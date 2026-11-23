@@ -9563,6 +9563,80 @@ gate_soak() {
 # dir-mtime fallback); NEVER evict current or journal previous; previous
 # pinned. Explicit check: previous recorded but dir missing → loud WARN
 # (the auto-rollback halt path already refuses to roll back onto it).
+#
+# Journal-aware rewrite (retention-eviction-gap commission): the legacy body
+# evicted purely by epoch order, so a STAGED release awaiting its ceremony
+# (no promoted descendant yet) was rm -rf'd silently with NO journal row,
+# and the on-disk `current` pointer target could be evicted when it diverged
+# from journal current. The rewrite is pointer-safe and journaled: every
+# eviction / refusal / hold writes a history row BEFORE the mutation; a
+# staged-awaiting release is pinned unless SUPERSEDED by a version-greater
+# commit; the pin set also covers in_flight.target / pending_op.target.
+# Keep-3 COUNTING/ORDER is UNCHANGED (current+previous are pinned members of
+# the three; epoch sort stays). RC contract UNCHANGED: 0 normal (including
+# refusal-to-evict — never fail the post-commit seat), 1 only on journal_read.
+#
+# Helpers below answer the three lifecycle questions over a one-entry-per-line
+# history view. The splice serializes compact single-line JSON, so grep -n
+# over "$json" would report line 1 for every row; splitting history on "},{"
+# first makes grep -n line numbers equal chronological array indices (SPEC §2).
+
+# _retention_hist_lines <json> — one history entry per line, chronological.
+# String-naive split on "},{" by design (our detail vocabulary never emits
+# that byte pair — same discipline as _json_sub's bracket walk). Pure bash so
+# no new python surface and no sed-portability (GNU/BSD) drift.
+_retention_hist_lines() {
+    local hist nl=$'\n' ob='{' cb='}'
+    hist="$(_json_sub "$1" history 2>/dev/null)" || return 0
+    [ -n "$hist" ] && [ "$hist" != "null" ] || return 0
+    printf '%s\n' "${hist//\},\{/$cb$nl$ob}"
+}
+
+# _retention_staged_line <hist_lines> <V> — 1-based array index of V's LAST
+# "staged" row whose detail begins `release <V> staged at `, else empty.
+# LAST wins on re-stage. Anchors (SPEC §2): event token
+# `"event":[[:space:]]*"staged"` (spacing-tolerant) + detail prefix
+# `release <V> staged at ` (v-prefix dots escaped for ERE).
+_retention_staged_line() {
+    local lines="$1" v="$2" vre="${2//./\\.}"
+    printf '%s\n' "$lines" \
+        | grep -nE "\"event\":[[:space:]]*\"staged\".*\"detail\":[[:space:]]*\"release ${vre} staged at " \
+        | tail -1 | cut -d: -f1
+}
+
+# _retention_closed_after <hist_lines> <after_idx> <V> — 0 iff a row AFTER
+# after_idx closes V's lifecycle: a commit naming V (`promote V committed`)
+# or a retention_evict naming `version=V` (boundary-guarded so v0.31.3 never
+# matches version=v0.31.35). Event-token guard keeps a detail string from
+# masquerading as the lifecycle row.
+_retention_closed_after() {
+    local lines="$1" after="$2" v="$3" vre="${3//./\\.}" tail_lines
+    tail_lines="$(printf '%s\n' "$lines" | tail -n "+$((after + 1))")"
+    printf '%s\n' "$tail_lines" | grep -qE "\"event\":[[:space:]]*\"commit\".*promote ${vre} committed" && return 0
+    printf '%s\n' "$tail_lines" | grep -qE "\"event\":[[:space:]]*\"retention_evict\".*version=${vre}([^0-9A-Za-z.]|$)" && return 0
+    return 1
+}
+
+# _retention_superseded_by <hist_lines> <after_idx> <V> — greatest W whose
+# commit row sits AFTER V's staged row and whose stripped-v version sorts
+# GREATER than V's (sort -V). Empty => staged-awaiting V is PINNED (SPEC §3).
+_retention_superseded_by() {
+    local lines="$1" after="$2" v="$3" vv="${3#v}" tail_lines w wv best=""
+    tail_lines="$(printf '%s\n' "$lines" | tail -n "+$((after + 1))")"
+    while read -r w; do
+        [ -n "$w" ] || continue
+        wv="${w#v}"
+        [ "$wv" = "$vv" ] && continue
+        [ "$(printf '%s\n%s\n' "$vv" "$wv" | sort -V | tail -1)" = "$wv" ] || continue
+        if [ -z "$best" ] || [ "$(printf '%s\n%s\n' "${best#v}" "$wv" | sort -V | tail -1)" = "$wv" ]; then
+            best="$w"
+        fi
+    done < <(printf '%s\n' "$tail_lines" \
+        | grep -E "\"event\":[[:space:]]*\"commit\"" \
+        | grep -oE 'promote [^[:space:]]+ committed' | awk '{print $2}')
+    printf '%s' "$best"
+}
+
 retention_evict() {
     local rel="$INSTALL_DIR/releases" json cur prev d name entries sorted n
     json="$(journal_read)" || return 1
@@ -9573,50 +9647,103 @@ retention_evict() {
     if [ -n "$prev" ] && [ ! -d "$rel/$prev" ]; then
         _warn "retention: journal previous '$prev' has NO release dir (manual deletion?) — rollback target missing; auto-rollback would halt-for-human"
     fi
-    # Count ALL releases; evict oldest non-pinned until RETENTION_KEEP
-    # remain IN TOTAL (ADR-004: "retention 3 releases" — current + previous
-    # are pinned members of the three, not additions to it).
-    local total=0 name st
+
+    # SPEC §1 — pin set: current, previous, in_flight.target, pending_op.target.
+    # A null/absent sub-object yields an empty target (null-safe). The journal
+    # is ours, so _json_sub + _json_field is the established extraction pair.
+    local inf="" inf_target="" po="" po_target=""
+    inf="$(_json_sub "$json" in_flight 2>/dev/null)" || inf=""
+    if [ -n "$inf" ] && [ "$inf" != "null" ]; then
+        inf_target="$(_json_field "$inf" target 2>/dev/null)"
+        [ "$inf_target" = "null" ] && inf_target=""
+    fi
+    po="$(_json_sub "$json" pending_op 2>/dev/null)" || po=""
+    if [ -n "$po" ] && [ "$po" != "null" ]; then
+        po_target="$(_json_field "$po" target 2>/dev/null)"
+        [ "$po_target" = "null" ] && po_target=""
+    fi
+
+    # SPEC §4 — POINTER GATE, before ANY eviction. The flip symlink lives at
+    # $INSTALL_DIR/current -> releases/<ver>; normalize to the bare version
+    # (${##*/}) so both the dir check and the candidate comparison use release
+    # names (a legacy releases/current symlink is honored as fallback). The
+    # gate engages ONLY when a pointer symlink EXISTS: a fresh/pre-fix layout
+    # with none has no target to protect (journal `current` is pinned above),
+    # and refusing there would strand every no-symlink fixture / first boot.
+    # Healthy = target dir present AND target == journal current; anything
+    # else journals retention_refuse + WARN + returns 0 with ZERO evictions
+    # (post-commit seat must never fail). Pointer WRITES belong to the
+    # stage/promote lane — we only read and protect here.
+    local ptr_link="$INSTALL_DIR/current" tgt_raw="" tgt="" refuse_reason=""
+    if [ -L "$ptr_link" ]; then
+        tgt_raw="$(readlink "$ptr_link" 2>/dev/null)" || tgt_raw=""
+    elif [ -L "$rel/current" ]; then
+        tgt_raw="$(readlink "$rel/current" 2>/dev/null)" || tgt_raw=""
+    fi
+    tgt="${tgt_raw##*/}"
+    if [ -n "$tgt_raw" ]; then
+        if [ ! -d "$rel/$tgt" ]; then
+            refuse_reason="pointer-dangling"
+        elif [ -n "$cur" ] && [ ! -d "$rel/$cur" ]; then
+            refuse_reason="journal-current-dir-missing"
+        elif [ "$tgt" != "$cur" ]; then
+            refuse_reason="pointer-mismatch"
+        fi
+    fi
+    if [ -n "$refuse_reason" ]; then
+        journal_history_append retention_refuse \
+            "reason=$refuse_reason pointer_target=$tgt journal_current=$cur evictions=0" \
+            >/dev/null 2>&1 \
+            || _warn "retention: journal append FAILED for retention_refuse ($refuse_reason)"
+        _warn "retention: REFUSING all evictions — $refuse_reason (pointer_target=$tgt journal_current=$cur); zero evictions; pointer writes belong to the stage/promote lane"
+        return 0
+    fi
+
+    # Chronological history view (SPEC §2/3) — empty when no journal rows yet.
+    local hist_lines
+    hist_lines="$(_retention_hist_lines "$json")"
+
+    # Count ALL releases; evict oldest non-pinned until RETENTION_KEEP remain
+    # IN TOTAL (ADR-004: "retention 3 releases" — current + previous are pinned
+    # members of the three, not additions to it). Classify each non-hard-pinned
+    # release as EVICTABLE (plain / superseded) or HELD (staged-awaiting with
+    # no promoted descendant → pinned; over-retention is the SAFE direction).
+    local total=0 st="" st_raw="" staged_line="" sup_by=""
+    local cand_staged="no" cand_reason="retention-oldest" evictable_count=0 held=""
     local entries=""
     for d in "$rel"/*/; do
         [ -d "$d" ] || continue
         name="${d%/}"; name="${name##*/}"
         [ "$name" = "current" ] && continue   # the flip symlink, not a release
         # Protocol/working artifacts under releases/ are NOT releases: the
-        # D5 lock dir, its stale-break leftovers, and stage temp assemblies.
-        # (Latent defect exposed by the epoch-key normalization below: with
-        # the old mixed ISO/epoch sort the lock dir — epoch mtime — sorted
-        # lexicographically FIRST and was silently rm -rf'd as the
-        # "oldest release", defeating the lock protocol mid-operation.)
+        # D5 lock dir, its stale-break leftovers, and stage temp assemblies
+        # (pre-fix the lock dir sorted first and was silently rm -rf'd).
         case "$name" in
             rollback.lock.d|rollback.lock.d.stale.*|.staging.*) continue ;;
         esac
         total=$((total + 1))
-        [ "$name" = "$cur" ] && continue
-        [ "$name" = "$prev" ] && continue
+        # Hard pins — counted in total, never evicted (SPEC §1 + pointer gate).
+        case "$name" in
+            "$cur"|"$prev"|"$inf_target"|"$po_target"|"$tgt")
+                [ -n "$tgt" ] && [ "$name" = "$tgt" ] \
+                    && _log "retention: SKIP $name — on-disk pointer target (stage/promote lane owns pointer writes)"
+                continue ;;
+        esac
         # normalize the sort key to EPOCH: a manifest staged_at (ISO) is
         # converted; a missing manifest falls back to the dir mtime (already
         # epoch). Sorting ISO strings against epoch digits lexicographically
-        # is meaningless (digits vs 'T'/'-'/'Z' compare by codepoint, not
-        # time) — normalizing keeps the oldest-first eviction order correct
-        # across mixed staged/unstaged release sets (review i3).
-        st="$(manifest_field "$name" staged_at 2>/dev/null)"
-        if [ -n "$st" ]; then
-            st="$(_iso_to_epoch "$st" 2>/dev/null)"
+        # is meaningless — normalizing keeps oldest-first order (review i3).
+        st_raw="$(manifest_field "$name" staged_at 2>/dev/null)"
+        if [ -n "$st_raw" ]; then
+            st="$(_iso_to_epoch "$st_raw" 2>/dev/null)"
+        else
+            st=""
         fi
-        # P2.1 BSD-port closure (D2a WS8 lib.sh clause): `stat -f '%m'` is
-        # BSD-only — the "eviction site" member of the quarantined GNU-debt
-        # trio (QUARANTINE.md 2026-09-30: date -j :86, sed -i :709, this
-        # seat; the first went dual in 31cd4fb59, the second is retired).
-        # GNU stat reads `-f` as FILESYSTEM status and emits MEASURED
-        # silent garbage for this invocation (the reason _run_log_retention
-        # pins the primitive out entirely — this site is the acknowledged
-        # residual named there). Same uname-dispatch shape as _iso_to_epoch
-        # / _cooldown_until_iso / _atomic_flip: the families are SELECTED,
-        # never ||-chained (a chain would launder wrong-family output into
-        # an epoch sort key and corrupt the oldest-first eviction order).
-        # Degrade is unchanged: stat error or unrecognized platform leaves
-        # st empty → 0 (the pre-port failure semantics; 2>/dev/null kept).
+        # P2.1 BSD-port closure: `stat -f '%m'` is BSD-only; GNU reads `-f` as
+        # FILESYSTEM status and emits MEASURED garbage. Same uname-dispatch
+        # shape as _iso_to_epoch / _atomic_flip — families SELECTED, never
+        # ||-chained (a chain would launder wrong-family output into the sort
+        # key). Degrade unchanged: stat error / unknown platform → 0.
         if [ -z "$st" ]; then
             case "$(uname -s)" in
                 Darwin|*BSD*|*bsd*) st="$(stat -f '%m' "$d" 2>/dev/null)" ;;
@@ -9625,17 +9752,62 @@ retention_evict() {
             esac
         fi
         [ -n "$st" ] || st=0
-        entries="$entries$st $name\n"
+
+        # Lifecycle (SPEC §2/3): staged row + no later close => staged-awaiting.
+        cand_staged="no"; cand_reason="retention-oldest"
+        staged_line="$(_retention_staged_line "$hist_lines" "$name")"
+        if [ -n "$staged_line" ]; then
+            cand_staged="yes"
+            if _retention_closed_after "$hist_lines" "$staged_line" "$name"; then
+                : # lifecycle already closed (own commit / prior evict) → plain
+            else
+                sup_by="$(_retention_superseded_by "$hist_lines" "$staged_line" "$name")"
+                if [ -n "$sup_by" ]; then
+                    cand_reason="superseded-by-promoted-$sup_by"
+                else
+                    held="${held:+$held,}$name"
+                    _log "retention: HOLD $name — staged-awaiting ceremony, no promoted descendant; pinned (over-retention is the safe direction)"
+                    continue
+                fi
+            fi
+        fi
+        evictable_count=$((evictable_count + 1))
+        entries="$entries$st $name $cand_staged $cand_reason\n"
     done
+
     if [ "$total" -le "$RETENTION_KEEP" ]; then
         _log "retention: $total releases ≤ keep=$RETENTION_KEEP — nothing to evict"
         return 0
     fi
     local evict_count=$((total - RETENTION_KEEP))
-    _log "retention: $total releases > keep=$RETENTION_KEEP — evicting $evict_count oldest (current=$cur previous=$prev pinned)"
-    printf '%b' "$entries" | sort | head -"$evict_count" | while read -r st name; do
+    _log "retention: $total releases > keep=$RETENTION_KEEP — evicting up to $evict_count oldest (current=$cur previous=$prev in_flight=$inf_target pending_op=$po_target pointer=$tgt pinned; held=$held)"
+
+    # SPEC §6 — pin overrun: never force-evict a staged-awaiting release.
+    if [ "$evictable_count" -lt "$evict_count" ]; then
+        journal_history_append retention_pin_hold \
+            "held=$held reason=staged-awaiting-ceremony-no-promoted-descendant keep=$RETENTION_KEEP total=$total" \
+            >/dev/null 2>&1 \
+            || _warn "retention: journal append FAILED for retention_pin_hold"
+        _warn "retention: PIN HOLD — only $evictable_count evictable of $evict_count needed (held=[$held]); over-retention is safe"
+    fi
+
+    # SPEC §5/§8 — pipeline subshell (existing shape): journal appends are
+    # atomic; no variable propagation out of it is needed.
+    printf '%b' "$entries" | sort | head -n "$evict_count" | while read -r st name cand_staged cand_reason; do
         [ -n "$name" ] || continue
-        _log "retention: evicting $name (staged $st) — neither current ($cur) nor previous ($prev)"
+        # Belt: the pointer target is never evicted (hard-pinned above too).
+        if [ -n "$tgt" ] && [ "$name" = "$tgt" ]; then
+            _log "retention: SKIP $name — pointer target; never evicted"
+            continue
+        fi
+        ptarget="no"; [ "$name" = "$tgt" ] && ptarget="yes"
+        st_at="$(manifest_field "$name" staged_at 2>/dev/null)"
+        [ -n "$st_at" ] || st_at="unknown"
+        journal_history_append retention_evict \
+            "version=$name staged_at=$st_at reason=$cand_reason staged_row=$cand_staged pointer_target=$ptarget journal_current=$cur journal_previous=$prev" \
+            >/dev/null 2>&1 \
+            || _warn "retention: journal append FAILED for retention_evict $name (eviction still performed)"
+        _log "retention: evicting $name (staged $st) — $cand_reason (staged_row=$cand_staged)"
         rm -rf "$rel/$name"
     done
     return 0
