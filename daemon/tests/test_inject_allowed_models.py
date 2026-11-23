@@ -133,11 +133,11 @@ def test_flag_on_with_council_models_override_injects_override_list(append_allow
     in the injected block.
 
     Use case: the Governor pins its own council seat count to a subset of
-    the global allowlist so adding a new model globally (e.g., ``coding2``
-    for weighted ``llm_models`` pools on worker/coder) does NOT grow the
-    Governor council from 2 → 3 seats. spawn_councilor still validates the
-    eventual model pick against the GLOBAL list — this test only asserts
-    the prompt-injection side of the contract.
+    the global allowlist so adding a new model globally (e.g. a newly
+    added purpose-id, for weighted ``llm_models`` pools on worker/coder)
+    does NOT grow the Governor council from 2 → 3 seats. spawn_councilor
+    still validates the eventual model pick against the GLOBAL list —
+    this test only asserts the prompt-injection side of the contract.
     """
     global_list = ["global-x", "global-y", "global-z"]
     override_list = ["override-a", "override-b"]

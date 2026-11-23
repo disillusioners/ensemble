@@ -87,7 +87,7 @@ class TestSpawnIntelligenceTierSuccess:
         ``model='agentic'`` as the priority-1 override (D7 — no
         ``model_tier`` kwarg crosses the facade).
         """
-        manager = make_spawn_manager(allowed_models=["agentic", "coding", "coding2"])
+        manager = make_spawn_manager(allowed_models=["agentic", "coding"])
         spawn_tool = _get_spawn_tool(manager)
 
         with patch(
