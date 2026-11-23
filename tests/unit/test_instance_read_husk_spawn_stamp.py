@@ -67,6 +67,8 @@ import pytest
 from sqlalchemy import create_engine
 from sqlmodel import Session, SQLModel
 
+from tests.helpers.checkpoints_fixture import create_checkpoints_table
+
 from daemon.repositories.instance.models import Instance
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
 from daemon.repositories.job_queue.models import JobItem
@@ -96,10 +98,17 @@ def _fake_home_fence(monkeypatch, tmp_path):
 
 @pytest.fixture()
 def fleet_db():
-    """A scratch SQLite engine with the instance + evidence tables."""
+    """A scratch SQLite engine with the instance + evidence tables.
+
+    Also creates the LangGraph ``checkpoints`` table (the E7 evidence
+    leg's probe target). Not part of SQLModel metadata; production
+    always has it, so the fixture provides it for the full flagging
+    path. ENABLING the code under test, not weakening an assertion.
+    """
     tmpdir = tempfile.mkdtemp(prefix="husk-spawnstamp-fleet-")
     engine = create_engine(f"sqlite:///{tmpdir}/fleet.db")
     SQLModel.metadata.create_all(engine)
+    create_checkpoints_table(engine)
     yield engine
     engine.dispose()
 
