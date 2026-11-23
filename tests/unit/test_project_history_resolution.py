@@ -524,3 +524,46 @@ class TestPendingQueueHookSeam:
         assert call["project_id"] == project.project_id
         assert call["source_type"] == "history"
         assert call["source_payload"]["entry_type"] == "feature"
+
+
+# =============================================================================
+# Test Class: TestTriadSchemaPins
+# =============================================================================
+
+
+def _assert_triad_is_optional(schema: dict) -> None:
+    """The project reference triad is optional and present on EVERY verb."""
+    required = set(schema.get("required", []))
+    properties = schema.get("properties", {})
+    for ref_arg in ("project_id", "name", "shortname"):
+        assert ref_arg not in required
+        assert ref_arg in properties
+
+
+class TestTriadSchemaPins:
+    """The generated tool schemas keep the non-triad required args REQUIRED.
+
+    The triad occupies slots 1-3 with defaults; the other required args
+    are keyword-only so the OpenAI tool schema still marks them required —
+    no contract weakening for the calling agent.
+    """
+
+    def test_add_schema_required_set(self, tool_map):
+        schema = tool_map["project_history_add"].args_schema.model_json_schema()
+        _assert_triad_is_optional(schema)
+        assert {"entry_type", "summary"} <= set(schema.get("required", []))
+
+    def test_list_schema_required_set(self, tool_map):
+        schema = tool_map["project_history_list"].args_schema.model_json_schema()
+        _assert_triad_is_optional(schema)
+        assert not schema.get("required")
+
+    def test_search_schema_required_set(self, tool_map):
+        schema = tool_map["project_history_search"].args_schema.model_json_schema()
+        _assert_triad_is_optional(schema)
+        assert {"query"} <= set(schema.get("required", []))
+
+    def test_delete_schema_required_set(self, tool_map):
+        schema = tool_map["project_history_delete"].args_schema.model_json_schema()
+        _assert_triad_is_optional(schema)
+        assert {"entry_id"} <= set(schema.get("required", []))
