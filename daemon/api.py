@@ -3815,6 +3815,23 @@ async def lifespan(app: FastAPI):
             sweep_result = await sweep_orphaned_live_turns(
                 manager=manager, boot_epoch=get_boot_epoch(),
             )
+            # Stranded-running surfacing pass (boot-recovery hole closure):
+            # retires RUNNING instances stranded by a daemon death whose
+            # checkpoint predates the boot epoch (or which have no
+            # checkpoint at all). NEVER resumes (idempotency). Never raises.
+            try:
+                from daemon.services.auto_continue_boot_pass import (
+                    surface_stranded_running_instances,
+                )
+                stranded_result = await surface_stranded_running_instances(
+                    manager=manager, boot_epoch=get_boot_epoch(),
+                )
+                logger.info("Stranded-running surfacing pass: %s", stranded_result)
+            except Exception as stranded_exc:  # noqa: BLE001
+                logger.warning(
+                    "Stranded-running surfacing pass failed (backstop "
+                    "continues): %s", stranded_exc,
+                )
             # The boot record — the effective-mode carrier (D16). The
             # mode comes from the PASS RESULT; the recorder never
             # re-reads the environment (A8's single-read rule).

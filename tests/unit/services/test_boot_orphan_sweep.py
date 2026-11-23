@@ -46,6 +46,7 @@ import daemon.repositories.message_queue.models  # noqa: F401
 import daemon.repositories.project.models  # noqa: F401
 import daemon.repositories.task.models  # noqa: F401
 import daemon.services.auto_continue_boot_pass as pass_mod
+from daemon.services.auto_continue_boot_pass import surface_stranded_running_instances
 from daemon.repositories.instance.models import Instance
 from daemon.repositories.job_queue.models import AdmissionState, JobItem
 from daemon.repositories.task.models import Task, TaskStatus
@@ -227,6 +228,13 @@ class _MockManager:
         # per-instance resume returns
         self.resume_returns: dict[str, dict[str, Any] | None] = {}
         self.resume_calls: list[dict[str, Any]] = []
+        self.terminated: list[tuple[str, str]] = []
+
+    async def terminate_instance(
+        self, instance_id: str, terminal_reason: str = "aborted", audit_sink=None
+    ) -> bool:
+        self.terminated.append((instance_id, terminal_reason))
+        return True
 
     async def _has_checkpoint(self, instance_id: str) -> bool:
         return self.checkpointer.raw_saver.last_writes.get(instance_id) is not None
@@ -1016,3 +1024,116 @@ async def test_new_restart_sweeps_fresh_orphan(
     assert result.candidates == 1
     assert result.scheduled == 1
     assert ckpt_ts < boot_epoch_2  # sanity: ckpt predates new boot epoch
+
+# ---------------------------------------------------------------------------
+# Stranded-running surfacing pass tests (boot-recovery hole closure)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stranded_with_preepoch_checkpoint_surfaced_and_retired(
+    task_repo: TaskRepository, engine: Engine
+) -> None:
+    """Class (a): running, no task, no JobItem, pre-epoch checkpoint
+    -> surfaced_with_checkpoint, retired, terminated orphan_retired."""
+    iid = f"i-{uuid4().hex[:8]}"
+    _seed_instance(engine, iid, status="running")
+    # no jobitem, no task
+    boot_epoch = now_utc_naive()
+    mgr = _MockManager(task_repo)
+    # checkpoint predates boot epoch
+    past = boot_epoch - timedelta(hours=2)
+    mgr.checkpointer.raw_saver.last_writes[iid] = past
+
+    res = await surface_stranded_running_instances(mgr, boot_epoch)
+    assert res.candidates == 1
+    assert res.surfaced_with_checkpoint == 1
+    assert res.surfaced_no_checkpoint == 0
+    assert res.retired == 1
+    assert res.skipped_current_generation == 0
+    assert mgr.terminated == [(iid, "orphan_retired")]
+
+
+@pytest.mark.asyncio
+async def test_stranded_no_checkpoint_surfaced_and_retired(
+    task_repo: TaskRepository, engine: Engine
+) -> None:
+    """Class (b): running, no task, no JobItem, no checkpoint
+    -> surfaced_no_checkpoint, retired."""
+    iid = f"i-{uuid4().hex[:8]}"
+    _seed_instance(engine, iid, status="running")
+    boot_epoch = now_utc_naive()
+    mgr = _MockManager(task_repo)
+    # no checkpoint (last_writes empty)
+
+    res = await surface_stranded_running_instances(mgr, boot_epoch)
+    assert res.candidates == 1
+    assert res.surfaced_no_checkpoint == 1
+    assert res.surfaced_with_checkpoint == 0
+    assert res.retired == 1
+    assert mgr.terminated == [(iid, "orphan_retired")]
+
+
+@pytest.mark.asyncio
+async def test_stranded_current_generation_checkpoint_skipped(
+    task_repo: TaskRepository, engine: Engine
+) -> None:
+    """An instance whose checkpoint is at/after boot_epoch is NOT
+    stranded (current generation) -> skipped, not retired."""
+    iid = f"i-{uuid4().hex[:8]}"
+    _seed_instance(engine, iid, status="running")
+    boot_epoch = now_utc_naive()
+    mgr = _MockManager(task_repo)
+    mgr.checkpointer.raw_saver.last_writes[iid] = boot_epoch  # not pre-epoch
+
+    res = await surface_stranded_running_instances(mgr, boot_epoch)
+    assert res.candidates == 1
+    assert res.skipped_current_generation == 1
+    assert res.surfaced_with_checkpoint == 0
+    assert res.surfaced_no_checkpoint == 0
+    assert res.retired == 0
+    assert mgr.terminated == []
+
+
+@pytest.mark.asyncio
+async def test_stranded_instance_with_active_jobitem_not_selected(
+    task_repo: TaskRepository, engine: Engine
+) -> None:
+    """Instances WITH an active JobItem are owned by the resume path,
+    not this pass."""
+    iid = f"i-{uuid4().hex[:8]}"
+    _seed_instance(engine, iid, status="running")
+    _seed_jobitem(engine, iid, admission_state=AdmissionState.ACTIVE.value)
+    boot_epoch = now_utc_naive()
+    mgr = _MockManager(task_repo)
+
+    res = await surface_stranded_running_instances(mgr, boot_epoch)
+    assert res.candidates == 0
+    assert mgr.terminated == []
+
+
+@pytest.mark.asyncio
+async def test_stranded_pass_kill_switch_off(
+    task_repo: TaskRepository, engine: Engine
+) -> None:
+    iid = f"i-{uuid4().hex[:8]}"
+    _seed_instance(engine, iid, status="running")
+    boot_epoch = now_utc_naive()
+    mgr = _MockManager(task_repo)
+    with _env("ENSEMBLE_AUTO_CONTINUE_RUNNING_ON_RESTART", "0"):
+        res = await surface_stranded_running_instances(mgr, boot_epoch)
+    assert res.skipped_kill_switch == 1
+    assert res.candidates == 0
+    assert mgr.terminated == []
+
+
+@pytest.mark.asyncio
+async def test_stranded_pass_boot_epoch_none(
+    task_repo: TaskRepository, engine: Engine
+) -> None:
+    iid = f"i-{uuid4().hex[:8]}"
+    _seed_instance(engine, iid, status="running")
+    mgr = _MockManager(task_repo)
+    res = await surface_stranded_running_instances(mgr, None)
+    assert res.skipped_no_boot_epoch == 1
+    assert mgr.terminated == []
