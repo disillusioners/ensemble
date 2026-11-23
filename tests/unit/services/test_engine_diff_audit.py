@@ -60,8 +60,10 @@ from pathlib import Path
 BASE_SHA = "8894f86a853c5fcba2173ab29405f02c71c1f3ef"
 
 # The expected daemon/ path set — DATA, per D7.4. Grouped by ownership-map row.
-# 54 declared paths (48 program rows + 6 P2-pilot stage-1 drift-arc addendum
-# rows). At the re-anchor the lane's committed daemon/ diff was exactly 2 paths:
+# 68 declared paths (48 program rows + 6 P2-pilot stage-1 drift-arc addendum
+# rows + 14 P2-pilot stage-2 sibling-lane drift addendum rows, re-anchored
+# 2026-11-23 when origin/latest advanced past 7fd7af010 to b1833127e).
+# At the re-anchor the lane's committed daemon/ diff was exactly 2 paths:
 # `daemon/api.py` (ALREADY declared by the P4 lifespan row)
 # and `daemon/services/orphan_watcher_sweep.py` (ONE newly declared row, added
 # by this lane with its sanctioning comment below).
@@ -151,6 +153,26 @@ EXPECTED_DAEMON_PATHS: frozenset[str] = frozenset({
     "daemon/tools/job_queue.py",  # drift-arc job-queue bd364876f (P2-pilot stage-1 census addendum 2026-11-22)
     "daemon/tools/project.py",  # drift-arc projres 8a4ce6899 (P2-pilot stage-1 census addendum 2026-11-22)
     "daemon/tools/upgrade_tools.py",  # drift-arc upgrade_tools PIPELINE_SCRIPTS re-pin 5aa5d01ae (P2-pilot stage-1 census addendum 2026-11-22)
+    # --- P2-PILOT STAGE-2 SIBLING-LANE DRIFT ADDENDUM (2026-11-23) ----------
+    # origin/latest advanced past the stage-1 drift merge (7fd7af010) to
+    # b1833127e; these 14 daemon paths landed from sibling lanes in the wider
+    # range 8894f86a..HEAD. Each row cites its owning lane and first-in-range
+    # commit so the attribution is per-file, never per-count. All are
+    # attributable legitimate sibling-lane work — no rogue/unowned path.
+    "daemon/constants.py",  # readiness boot-warm tolerance bb9e893c2 (stage-2 drift addendum 2026-11-23)
+    "daemon/services/readiness.py",  # readiness boot-warm tolerance bb9e893c2 (stage-2 drift addendum 2026-11-23)
+    "daemon/repositories/event/models.py",  # event-registry L-11 silent-kind retirement 2275192cf (stage-2 drift addendum 2026-11-23)
+    "daemon/repositories/source/maintenance_seed.py",  # central-maintenance P1 weekly trigger seed c191074b6 (stage-2 drift addendum 2026-11-23)
+    "daemon/services/maintenance_schedule_knobs.py",  # central-maintenance P1 knobs picker c191074b6 (stage-2 drift addendum 2026-11-23)
+    "daemon/sources/adapters/scheduler.py",  # central-maintenance scheduler adapter re-arm seam c191074b6 (stage-2 drift addendum 2026-11-23)
+    "daemon/routers/maintenance_reports.py",  # central-maintenance P4 report list route f94e73660 (stage-2 drift addendum 2026-11-23)
+    "daemon/routers/__init__.py",  # central-maintenance P4 route registration f94e73660 (stage-2 drift addendum 2026-11-23)
+    "daemon/services/live_views.py",  # central-maintenance live_views maintenance-reports root f94e73660 (stage-2 drift addendum 2026-11-23)
+    "daemon/repositories/task/repository.py",  # wc-watchdog tri-state wake-source gate 93da27b29 (stage-2 drift addendum 2026-11-23)
+    "daemon/services/waiting_children_watchdog.py",  # wc-watchdog false-wedge suppression 93da27b29 (stage-2 drift addendum 2026-11-23)
+    "daemon/services/pok_service.py",  # pok active-entry cap 512->1024 942ac40fa (stage-2 drift addendum 2026-11-23)
+    "daemon/tools/project_future.py",  # project-future name/shortname resolution seam 0b4493258 (stage-2 drift addendum 2026-11-23)
+    "daemon/tools/project_history.py",  # project-history name/shortname resolution ladder a84bbc51c (stage-2 drift addendum 2026-11-23)
 })
 
 # Owner hints for the RED message — which phase SHOULD have owned an offending

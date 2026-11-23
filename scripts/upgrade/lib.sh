@@ -9667,71 +9667,272 @@ gate_soak() {
 # dir-mtime fallback); NEVER evict current or journal previous; previous
 # pinned. Explicit check: previous recorded but dir missing → loud WARN
 # (the auto-rollback halt path already refuses to roll back onto it).
+#
+# Journal-aware rewrite (retention-eviction-gap commission): the legacy body
+# evicted purely by epoch order, so a STAGED release awaiting its ceremony
+# (no promoted descendant yet) was rm -rf'd silently with NO journal row,
+# and the on-disk `current` pointer target could be evicted when it diverged
+# from journal current. The rewrite is pointer-safe and journaled: every
+# eviction / refusal / hold writes a history row BEFORE the mutation; a
+# staged-awaiting release is pinned unless SUPERSEDED by a version-greater
+# commit; the pin set also covers in_flight.target / pending_op.target.
+# Keep-3 COUNTING/ORDER is UNCHANGED (current+previous are pinned members of
+# the three; epoch sort stays). RC contract UNCHANGED: 0 normal (including
+# refusal-to-evict — never fail the post-commit seat), 1 only on journal_read.
+#
+# Helpers below answer the three lifecycle questions over a one-entry-per-line
+# history view. The splice serializes compact single-line JSON, so grep -n
+# over "$json" would report line 1 for every row; splitting history on "},{"
+# first makes grep -n line numbers equal chronological array indices (SPEC §2).
+
+# _retention_hist_lines <json> — one history entry per line, chronological.
+# String-naive split on "},{" by design (our detail vocabulary never emits
+# that byte pair — same discipline as _json_sub's bracket walk). Pure bash so
+# no new python surface and no sed-portability (GNU/BSD) drift.
+_retention_hist_lines() {
+    local hist nl=$'\n' ob='{' cb='}'
+    hist="$(_json_sub "$1" history 2>/dev/null)" || return 0
+    [ -n "$hist" ] && [ "$hist" != "null" ] || return 0
+    printf '%s\n' "${hist//\},\{/$cb$nl$ob}"
+}
+
+# _retention_staged_line <hist_lines> <V> — 1-based array index of V's LAST
+# "staged" row whose detail begins `release <V> staged at `, else empty.
+# LAST wins on re-stage. Anchors (SPEC §2): event token
+# `"event":[[:space:]]*"staged"` (spacing-tolerant) + detail prefix
+# `release <V> staged at ` (v-prefix dots escaped for ERE).
+_retention_staged_line() {
+    local lines="$1" v="$2" vre="${2//./\\.}"
+    printf '%s\n' "$lines" \
+        | grep -nE "\"event\":[[:space:]]*\"staged\".*\"detail\":[[:space:]]*\"release ${vre} staged at " \
+        | tail -1 | cut -d: -f1
+}
+
+# _retention_commit_line <hist_lines> <V> — 1-based array index of V's LAST
+# commit row naming V (`promote V committed`), else empty. LAST wins.
+_retention_commit_line() {
+    local lines="$1" v="$2" vre="${2//./\\.}"
+    printf '%s\n' "$lines" \
+        | grep -nE "\"event\":[[:space:]]*\"commit\".*promote ${vre} committed" \
+        | tail -1 | cut -d: -f1
+}
+
+# _retention_superseded_by <hist_lines> <after_idx> <V> — greatest W whose
+# commit row sits AFTER the given row and whose stripped-v version sorts
+# GREATER than V's (sort -V). Empty => no superseding promotion.
+_retention_superseded_by() {
+    local lines="$1" after="$2" v="$3" vv="${3#v}" tail_lines w wv best=""
+    tail_lines="$(printf '%s\n' "$lines" | tail -n "+$((after + 1))")"
+    while read -r w; do
+        [ -n "$w" ] || continue
+        wv="${w#v}"
+        [ "$wv" = "$vv" ] && continue
+        [ "$(printf '%s\n%s\n' "$vv" "$wv" | sort -V | tail -1)" = "$wv" ] || continue
+        if [ -z "$best" ] || [ "$(printf '%s\n%s\n' "${best#v}" "$wv" | sort -V | tail -1)" = "$wv" ]; then
+            best="$w"
+        fi
+    done < <(printf '%s\n' "$tail_lines" \
+        | grep -E "\"event\":[[:space:]]*\"commit\"" \
+        | grep -oE 'promote [^[:space:]]+ committed' | awk '{print $2}')
+    printf '%s' "$best"
+}
+
+# _retention_liveness_holder <proc_root> <release_dir_abs>
+# LIVENESS PROBE (stopgap AMEND-2): a release dir may still be the cwd /
+# exe / root of a LIVE process, or appear inside a live process's argv.
+# Scanning the directory listing for "oldest first" and deleting it is the
+# defect class this closes: the dir must be PROVEN dead first.
+#   rc 0 — a holder was found: prints "<pid>:<which-link>"
+#   rc 1 — no holder found (safe to evict)
+#   rc 2 — /proc unavailable/unreadable (FAIL-CLOSED: never evict)
+# Only NUMERIC /proc/<pid> entries are scanned (kernel threads and other
+# non-pid entries are skipped). The probe root is overridable for tests via
+# ENSEMBLE_RETENTION_PROC_ROOT (default /proc).
+_retention_liveness_holder() {
+    local proc_root="$1" p="$2" phys="" pid_dir pid link target cmdline
+    if [ ! -d "$proc_root" ] || [ ! -r "$proc_root" ]; then
+        return 2
+    fi
+    # Physical form of the release dir: /proc paths are kernel-RESOLVED, so
+    # a $HOME reached through a symlink would otherwise never prefix-match.
+    phys="$(cd "$p" 2>/dev/null && pwd -P)" || phys=""
+    for pid_dir in "$proc_root"/*; do
+        pid="${pid_dir##*/}"
+        case "$pid" in ''|*[!0-9]*) continue ;; esac
+        for link in cwd exe root; do
+            target="$(readlink "$pid_dir/$link" 2>/dev/null)" || target=""
+            [ -n "$target" ] || continue
+            # "under $P" = $P itself OR anything below it. The strict
+            # "$P/" prefix covers exe/root (they always point INSIDE the
+            # dir); the exact "$P" arm is the cwd case (a process whose cwd
+            # IS the release dir — AMEND-4's own "background sleep whose cwd
+            # is inside it"). Being a strict SUPERSET of the stated rule,
+            # it can only ever hold MORE, never evict more.
+            case "$target" in
+                "$p"|"$p"/*) printf '%s:%s' "$pid" "$link"; return 0 ;;
+            esac
+            if [ -n "$phys" ]; then
+                case "$target" in
+                    "$phys"|"$phys"/*) printf '%s:%s' "$pid" "$link"; return 0 ;;
+                esac
+            fi
+        done
+        cmdline="$(tr '\0' '\n' < "$pid_dir/cmdline" 2>/dev/null)" || cmdline=""
+        case "$cmdline" in
+            *"$p"/*) printf '%s:%s' "$pid" "cmdline"; return 0 ;;
+        esac
+        if [ -n "$phys" ]; then
+            case "$cmdline" in
+                *"$phys"/*) printf '%s:%s' "$pid" "cmdline"; return 0 ;;
+            esac
+        fi
+    done
+    return 1
+}
+
 retention_evict() {
     local rel="$INSTALL_DIR/releases" json cur prev d name entries sorted n
+    # LIVENESS PROBE ROOT (AMEND-2): /proc by default; overridable so a
+    # scratch harness can simulate both a live holder and an unreadable /proc.
+    local PROC_ROOT="${ENSEMBLE_RETENTION_PROC_ROOT:-/proc}"
     json="$(journal_read)" || return 1
     cur="$(_json_field "$json" current)"
     prev="$(_json_field "$json" previous)"
     [ "$cur" = "null" ] && cur=""
     [ "$prev" = "null" ] && prev=""
-    # Pointer-alias pin (relcur-m1): releases/current is an alias that may
-    # point at a release; never evict its target. Resolve it when present.
-    local alias_pin=""
-    if [ -L "$rel/current" ]; then
-        alias_pin="$(readlink "$rel/current" 2>/dev/null)" || alias_pin=""
-        alias_pin="${alias_pin##*/}"
-    fi
     if [ -n "$prev" ] && [ ! -d "$rel/$prev" ]; then
         _warn "retention: journal previous '$prev' has NO release dir (manual deletion?) — rollback target missing; auto-rollback would halt-for-human"
     fi
-    # Count ALL releases; evict oldest non-pinned until RETENTION_KEEP
-    # remain IN TOTAL (ADR-004: "retention 3 releases" — current + previous
-    # are pinned members of the three, not additions to it).
-    local total=0 name st
-    local entries=""
+
+    # SPEC §1 — pin set: current, previous, in_flight.target, pending_op.target.
+    # A null/absent sub-object yields an empty target (null-safe). The journal
+    # is ours, so _json_sub + _json_field is the established extraction pair.
+    local inf="" inf_target="" po="" po_target=""
+    inf="$(_json_sub "$json" in_flight 2>/dev/null)" || inf=""
+    if [ -n "$inf" ] && [ "$inf" != "null" ]; then
+        inf_target="$(_json_field "$inf" target 2>/dev/null)"
+        [ "$inf_target" = "null" ] && inf_target=""
+    fi
+    po="$(_json_sub "$json" pending_op 2>/dev/null)" || po=""
+    if [ -n "$po" ] && [ "$po" != "null" ]; then
+        po_target="$(_json_field "$po" target 2>/dev/null)"
+        [ "$po_target" = "null" ] && po_target=""
+    fi
+
+    # SPEC §4 — POINTER GATE, before ANY eviction. The flip symlink lives at
+    # $INSTALL_DIR/current -> releases/<ver>; normalize to the bare version
+    # (${##*/}) so both the dir check and the candidate comparison use release
+    # names (a legacy releases/current symlink is honored as fallback). The
+    # gate engages ONLY when a pointer symlink EXISTS: a fresh/pre-fix layout
+    # with none has no target to protect (journal `current` is pinned above),
+    # and refusing there would strand every no-symlink fixture / first boot.
+    # Healthy = target dir present AND target == journal current; anything
+    # else journals retention_refuse + WARN + returns 0 with ZERO evictions
+    # (post-commit seat must never fail). Pointer WRITES belong to the
+    # stage/promote lane — we only read and protect here.
+    local ptr_link="$INSTALL_DIR/current" tgt_raw="" tgt="" refuse_reason=""
+    local _top_healthy=0
+    if [ -L "$ptr_link" ]; then
+        tgt_raw="$(readlink "$ptr_link" 2>/dev/null)" || tgt_raw=""
+        _top_healthy=1
+    elif [ -L "$rel/current" ]; then
+        tgt_raw="$(readlink "$rel/current" 2>/dev/null)" || tgt_raw=""
+    fi
+    tgt="${tgt_raw##*/}"
+    if [ -n "$tgt_raw" ]; then
+        if [ ! -d "$rel/$tgt" ]; then
+            refuse_reason="pointer-dangling"
+        elif [ -n "$cur" ] && [ ! -d "$rel/$cur" ]; then
+            refuse_reason="journal-current-dir-missing"
+        elif [ "$tgt" != "$cur" ]; then
+            refuse_reason="pointer-mismatch"
+        fi
+    fi
+
+    # Alias-divergence seam (relcur-m1): when BOTH pointers exist and the
+    # top-level pointer is healthy, the releases/current alias is a SECOND
+    # pointer. If it is dangling or disagrees with the journal current, refuse
+    # all evictions (fail-closed, same path as primary-pointer divergence) so
+    # the alias target is never evicted. When the alias is healthy it equals
+    # journal current == already pinned — no extra pin needed.
+    if [ -z "$refuse_reason" ] && [ "$_top_healthy" = "1" ] && [ -L "$rel/current" ]; then
+        local _alias_raw="" _alias_tgt=""
+        _alias_raw="$(readlink "$rel/current" 2>/dev/null)" || _alias_raw=""
+        _alias_tgt="${_alias_raw##*/}"
+        if [ -n "$_alias_raw" ] && { [ ! -d "$rel/$_alias_tgt" ] || [ "$_alias_tgt" != "$cur" ]; }; then
+            refuse_reason="alias-divergence"
+            tgt="$_alias_tgt"
+        fi
+    fi
+
+    if [ -n "$refuse_reason" ]; then
+        journal_history_append retention_refuse \
+            "reason=$refuse_reason pointer_target=$tgt journal_current=$cur evictions=0" \
+            >/dev/null 2>&1 \
+            || _warn "retention: journal append FAILED for retention_refuse ($refuse_reason)"
+        _warn "retention: REFUSING all evictions — $refuse_reason (pointer_target=$tgt journal_current=$cur); zero evictions; pointer writes belong to the stage/promote lane"
+        return 0
+    fi
+
+    # Chronological history view (SPEC §2/3) — empty when no journal rows yet.
+    local hist_lines
+    hist_lines="$(_retention_hist_lines "$json")"
+
+    # Count ALL releases; the keep-3 CEILING is unchanged (ADR-004: "retention
+    # 3 releases" — current + previous are pinned members of the three, not
+    # additions to it). What CHANGED under the stopgap is ELIGIBILITY: a
+    # release dir may be evicted ONLY when the journal AFFIRMATIVELY shows
+    # its slot is dead. Deciding eviction from the directory listing (oldest
+    # first) IS the defect — there is NO journal-less eviction any more.
+    #   EVICTABLE : V has a lifecycle row of its own (a `staged` row OR a
+    #               `commit` row) AND a LATER commit row for a version-
+    #               greater W  ->  reason=superseded-by-promoted-<W>
+    #   HELD      : EVERY other candidate, with a frozen reason token:
+    #       no-journal-evidence                             (no journal row
+    #                               ever mentions this version)
+    #       staged-awaiting-ceremony-no-promoted-descendant  (staged row, no
+    #                               later close, no superseding commit)
+    #       promoted-not-superseded                         (has a commit row,
+    #                               no later version-greater commit)
+    # CONSEQUENCE (carry in the comment, do not "fix"): a release with NO
+    # journal evidence (e.g. one staged before this fix landed) is now HELD,
+    # not evicted — the sweep prefers holding to guessing.
+    local total=0 st="" st_raw="" staged_line="" commit_line="" ref_line=""
+    local cand_staged="no" cand_reason="" sup_by="" hold_reason=""
+    local entries="" held="" held_reasons="" held_count=0
     for d in "$rel"/*/; do
         [ -d "$d" ] || continue
         name="${d%/}"; name="${name##*/}"
         [ "$name" = "current" ] && continue   # the flip symlink, not a release
         # Protocol/working artifacts under releases/ are NOT releases: the
-        # D5 lock dir, its stale-break leftovers, and stage temp assemblies.
-        # (Latent defect exposed by the epoch-key normalization below: with
-        # the old mixed ISO/epoch sort the lock dir — epoch mtime — sorted
-        # lexicographically FIRST and was silently rm -rf'd as the
-        # "oldest release", defeating the lock protocol mid-operation.)
+        # D5 lock dir, its stale-break leftovers, and stage temp assemblies
+        # (pre-fix the lock dir sorted first and was silently rm -rf'd).
         case "$name" in
             rollback.lock.d|rollback.lock.d.stale.*|.staging.*) continue ;;
         esac
         total=$((total + 1))
-        [ "$name" = "$cur" ] && continue
-        [ "$name" = "$prev" ] && continue
-        if [ -n "$alias_pin" ] && [ "$name" = "$alias_pin" ]; then
-            _log "retention: skipping $name (pinned by releases/current alias pointer)"
-            continue
-        fi
+        # Hard pins — counted in total, never evicted (SPEC §1 + pointer gate).
+        case "$name" in
+            "$cur"|"$prev"|"$inf_target"|"$po_target"|"$tgt")
+                [ -n "$tgt" ] && [ "$name" = "$tgt" ] \
+                    && _log "retention: SKIP $name — on-disk pointer target (stage/promote lane owns pointer writes)"
+                continue ;;
+        esac
         # normalize the sort key to EPOCH: a manifest staged_at (ISO) is
         # converted; a missing manifest falls back to the dir mtime (already
         # epoch). Sorting ISO strings against epoch digits lexicographically
-        # is meaningless (digits vs 'T'/'-'/'Z' compare by codepoint, not
-        # time) — normalizing keeps the oldest-first eviction order correct
-        # across mixed staged/unstaged release sets (review i3).
-        st="$(manifest_field "$name" staged_at 2>/dev/null)"
-        if [ -n "$st" ]; then
-            st="$(_iso_to_epoch "$st" 2>/dev/null)"
+        # is meaningless — normalizing keeps oldest-first order (review i3).
+        st_raw="$(manifest_field "$name" staged_at 2>/dev/null)"
+        if [ -n "$st_raw" ]; then
+            st="$(_iso_to_epoch "$st_raw" 2>/dev/null)"
+        else
+            st=""
         fi
-        # P2.1 BSD-port closure (D2a WS8 lib.sh clause): `stat -f '%m'` is
-        # BSD-only — the "eviction site" member of the quarantined GNU-debt
-        # trio (QUARANTINE.md 2026-09-30: date -j :86, sed -i :709, this
-        # seat; the first went dual in 31cd4fb59, the second is retired).
-        # GNU stat reads `-f` as FILESYSTEM status and emits MEASURED
-        # silent garbage for this invocation (the reason _run_log_retention
-        # pins the primitive out entirely — this site is the acknowledged
-        # residual named there). Same uname-dispatch shape as _iso_to_epoch
-        # / _cooldown_until_iso / _atomic_flip: the families are SELECTED,
-        # never ||-chained (a chain would launder wrong-family output into
-        # an epoch sort key and corrupt the oldest-first eviction order).
-        # Degrade is unchanged: stat error or unrecognized platform leaves
-        # st empty → 0 (the pre-port failure semantics; 2>/dev/null kept).
+        # P2.1 BSD-port closure: `stat -f '%m'` is BSD-only; GNU reads `-f` as
+        # FILESYSTEM status and emits MEASURED garbage. Same uname-dispatch
+        # shape as _iso_to_epoch / _atomic_flip — families SELECTED, never
+        # ||-chained (a chain would launder wrong-family output into the sort
+        # key). Degrade unchanged: stat error / unknown platform → 0.
         if [ -z "$st" ]; then
             case "$(uname -s)" in
                 Darwin|*BSD*|*bsd*) st="$(stat -f '%m' "$d" 2>/dev/null)" ;;
@@ -9740,17 +9941,111 @@ retention_evict() {
             esac
         fi
         [ -n "$st" ] || st=0
-        entries="$entries$st $name\n"
+
+        # EVIDENCE: V's own lifecycle rows (last one of each kind wins).
+        staged_line="$(_retention_staged_line "$hist_lines" "$name")"
+        commit_line="$(_retention_commit_line "$hist_lines" "$name")"
+        if [ -z "$staged_line" ] && [ -z "$commit_line" ]; then
+            hold_reason="no-journal-evidence"
+        else
+            # The reference point is V's LAST lifecycle row: a superseding
+            # commit must come AFTER it (a promotion that happened BEFORE V's
+            # own promotion does not supersede V).
+            if [ -z "$staged_line" ]; then
+                ref_line="$commit_line"
+            elif [ -z "$commit_line" ]; then
+                ref_line="$staged_line"
+            elif [ "$staged_line" -gt "$commit_line" ]; then
+                ref_line="$staged_line"
+            else
+                ref_line="$commit_line"
+            fi
+            sup_by="$(_retention_superseded_by "$hist_lines" "$ref_line" "$name")"
+            if [ -n "$sup_by" ]; then
+                cand_staged="no"; [ -n "$staged_line" ] && cand_staged="yes"
+                cand_reason="superseded-by-promoted-$sup_by"
+                entries="$entries$st $name $cand_staged $cand_reason\n"
+                continue
+            fi
+            # Not superseded -> HELD, one frozen reason token per dir.
+            # (the staged_line empty case MUST be tested separately: a bare
+            # `[ "$commit_line" -ge "$staged_line" ]` against an empty string
+            # is an integer-expression error in bash and would silently
+            # mislabel a promoted release as staged-awaiting.)
+            if [ -z "$staged_line" ]; then
+                hold_reason="promoted-not-superseded"
+            elif [ -n "$commit_line" ] && [ "$commit_line" -ge "$staged_line" ]; then
+                hold_reason="promoted-not-superseded"
+            else
+                hold_reason="staged-awaiting-ceremony-no-promoted-descendant"
+            fi
+        fi
+        held="${held:+$held,}$name"
+        held_reasons="${held_reasons:+$held_reasons:}$hold_reason"
+        held_count=$((held_count + 1))
+        _log "retention: HOLD $name — $hold_reason (the journal does not affirm this slot is dead; the sweep prefers holding to guessing)"
     done
+
+    # The pin_hold row names EVERY held dir with its reason (positional to
+    # `held=`), plus the counts. Written whenever >=1 dir is held — "nothing
+    # evicted" must never be silent.
+    if [ "$held_count" -gt 0 ]; then
+        journal_history_append retention_pin_hold \
+            "held=$held reasons=$held_reasons keep=$RETENTION_KEEP total=$total evictions=0" \
+            >/dev/null 2>&1 \
+            || _warn "retention: journal append FAILED for retention_pin_hold"
+        _warn "retention: PIN HOLD — $held_count dir(s) held (held=[$held] reasons=[$held_reasons]); eviction proceeds ONLY for journal-evidenced superseded releases; over-retention is the safe direction"
+    fi
+
     if [ "$total" -le "$RETENTION_KEEP" ]; then
         _log "retention: $total releases ≤ keep=$RETENTION_KEEP — nothing to evict"
         return 0
     fi
     local evict_count=$((total - RETENTION_KEEP))
-    _log "retention: $total releases > keep=$RETENTION_KEEP — evicting $evict_count oldest (current=$cur previous=$prev alias_pin=${alias_pin:-<none>} pinned)"
-    printf '%b' "$entries" | sort | head -"$evict_count" | while read -r st name; do
+    _log "retention: $total releases > keep=$RETENTION_KEEP — evicting up to $evict_count oldest (current=$cur previous=$prev in_flight=$inf_target pending_op=$po_target pointer=$tgt pinned; held=$held)"
+
+    # Eviction loop — pipeline subshell (existing shape): journal appends are
+    # atomic; no variable propagation out of it is needed.
+    printf '%b' "$entries" | sort | head -n "$evict_count" | while read -r st name cand_staged cand_reason; do
         [ -n "$name" ] || continue
-        _log "retention: evicting $name (staged $st) — neither current ($cur) nor previous ($prev)"
+        # Belt: the pointer target is never evicted (hard-pinned above too).
+        if [ -n "$tgt" ] && [ "$name" = "$tgt" ]; then
+            _log "retention: SKIP $name — pointer target; never evicted"
+            continue
+        fi
+        # LIVENESS PROBE (AMEND-2) — the dir must be PROVEN dead before the
+        # rm -rf: a release dir may still be the cwd / exe / root of a live
+        # process, or appear inside a live process's argv.
+        p="$rel/$name"
+        case "$p" in /*) ;; *) p="$PWD/$p" ;; esac
+        holder="$(_retention_liveness_holder "$PROC_ROOT" "$p")"
+        probe_rc=$?
+        if [ "$probe_rc" -eq 2 ]; then
+            # FAIL-CLOSED: /proc unreadable -> we cannot prove the slot is
+            # dead, so we NEVER evict it (and we say why in the row).
+            journal_history_append retention_refuse \
+                "reason=live-process-holding-release version=$name path=$p holder=proc-root-unreadable evictions=0" \
+                >/dev/null 2>&1 \
+                || _warn "retention: journal append FAILED for retention_refuse (liveness probe unavailable, $name)"
+            _warn "retention: HOLD $name — liveness probe UNAVAILABLE ($PROC_ROOT unreadable); FAIL-CLOSED, never evict a dir whose liveness cannot be proven"
+            continue
+        fi
+        if [ -n "$holder" ]; then
+            journal_history_append retention_refuse \
+                "reason=live-process-holding-release version=$name path=$p holder=$holder evictions=0" \
+                >/dev/null 2>&1 \
+                || _warn "retention: journal append FAILED for retention_refuse (live holder, $name)"
+            _warn "retention: HOLD $name — a LIVE process holds it (holder=$holder path=$p); never evict a release dir a live process is running from"
+            continue
+        fi
+        ptarget="no"; [ "$name" = "$tgt" ] && ptarget="yes"
+        st_at="$(manifest_field "$name" staged_at 2>/dev/null)"
+        [ -n "$st_at" ] || st_at="unknown"
+        journal_history_append retention_evict \
+            "version=$name staged_at=$st_at reason=$cand_reason staged_row=$cand_staged pointer_target=$ptarget journal_current=$cur journal_previous=$prev" \
+            >/dev/null 2>&1 \
+            || _warn "retention: journal append FAILED for retention_evict $name (eviction still performed)"
+        _log "retention: evicting $name (staged $st) — $cand_reason (staged_row=$cand_staged)"
         rm -rf "$rel/$name"
     done
     return 0
