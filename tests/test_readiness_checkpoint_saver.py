@@ -138,12 +138,15 @@ class TestProbeTopologyDetection:
         handles that). Probe must NOT degrade."""
         adapter = _FakeSingleSaverAdapter()
         probe = make_checkpoint_saver_probe(adapter)
-        # Sync call returns True — never degrades.
-        assert probe() is True
+        # Sync call returns the D1a PAIR (verdict, class) — a healthy
+        # answer: verdict True, no failure class. (The probe factory
+        # returns the pair form; the orchestrator's ``_unpack`` accepts
+        # it AND the legacy bare bool.)
+        assert probe() == (True, None)
 
     def test_no_checkpointer_returns_true(self):
         """checkpointer=None → probe returns True (healthy)."""
-        assert make_checkpoint_saver_probe(None)() is True
+        assert make_checkpoint_saver_probe(None)() == (True, None)
 
     def test_checkpointer_without_raw_saver_returns_true(self):
         """checkpointer exposes no raw_saver → passthrough True."""
@@ -151,7 +154,7 @@ class TestProbeTopologyDetection:
         class _NoRawSaver:
             pass
 
-        assert make_checkpoint_saver_probe(_NoRawSaver())() is True
+        assert make_checkpoint_saver_probe(_NoRawSaver())() == (True, None)
 
     def test_saver_without_conn_returns_true(self):
         """raw_saver.conn is missing → passthrough True (no probe target)."""
@@ -162,7 +165,7 @@ class TestProbeTopologyDetection:
         class _AdapterNoConn:
             raw_saver = _NoConnSaver()
 
-        assert make_checkpoint_saver_probe(_AdapterNoConn())() is True
+        assert make_checkpoint_saver_probe(_AdapterNoConn())() == (True, None)
 
 
 # ── Pool topology: sentinel-cycle execution ────────────────────────────────
@@ -184,13 +187,13 @@ class TestSentinelProbeExecution:
         probe = make_checkpoint_saver_probe(adapter)
 
         first = await asyncio.to_thread(probe)
-        assert first is True
+        assert first == (True, None)
         assert pool.check_calls == 0, "sentinel probe must not drive pool.check()"
         assert len(saver.aput_writes_calls) == 1, "write-once init"
         assert len(saver.aget_tuple_calls) == 1
 
         second = await asyncio.to_thread(probe)
-        assert second is True
+        assert second == (True, None)
         assert len(saver.aput_writes_calls) == 1, "no second write"
         assert len(saver.aget_tuple_calls) == 2, "read-only tick"
 
@@ -249,7 +252,7 @@ class TestSentinelProbeExecution:
             await asyncio.to_thread(probe)
 
         saver.aput_writes = original  # heal
-        assert await asyncio.to_thread(probe) is True
+        assert await asyncio.to_thread(probe) == (True, None)
         assert len(saver.aput_writes_calls) == 1, "write retried and landed"
         assert len(saver.aget_tuple_calls) == 1
 
@@ -280,6 +283,18 @@ class TestSentinelProbeExecution:
             "checkpoint_saver" in reason and "sentinel" in reason
             for reason in composite.reasons
         ), composite.reasons
+        # The degraded reason carries the §4.0 failure CLASS (the live
+        # log could not distinguish a BUSY checkpoint path from a
+        # BROKEN one before this — the 2026-11-22 boot flap was
+        # untriageable from the journal for exactly that reason).
+        assert any(
+            "class=hard_component_red" in reason
+            for reason in composite.reasons
+        ), composite.reasons
+        assert (
+            composite.component_classes["checkpoint_saver"]
+            == "hard_component_red"
+        )
 
     @pytest.mark.asyncio
     async def test_sentinel_read_timeout_degrades_with_reason(self):
