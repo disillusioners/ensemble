@@ -5,6 +5,18 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.31.40] — 2026-11-23
+
+### Fixed — agent model pins repointed off the dead llmproxy `agentic` alias (BRIDGE)
+
+- The llmproxy model id `agentic` returned HTTP 400 `invalid_request_error` (`"openai: Invalid API parameter, please check the documentation."`) on every request on BOTH deployments (`llm.ensem.dev`, `llm.daoduc.org`) during the 2026-11-23 outage; every agent whose model was `agentic` — directly, or via the `OPENAI_MODEL` default — died on its first model call. The live install `.env` default was repointed to `agentic-turbo` (backup kept) and needs a daemon restart to load; the four agents below carry their OWN `meta.json` pin, which wins at priority-3 model resolution (`daemon/services/instance_lifecycle.py:2205-2214`), so the `.env` change alone did NOT revive them.
+- Repointed `"llm_model": "agentic"` → `"agentic-turbo"` (a healthy pool) in exactly four agent definitions: `agents/aegis/meta.json`, `agents/sonic-developer/meta.json`, `agents/sonic-leader/meta.json`, `agents/sonic-reviewer/meta.json`. Nothing else in those files was touched.
+- Pins re-pinned in lockstep: `tests/unit/agents/test_aegis_security_family.py` (the aegis T27 model pin) and `test/packs/sonic_agent_defs_checks.py` (`EXPECTED_LLM_MODEL`, `FROZEN [sonic-llm-pins-v3]` → `v4`, plus the three matching self-test fixture metas). The pack's A4 counter-mutation legs stay RED (non-vacuous).
+- **THIS IS A BRIDGE, NOT A FIX.** The permanent fix is proxy-side — repairing the `agentic` alias (expert-team job `98c5b408`). **REVERT (named so it is not forgotten):** once the alias is healthy again and the Emperor prefers the canonical alias, restore `"llm_model": "agentic"` in the same four `meta.json` files, restore the three sonic values in `EXPECTED_LLM_MODEL` and the three matching self-test fixture metas in the same pack file, and retitle the FROZEN block back to `v3`. `sonic-coder` / `sonic-tester` (`coding`) and the aegis children (`coding`) never moved and need no revert. The decision ledger is `.agents/shared/planning/agentic-bridge-repin/decisions.md`.
+- Verification: `meta.json` is NOT in `VERSIONED_PROMPT_ARTIFACTS` (`daemon/tools/prompt_artifacts.py`) and NOT in the prompt-artifact baseline `agents/.prompt-artifacts.sha256` (217 rows, zero `meta.json`) and NOT in `SEALED_SHA_BASELINES` (`tests/test_chart_image_delivery_e2e.py`) — so NO baseline or seal re-pin was required. Base-vs-head net-new delta: ZERO (the `sonic_agent_defs` static red set `{A3, A8, A9}` is unchanged — all three pre-existing and unrelated to this change; the aegis file is 556 passed at both base and head; the meta.json-walking set is 5 failed / 135 passed at both, the same 5 pre-existing).
+- Independent re-probe of the premise (2026-11-23T15:03Z, live key): `agentic` returned **HTTP 200** on BOTH deployments across four request shapes (minimal, daemon-shaped non-streaming, streaming, tool-bearing) — i.e. the alias was ALREADY HEALTHY roughly nine hours after the 06:00Z diagnosis, so the original 400 was either repaired in the interim or is not reproducible with the shapes probed. This does not change the action taken (the repoint is cheap and reversible) but it raises the priority of the REVERT above; the expert team is asked to confirm whether the alias is repaired and whether the 400 reproduces.
+- Zero migration files in the v0.31.39 → v0.31.40 delta.
+
 ## [v0.31.39] — 2026-11-23
 
 ### Fixed — release-note truthfulness (v0.31.38 correction)
