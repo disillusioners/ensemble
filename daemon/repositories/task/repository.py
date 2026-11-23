@@ -8,6 +8,7 @@ import os
 import uuid
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from sqlalchemy import (
@@ -42,7 +43,7 @@ from daemon.services.turn_transitions import (
     RetryTurn,
 )
 
-from ..instance.models import Instance, InstanceStatus
+from ..instance.models import Instance, InstanceStatus, InstanceHierarchy
 from ..job_queue.models import (
     ACTIVE_ADMISSION_STATES,
     AdmissionState,
@@ -50,8 +51,54 @@ from ..job_queue.models import (
     active_admission_states_sql,
 )
 from .models import SuspensionReason, Task, TaskStatus, TaskType
+from ..message_queue.models import MessageQueue
+from ..job_queue.watcher_models import JobWatcher
+from ..report_injection.models import ReportInjection, ReportInjectionState
 
 logger = logging.getLogger(__name__)
+
+@dataclass
+class StrandedClassification:
+    """Classification of a stranded RUNNING instance.
+
+    ``classification`` is one of:
+      * ``"1a"`` — proven dead, never dispatched (zero task rows,
+        zero message rows, no active JobItem, no non-terminal
+        descendant, idle past the recency bound, no delivered work).
+        RETIRE is correct.
+      * ``"1b"`` — proven dead, work delivered (report_injections
+        with state TASK_DELIVERED). RETIRE is correct.
+      * ``"2"``  — recoverable (active JobItem / active task row /
+        pending watcher / live descendant / recent activity). NEVER
+        retire; surface only.
+      * ``"3"``  — ambiguous (fail-closed): unparseable/absent value,
+        clock skew, unexpected status, or unprovable. Surface only,
+        no mutation.
+    """
+    instance_id: str
+    classification: str
+    evidence: dict = field(default_factory=dict)
+
+
+# Proven-dead recency bound (seconds). An instance whose last activity
+# is younger than this is NEVER proven dead (in-flight-spawn hazard).
+# Named + documented + configurable via env
+# ENSEMBLE_STRANDED_PROVEN_DEAD_MIN_IDLE_SECONDS (default 3600).
+# Aligned loosely with the husk detector's 24h threshold but set to 1h
+# because exemplar 716908e7 is only ~5h idle and must still qualify,
+# while 24h would exclude it. See the report for the justification.
+DEFAULT_STRANDED_PROVEN_DEAD_MIN_IDLE_SECONDS = 3600
+
+
+def _stranded_min_idle_seconds() -> int:
+    raw = os.environ.get(
+        "ENSEMBLE_STRANDED_PROVEN_DEAD_MIN_IDLE_SECONDS", ""
+    )
+    try:
+        v = int(raw) if raw != "" else DEFAULT_STRANDED_PROVEN_DEAD_MIN_IDLE_SECONDS
+        return v if v > 0 else DEFAULT_STRANDED_PROVEN_DEAD_MIN_IDLE_SECONDS
+    except (ValueError, TypeError):
+        return DEFAULT_STRANDED_PROVEN_DEAD_MIN_IDLE_SECONDS
 
 
 # Bind-parameter chunk size for the bulk answer-handle lookup
@@ -1408,67 +1455,160 @@ class TaskRepository:
             # CHARACTER off the id; iterate directly instead.
             return list(db_session.exec(stmt).all())
 
-    def find_stranded_running_instances(
+    def classify_stranded_running_instances(
         self, *, boot_epoch: datetime
-    ) -> list[str]:
-        """Return ``instance_id`` rows for the boot-time STRANDED
-        surfacing pass (the complement of ``find_orphaned_live_turns``).
+    ) -> list["StrandedClassification"]:
+        """Classify RUNNING instances into proven-dead / recoverable /
+        ambiguous (surface-first doctrine).
 
-        Feature: boot-recovery-stranded-surfacing. Covers the orphan
-        class that ``find_orphaned_live_turns`` deliberately excludes
-        via its active-JobItem clause -- RUNNING instances whose
-        ``task`` row is gone AND which carry NO active JobItem
-        (the mid-turn-pre-epoch and never-dispatched classes). These
-        are surfaced (and retired) at boot rather than resumed, so a
-        pre-epoch checkpoint is NEVER re-executed (which would
-        duplicate already-completed work).
-
-        Selection:
-          * ``instances.status = 'running'``
-          * NO active ``task`` row (``task.status IN
-            ('pending','running','paused')`` returns 0)
-          * NO active JobItem bound (the inverse of the
-            ``find_orphaned_live_turns`` JobItem clause -- instances
-            WITH an active JobItem are owned by the resume path)
-
-        Returns oldest-first by ``instances.created_at``.
+        See :class:`StrandedClassification` and the design requirements
+        in the commission. Returns one entry per RUNNING instance,
+        classified. Instances that are structurally class 2/3 are
+        included (surfaced) but never retired by the pass.
         """
         if boot_epoch is None:
             return []
-        with SQLModelSession(self.engine) as db_session:
-            active_task_subq = (
-                select(Task.instance_id)
-                .where(
-                    Task.status.in_([
-                        TaskStatus.PENDING.value,
-                        TaskStatus.RUNNING.value,
-                        TaskStatus.PAUSED.value,
-                    ])
-                )
-                .group_by(Task.instance_id)
-            )
-            active_job_subq = (
-                select(JobItem.instance_id)
-                .where(
-                    col(JobItem.instance_id).is_not(None)
-                )
-                .where(
-                    col(JobItem.admission_state).in_(
-                        list(ACTIVE_ADMISSION_STATES)
-                    )
-                )
-                .where(col(JobItem.deleted_at).is_(None))
-                .group_by(JobItem.instance_id)
-            )
-            stmt = (
-                select(Instance.instance_id)
-                .where(Instance.status == InstanceStatus.RUNNING.value)
-                .where(col(Instance.instance_id).not_in(active_task_subq))
-                .where(col(Instance.instance_id).not_in(active_job_subq))
-                .order_by(col(Instance.created_at).asc())
-            )
-            return list(db_session.exec(stmt).all())
+        terminal_statuses = {
+            InstanceStatus.COMPLETED.value,
+            InstanceStatus.TERMINATED.value,
+            InstanceStatus.ERROR.value,
+            InstanceStatus.FAILED.value,
+            InstanceStatus.CANCELLED.value if hasattr(InstanceStatus, "CANCELLED") else "cancelled",
+        }
+        min_idle = _stranded_min_idle_seconds()
 
+        out: list[StrandedClassification] = []
+        with SQLModelSession(self.engine) as db_session:
+            instances = list(
+                db_session.exec(
+                    select(Instance).where(
+                        Instance.status == InstanceStatus.RUNNING.value
+                    )
+                ).all()
+            )
+            for inst in instances:
+                iid = inst.instance_id
+                evidence: dict = {}
+                # Fail-closed inputs
+                try:
+                    # recency from last_activity_at or created_at
+                    activity_raw = getattr(inst, "last_activity_at", None)
+                    if activity_raw is None:
+                        activity_raw = getattr(inst, "created_at", None)
+                    if activity_raw is None:
+                        raise ValueError("no activity timestamp")
+                    if isinstance(activity_raw, datetime):
+                        activity_ts = activity_raw
+                    else:
+                        activity_ts = datetime.fromisoformat(
+                            str(activity_raw).replace("Z", "+00:00")
+                        )
+                    if activity_ts.tzinfo is not None:
+                        activity_ts = activity_ts.replace(tzinfo=None)
+                    # clock skew: activity after boot_epoch => ambiguous
+                    if activity_ts > boot_epoch:
+                        raise ValueError("clock skew: activity after boot_epoch")
+                    age_seconds = (boot_epoch - activity_ts).total_seconds()
+                except (ValueError, TypeError):
+                    out.append(StrandedClassification(
+                        instance_id=iid, classification="3",
+                        evidence={"reason": "unparseable/absent/skew timestamp"},
+                    ))
+                    continue
+
+                evidence["age_seconds"] = age_seconds
+                evidence["recency_bound_seconds"] = min_idle
+
+                # Task rows (ANY state)
+                task_count = db_session.exec(
+                    select(func.count()).select_from(Task).where(
+                        Task.instance_id == iid
+                    )
+                ).one()
+                evidence["task_count"] = int(task_count or 0)
+
+                # Message queue rows (ANY state)
+                try:
+                    mq_count = db_session.exec(
+                        select(func.count()).select_from(MessageQueue).where(
+                            MessageQueue.instance_id == iid
+                        )
+                    ).one()
+                except Exception:
+                    mq_count = 0
+                evidence["message_queue_count"] = int(mq_count or 0)
+
+                # Active JobItem
+                active_job = db_session.exec(
+                    select(func.count()).select_from(JobItem).where(
+                        col(JobItem.instance_id) == iid
+                    ).where(
+                        col(JobItem.admission_state).in_(
+                            list(ACTIVE_ADMISSION_STATES)
+                        )
+                    ).where(col(JobItem.deleted_at).is_(None))
+                ).one()
+                evidence["active_jobitem"] = bool(active_job)
+
+                # Non-terminal descendants
+                desc_rows = list(db_session.exec(
+                    select(InstanceHierarchy).where(
+                        InstanceHierarchy.parent_id == iid
+                    )
+                ).all())
+                nonterm_desc = 0
+                for hr in desc_rows:
+                    child = db_session.get(Instance, hr.child_id)
+                    if child is not None and child.status not in terminal_statuses:
+                        nonterm_desc += 1
+                evidence["nonterminal_descendants"] = nonterm_desc
+
+                # Pending watcher
+                watcher_count = db_session.exec(
+                    select(func.count()).select_from(JobWatcher).where(
+                        JobWatcher.instance_id == iid
+                    )
+                ).one()
+                evidence["pending_watchers"] = int(watcher_count or 0)
+
+                # Delivered work
+                try:
+                    delivered = db_session.exec(
+                        select(func.count()).select_from(ReportInjection).where(
+                            ReportInjection.parent_instance_id == iid
+                        ).where(
+                            ReportInjection.state == ReportInjectionState.TASK_DELIVERED.value
+                        )
+                    ).one()
+                except Exception:
+                    delivered = 0
+                evidence["delivered_reports"] = int(delivered or 0)
+
+                # Recoverable if any leg
+                recoverable = (
+                    int(task_count or 0) > 0
+                    or int(mq_count or 0) > 0
+                    or bool(active_job)
+                    or nonterm_desc > 0
+                    or int(watcher_count or 0) > 0
+                    or age_seconds < min_idle
+                )
+                if recoverable:
+                    out.append(StrandedClassification(
+                        instance_id=iid, classification="2", evidence=evidence,
+                    ))
+                    continue
+
+                # Proven dead
+                if int(delivered or 0) > 0:
+                    cls = "1b"
+                else:
+                    cls = "1a"
+                out.append(StrandedClassification(
+                    instance_id=iid, classification=cls, evidence=evidence,
+                ))
+
+        return out
     def mark_task_auto_continued(
         self, task_id: int, boot_epoch: datetime
     ) -> bool:
@@ -2059,52 +2199,6 @@ class TaskRepository:
                 .where(
                     Task.task_type == TaskType.PROCESS_REPORT.value
                 )
-                .where(
-                    Task.status.in_([
-                        TaskStatus.PENDING.value,
-                        TaskStatus.RUNNING.value,
-                    ])
-                )
-                .order_by(col(Task.created_at).desc())
-            )
-            return list(db_session.exec(stmt))
-
-    def list_live_delivery_tasks_for_instance(
-        self, instance_id: str
-    ) -> list[Task]:
-        """Return every live Task row for ``instance_id`` — ANY kind.
-
-        Wedge-fix backstop helper (waiting_children_watchdog): the
-        GENERIC "can anything still deliver to this instance?" probe.
-        It mirrors
-        :meth:`list_live_process_report_carriers_for_instance` MINUS
-        the ``task_type`` filter.
-
-        Why the widening matters: a parked ``WAITING_CHILDREN``
-        parent may be waiting on a delivery that is NOT a
-        ``PROCESS_REPORT`` carrier — a ``process_message`` turn, a
-        report-injection fallback task, a continuation row. Reading
-        "no PROCESS_REPORT carrier" as "nothing can deliver to me" is
-        the false-positive class behind anomaly ``a370b036`` (the
-        wedge-notice false positives on root ``77ddcb9f``,
-        2026-11-21→22): the wedge fired on a parent that still had a
-        live delivery row.
-
-        "Live" = ``status IN ('pending', 'running')`` — the SAME
-        vocabulary as the carrier helper (PAUSED is NOT live: a
-        paused task row cannot deliver on its own).
-
-        Args:
-            instance_id: The instance ID whose live task rows are
-                enumerated.
-
-        Returns:
-            List of live Task rows (possibly empty).
-        """
-        with SQLModelSession(self.engine) as db_session:
-            stmt = (
-                select(Task)
-                .where(Task.instance_id == instance_id)
                 .where(
                     Task.status.in_([
                         TaskStatus.PENDING.value,
