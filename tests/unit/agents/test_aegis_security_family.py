@@ -830,7 +830,7 @@ class TestAssignments:
         assert _meta(agent)["default_queue"] == "system_parallel_queue"
 
     def test_model_assignments(self):  # T27
-        assert _meta("aegis")["llm_model"] == "agentic-turbo"
+        assert _meta("aegis")["llm_model"] == "agentic"
         for child in FAMILY_CHILDREN:
             assert _meta(child)["llm_model"] == "coding"
 
