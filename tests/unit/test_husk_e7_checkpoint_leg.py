@@ -29,6 +29,12 @@ from sqlmodel import Session, SQLModel
 from daemon.repositories.instance.models import Instance
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
 from daemon.tools import instance_read as ir
+from daemon.repositories.job_queue.models import JobItem
+from daemon.repositories.task.models import Task
+from tests.helpers.checkpoints_fixture import (
+    create_checkpoints_table,
+    insert_checkpoint_row,
+)
 from tests.helpers.nestops_pg_fixtures import call, install_fake_home
 
 
@@ -130,29 +136,15 @@ async def test_e7_row_with_checkpoint_rows_is_not_flagged():
     tmpdir = tempfile.mkdtemp(prefix="husk-e7-ckpt-")
     engine = create_engine(f"sqlite:///{tmpdir}/fleet.db")
     SQLModel.metadata.create_all(engine)
-    # Create the checkpoints table (LangGraph schema, thread_id = instance_id).
-    with engine.connect() as conn:
-        conn.execute(text(
-            "CREATE TABLE checkpoints ("
-            "thread_id TEXT NOT NULL, checkpoint_ns TEXT NOT NULL DEFAULT '', "
-            "checkpoint_id TEXT NOT NULL, PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id))"
-        ))
-        conn.commit()
+    create_checkpoints_table(engine)
 
     created = _aged(30)
     row = _instance("husk-with-ckpt-1", created_at=created, last_activity_at=None)
-    ids = []
     with Session(engine) as session:
         session.add(row)
         session.commit()
-    ids.append("husk-with-ckpt-1")
     # Insert a checkpoint row for this thread — proof a turn ran.
-    with engine.connect() as conn:
-        conn.execute(text(
-            "INSERT INTO checkpoints (thread_id, checkpoint_ns, checkpoint_id) "
-            "VALUES ('husk-with-ckpt-1', '', 'cp-1')"
-        ))
-        conn.commit()
+    insert_checkpoint_row(engine, "husk-with-ckpt-1", "cp-1")
 
     manager = _RepoBackedManager(engine)
     payload = await call(_read_tools(manager), "instance_health")
@@ -187,28 +179,82 @@ async def test_e7_graceful_degradation_table_absent():
 
 
 @pytest.mark.asyncio
-async def test_e7_row_without_checkpoint_rows_can_still_be_flagged():
-    """Companion: when the checkpoints table is present but a row has NO
-    checkpoint rows, and every other leg is satisfied, it IS flagged."""
-    tmpdir = tempfile.mkdtemp(prefix="husk-e7-nockpt-")
+async def test_composed_residual_row_that_satisfies_every_leg_is_still_flagged():
+    """THE COMPOSED RESIDUAL — pinned as the CURRENT, DISCLOSED behaviour.
+
+    A row that satisfies EVERY leg INCLUDING zero checkpoints is still
+    flagged. This models the shape the E7 "does NOT cover" list
+    describes: an instance that DID execute a turn, then
+
+      * its task rows were boot-wiped (``queue_discard_on_startup`` /
+        boot recovery deletes durable rows),
+      * its ``message_queue`` rows aged out (``cleanup_old`` > 24 h),
+      * its ``checkpoints`` rows were retention-swept (> 168 h TTL),
+      * it has been silent > 24 h, with no descendants, no JobItem and
+        no dependency watcher.
+
+    Observationally that row is INDISTINGUISHABLE from a genuine
+    never-dispatched husk: zero rows in every evidence table. The
+    detector therefore flags it — the current, disclosed behaviour. This
+    pin exists so the NEXT lane sees the boundary pinned rather than
+    discovered: E7 closes the band only WHILE the checkpoint rows
+    survive; once they are retention-swept the row re-enters the class.
+    """
+    tmpdir = tempfile.mkdtemp(prefix="husk-e7-residual-")
     engine = create_engine(f"sqlite:///{tmpdir}/fleet.db")
     SQLModel.metadata.create_all(engine)
+    create_checkpoints_table(engine)
+
+    created = _aged(30)  # > 168 h — the checkpoints TTL has elapsed.
+    with Session(engine) as session:
+        session.add(
+            _instance("composed-residual-1", created_at=created, last_activity_at=None)
+        )
+        session.commit()
+
+    # The row DID execute a turn: build the evidence a turn leaves, then
+    # remove it exactly as the production retention/boot paths do.
+    with Session(engine) as session:
+        session.add(Task(instance_id="composed-residual-1", task_type="PROCESS_MESSAGE"))
+        session.add(
+            JobItem(
+                agent_id="worker",
+                agent_dir="/tmp/agents/worker",
+                message="dispatch",
+                instance_id="composed-residual-1",
+                job_type="task",
+                admission_state="done",
+            )
+        )
+        session.commit()
+    insert_checkpoint_row(engine, "composed-residual-1", "cp-residual-1")
+    # Boot-wipe of task/job rows + checkpoint retention sweep (> 168 h).
     with engine.connect() as conn:
-        conn.execute(text(
-            "CREATE TABLE checkpoints ("
-            "thread_id TEXT NOT NULL, checkpoint_ns TEXT NOT NULL DEFAULT '', "
-            "checkpoint_id TEXT NOT NULL, PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id))"
-        ))
+        conn.execute(text("DELETE FROM task WHERE instance_id = 'composed-residual-1'"))
+        conn.execute(
+            text("DELETE FROM job_queue_items WHERE instance_id = 'composed-residual-1'")
+        )
+        conn.execute(text("DELETE FROM checkpoints WHERE thread_id = 'composed-residual-1'"))
         conn.commit()
 
-    created = _aged(30)
-    with Session(engine) as session:
-        session.add(_instance("husk-no-ckpt-2", created_at=created, last_activity_at=None))
-        session.commit()
+    # The residue: zero task, zero message_queue, zero job_item, zero
+    # checkpoint rows, no descendants, no watcher — every leg satisfied.
+    with engine.connect() as conn:
+        assert conn.execute(text(
+            "SELECT count(*) FROM checkpoints WHERE thread_id = 'composed-residual-1'"
+        )).scalar() == 0
+        assert conn.execute(text(
+            "SELECT count(*) FROM task WHERE instance_id = 'composed-residual-1'"
+        )).scalar() == 0
+        assert conn.execute(text(
+            "SELECT count(*) FROM job_queue_items WHERE instance_id = 'composed-residual-1'"
+        )).scalar() == 0
 
     manager = _RepoBackedManager(engine)
     payload = await call(_read_tools(manager), "instance_health")
 
-    assert "husk-no-ckpt-2" in _flagged_ids(payload)
+    # CURRENT, DISCLOSED behaviour: the row is flagged. E7 cannot tell a
+    # retention-swept executed row from a genuine never-dispatched husk.
+    assert "composed-residual-1" in _flagged_ids(payload)
     assert payload["evidence_legs"] == "ok"
     engine.dispose()

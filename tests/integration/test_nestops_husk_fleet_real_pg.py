@@ -69,6 +69,7 @@ from daemon.repositories.instance.models import Instance
 from daemon.repositories.job_queue.models import JobItem
 from daemon.repositories.message_queue.models import MessageQueue
 from daemon.repositories.task.models import Task
+from tests.helpers.checkpoints_fixture import create_checkpoints_table
 from tests.helpers.nestops_pg_fixtures import (
     AMBIENT_POSTGRES,
     FILLER_AGENT_ID,
@@ -173,9 +174,17 @@ def shakedown_db(shakedown_admin):
 
 @pytest.fixture(scope="module")
 def shakedown_engine(shakedown_admin, shakedown_db, tmp_path_factory):
-    """Schema-create on the disposable DB; dispose at module teardown."""
+    """Schema-create on the disposable DB; dispose at module teardown.
+
+    Also creates the LangGraph ``checkpoints`` table (the E7 evidence
+    leg's probe target). That table is NOT part of SQLModel metadata
+    (the LangGraph checkpointer owns it); production always has it, so
+    the disposable DB provides it here to exercise the full flagging
+    path. ENABLING the code under test, not weakening an assertion.
+    """
     engine = create_engine(shakedown_db.url, pool_pre_ping=True, future=True)
     SQLModel.metadata.create_all(engine)
+    create_checkpoints_table(engine)
     yield engine
     engine.dispose()
 
