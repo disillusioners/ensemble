@@ -88,6 +88,39 @@ class ScheduleInfo(BaseModel):
     updated_at: datetime | None = Field(default=None, description="Last update timestamp")
     last_run_at: datetime | None = Field(default=None, description="Last execution timestamp")
     next_run_at: datetime | None = Field(default=None, description="Next scheduled execution")
+    # ── Truth-telling listing fields (schedule listing truth, Phase 1) ──────
+    #: The EFFECTIVE recurrence — for a windowed (chain-mode) row this is
+    #: the DERIVED label, never the stored "once".
+    recurrence: str | None = Field(
+        default=None,
+        description=(
+            "Effective recurrence: once | daily | weekly | cron | "
+            "'weekly (windowed)' (derived for a windowed chain row)"
+        ),
+    )
+    #: The scheduling WINDOW (start / end / weekday / timezone) when the
+    #: row carries one; ``None`` for every row without a window.
+    window: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Scheduling window (start, end, weekday, timezone) when the row "
+            "carries one; null otherwise"
+        ),
+    )
+    #: The project scope of the schedule (the row's project_id).
+    project_id: str | None = Field(
+        default=None, description="Project scope of the schedule"
+    )
+    #: The status of the LAST fire, AS STORED in ``schedule_executions``.
+    #: NOT evidence that a turn ran — the execution-receipt lane owns the
+    #: outcome truth (job d271db9d).
+    last_execution_status: str | None = Field(
+        default=None,
+        description=(
+            "Status of the last fire as stored in schedule_executions "
+            "(not evidence that a turn ran)"
+        ),
+    )
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -274,6 +307,13 @@ class ScheduleDetailRestResponse(BaseModel):
     instance_mode: str | None
     cancelled_at: str | None
     tz_warning: str = ""
+    #: The scheduling WINDOW (start / end / weekday / timezone) when the
+    #: row carries one; ``None`` for every row without a window.
+    window: dict[str, Any] | None = None
+    #: The status of the LAST fire, AS STORED in ``schedule_executions``.
+    #: NOT evidence that a turn ran — the execution-receipt lane owns the
+    #: outcome truth (job d271db9d).
+    last_execution_status: str | None = None
 
 
 class ScheduleCancelRestResponse(BaseModel):

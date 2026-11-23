@@ -27,7 +27,12 @@ from daemon.models import (
     SourceActionResponse,
     SourceStatus,
 )
-from daemon.services.scheduling_service import REST_CALLER_ID, ScheduleCreatePayload
+from daemon.services.scheduling_service import (
+    REST_CALLER_ID,
+    ScheduleCreatePayload,
+    compute_next_run,
+    listing_view,
+)
 from daemon.utils import parse_utc_datetime, validate_instance_mode
 from daemon.routers.sources import WEBHOOK_SECRET_MASK, _mask_source_config
 
@@ -125,23 +130,52 @@ async def list_schedules(request: Request, include_cancelled: bool = False):
             # Default-exclude cancelled rows (architecture §3.4 / ADR-005).
             if not include_cancelled and src.status == SourceStatus.cancelled.value:
                 continue
-            # Calculate next_run_at from adapter if available
-            next_run_at = None
-            adapter = manager.source_registry.get(src.source_id) if manager.source_registry else None
-            if adapter and hasattr(adapter, '_get_next_trigger_time'):
-                try:
-                    next_run_at = adapter._get_next_trigger_time()
-                except Exception as e:
-                    logger.debug(f"Failed to get next_run_at: {e}")
+            # ── next_run_at: ONE authoritative source (the STORED config) ──
+            #
+            # The adapter's in-memory ``_get_next_trigger_time`` was the
+            # OLD source here — a SECOND source for a field the tool
+            # surface already computed from the stored config, and one
+            # that goes null whenever the adapter is not registered (the
+            # two surfaces could therefore disagree).  The stored config
+            # is now the authority; the adapter survives ONLY as an
+            # explicit fallback for a row whose stored config yields no
+            # next-fire at all.
+            next_local, next_utc, _tz_warning = compute_next_run(src.config or {})
+            next_run_at = parse_utc_datetime(next_utc) if next_utc else None
+            if next_run_at is None:
+                adapter = (
+                    manager.source_registry.get(src.source_id)
+                    if manager.source_registry
+                    else None
+                )
+                if adapter and hasattr(adapter, '_get_next_trigger_time'):
+                    try:
+                        next_run_at = adapter._get_next_trigger_time()
+                    except Exception as e:
+                        logger.debug(f"Failed to get next_run_at: {e}")
 
             # Get last_run_at from latest execution record
+            #
+            # ASSUMPTION (execution-receipt contract): last-fire and
+            # status are rendered from ``schedule_executions`` as stored;
+            # outcome-truth (instance linkage + terminal status) is owned
+            # by the execution-receipt lane (job d271db9d) — until that
+            # lands, ``last_execution_status`` is NOT evidence that a
+            # turn ran.
             last_run_at = None
+            last_execution_status = None
             try:
                 latest_execution = manager._source_repository.get_latest_execution(src.source_id)
                 if latest_execution:
                     last_run_at = parse_utc_datetime(latest_execution.triggered_at)
+                    last_execution_status = getattr(latest_execution, "status", None)
             except Exception as e:
                 logger.debug(f"Failed to get last_run_at: {e}")
+
+            # The DERIVED listing view (effective recurrence + window +
+            # project scope) — shared with the tool surface so the two
+            # can never disagree about the same row.
+            view = listing_view(src.config)
 
             schedules.append(ScheduleInfo(
                 id=src.source_id,
@@ -157,6 +191,10 @@ async def list_schedules(request: Request, include_cancelled: bool = False):
                 updated_at=parse_utc_datetime(src.updated_at),
                 last_run_at=last_run_at,
                 next_run_at=next_run_at,
+                recurrence=view["recurrence"],
+                window=view["window"],
+                project_id=view["project_id"],
+                last_execution_status=last_execution_status,
             ))
     return ScheduleListResponse(schedules=schedules)
 
@@ -250,7 +288,27 @@ async def get_schedule_by_id(schedule_id: str, request: Request):
     manager = _get_manager(request)
 
     # Landed service call: get_schedule is ASYNC (awaited directly — correction (b)).
-    detail = await manager.scheduling_service.get_schedule(schedule_id)
+    try:
+        detail = await manager.scheduling_service.get_schedule(schedule_id)
+    except ValueError as e:
+        # An ambiguous LABEL (two live schedules share it — dead labels are
+        # reusable, so the resolver refuses the guess) is a conflict, not a
+        # 404: the row EXISTS, the reference is just not unique.
+        if "ambiguous" in str(e).lower():
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "SCHEDULE_LABEL_AMBIGUOUS",
+                    "message": str(e),
+                },
+            )
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                code=ErrorCodes.SOURCE_NOT_FOUND,
+                message=str(e),
+            ).model_dump(),
+        )
     if detail is None:
         raise HTTPException(
             status_code=404,
@@ -277,6 +335,8 @@ async def get_schedule_by_id(schedule_id: str, request: Request):
         instance_mode=detail.instance_mode,
         cancelled_at=detail.cancelled_at,
         tz_warning=detail.tz_warning,
+        window=detail.window.model_dump() if detail.window is not None else None,
+        last_execution_status=detail.last_execution_status,
     )
 
 
@@ -307,6 +367,17 @@ async def cancel_schedule(schedule_id: str, request: Request):
                 status_code=409,
                 detail={
                     "code": "SCHEDULE_ALREADY_CANCELLED",
+                    "message": str(e),
+                },
+            )
+        if "ambiguous" in str(e).lower():
+            # Two LIVE schedules share the label (dead labels are
+            # reusable, so the resolver refuses to guess) — a conflict,
+            # not a 404: the row exists, the reference is not unique.
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "SCHEDULE_LABEL_AMBIGUOUS",
                     "message": str(e),
                 },
             )
@@ -436,23 +507,35 @@ async def update_schedule(schedule_id: str, schedule_update: ScheduleUpdate, req
         enabled=existing.enabled,
     )
     
-    # Calculate next_run_at from adapter if available
-    next_run_at = None
-    adapter = manager.source_registry.get(updated.source_id)
-    if adapter and hasattr(adapter, '_get_next_trigger_time'):
-        try:
-            next_run_at = adapter._get_next_trigger_time()
-        except Exception as e:
-            logger.debug(f"Failed to get next_run_at: {e}")
+    # Calculate next_run_at from the STORED config (the one authoritative
+    # source — the adapter's in-memory value is only a fallback).
+    next_local, next_utc, _tz_warning = compute_next_run(updated.config or {})
+    next_run_at = parse_utc_datetime(next_utc) if next_utc else None
+    if next_run_at is None:
+        adapter = manager.source_registry.get(updated.source_id)
+        if adapter and hasattr(adapter, '_get_next_trigger_time'):
+            try:
+                next_run_at = adapter._get_next_trigger_time()
+            except Exception as e:
+                logger.debug(f"Failed to get next_run_at: {e}")
 
     # Get last_run_at from latest execution record
+    #
+    # ASSUMPTION (execution-receipt contract): last-fire and status are
+    # rendered from ``schedule_executions`` as stored; outcome-truth is
+    # owned by the execution-receipt lane (job d271db9d) — until that
+    # lands, ``last_execution_status`` is NOT evidence that a turn ran.
     last_run_at = None
+    last_execution_status = None
     try:
         latest_execution = manager._source_repository.get_latest_execution(schedule_id)
         if latest_execution:
             last_run_at = parse_utc_datetime(latest_execution.triggered_at)
+            last_execution_status = getattr(latest_execution, "status", None)
     except Exception as e:
         logger.debug(f"Failed to get last_run_at: {e}")
+
+    view = listing_view(updated.config)
 
     return ScheduleInfo(
         id=updated.source_id,
@@ -469,6 +552,10 @@ async def update_schedule(schedule_id: str, schedule_update: ScheduleUpdate, req
         updated_at=parse_utc_datetime(updated.updated_at),
         last_run_at=last_run_at,
         next_run_at=next_run_at,
+        recurrence=view["recurrence"],
+        window=view["window"],
+        project_id=view["project_id"],
+        last_execution_status=last_execution_status,
     )
 
 

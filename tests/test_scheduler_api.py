@@ -2015,3 +2015,132 @@ class TestDeleteGuardPlacement:
         assert response.status_code == 200
         assert response.json()["deleted"] is True
         mock_manager._source_repository.delete_source_config.assert_called_once()
+
+
+# ===========================================================================
+# PIN — the schedule LISTING tells the truth (schedule listing truth, Phase 1)
+#
+# Architecture v3 §3.3 — the listing floor, on EVERY surface:
+#   1. recurrence truth (a chain task NEVER renders as "once"),
+#   2. window (start / end / weekday / timezone),
+#   3. the ACTUAL next-fire from ONE authoritative source (the STORED
+#      config) — non-null for an armed recurring row,
+#   4. last-fire + status (rendered from ``schedule_executions`` AS
+#      STORED — never synthesized),
+#   5. project scope.
+#
+# The tool surface is pinned in
+# ``tests/unit/services/test_schedule_listing_truth.py``; BOTH surfaces
+# derive through the SAME functions (``listing_view`` +
+# ``compute_next_run``), so one derivation mutation breaks both.
+#
+# MUTATION-VERIFIED (skill ``mutation-verified-regression-pins``): the
+# "adapter-only next-fire source" mutation turns this pin RED; the
+# restore turns it GREEN again.
+# ===========================================================================
+
+
+class TestScheduleListingTruthRest:
+    """The REST list surface of the truth-telling listing."""
+
+    def _chain_source(self, source_id="chain-1", name="central-maintenance-weekly"):
+        """A chain-shaped (windowed) scheduler row — the shape the
+        maintenance seeder writes: ``recurrence="once"`` + a ``chain``
+        block, with a ``run_at`` in the future."""
+        from datetime import datetime, timedelta, timezone as _tz
+
+        run_at = datetime.now(_tz.utc) + timedelta(days=3)
+        source = Mock()
+        source.source_id = source_id
+        source.source_type = "scheduler"
+        source.name = name
+        source.config = {
+            "agent": "maintenancer",
+            "message": "weekly run",
+            "timezone": "Asia/Ho_Chi_Minh",
+            "recurrence": "once",
+            "local_time": "03:30",
+            "run_at": run_at.isoformat(),
+            "instance_mode": "new_instance",
+            "project_id": "agents-ensemble",
+            "chain": {
+                "mode": "weekly-random",
+                "window_start": "01:00",
+                "window_end": "05:00",
+                "weekday": 0,
+                "timezone": "Asia/Ho_Chi_Minh",
+                "run_at_utc": run_at.isoformat(),
+            },
+        }
+        source.credentials = None
+        source.enabled = True
+        source.status = "running"
+        source.error_message = None
+        source.created_at = "2026-11-01T00:00:00+00:00"
+        source.updated_at = "2026-11-01T00:00:00+00:00"
+        return source
+
+    @pytest.mark.asyncio
+    async def test_rest_list_renders_the_truth_for_a_chain_row(self, client, mock_manager):
+        """1 + 2 + 3 + 5 on the REST surface."""
+        mock_manager._source_repository.list_source_configs = Mock(
+            return_value=[self._chain_source()]
+        )
+        mock_manager._source_repository.get_latest_execution = Mock(return_value=None)
+
+        response = await client.get("/schedules")
+        assert response.status_code == 200
+        schedules = response.json()["schedules"]
+        assert len(schedules) == 1
+        item = schedules[0]
+        # 1. recurrence truth — NEVER the stored "once".
+        assert item["recurrence"] != "once"
+        assert item["recurrence"] == "weekly (windowed)"
+        # 2. window.
+        assert item["window"] == {
+            "start": "01:00",
+            "end": "05:00",
+            "weekday": 0,
+            "timezone": "Asia/Ho_Chi_Minh",
+        }
+        # 3. the next-fire is NON-NULL (the stored config is the source).
+        assert item["next_run_at"] is not None
+        # 5. project scope.
+        assert item["project_id"] == "agents-ensemble"
+        # 4. last-fire + status are rendered from schedule_executions AS
+        #    STORED — with no execution row they are null, never
+        #    synthesized.
+        assert item["last_run_at"] is None
+        assert item["last_execution_status"] is None
+
+    @pytest.mark.asyncio
+    async def test_the_stored_config_wins_over_the_live_adapter(self, client, mock_manager):
+        """ONE field, ONE source — the STORED config is authoritative on
+        the REST surface too.  The adapter's in-memory value is a SECOND
+        source (and it goes null whenever the adapter is absent); it
+        survives only as a fallback for a row whose stored config yields
+        no next-fire at all."""
+        from datetime import datetime, timezone as _tz
+
+        source = self._chain_source()
+        mock_manager._source_repository.list_source_configs = Mock(
+            return_value=[source]
+        )
+        mock_manager._source_repository.get_latest_execution = Mock(return_value=None)
+        # A live adapter that claims a DIFFERENT next-fire.
+        adapter = Mock()
+        adapter._get_next_trigger_time = Mock(
+            return_value=datetime(1999, 1, 1, 0, 0, tzinfo=_tz.utc)
+        )
+        registry = Mock()
+        registry.get = Mock(return_value=adapter)
+        mock_manager.source_registry = registry
+
+        response = await client.get("/schedules")
+        assert response.status_code == 200
+        item = response.json()["schedules"][0]
+        # The adapter's value would be 1999 — the STORED config wins.
+        assert not item["next_run_at"].startswith("1999")
+        assert item["next_run_at"].startswith(
+            source.config["run_at"][:13]
+        )
