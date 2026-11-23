@@ -3849,6 +3849,32 @@ async def lifespan(app: FastAPI):
                 "backstop will catch orphans at boot+10min): %s",
                 cont_boot_exc,
             )
+        # ── Boot-consistency reconciler (fix/post-outage-recovery SCOPE b) ──
+        # Runs IMMEDIATELY AFTER the orphan sweep above (sibling of the
+        # auto-continue / orphan-sweep passes in the lifespan BODY block —
+        # NOT nested in the upgrade-install-dir if). Reconciles RUNNING
+        # instances left with no durable work by the boot-window queue GC
+        # leg (the 2026-11-23 outage RCA). 100% PG-derived selection; the
+        # lane has its own three-layer never-wedge isolation and NEVER
+        # raises — this third (lifespan) envelope is belt-and-suspenders.
+        # The kill-switch is the shared
+        # ENSEMBLE_AUTO_CONTINUE_RUNNING_ON_RESTART (same logical action).
+        try:
+            from daemon.services.boot_consistency_reconciler import (
+                reconcile_boot_consistency,
+            )
+
+            reconcile_result = await reconcile_boot_consistency(
+                manager=manager, boot_epoch=get_boot_epoch(),
+            )
+            logger.info("BootConsistency reconciler: %s", reconcile_result)
+        except Exception as boot_reconcile_exc:  # noqa: BLE001 — never wedge
+            logger.error(
+                "[BOOT_RECOVERY_DB_ERROR] pass=lifespan: boot-consistency "
+                "reconciler raised (never-wedge holds; readyz leg may be "
+                "stale): %s: %s",
+                type(boot_reconcile_exc).__name__, boot_reconcile_exc,
+            )
         # Stale-pause backstop boot pass (feature/fix/question-pause-
         # resume-asymmetry, R3). Placement: AFTER ``setup_worker_pool``
         # (the task repo / instance repository are live) and next to

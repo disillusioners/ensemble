@@ -54,6 +54,27 @@ from .models import SuspensionReason, Task, TaskStatus, TaskType
 logger = logging.getLogger(__name__)
 
 
+def _naive_utc_from_event_stamp(raw: Any) -> datetime:
+    """Parse an Event.data ``created_at`` stamp into naive-UTC digits.
+
+    Event.data carries ``now_utc_iso()`` (an ISO-8601 string, usually
+    aware with ``+00:00``). The re-minted Task/MessageQueue timestamp
+    columns are naive-UTC (DC-A), so the offset is stripped after UTC
+    normalization. Unparseable / missing stamps fall back to
+    ``now_utc_naive()`` (fail-open — a bad trace stamp must never block
+    a re-mint).
+    """
+    if isinstance(raw, str) and raw:
+        try:
+            value = datetime.fromisoformat(raw)
+            if value.tzinfo is not None:
+                value = value.astimezone(timezone.utc).replace(tzinfo=None)
+            return value
+        except ValueError:
+            pass
+    return now_utc_naive()
+
+
 # Bind-parameter chunk size for the bulk answer-handle lookup
 # (``find_instances_with_answer_handle``). Keeps the rendered
 # ``IN (...)`` statement inside the bind-parameter limits of both engines
@@ -1407,6 +1428,308 @@ class TaskRepository:
             # Row objects). Indexing ``row[0]`` would slice the first
             # CHARACTER off the id; iterate directly instead.
             return list(db_session.exec(stmt).all())
+
+    # ------------------------------------------------------------------
+    # Boot-consistency reconciler (fix/post-outage-recovery SCOPE b)
+    # ------------------------------------------------------------------
+
+    def find_boot_consistency_candidates(
+        self, boot_epoch: datetime
+    ) -> list[dict[str, Any]]:
+        """Return 100% DB-derived boot-consistency reconciliation candidates.
+
+        Feature: fix/post-outage-recovery SCOPE (b). The post-outage RCA:
+        the boot-window queue recovery/GC leg deletes durable mq/task rows
+        that RUNNING instance rows depend on, while no instance-side boot
+        seam reconciles the row state — leaving ``status='running'`` with
+        nothing to consume and no durable trace of the turn.
+
+        This selector is the SOLE candidate source for the lane — there is
+        deliberately NO in-memory candidate source (no ``_graph_tasks`` /
+        ``_pending_injections`` / ``_live_children``). Three disjoint
+        families (UNION ALL), all gated on ``status='running'`` (which
+        excludes terminal / PAUSED / WAITING_CHILDREN by construction) and
+        on the per-epoch CAS predicate
+        ``(boot_re_drive_at IS NULL OR boot_re_drive_at < :boot_epoch)``:
+
+          1. ``deleted_trace`` — the message_queue row AND the task row are
+             both gone (the post-commit-deletion signature). The LATEST
+             ``message_received`` Event is LEFT-JOINed (may be absent):
+             its ``data`` JSON is the durable trace the lane re-mints from
+             (Tier 1, content present) or retires from (Tier 2, Event
+             absent / content empty — the no-event ghost). One row per
+             instance. The ghost variant (no checkpoint) is detected in
+             the LANE via ``manager._has_checkpoint`` — NOT in this query,
+             because the LangGraph ``checkpoints`` table is not part of
+             SQLModel metadata on SQLite.
+          2. ``blocked_claim`` — a PENDING, non-cancelled task is blocked
+             by a stale RUNNING task on the same instance (the exact
+             per-instance claim guard at ``claim_pending_task`` ~:2960 —
+             ``instance_id NOT IN (SELECT instance_id FROM task WHERE
+             status='running')``). ``work_id`` carries the blocking
+             RUNNING task's handle for a continue-in-place re-drive.
+          3. ``completed_task`` — the instance's LATEST task is terminal
+             COMPLETED with a ``completed_at`` stamp. The lane defers
+             ROOTS (``parent_id IS NULL``) to ``mission_strand_healer``
+             and finalizes non-roots to COMPLETED (the finalize-gap
+             non-root disposition).
+
+        ``cancel_requested`` is excluded on the task-based families
+        (a deliberate stop is never re-driven). Read-only — no row
+        mutation. Ordering: ``instance_id`` then family (deterministic).
+
+        Args:
+            boot_epoch: Naive-UTC process boot epoch. ``None`` returns
+                empty (the lane short-circuits before calling this).
+
+        Returns:
+            List of mapping rows with keys: ``instance_id``, ``family``,
+            ``parent_id``, ``agent_id``, ``agent_tag``, ``created_at``,
+            ``metadata``, ``version``, ``event_data``, ``message_id``,
+            ``work_id``.
+        """
+        if boot_epoch is None:
+            return []
+        statement = text(
+            """
+            SELECT
+                i.instance_id AS instance_id,
+                'deleted_trace' AS family,
+                i.parent_id AS parent_id,
+                i.agent_id AS agent_id,
+                i.agent_tag AS agent_tag,
+                i.created_at AS created_at,
+                i.metadata AS metadata,
+                i.version AS version,
+                e.data AS event_data,
+                e.message_id AS message_id,
+                CAST(NULL AS TEXT) AS work_id
+            FROM instances i
+            LEFT JOIN event e
+              ON e.id = (
+                  SELECT e2.id FROM event e2
+                  WHERE e2.instance_id = i.instance_id
+                    AND e2.kind = 'message_received'
+                  ORDER BY e2.created_at DESC, e2.id DESC LIMIT 1
+              )
+            WHERE i.status = 'running'
+              AND (i.boot_re_drive_at IS NULL
+                   OR i.boot_re_drive_at < :boot_epoch)
+              AND NOT EXISTS (
+                  SELECT 1 FROM message_queue mq
+                  WHERE mq.instance_id = i.instance_id
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM task t
+                  WHERE t.instance_id = i.instance_id
+              )
+
+            UNION ALL
+
+            SELECT
+                i.instance_id, 'blocked_claim', i.parent_id, i.agent_id,
+                i.agent_tag, i.created_at, i.metadata, i.version,
+                CAST(NULL AS TEXT), CAST(NULL AS TEXT),
+                (SELECT tr.work_id FROM task tr
+                 WHERE tr.instance_id = i.instance_id
+                   AND tr.status = 'running' AND COALESCE(tr.cancel_requested, FALSE) = FALSE
+                 ORDER BY tr.created_at ASC, tr.id ASC LIMIT 1) AS work_id
+            FROM instances i
+            WHERE i.status = 'running'
+              AND (i.boot_re_drive_at IS NULL
+                   OR i.boot_re_drive_at < :boot_epoch)
+              AND EXISTS (
+                  SELECT 1 FROM task tp
+                  WHERE tp.instance_id = i.instance_id
+                    AND tp.status = 'pending' AND COALESCE(tp.cancel_requested, FALSE) = FALSE
+              )
+              AND EXISTS (
+                  SELECT 1 FROM task tr
+                  WHERE tr.instance_id = i.instance_id
+                    AND tr.status = 'running' AND COALESCE(tr.cancel_requested, FALSE) = FALSE
+              )
+
+            UNION ALL
+
+            SELECT
+                i.instance_id, 'completed_task', i.parent_id, i.agent_id,
+                i.agent_tag, i.created_at, i.metadata, i.version,
+                CAST(NULL AS TEXT), CAST(NULL AS TEXT), t.work_id
+            FROM instances i
+            JOIN task t
+              ON t.id = (
+                  SELECT t2.id FROM task t2
+                  WHERE t2.instance_id = i.instance_id
+                  ORDER BY t2.created_at DESC, t2.id DESC LIMIT 1
+              )
+            WHERE i.status = 'running'
+              AND (i.boot_re_drive_at IS NULL
+                   OR i.boot_re_drive_at < :boot_epoch)
+              AND t.status = 'completed'
+              AND t.completed_at IS NOT NULL
+
+            ORDER BY instance_id ASC, family ASC
+            """
+        ).bindparams(bindparam("boot_epoch", type_=DateTime))
+        with self.engine.connect() as conn:
+            rows = conn.execute(statement, {"boot_epoch": boot_epoch}).mappings().all()
+        return [dict(row) for row in rows]
+
+    def stamp_boot_re_drive(
+        self, instance_id: str, boot_epoch: datetime,
+        require_running: bool = True,
+    ) -> bool:
+        """CAS-stamp ``instances.boot_re_drive_at`` (mirrors mark_task_auto_continued).
+
+        Single-statement atomic CAS:
+
+            UPDATE instances SET boot_re_drive_at = :boot_epoch
+            WHERE instance_id = :iid
+              [AND status = 'running']
+              AND (boot_re_drive_at IS NULL
+                   OR boot_re_drive_at < :boot_epoch)
+
+        ``require_running=True`` (default) is the resume/retire path guard
+        (mirrors ``mark_task_auto_continued``'s status guard — avoids
+        racing a concurrent worker-pool completion). The finalize path
+        passes ``require_running=False`` because it has ALREADY flipped
+        the row to COMPLETED before stamping; the CAS still gives
+        exactly-once via the boot_re_drive_at epoch predicate.
+
+        Returns ``True`` iff ``rowcount == 1``. Called ONLY AFTER the
+        disposition succeeds (no marked-but-never-re-driven window).
+        ``False`` is a benign idempotency outcome.
+        """
+        if boot_epoch is None:
+            return False
+        sql = (
+            "UPDATE instances SET boot_re_drive_at = :boot_epoch "
+            "WHERE instance_id = :iid "
+        )
+        if require_running:
+            sql += "AND status = 'running' "
+        sql += (
+            "AND (boot_re_drive_at IS NULL "
+            "     OR boot_re_drive_at < :boot_epoch)"
+        )
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                text(sql).bindparams(bindparam("boot_epoch", type_=DateTime)),
+                {"iid": instance_id, "boot_epoch": boot_epoch},
+            )
+            return result.rowcount == 1
+
+    def remint_boot_consistency_work(
+        self,
+        instance_id: str,
+        payload: dict[str, Any],
+        work_id: str | None = None,
+    ) -> str:
+        """Re-mint Task + MessageQueue rows from a durable Event (Tier 1).
+
+        ``payload`` is the parsed ``Event.data`` JSON (``content``,
+        ``message_id``, ``role``, ``source``, ``created_at``). A surviving
+        ``mission_commissions.work_id`` is reused when present; otherwise
+        a fresh UUID4 work_id is minted. Returns the work_id used, for the
+        lane's ``_schedule_explicit_handle_resume`` call.
+
+        Both inserts ride ONE transaction (same shape as the normal
+        enqueue at ``instance_messaging.py:2515`` / ``:2647``). Naive-UTC
+        digits for the timestamp columns (DC-A).
+        """
+        from daemon.repositories.message_queue.models import (
+            MessageQueue,
+            MessageStatus,
+            MessageType,
+        )
+
+        content = payload.get("content") or ""
+        message_id = payload.get("message_id") or str(uuid.uuid4())
+        source = payload.get("source")
+        role = payload.get("role") or "user"
+        msg_type = (
+            MessageType.SYSTEM.value
+            if role == "system"
+            else MessageType.HUMAN.value
+        )
+        enqueued_at = _naive_utc_from_event_stamp(payload.get("created_at"))
+
+        # Reuse a surviving commission's work_id when one exists. Fail-open
+        # (the mission_commissions table is absent on some SQLite harnesses).
+        if work_id is None:
+            try:
+                from daemon.repositories.mission_record.models import (
+                    MissionCommission,
+                )
+
+                with SQLModelSession(self.engine) as s:
+                    row = s.exec(
+                        select(MissionCommission.work_id)
+                        .where(
+                            MissionCommission.worker_instance_id
+                            == instance_id
+                        )
+                        .where(MissionCommission.work_id.isnot(None))
+                        .order_by(MissionCommission.created_at.desc())
+                        .limit(1)
+                    ).first()
+                    if row:
+                        work_id = str(row)
+            except Exception:  # noqa: BLE001 — fail-open to a fresh work_id
+                work_id = None
+        if work_id is None:
+            work_id = str(uuid.uuid4())
+
+        with SQLModelSession(self.engine) as s:
+            s.add(
+                MessageQueue(
+                    message_id=message_id,
+                    instance_id=instance_id,
+                    content=content,
+                    source=source,
+                    type=msg_type,
+                    status=MessageStatus.READY.value,
+                    enqueued_at=enqueued_at,
+                )
+            )
+            s.add(
+                Task(
+                    task_type=TaskType.PROCESS_MESSAGE.value,
+                    instance_id=instance_id,
+                    message_id=message_id,
+                    status=TaskStatus.PENDING.value,
+                    created_at=enqueued_at,
+                    work_id=work_id,
+                )
+            )
+            s.commit()
+        return work_id
+
+    def finalize_boot_consistency_instance(
+        self, instance_id: str, expected_version: int | None
+    ) -> bool:
+        """Finalize-gap non-root: flip a RUNNING instance to COMPLETED.
+
+        Guarded CAS on ``status='running'`` (+ ``version`` when supplied)
+        so a concurrent terminalizer wins cleanly. Terminal-status writer
+        used by the strand-healer precedent. Returns ``True`` iff one row
+        flipped.
+        """
+        sql = (
+            "UPDATE instances SET status = 'completed', "
+            "updated_at = :updated_at, version = version + 1 "
+            "WHERE instance_id = :iid AND status = 'running'"
+        )
+        params: dict[str, Any] = {
+            "iid": instance_id,
+            "updated_at": now_utc_naive().isoformat(),
+        }
+        if expected_version is not None:
+            sql += " AND version = :expected_version"
+            params["expected_version"] = expected_version
+        with self.engine.begin() as conn:
+            result = conn.execute(text(sql), params)
+            return result.rowcount == 1
 
     def mark_task_auto_continued(
         self, task_id: int, boot_epoch: datetime
