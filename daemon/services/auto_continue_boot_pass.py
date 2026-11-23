@@ -1210,3 +1210,179 @@ async def sweep_orphaned_live_turns(
         result.auto_continue_mode,
     )
     return result
+
+# ---------------------------------------------------------------------------
+# Stranded-running surfacing pass (boot-recovery hole closure)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class StrandedSurfacingResult:
+    """Outcome of :func:`surface_stranded_running_instances`."""
+
+    candidates: int = 0
+    surfaced_with_checkpoint: int = 0
+    surfaced_no_checkpoint: int = 0
+    skipped_current_generation: int = 0
+    skipped_kill_switch: int = 0
+    skipped_no_boot_epoch: int = 0
+    retired: int = 0
+    errors: int = 0
+    duration_seconds: float = 0.0
+    auto_continue_mode: str = "unknown"
+    auto_continue_raw_env: str | None = None
+
+
+async def surface_stranded_running_instances(
+    manager: "InstanceManager",
+    boot_epoch: datetime | None,
+) -> StrandedSurfacingResult:
+    """Boot-time surfacing of RUNNING instances stranded by a daemon death.
+
+    Closes the hole where an instance whose newest checkpoint predates
+    the current boot epoch (or which has no checkpoint at all) is
+    never selected by the resume passes and stays ``running`` forever.
+
+    SAFETY: this pass NEVER resumes. A pre-epoch checkpoint may be
+    stale or unsafe, and resuming it could re-execute work that
+    already completed post-restart (the class-(a) proof). Instead each
+    stranded instance is TERMINATED via the lifecycle lane
+    (``terminal_reason='orphan_retired'``) and counted/surfaced. The
+    checkpoint-epoch gate (``ckpt_ts < boot_epoch``) is KEPT for the
+    new-epoch contract; current-generation instances
+    (``ckpt_ts >= boot_epoch``) are skipped (natural immunity).
+
+    Class distinction (kept distinct in counters/logs):
+      * ``surfaced_with_checkpoint`` — pre-epoch checkpoint present
+        (class a).
+      * ``surfaced_no_checkpoint`` — no checkpoint at all (class b).
+
+    Invariants preserved: shared kill-switch, boot-epoch barrier,
+    sequential execution, fail-closed (never raises out).
+    """
+    result = StrandedSurfacingResult()
+
+    enabled = _auto_continue_enabled()
+    result.auto_continue_mode = "on" if enabled else "off"
+    result.auto_continue_raw_env = _last_auto_continue_raw_value()
+    if not enabled:
+        result.skipped_kill_switch = 1
+        logger.info(
+            "[BOOT_RECOVERY] stranded-surfacing OFF: %s=0",
+            AUTO_CONTINUE_KILL_SWITCH_ENV,
+        )
+        return result
+
+    if boot_epoch is None:
+        result.skipped_no_boot_epoch = 1
+        logger.warning(
+            "[BOOT_RECOVERY] stranded-surfacing SKIPPED: boot_epoch=None"
+        )
+        return result
+
+    task_repo = manager._task_repo  # type: ignore[attr-defined]
+    assert task_repo is not None, (
+        "Stranded surfacing requires _task_repo wired by initialize()"
+    )
+
+    loop_started = time.monotonic()
+    try:
+        try:
+            instance_ids = await asyncio.to_thread(
+                task_repo.find_stranded_running_instances, boot_epoch=boot_epoch
+            )
+        except Exception as exc:
+            result.errors += 1
+            logger.warning(
+                "[BOOT_RECOVERY] stranded-surfacing selection failed: %s: %s",
+                type(exc).__name__, exc,
+            )
+            result.duration_seconds = time.monotonic() - loop_started
+            return result
+
+        result.candidates = len(instance_ids)
+
+        for instance_id in instance_ids:
+            try:
+                ckpt_ts = await _get_checkpoint_last_write_naive_utc(
+                    manager, instance_id
+                )
+                if ckpt_ts is not None and ckpt_ts >= boot_epoch:
+                    result.skipped_current_generation += 1
+                    logger.info(
+                        "[BOOT_RECOVERY] stranded SKIPPED instance=%s: "
+                        "checkpoint last-write (%s) >= boot_epoch (%s) "
+                        "— current generation, not stranded",
+                        instance_id[:8],
+                        ckpt_ts.isoformat(),
+                        boot_epoch.isoformat(),
+                    )
+                    continue
+
+                if ckpt_ts is None:
+                    result.surfaced_no_checkpoint += 1
+                    cls = "no-checkpoint"
+                else:
+                    result.surfaced_with_checkpoint += 1
+                    cls = "pre-epoch-checkpoint"
+
+                logger.warning(
+                    "[BOOT_RECOVERY] STRANDED instance=%s class=%s "
+                    "ckpt_ts=%s boot_epoch=%s — retiring (orphan_retired), "
+                    "NOT resumed (idempotency: avoids re-running "
+                    "completed work)",
+                    instance_id[:8],
+                    cls,
+                    (ckpt_ts.isoformat() if ckpt_ts is not None else None),
+                    boot_epoch.isoformat(),
+                )
+
+                try:
+                    ok = await manager.terminate_instance(
+                        instance_id, terminal_reason="orphan_retired"
+                    )
+                    if ok:
+                        result.retired += 1
+                except Exception as term_exc:  # noqa: BLE001
+                    result.errors += 1
+                    logger.warning(
+                        "[BOOT_RECOVERY] retire failed instance=%s: %s: %s",
+                        instance_id[:8],
+                        type(term_exc).__name__,
+                        term_exc,
+                    )
+            except Exception as exc:
+                result.errors += 1
+                logger.warning(
+                    "[BOOT_RECOVERY] instance=%s failed: %s: %s",
+                    instance_id[:8],
+                    type(exc).__name__,
+                    exc,
+                )
+                continue
+    except Exception as exc:
+        result.errors += 1
+        logger.warning(
+            "[BOOT_RECOVERY] stranded-surfacing sweep failed: %s: %s",
+            type(exc).__name__,
+            exc,
+        )
+    finally:
+        result.duration_seconds = time.monotonic() - loop_started
+
+    logger.info(
+        "[BOOT_RECOVERY] stranded-surfacing summary: candidates=%d "
+        "surfaced_with_checkpoint=%d surfaced_no_checkpoint=%d "
+        "skipped_current_generation=%d retired=%d errors=%d "
+        "duration_s=%.3f boot_epoch=%s mode=%s",
+        result.candidates,
+        result.surfaced_with_checkpoint,
+        result.surfaced_no_checkpoint,
+        result.skipped_current_generation,
+        result.retired,
+        result.errors,
+        result.duration_seconds,
+        boot_epoch.isoformat(),
+        result.auto_continue_mode,
+    )
+    return result
