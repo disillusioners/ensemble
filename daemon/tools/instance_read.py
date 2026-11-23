@@ -153,6 +153,34 @@ DEFAULT_STALE_SECONDS = DEFAULT_STALE_MINUTES * 60
 #: NOT a tool argument either — the threshold moves by editing this
 #: constant, never by widening the tool schema.
 DEFAULT_HUSK_MIN_AGE_SECONDS: int = 86_400
+#: The SPAWN-STAMP WINDOW (seconds) — the maximum distance between an
+#: instance's ``created_at`` and its ``last_activity_at`` for that
+#: activity stamp to count as the SPAWN's own stamp rather than as
+#: evidence that the instance has been active since it was created.
+#:
+#: WHY A WINDOW AT ALL (the 2026-11-23 spawn-stamp blind spot): the
+#: spawn/enqueue transaction stamps ``last_activity_at`` itself, so a
+#: row that was SPAWNED but never DISPATCHED can carry a NON-NULL
+#: ``last_activity_at`` (measured live: ``created_at`` +
+#: 50.393 ms). The old ``last_activity_at IS NULL`` conjunct could not
+#: see those rows — the detector was blind to a spawn that never
+#: dispatched (measured: 1 such row, ``716908e7-b740-431f-9152-
+#: 0e90ab64d9b0``, was alive in the fleet and unflagged).
+#:
+#: WHY 60 (the measured basis): across the LIVE fleet (5 637
+#: instances, ``ensemble_prod``, 2026-11-23) every instance that was
+#: never executed AND carries no evidence row has its stamp within
+#: **0.043 s … 0.289 s** of its creation (32 rows; median 0.066 s).
+#: 60 s is a ~200x margin over that maximum — jitter-proof — while
+#: staying an order of magnitude below the band (60 s … 300 s) where
+#: the population of instances that were dispatched LATER starts. The
+#: window is a ONE-SHOT gate: an instance whose first activity stamp
+#: lands outside it can never re-enter the class, because the window
+#: is measured from ``created_at``, which never moves.
+#:
+#: It is deliberately NOT a tool argument — like the age threshold, it
+#: moves by editing this constant, never by widening the tool schema.
+SPAWN_STAMP_WINDOW_SECONDS: int = 60
 #: The maximum number of checkpoint messages ``instance_get`` returns.
 MAX_LAST_MESSAGES = 20
 
@@ -1127,8 +1155,12 @@ Returns:
     `never-dispatched-husk` is the SEVENTH detector (added 2026-10-24,
     F3): a row that was SPAWNED but never received any work at all —
     no task, no job item, no message, no child, no pending question,
-    no pause marker, and no activity EVER (`last_activity_at` is null)
-    — aged past 24h (`DEFAULT_HUSK_MIN_AGE_SECONDS`). For a husk,
+    no pause marker, and no activity beyond its SPAWN stamp
+    (`last_activity_at` is null, or it lies inside
+    `SPAWN_STAMP_WINDOW_SECONDS` of `created_at` — the spawn/enqueue
+    transaction stamps it itself, so a spawn that never dispatched is
+    NOT invisible to this detector) — aged past 24h
+    (`DEFAULT_HUSK_MIN_AGE_SECONDS`). For a husk,
     `idle_seconds` is the AGE since `created_at`, because "how long
     since it last did anything" has no answer: it never did anything.
     The `detail` string names the mechanism, so a husk row is never
@@ -1445,6 +1477,54 @@ def _job_item_counts_by_instance(
     return counts
 
 
+def _activity_is_spawn_stamp_only(
+    info: dict[str, Any],
+    *,
+    window_seconds: int = SPAWN_STAMP_WINDOW_SECONDS,
+) -> bool:
+    """True when the instance's ONLY activity stamp is its SPAWN stamp.
+
+    The REPLACEMENT for the old ``last_activity_at IS NULL`` conjunct
+    (2026-11-23 spawn-stamp blind spot). Two shapes qualify:
+
+    * ``last_activity_at`` is ``None`` — the row was never stamped, so
+      it was never enqueued. (The pre-fix shape, unchanged.)
+    * ``last_activity_at`` falls inside the spawn-stamp window —
+      ``created_at`` ≤ stamp ≤ ``created_at + window_seconds`` — so the
+      stamp was written by the spawn/enqueue transaction ITSELF, not by
+      anything the instance did afterwards.
+
+    Every other shape means the instance HAS been active since it was
+    created: a later dispatch, a turn, a revive. Those rows are not
+    never-dispatched husks and this predicate keeps excluding them.
+
+    The comparison is done on the ALREADY-NORMALISED ISO strings the
+    row carries (``Instance.to_dict()`` renders ``last_activity_at``
+    through ``to_utc_iso`` — a tz-naive column value read back as an
+    aware UTC ISO string — and ``created_at`` is stored as a VARCHAR
+    ISO-8601 string). No SQL cast is involved, so the VARCHAR/TIMESTAMP
+    frame mismatch (a naive-UTC column vs an offset-carrying string)
+    cannot silently mis-compare: both sides are parsed as ISO-8601 and
+    a naive value is read as UTC, the same policy ``_parse_iso``
+    applies everywhere else in this module.
+
+    Fail-closed: an unparseable timestamp is NOT treated as a spawn
+    stamp (the row is simply not a candidate) — a widened conjunct
+    must never rest on a value the scanner could not read.
+    """
+    activity = info.get("last_activity_at")
+    if activity is None:
+        return True
+    created = _parse_iso(info.get("created_at"))
+    stamped = _parse_iso(activity)
+    if created is None or stamped is None:
+        return False
+    delta = (stamped - created).total_seconds()
+    # A stamp that PREDATES the creation is not a spawn stamp (it is a
+    # clock-skew artefact); it must not widen the conjunct.
+    return 0.0 <= delta <= float(window_seconds)
+
+
 def _husk_row_local_candidate(
     manager: Any,
     info: dict[str, Any],
@@ -1455,15 +1535,26 @@ def _husk_row_local_candidate(
 ) -> int | None:
     """The row-local legs of the husk predicate — the candidate's AGE.
 
-    Non-terminal ∧ ``last_activity_at is None`` ∧ no children (E4, the
+    Non-terminal ∧ "the only activity stamp is the SPAWN stamp"
+    (``last_activity_at`` is NULL, or it lies inside
+    :data:`SPAWN_STAMP_WINDOW_SECONDS` of ``created_at`` — see
+    :func:`_activity_is_spawn_stamp_only`) ∧ no children (E4, the
     per-row attach) ∧ no question pack (E5, RAM) ∧ no pause marker (E6)
     ∧ age > threshold. ``None`` means "not a candidate". The BATCHED
     evidence legs (E1/E2/E3) are resolved later, for the whole candidate
     set at once — see :func:`_husk_flagged_rows`.
+
+    The activity conjunct used to be ``last_activity_at IS NULL``, which
+    was BLIND to the spawned-but-never-dispatched class: the
+    spawn/enqueue transaction stamps ``last_activity_at`` itself, so a
+    spawn that never dispatched carries a non-NULL stamp and the old
+    conjunct could not see it. The replacement keeps the SAME meaning
+    ("this instance has never had a turn") while covering both the
+    never-enqueued and the spawned-then-swept shapes.
     """
     if info.get("status") in terminal_statuses:
         return None
-    if info.get("last_activity_at") is not None:
+    if not _activity_is_spawn_stamp_only(info):
         return None
     age = _seconds_since(info.get("created_at"), now=now)
     if age is None or age <= threshold:
@@ -1558,10 +1649,11 @@ def _husk_flagged_rows(
                 info,
                 idle_seconds=age,
                 detail=(
-                    "never dispatched: no activity ever (last_activity_at is "
-                    "null), no task, no job item, no messages, no children, "
-                    "no question pack, no pause marker; "
-                    f"age {age}s (threshold {threshold}s)"
+                    "never dispatched: no activity beyond the spawn stamp "
+                    "(last_activity_at is null, or it lies inside the "
+                    "spawn-stamp window of created_at), no task, no job "
+                    "item, no messages, no children, no question pack, no "
+                    f"pause marker; age {age}s (threshold {threshold}s)"
                 ),
             )
         )
@@ -1960,7 +2052,9 @@ def _build_health_report(
                 "EVIDENCE-CONJUNCT CONTAINMENT ONLY: every husk-flagged "
                 "row satisfies no-message-rows AND no-task-rows (via "
                 "that shared expression) AND non-terminal AND "
-                "last_activity_at IS NULL AND age > "
+                "spawn-stamp-only activity (last_activity_at IS NULL OR "
+                "last_activity_at within SPAWN_STAMP_WINDOW_SECONDS of "
+                "created_at) AND age > "
                 "DEFAULT_HUSK_MIN_AGE_SECONDS. The husk set is NOT a "
                 "subset of the canonical ghost set — that set adds the "
                 "idle ∧ version==1 state conjuncts, which are not "
