@@ -83,11 +83,30 @@ class StrandedClassification:
 # Proven-dead recency bound (seconds). An instance whose last activity
 # is younger than this is NEVER proven dead (in-flight-spawn hazard).
 # Named + documented + configurable via env
-# ENSEMBLE_STRANDED_PROVEN_DEAD_MIN_IDLE_SECONDS (default 3600).
-# Aligned loosely with the husk detector's 24h threshold but set to 1h
-# because exemplar 716908e7 is only ~5h idle and must still qualify,
-# while 24h would exclude it. See the report for the justification.
-DEFAULT_STRANDED_PROVEN_DEAD_MIN_IDLE_SECONDS = 3600
+# ENSEMBLE_STRANDED_PROVEN_DEAD_MIN_IDLE_SECONDS (default 86400 = 24h).
+# Aligned EXACTLY with the husk detector's DEFAULT_HUSK_MIN_AGE_SECONDS
+# (86400) so the report surface and the mutation surface agree on when
+# an instance is "dead": the boot pass's proven-dead set is the husk
+# set INTERSECT (no active JobItem, no non-terminal descendant, no
+# pending watcher). A 1h bound was REJECTED: measured spawn->task-start
+# latency reaches 20 min on a loaded lane, so any unclaimed spawn older
+# than 1h would be falsely labelled proven-dead in the durable report.
+# Consequence: 68f04ccd (idle 5.5d, 5 deliveries) still classifies 1b
+# and is surfaced retire-armed; 716908e7 (idle ~5.5h, zero evidence)
+# classifies 3 (ambiguous) TODAY and becomes 1a at ~2026-11-24T14:51:31Z
+# — exactly when the husk detector's 24h gate starts naming it. That
+# alignment is the point, not a side effect.
+DEFAULT_STRANDED_PROVEN_DEAD_MIN_IDLE_SECONDS = 86400
+
+#: Recent-activity window (seconds). An instance with activity inside
+#: this window has DEMONSTRABLE liveness -> class 2 (recoverable).
+#: Measured spawn->task-start latency is 5-7 min generally, 20 min on a
+#: loaded lane; 1h is ~3x the worst measured case.
+#: LABEL-ONLY boundary: class 2 and class 3 are BOTH non-mutating
+#: (surface only, never retired), so this constant only decides which
+#: label an operator sees — it is not a safety boundary. The safety
+#: boundary is DEFAULT_STRANDED_PROVEN_DEAD_MIN_IDLE_SECONDS (24h).
+DEFAULT_STRANDED_RECENT_ACTIVITY_SECONDS = 3600
 
 
 def _stranded_min_idle_seconds() -> int:
@@ -1476,6 +1495,7 @@ class TaskRepository:
             InstanceStatus.CANCELLED.value if hasattr(InstanceStatus, "CANCELLED") else "cancelled",
         }
         min_idle = _stranded_min_idle_seconds()
+        recent_window = DEFAULT_STRANDED_RECENT_ACTIVITY_SECONDS
 
         out: list[StrandedClassification] = []
         with SQLModelSession(self.engine) as db_session:
@@ -1584,18 +1604,42 @@ class TaskRepository:
                     delivered = 0
                 evidence["delivered_reports"] = int(delivered or 0)
 
-                # Recoverable if any leg
+                # Class 2 (RECOVERABLE) — a LIVE signal exists: work
+                # evidence (task rows / message rows in ANY state), an
+                # active JobItem, a pending watcher, or a non-terminal
+                # descendant. NEVER retired.
                 recoverable = (
                     int(task_count or 0) > 0
                     or int(mq_count or 0) > 0
                     or bool(active_job)
                     or nonterm_desc > 0
                     or int(watcher_count or 0) > 0
-                    or age_seconds < min_idle
                 )
                 if recoverable:
                     out.append(StrandedClassification(
                         instance_id=iid, classification="2", evidence=evidence,
+                    ))
+                    continue
+
+                # No live signal at all (no rows, no job, no watcher, no
+                # live descendant). The recency legs now decide:
+                #   age < recent_window -> class 2 (recent activity =
+                #                    demonstrable liveness)
+                #   recent_window <= age < bound -> class 3 (AMBIGUOUS):
+                #                    the selectors CANNOT PROVE the
+                #                    instance is dead (e.g. a spawned-but-
+                #                    not-yet-claimed instance whose first
+                #                    turn has not created rows yet).
+                #                    Surface only, no mutation.
+                #   age >= bound -> class 1a / 1b (PROVEN DEAD).
+                if age_seconds < recent_window:
+                    out.append(StrandedClassification(
+                        instance_id=iid, classification="2", evidence=evidence,
+                    ))
+                    continue
+                if age_seconds < min_idle:
+                    out.append(StrandedClassification(
+                        instance_id=iid, classification="3", evidence=evidence,
                     ))
                     continue
 
