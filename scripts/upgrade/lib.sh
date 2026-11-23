@@ -5746,6 +5746,59 @@ atomic_flip() {
         return 1
     fi
     _log "current -> releases/$ver (atomic flip)"
+
+    # Pointer alias maintenance (relcur-m1): the ceremony OWNS the
+    # $INSTALL_DIR/releases/current alias and must never strand it.
+    # Mirror the top-level flip onto the alias with the same rename(2)
+    # discipline. CREATE it on first flip when absent (mv -T/-h creates
+    # dest when missing). Top-level flip is already committed, so an
+    # alias failure/mismatch is LOUD but never fails/rolls back.
+    local _rel="$INSTALL_DIR/releases"
+    local _alias_rc=0
+    mkdir -p "$_rel" 2>/dev/null || true
+    if ln -sfn "$ver" "$_rel/current.alias.new.$$" 2>/dev/null; then
+        # shellcheck disable=SC2086
+        if ! mv $mv_args "$_rel/current.alias.new.$$" "$_rel/current" 2>/dev/null; then
+            rm -f "$_rel/current.alias.new.$$" 2>/dev/null
+            _alias_rc=1
+            _warn "atomic_flip: pointer alias releases/current flip FAILED for $ver — top-level current already committed; NOT rolling back"
+            journal_history_append warn "pointer-alias: releases/current flip FAILED for $ver (top-level current committed)" >/dev/null 2>&1 || true
+        else
+            _log "releases/current -> $ver (pointer alias flip)"
+        fi
+    else
+        _alias_rc=1
+        _warn "atomic_flip: pointer alias releases/current ln FAILED for $ver — top-level current already committed; NOT rolling back"
+        journal_history_append warn "pointer-alias: releases/current ln FAILED for $ver (top-level current committed)" >/dev/null 2>&1 || true
+    fi
+
+    # ASSERT: top-level basename == alias basename == journal current.
+    # Loud on mismatch; never fatal.
+    local _top_base _alias_base _journal_cur _journal_base
+    _top_base="$(basename "$(readlink "$INSTALL_DIR/current" 2>/dev/null)" 2>/dev/null)"
+    _alias_base=""
+    if [ -L "$_rel/current" ]; then
+        _alias_base="$(basename "$(readlink "$_rel/current" 2>/dev/null)" 2>/dev/null)"
+    fi
+    _journal_cur="$(journal_read 2>/dev/null)" || _journal_cur=""
+    _journal_base=""
+    if [ -n "$_journal_cur" ]; then
+        _journal_base="$(_json_field "$_journal_cur" current 2>/dev/null)" || _journal_base=""
+        [ "$_journal_base" = "null" ] && _journal_base=""
+    fi
+    if [ -n "$_alias_base" ] && [ "$_top_base" != "$_alias_base" ]; then
+        _warn "atomic_flip: ASSERT FAILED top-level basename '$_top_base' != alias basename '$_alias_base' (target $ver)"
+        journal_history_append warn "pointer-alias: ASSERT top '$_top_base' != alias '$_alias_base'" >/dev/null 2>&1 || true
+    fi
+    if [ -n "$_alias_base" ] && [ "$_alias_base" != "$ver" ]; then
+        _warn "atomic_flip: ASSERT FAILED alias basename '$_alias_base' != flipped version '$ver'"
+        journal_history_append warn "pointer-alias: ASSERT alias '$_alias_base' != flipped '$ver'" >/dev/null 2>&1 || true
+    fi
+    if [ -n "$_journal_base" ] && [ -n "$_alias_base" ] && [ "$_journal_base" != "$_alias_base" ]; then
+        _warn "atomic_flip: ASSERT FAILED alias basename '$_alias_base' != journal current '$_journal_base' (ceremony window expected)"
+        journal_history_append warn "pointer-alias: ASSERT alias '$_alias_base' != journal '$_journal_base'" >/dev/null 2>&1 || true
+    fi
+
     return 0
 }
 
@@ -9570,6 +9623,13 @@ retention_evict() {
     prev="$(_json_field "$json" previous)"
     [ "$cur" = "null" ] && cur=""
     [ "$prev" = "null" ] && prev=""
+    # Pointer-alias pin (relcur-m1): releases/current is an alias that may
+    # point at a release; never evict its target. Resolve it when present.
+    local alias_pin=""
+    if [ -L "$rel/current" ]; then
+        alias_pin="$(readlink "$rel/current" 2>/dev/null)" || alias_pin=""
+        alias_pin="${alias_pin##*/}"
+    fi
     if [ -n "$prev" ] && [ ! -d "$rel/$prev" ]; then
         _warn "retention: journal previous '$prev' has NO release dir (manual deletion?) — rollback target missing; auto-rollback would halt-for-human"
     fi
@@ -9594,6 +9654,10 @@ retention_evict() {
         total=$((total + 1))
         [ "$name" = "$cur" ] && continue
         [ "$name" = "$prev" ] && continue
+        if [ -n "$alias_pin" ] && [ "$name" = "$alias_pin" ]; then
+            _log "retention: skipping $name (pinned by releases/current alias pointer)"
+            continue
+        fi
         # normalize the sort key to EPOCH: a manifest staged_at (ISO) is
         # converted; a missing manifest falls back to the dir mtime (already
         # epoch). Sorting ISO strings against epoch digits lexicographically
@@ -9632,7 +9696,7 @@ retention_evict() {
         return 0
     fi
     local evict_count=$((total - RETENTION_KEEP))
-    _log "retention: $total releases > keep=$RETENTION_KEEP — evicting $evict_count oldest (current=$cur previous=$prev pinned)"
+    _log "retention: $total releases > keep=$RETENTION_KEEP — evicting $evict_count oldest (current=$cur previous=$prev alias_pin=${alias_pin:-<none>} pinned)"
     printf '%b' "$entries" | sort | head -"$evict_count" | while read -r st name; do
         [ -n "$name" ] || continue
         _log "retention: evicting $name (staged $st) — neither current ($cur) nor previous ($prev)"
