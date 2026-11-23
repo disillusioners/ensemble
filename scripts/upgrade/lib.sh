@@ -1925,6 +1925,11 @@ _splice_journal_path() {
         printf '%s\n' "$REPO_ROOT/scripts/upgrade/journal_splice.py"
         return 0
     fi
+    # LOUD on resolution failure: both anchors missed (no sibling
+    # journal_splice.py next to a sourced lib.sh COPY, and no REPO_ROOT).
+    # _splice_journal also warns, but naming the two probed paths here is
+    # what makes the failure attributable instead of a silent vacuous run.
+    _warn "journal splice helper UNRESOLVED (self_dir='${self_dir:-}' REPO_ROOT='${REPO_ROOT:-}') — every journal append will FAIL; a lib.sh sourced from a copy without its sibling journal_splice.py is the classic cause"
     return 1
 }
 
@@ -10041,10 +10046,27 @@ retention_evict() {
         ptarget="no"; [ "$name" = "$tgt" ] && ptarget="yes"
         st_at="$(manifest_field "$name" staged_at 2>/dev/null)"
         [ -n "$st_at" ] || st_at="unknown"
-        journal_history_append retention_evict \
+        # FIX-CONTRACT (b) — FAIL-CLOSED on a journal-append failure: a
+        # retention_evict row we could NOT write means the eviction is NOT
+        # durably recorded, so we do NOT evict. The dir SURVIVES (the
+        # semantics module C's pack pins) and the sweep CONTINUES with the
+        # other candidates. rc stays 0: this is the post-commit seat, which
+        # must never fail; over-retention is the safe direction. This mirrors
+        # stage.sh's fail-loud staged append (stage.sh:1192) IN SPIRIT — but
+        # WITHOUT exiting, because the stage seat may exit and this one may
+        # not. The pre-fix shape ("eviction still performed") was the
+        # fail-OPEN window: an unrecorded rm -rf is indistinguishable from a
+        # never-happened eviction.
+        if ! journal_history_append retention_evict \
             "version=$name staged_at=$st_at reason=$cand_reason staged_row=$cand_staged pointer_target=$ptarget journal_current=$cur journal_previous=$prev" \
-            >/dev/null 2>&1 \
-            || _warn "retention: journal append FAILED for retention_evict $name (eviction still performed)"
+            >/dev/null 2>&1; then
+            _warn "retention: HOLD $name — held: journal row append failed — refusing to evict without a journal record (fix-contract b)"
+            journal_history_append retention_pin_hold \
+                "held=$name reasons=journal-append-failed keep=$RETENTION_KEEP total=$total evictions=0" \
+                >/dev/null 2>&1 \
+                || _warn "retention: journal append FAILED for retention_pin_hold ($name — the journal path may be down entirely)"
+            continue
+        fi
         _log "retention: evicting $name (staged $st) — $cand_reason (staged_row=$cand_staged)"
         rm -rf "$rel/$name"
     done
