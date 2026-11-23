@@ -901,6 +901,86 @@ def _current_symlink(install_dir: Path | None) -> tuple[str | None, str]:
         return None, "current symlink unreadable"
 
 
+# The pointer-source label carried by every "current=" display line.
+#
+# TWO pointers exist in a staged install:
+#   <install>/current          -> releases/vX.Y.Z   (install-root current —
+#                                 what the launcher resolves and what
+#                                 _current_symlink() READS)
+#   <install>/releases/current -> vX.Y.Z            (convenience/fence alias —
+#                                 owned by the ceremony, see
+#                                 scripts/upgrade/lib.sh atomic_flip)
+#
+# relcur-pointer M3 (2026-11-23): the display used to label the
+# install-root read as "(via releases/current → …)". The label LIED about
+# the source — an operator reading it believed release_info read the
+# alias, which it never did. The label now names the REAL source, and the
+# alias gets its OWN status line (see _alias_pointer_status) so the
+# display reports BOTH pointers honestly.
+_CURRENT_SOURCE_LABEL = "install-root current"
+
+
+def _alias_pointer_status(
+    install_dir: Path | None, journal_current: str | None
+) -> tuple[str | None, str]:
+    """Read the ``releases/current`` convenience alias.
+
+    Returns ``(status_line, warning_note)``:
+
+    * ``status_line`` is None when the alias does NOT exist — the caller
+      then prints NO alias line at all (an absent alias is not drift; the
+      sibling boot check, daemon/services/release_pointer_check.py, reports
+      that shape separately).
+    * ``warning_note`` is "" when the alias is clean (it resolves AND its
+      basename equals the journal current); otherwise a D-FA5.3-family
+      note naming the ``alias-dangling`` / ``alias-mismatch`` tokens — the
+      same token vocabulary the boot check uses, so the two surfaces read
+      alike.
+
+    READ-ONLY: touches the symlink + the journal's ``current`` value only.
+    Never writes, never locks, never raises.
+    """
+    if install_dir is None:
+        return None, ""
+    alias = install_dir / "releases" / "current"
+    try:
+        if not alias.is_symlink():
+            return None, ""
+        target = os.readlink(alias)
+    except OSError as exc:
+        logger.warning("upgrade_tools: releases/current alias read failed: %s", exc)
+        return None, "releases/current alias unreadable"
+    name = target.rstrip("/").rsplit("/", 1)[-1]
+    # The alias lives in <install>/releases, so a relative target resolves
+    # against THAT directory (same resolution the boot check uses).
+    try:
+        resolves = (install_dir / "releases" / target).is_dir()
+    except OSError:
+        resolves = False
+    state = "resolves" if resolves else "DANGLING"
+    if journal_current:
+        match = "yes" if name == journal_current else "no"
+    else:
+        match = "unknown"
+    line = (
+        f"alias releases/current: target={target} "
+        f"state={state} journal-match={match}"
+    )
+    notes: list[str] = []
+    if not resolves:
+        notes.append(
+            f"alias-dangling: releases/current → {target} resolves to a "
+            "missing release dir (target release missing — layout divergence, "
+            "mutations frozen per D-FA5.3)"
+        )
+    if match == "no":
+        notes.append(
+            f"alias-mismatch: releases/current → {name} != journal "
+            f"current={journal_current}"
+        )
+    return line, "; ".join(notes)
+
+
 def _armtime_rollback_target_invariant(
     install_dir: Path | None,
 ) -> tuple[str, str, str]:
@@ -2356,11 +2436,29 @@ def create_upgrade_tools(
                 block: list[str] = []
                 target, note = _current_symlink(install_dir)
                 if target is not None:
-                    block.append(f"current={target.rsplit('/', 1)[-1]} (via releases/current → {target})")
+                    block.append(
+                        f"current={target.rsplit('/', 1)[-1]} "
+                        f"(via {_CURRENT_SOURCE_LABEL} → {target})"
+                    )
                 else:
                     block.append("current symlink: none")
                 if note:
                     block.append(f"current: WARNING — {note}")
+                # The releases/current ALIAS is a SECOND pointer — report it
+                # on its own line so the display names BOTH pointers and
+                # never implies the "current=" line came from the alias
+                # (relcur-pointer M3).
+                raw_current = journal.get("current") if isinstance(journal, dict) else None
+                journal_current = (
+                    raw_current if isinstance(raw_current, str) and raw_current else None
+                )
+                alias_line, alias_note = _alias_pointer_status(
+                    install_dir, journal_current
+                )
+                if alias_line:
+                    block.append(alias_line)
+                if alias_note:
+                    block.append(f"alias: WARNING — {alias_note}")
                 if include_journal and isinstance(journal, dict):
                     block.append(
                         f"journal: current={journal.get('current')} "
@@ -2592,7 +2690,10 @@ Args:
     section: One of:
         * "all" (default) — current + journal + releases + changelog +
           user-origin drift probe + upgrade.log tail.
-        * "current" — current symlink, journal current/previous/in-flight,
+        * "current" — current symlink (the INSTALL-ROOT ``current``, the
+          pointer the launcher resolves), the ``releases/current`` alias
+          status line (target / resolves-or-DANGLING / matches-journal),
+          journal current/previous/in-flight,
           /livez + /readyz self-probes, version smoke vs the current
           manifest's binary_version, launcher state.
         * "journal" — full journal state incl. the raw releases/state.json,
@@ -3643,7 +3744,7 @@ never decides go/rollback).
                 )
                 lines = [
                     f"UPGRADE PREFLIGHT (dry-run) — env={self_env} target={version}",
-                    f"current={cur_ver or 'none'} (via releases/current)"
+                    f"current={cur_ver or 'none'} (via {_CURRENT_SOURCE_LABEL})"
                     + (" rollback_safe=true" if cur_ver else ""),
                     f"target staged: releases/{version} manifest "
                     f"rollback_safe={str(manifest.get('rollback_safe')).lower()} "

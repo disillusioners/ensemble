@@ -928,6 +928,15 @@ async def lifespan(app: FastAPI):
         f"[Config] reasoning_echo_disabled_models={ThinkingChatOpenAI.reasoning_echo_disabled_models} "
         f"(models matching these patterns will NOT echo reasoning_content; all others echo)"
     )
+    # Release-pointer invariant boot check (relcur-pointer M2): CHEAP, LOUD,
+    # NON-BLOCKING. Mirrors daemon/__main__.py — detects a dangling/mismatched
+    # releases/current alias vs journal current without ever gating boot
+    # (metadata drift != outage). Flag readable via last_boot_check().
+    from daemon.services.release_pointer_check import (
+        run_boot_check as _boot_release_pointer_check,
+    )
+
+    _boot_release_pointer_check()
     # Wire the OPENAI_STREAMING operator knob (CF-125s 524 fix). The
     # chokepoint ``clean_llm_config`` reads this class var when callers
     # don't pass an explicit streaming flag — see daemon/graph.py.
@@ -3806,6 +3815,23 @@ async def lifespan(app: FastAPI):
             sweep_result = await sweep_orphaned_live_turns(
                 manager=manager, boot_epoch=get_boot_epoch(),
             )
+            # Stranded-running surfacing pass (boot-recovery hole closure):
+            # retires RUNNING instances stranded by a daemon death whose
+            # checkpoint predates the boot epoch (or which have no
+            # checkpoint at all). NEVER resumes (idempotency). Never raises.
+            try:
+                from daemon.services.auto_continue_boot_pass import (
+                    surface_stranded_running_instances,
+                )
+                stranded_result = await surface_stranded_running_instances(
+                    manager=manager, boot_epoch=get_boot_epoch(),
+                )
+                logger.info("Stranded-running surfacing pass: %s", stranded_result)
+            except Exception as stranded_exc:  # noqa: BLE001
+                logger.warning(
+                    "Stranded-running surfacing pass failed (backstop "
+                    "continues): %s", stranded_exc,
+                )
             # The boot record — the effective-mode carrier (D16). The
             # mode comes from the PASS RESULT; the recorder never
             # re-reads the environment (A8's single-read rule).
