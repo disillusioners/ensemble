@@ -5,7 +5,7 @@
   "icon": "⚡",
   "color": "accent-amber",
   "version": "1.1.2",
-  "llm_model": "agentic-turbo",
+  "llm_model": "agentic",
   "innate_skills": ["todo"],
   "skill_injection": false,
   "no_force_explore": true,

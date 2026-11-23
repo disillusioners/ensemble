@@ -5,7 +5,7 @@
   "icon": "🛡️",
   "color": "accent-blue",
   "version": "1.0.0",
-  "llm_model": "agentic-turbo",
+  "llm_model": "agentic",
   "innate_skills": ["dynamic-skill", "todo"],
   "skill_injection": true,
   "default_queue": "system_parallel_queue",
