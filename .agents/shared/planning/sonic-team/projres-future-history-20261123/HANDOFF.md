@@ -153,6 +153,32 @@ edit to daemon/tools/project_history.py" bullet. Zero migrations in the delta.
   edited copy can silently diverge from the other two (a refusal-shape drift risk, not a
   matching-logic risk). Offered as the next cleanup lane.
 
+- Post-release state (2026-11-23 ~11:00Z, recorded by the replacement integration owner
+  after the release lane closed): origin/latest has ADVANCED PAST this lane's tag —
+  449163f17 -> 10980c05d (this lane, pushed 07:04:12Z) -> v0.31.40 / v0.31.41 / v0.31.42
+  (sibling lanes) -> ea5325a60. The v0.31.39 RELEASE DIRECTORY was EVICTED by the
+  keep-3 retention policy during the v0.31.42 promote ("retention: evicting v0.31.39
+  (staged 1795418096) — neither current (v0.31.42) nor previous (v0.31.37)"), so the
+  staged v0.31.39 artifact no longer exists on disk; its stage evidence is retained at
+  /home/nea/ensemble-src-wt-stage-v03139 (binary sha256 ed18a9c34c70..., provenance
+  sidecar head=10980c05d git_dirty=false, stage log /tmp/v03139_stage.log STAGE_RC=0,
+  rollback_safe=true source=explicit=true). This lane performed NO promote.
+  CONSEQUENCE FOR THE READER: the commission's source change is now LIVE — live is
+  v0.31.42 (/livez version 0.31.42) and carries byte-identical blobs to this lane's
+  tip for daemon/tools/project_history.py, daemon/tools/project_future.py,
+  tests/unit/test_project_future_resolution.py and
+  tests/unit/test_project_history_resolution.py. A verifier should therefore test the
+  RESOLVED BEHAVIOUR on live v0.31.42; the "staged-only" wording in this handoff
+  describes THIS LANE's action, not the current live state.
+- Registry staleness (disclosed, NOT edited): the registered pack row
+  `project_future_history_resolution` still carries the tester's Last-run write-back
+  for the v0.31.38 tree 449163f17 (218P / 0F) — deliberately preserved byte-intact by
+  the fix-wave pack module (e25919fde), which harmonised ONLY the invocation form. On
+  the v0.31.39 merged tree the same registered command yields 225P / 0F (the +7 nodes
+  are the newly committed schema pins — 3 future + 4 history). The registered row
+  therefore understates the CURRENT count by those 7 nodes; the tester-owned Last-run
+  column is the tester lane's call, so this lane left it untouched.
+
 ## How to verify
 
 On the merged tree (integration worktree / any checkout of tag v0.31.39):
@@ -183,6 +209,13 @@ On the merged tree (integration worktree / any checkout of tag v0.31.39):
 4. Triad census: grep -c "project_id: str | None = None" over daemon/tools/project.py
    (1), project_future.py (3), project_history.py (4).
 5. Version: .venv/bin/python -c "import daemon; print(daemon.__version__)" => 0.31.39.
+
+6. Independent re-run by the replacement integration owner (2026-11-23 ~11:00Z) on the
+   v0.31.39 merged tree 10980c05d — the same registered commands, verbatim:
+   pack 1 (project_future_history_resolution) => 225 passed / 0 failed, rc=0, 16.84s;
+   pack 2 (project_resolution_triad_runtime_proof) => 35/35 checks PASS, RESULT: PASS,
+   rc=0 (RUNTIME_RC=0). Both re-runs stayed inside the 600 s bash default (no raise).
+   The +7 nodes over the registered 218P baseline are the newly committed schema pins.
 
 ## Bash-raises used
 
