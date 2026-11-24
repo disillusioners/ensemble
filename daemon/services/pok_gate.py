@@ -57,6 +57,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -79,6 +80,8 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "ActiveRow",
+    "Tightening",
+    "apply_tightening",
     "AskOutcomeClass",
     "DEFAULT_MERGE_POLICY",
     "FAMILY_TEMPLATES",
@@ -1164,6 +1167,135 @@ def _merge_kind_for(
     return "delta"
 
 
+#: The token-overlap share a digest row must cover before the
+#: near-soft-max tightening treats it as the redundancy carrier
+#: (T10.6). The tightening NEVER invents a merge target: without a
+#: row that demonstrably carries the candidate's own operative terms,
+#: the verdict stands.
+TIGHTENING_OVERLAP_SHARE = 0.6
+
+
+@dataclass(frozen=True)
+class Tightening:
+    """The near-soft-max admission tightening (T10.6).
+
+    The librarian computes a per-project soft max; when the store has
+    reached it, admission TIGHTENS — more ASK rounds (a new row is
+    confirmed, not silently admitted) and MERGE is preferred over a
+    NEW row (the store stops growing).
+
+    The tightening rides the ``pok_gate.softmax_tightening`` switch
+    family (BOTH switches default OFF at build — design-amendments-v2
+    §13.3 item 5): the soft max is COMPUTED and drift-reported from
+    day one (safe), but the tightening ACTION changes admission
+    outcomes, so it waits for the operator's ceremony.
+    """
+
+    tight: bool = False
+    reason: str = "the soft max is unset or the store is below it"
+    soft_max: int | None = None
+    active_count: int = 0
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any] | None) -> "Tightening":
+        if not payload:
+            return cls()
+        return cls(
+            tight=bool(payload.get("tight")),
+            reason=str(payload.get("reason") or "the soft max is unset or the store is below it"),
+            soft_max=payload.get("soft_max"),
+            active_count=int(payload.get("active_count") or 0),
+        )
+
+
+def _redundancy_carrier(
+    *,
+    rows: Sequence[ActiveRow],
+    candidate_slug: str,
+    candidate_body: str,
+) -> ActiveRow | None:
+    """The digest row that demonstrably carries the candidate's terms.
+
+    The tightening NEVER guesses: the row must cover at least
+    :data:`TIGHTENING_OVERLAP_SHARE` of the candidate's distinctive
+    tokens (and at least one token). A weak overlap returns ``None``
+    and the verdict stands.
+    """
+    candidate_tokens = _distinctive_tokens(f"{candidate_slug} {candidate_body}")
+    if not candidate_tokens:
+        return None
+    needed = max(1, int(math.ceil(len(candidate_tokens) * TIGHTENING_OVERLAP_SHARE)))
+    best: ActiveRow | None = None
+    best_overlap = 0
+    for row in rows:
+        overlap = len(candidate_tokens & _distinctive_tokens(f"{row.slug} {row.body}"))
+        if overlap > best_overlap:
+            best = row
+            best_overlap = overlap
+    if best is None or best_overlap < needed:
+        return None
+    return best
+
+
+def apply_tightening(
+    verdict: GateVerdict,
+    *,
+    rows: Sequence[ActiveRow],
+    candidate_slug: str,
+    candidate_body: str,
+    tightening: Tightening | None,
+) -> GateVerdict:
+    """Apply the near-soft-max tightening to a verdict (T10.6).
+
+    * an ACCEPT becomes an ASK — more ASK rounds: the caller confirms
+      the new row instead of having it admitted silently;
+    * a redundancy REJECT becomes a MERGE that names the row that
+      demonstrably carries the fact — MERGE is preferred over a NEW
+      row, so the store does not grow. The merge is a ``no_delta``
+      merge (the fact is carried — the tool stamps the target and
+      writes no row);
+    * every other verdict stands, and a NOT-tightening pass returns
+      the verdict byte-identically.
+    """
+    if tightening is None or not tightening.tight:
+        return verdict
+    token = verdict.verdict
+    if token == "ACCEPT":
+        return replace(
+            verdict,
+            verdict="ASK",
+            question=(
+                "the store has reached its soft max (%s) — confirm this "
+                "new row, or merge it into an existing row that already "
+                "carries the fact" % tightening.soft_max
+            ),
+        )
+    if token == "REJECT" and verdict.family == "redundancy":
+        carrier = _redundancy_carrier(
+            rows=rows,
+            candidate_slug=candidate_slug,
+            candidate_body=candidate_body,
+        )
+        if carrier is None:
+            return verdict
+        return replace(
+            verdict,
+            verdict="MERGE",
+            target_slug=carrier.slug,
+            merge_kind="no_delta",
+            proposed_body=None,
+            proposed_body_sha256=None,
+            target_body_sha256=_sha256(carrier.body),
+            question=(
+                "the store has reached its soft max (%s) — the fact is "
+                "already carried by the ACTIVE row %r; fold this write "
+                "into it instead of adding a new row"
+                % (tightening.soft_max, carrier.slug)
+            ),
+        )
+    return verdict
+
+
 def judge_pok_write(
     *,
     project_id: str,
@@ -1179,6 +1311,7 @@ def judge_pok_write(
     cache: VerdictCache | None = None,
     is_production: bool = True,
     shadow: bool = False,
+    tightening: Mapping[str, Any] | None = None,
 ) -> GateVerdict:
     """JUDGE one candidate write (T7.1–T7.15).
 
@@ -1232,12 +1365,22 @@ def judge_pok_write(
         # Replay: ACCEPT / REJECT replay byte-identically; an ASK
         # replays AS-ASK with the SAME question but a FRESH gate_id
         # (T8.13 — the fresh id is what makes the pending TTL real).
-        return replace(
-            cached,
-            gate_id=str(uuid.uuid4()),
-            cache_hit=True,
-            advisory=shadow,
-            latency_ms=int((time.monotonic() - started) * 1000),
+        # The tightening (T10.6) is applied to the REPLAY too — the
+        # CACHE holds the judge's RAW verdict (the tightening is a
+        # deterministic function of it), so a store that tightened
+        # after the verdict was cached still tightens the replay.
+        return apply_tightening(
+            replace(
+                cached,
+                gate_id=str(uuid.uuid4()),
+                cache_hit=True,
+                advisory=shadow,
+                latency_ms=int((time.monotonic() - started) * 1000),
+            ),
+            rows=rows,
+            candidate_slug=slug,
+            candidate_body=body,
+            tightening=Tightening.from_payload(tightening),
         )
 
     digest = build_active_digest(
@@ -1278,9 +1421,20 @@ def judge_pok_write(
         shadow=shadow,
         latency_ms=int((time.monotonic() - started) * 1000),
     )
+    # The near-soft-max tightening (T10.6) — applied AFTER the verdict
+    # rules, so a tightened verdict is never re-finalized (the
+    # confidence floor and the R-RET remedy keep their say). The CACHE
+    # stores the RAW verdict: the tightening is a deterministic
+    # function of it, so the replay stays consistent.
     if cache is not None:
         cache.put(key, replace(verdict, gate_id="", cache_hit=False))
-    return verdict
+    return apply_tightening(
+        verdict,
+        rows=rows,
+        candidate_slug=slug,
+        candidate_body=body,
+        tightening=Tightening.from_payload(tightening),
+    )
 
 
 def _call_judge_with_retry(

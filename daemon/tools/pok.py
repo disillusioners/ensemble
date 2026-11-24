@@ -38,6 +38,12 @@ IN-BODY role gates from the FACTORY-CAPTURED ``agent_id``
   adjudicated stripped body + all the upsert inputs, and the answer
   re-runs the write with the gate bypassed so the scope/fence/
   budget/no-op/caps checks re-run at answer time.
+* :func:`pok_census` — the census READ surface (pok-write-gate
+  Phase 9, T9.1): leader / project-manager only. It returns the
+  per-store metrics the POK librarian maintains the store from (the
+  shape, the families, the authors, the tiers, the retrieval legs the
+  librarian TRUSTS, the never-retrieved / never-verified
+  populations) plus the derived soft max and its drift. Read-only.
 
 WRITE GATE (pok-write-gate Wave 2, Phase 7/8): the tool layer is the
 EXECUTOR — the gate NEVER writes (design-amendments-v2 §8, authority
@@ -66,7 +72,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 
 from ._schema_registry import tool
@@ -243,6 +249,263 @@ def read_gate_switches(engine: Any) -> tuple[bool, bool]:
     )
 
 
+# ── the refusal ROUTE TABLE (pok-write-gate Phase 9, T9.2/T9.3) ───────────
+#
+# The per-lane refusal TRANSITION MAP: what class of content a refusal
+# names, WHERE that content belongs instead, and the tool CATEGORY
+# that provides the destination (the grant-check inputs). Every
+# rejection carries its route, so the caller is never left with a
+# refusal and no home (R5: "a rejection with no home is itself a
+# defect").
+#
+# The map is the guideline's per-class routing table (its §4 table)
+# expressed in the gate's own vocabulary: knowledge → RAG, operational
+# → POK, governance → the curated note surface, episode → the board
+# / the KV.
+REFUSAL_ROUTE_TABLE: dict[str, dict[str, Any]] = {
+    "boundary": {
+        "content_class": "knowledge",
+        "route": "rag",
+        "destination": "the knowledge base (RAG)",
+        "categories": ("rag",),
+        "instruction": (
+            "capture it with the knowledge-base tool (rag_insert_text) — "
+            "POK holds this project's operating how-to, not general "
+            "knowledge"
+        ),
+    },
+    "reason": {
+        "content_class": "operational",
+        "route": "pok",
+        "destination": "POK (this project) with a sharper claim",
+        "categories": ("pok",),
+        "instruction": (
+            "rewrite the reason so it names the operational invariant the "
+            "fact protects, then write it again"
+        ),
+    },
+    "durability": {
+        "content_class": "episode",
+        "route": "board_or_kv",
+        "destination": "the board (a human-facing ledger) or the shared KV",
+        "categories": ("board", "shared_meta_kv"),
+        "instruction": (
+            "a snapshot or an episode does not belong in a durable store — "
+            "put it on the board (or the shared KV) and keep only the "
+            "invariant here"
+        ),
+    },
+    "redundancy": {
+        "content_class": "operational",
+        "route": "pok",
+        "destination": "POK (this project) — the ACTIVE row named by the verdict",
+        "categories": ("pok",),
+        "instruction": (
+            "supersede the named ACTIVE row with the better body instead of "
+            "adding a second row for one fact"
+        ),
+    },
+    "scope": {
+        "content_class": "operational",
+        "route": "pok",
+        "destination": "POK — the project it actually belongs to",
+        "categories": ("pok",),
+        "instruction": (
+            "write it to the project it belongs to, not to this one"
+        ),
+    },
+}
+
+#: The fallback route for a verdict with no family (the gate's closed
+#: family set always names one, but the envelope must never be empty).
+DEFAULT_ROUTE: dict[str, Any] = {
+    "content_class": "operational",
+    "route": "pok",
+    "destination": "POK (this project)",
+    "categories": ("pok",),
+    "instruction": "state the operational claim and write it again",
+}
+
+
+def route_for_family(family: str | None) -> dict[str, Any]:
+    """The route a refusal family names (T9.2/T9.3)."""
+    return REFUSAL_ROUTE_TABLE.get(family or "", DEFAULT_ROUTE)
+
+
+def _agent_tool_grants(agent_id: str) -> list[str] | None:
+    """The agent's ``tools.allow`` list — ``None`` means UNRESTRICTED.
+
+    The registry pattern (ALL meta lookups use ``get_version`` with a
+    ``get_resolved`` fallback). An empty/absent allow list means the
+    agent inherits the whole universe (the F1b semantics), so it
+    resolves to ``None`` here — "everything is reachable".
+    """
+    if not agent_id:
+        return None
+    try:
+        from ..registry import get_registry  # noqa: PLC0415 — cycle-neutral
+
+        registry = get_registry()
+        meta = registry.get_version(agent_id) or registry.get_resolved(agent_id)
+        if meta is None:
+            return None
+        tools = getattr(meta, "tools", None)
+        allow = getattr(tools, "allow", None) if tools is not None else None
+        if not allow:
+            return None
+        return [str(entry) for entry in allow]
+    except Exception as exc:  # noqa: BLE001 — a degraded read ⇒ unrestricted
+        logger.warning(
+            "[POK] grant read failed for %r (%s) — the destination check "
+            "falls back to 'available'",
+            agent_id,
+            type(exc).__name__,
+        )
+        return None
+
+
+def destination_available(agent_id: str, categories: Any) -> bool:
+    """Is the named destination REACHABLE by this agent? (T9.3)
+
+    The grant-check behind the rejection envelope: a refusal that
+    names a home the caller cannot reach is a SILENT DROP unless the
+    content is parked (T9.4). The check reads the agent's
+    ``tools.allow`` grant list — an unrestricted agent (no allow
+    list) reaches everything.
+    """
+    if not categories:
+        return True
+    wanted = [str(c) for c in categories]
+    allow = _agent_tool_grants(agent_id)
+    if allow is None:
+        return True
+    return any(category in allow for category in wanted)
+
+
+# ── the near-soft-max TIGHTENING read (pok-write-gate Phase 10, T10.6) ────
+
+
+def _tightening_payload(
+    engine: Any, project_id: str, *, enabled: bool
+) -> dict[str, Any] | None:
+    """Read the tightening decision for ONE write (T10.6).
+
+    The soft max is read at WRITE TIME by one unique-index SELECT
+    (the I1 placement) — NEVER memoised in-process (a memo would
+    serve a stale ceiling to the admission path). The active count
+    comes from the same store the upsert already reads.
+
+    ``enabled=False`` (the ``pok_gate.softmax_tightening`` switch is
+    OFF — the build default) short-circuits: no read, no tightening.
+    """
+    if not enabled or engine is None:
+        return None
+    try:
+        from ..services.pok_librarian import (  # noqa: PLC0415 — cycle-neutral
+            read_soft_max,
+            tightening_decision,
+        )
+
+        state = read_soft_max(engine, project_id)
+        if state is None:
+            return None
+        active_count = POKRepository(engine).count_active(project_id)
+        return tightening_decision(
+            active_count=active_count, soft_max=state.value
+        ).to_payload()
+    except Exception as exc:  # noqa: BLE001 — a degraded read ⇒ no tightening
+        logger.warning(
+            "[POK] tightening read failed for project %s (%s) — the write "
+            "is not tightened",
+            project_id,
+            type(exc).__name__,
+        )
+        return None
+
+
+# ── the PARKING seam (pok-write-gate Phase 9, T9.4) ───────────────────────#
+# ZERO SILENT DROPS: at enforcement a refused write whose destination
+# the caller cannot reach would vanish. The parking seam RETAINS it:
+# a ledger receipt with the ``park:`` gate-id prefix carries the
+# content + the reason, so the fact is never lost and the curator can
+# route it later. The seam is P1-READY (the surface exists and is
+# exercised); the ENFORCEMENT flip is the Emperor's ceremony.
+PARKING_GATE_ID_PREFIX = "park:"
+PARKING_BODY_LIMIT = 900
+
+
+def parking_id(project_id: str, slug: str, body: str, reason: str) -> str:
+    """The stable id of a parked write (idempotent per content)."""
+    import hashlib
+
+    digest = hashlib.sha256(
+        f"{project_id}\x00{slug}\x00{body}\x00{reason}".encode("utf-8")
+    ).hexdigest()
+    return f"{PARKING_GATE_ID_PREFIX}{digest[:24]}"
+
+
+def park_rejected_write(
+    engine: Any,
+    *,
+    project_id: str,
+    slug: str,
+    body: str,
+    reason: str,
+    family: str | None,
+    route: Mapping[str, Any],
+    agent_id: str,
+) -> str | None:
+    """PARK a refused write whose destination is unreachable (T9.4).
+
+    Appends the parking receipt to the ledger (the only mutator on
+    that surface). Idempotent: the ``park:`` id is derived from the
+    content, and the DB-level gate-chain unique index makes a replay
+    a no-op (the duplicate error is swallowed — the receipt is
+    already there).
+
+    Returns the parking id, or ``None`` when the receipt could not be
+    written (the envelope then says the write was NOT retained — the
+    caller must be told the truth).
+    """
+    if engine is None:
+        return None
+    pid = parking_id(project_id, slug, body, reason)
+    excerpt = (body or "")[:PARKING_BODY_LIMIT]
+    explanation = (
+        "PARKED — the write gate refused this fact (family=%s) and its "
+        "destination (%s) is not available to this agent, so the content "
+        "is retained here instead of being dropped: %s"
+        % (family or "unknown", route.get("destination", "unknown"), excerpt)
+    )
+    try:
+        POKRepository(engine).append_ledger(
+            POKWriteGateLedger(
+                project_id=project_id,
+                gate_id=pid,
+                phase="ADMISSION",
+                candidate_slug=slug,
+                verdict="REJECT",
+                reason=(reason or "")[:200] or None,
+                judge_explanation=explanation,
+                basis="gate-rejection",
+                executed=False,
+                agent_id=agent_id or "unknown",
+            )
+        )
+        return pid
+    except Exception as exc:  # noqa: BLE001 — best-effort, never raises
+        if "UQ_POK_LEDGER_GATE_CHAIN" in str(exc).upper() or "GATE_ID" in str(exc).upper():
+            # Already parked (the content is retained) — idempotent.
+            return pid
+        logger.warning(
+            "[POK] parking receipt failed for %r (%s) — the refused write "
+            "is NOT retained",
+            slug,
+            type(exc).__name__,
+        )
+        return None
+
+
 def active_rows_for_digest(engine: Any, project_id: str) -> list[ActiveRow]:
     """The project's ACTIVE rows, projected for the judge digest.
 
@@ -375,6 +638,31 @@ def _slug_family_of(slug: str) -> str | None:
         return None
 
 
+def _record_standing_defects_best_effort(engine: Any, project_id: str) -> bool:
+    """Record the standing-defect RESIDUAL rows on the gate path.
+
+    The Q-2 ruling: NO boot-time seed, no live-write path without
+    sanction — the residual rows (the dispositions of the two
+    standing defects of the write-gate subsystem) are written by the
+    GATE PATH, the first time the gate judges for a project. The
+    write is idempotent per defect (the ledger rows are keyed by
+    their defect) and it NEVER changes the write verdict.
+    """
+    if engine is None:
+        return False
+    try:
+        POKRepository(engine).record_standing_defects(project_id)
+        return True
+    except Exception as exc:  # noqa: BLE001 — best-effort by contract
+        logger.warning(
+            "[POK] standing-defect residual write failed for project %s "
+            "(%s) — the write verdict is unchanged",
+            project_id,
+            type(exc).__name__,
+        )
+        return False
+
+
 def append_ledger_row_best_effort(engine: Any, row: POKWriteGateLedger) -> bool:
     """Append a ledger row, NEVER raising (best-effort audit).
 
@@ -457,6 +745,7 @@ def create_pok_tools(
         project_name: str | None,
         enforcement_on: bool,
         gate_state: dict[str, Any],
+        tightening_on: bool = False,
     ) -> Any:
         """Build the gate callable the SERVICE calls at its gate slot.
 
@@ -468,6 +757,12 @@ def create_pok_tools(
         In ENFORCE mode an unavailable judge is D2 fail-closed: the
         write does NOT happen and the caller is told the content was
         not judged.
+
+        THE TIGHTENING (T10.6): when the ``pok_gate.softmax_tightening``
+        switch is ON and the store has reached its soft max, the gate
+        is told to tighten (more ASK rounds, MERGE preferred over a
+        new row). The soft max is read at WRITE TIME by one
+        unique-index SELECT (the I1 placement) — NEVER memoised.
         """
 
         def _gate_fn(**kwargs: Any) -> GateVerdict | None:
@@ -484,6 +779,9 @@ def create_pok_tools(
                     cache=_GATE_CACHE,
                     is_production=is_prod_lane(),
                     shadow=not enforcement_on,
+                    tightening=_tightening_payload(
+                        engine, project_id, enabled=tightening_on
+                    ),
                 )
             except POKGateUnavailable as exc:
                 if enforcement_on:
@@ -510,6 +808,15 @@ def create_pok_tools(
                 )
                 return None
             gate_state["verdict"] = verdict
+            # The STANDING-DEFECT RESIDUAL rows (pok-write-gate Phase 5,
+            # T5.6 — the FIRST REAL WRITER of the dispositions). The
+            # Q-2 ruling: NO boot-time seed and no unwired write path
+            # — the residual rows are recorded ON THE GATE PATH, the
+            # first time the gate judges for this project. The write
+            # is idempotent per defect (the ledger is append-only and
+            # the residual rows are keyed by their defect) and it is
+            # best-effort: a failure NEVER changes the write verdict.
+            _record_standing_defects_best_effort(engine, project_id)
             return verdict
 
         return _gate_fn
@@ -1040,6 +1347,7 @@ def create_pok_tools(
                 project_name=project_name,
                 enforcement_on=enforcement_on,
                 gate_state=gate_state,
+                tightening_on=_softmax_tightening,
             )
 
             outcome = svc.upsert(
@@ -1066,6 +1374,42 @@ def create_pok_tools(
                     project_id=project_id,
                     verdict=gate_state.get("verdict"),
                     reason=reason,
+                )
+                # ── the ROUTE + the zero-silent-drop parking seam ──────
+                # A refusal must NAME a home (R5) and the caller must
+                # be able to REACH it (T9.3). When the home is out of
+                # the caller's reach, the content would vanish — so it
+                # is PARKED (T9.4) and the envelope says so.
+                family = exc.details.get("family")
+                route = route_for_family(family)
+                reachable = destination_available(
+                    captured_agent_id, route.get("categories")
+                )
+                parked_id: str | None = None
+                if not reachable:
+                    parked_id = park_rejected_write(
+                        engine,
+                        project_id=project_id,
+                        slug=slug,
+                        body=body,
+                        reason=reason,
+                        family=family,
+                        route=route,
+                        agent_id=captured_agent_id,
+                    )
+                return _err(
+                    exc.code,
+                    exc.message,
+                    family=family,
+                    alternative=exc.details.get("alternative"),
+                    gate_id=exc.details.get("gate_id"),
+                    route=route.get("route"),
+                    destination=route.get("destination"),
+                    content_class=route.get("content_class"),
+                    instruction=route.get("instruction"),
+                    destination_available=reachable,
+                    parked=bool(parked_id),
+                    parking_id=parked_id,
                 )
             return _err(exc.code, exc.message, **exc.details)
         except POKGateUnavailable as exc:
@@ -1623,4 +1967,108 @@ def create_pok_tools(
             "basis": basis if archived is True else None,
         }
 
-    return [pok_upsert, pok_query, pok_curate, pok_gate_answer]
+    @register_tool_category(CATEGORY_NAME)
+    @tool
+    def pok_census() -> dict:
+        """Census THIS project's operating knowledge (leader /
+        project-manager ONLY).
+
+        Use tool_help() for details. The census is the READ surface
+        the POK librarian maintains the store from: the per-store
+        metrics (shape, families, authors, tiers), the retrieval legs
+        the librarian TRUSTS (the ledger's retrieval counts, split
+        query-vs-injection), the never-retrieved / never-verified
+        populations, the soft max the librarian derives and its drift.
+
+        Behavior:
+        - Read-only: the census NEVER writes a row.
+        - ``snapshot_at``: the measurement time — every count is tied
+          to it (cite the snapshot, never a bare count).
+        - ``soft_max``: the derived ceiling (or null when the
+          librarian has not run yet) + ``tightening``: whether
+          admission is currently tightened.
+        - The metric legs are labelled per-store (telemetry); the
+          per-row metrics live in the ledger, not here.
+        """
+        svc = _service()
+        if svc is None:
+            return _err(
+                "pok_store_unavailable",
+                "the POK store is unavailable on this boot — the tool "
+                "refuses rather than reading blind",
+            )
+        project_id, project_name, refusal = _scope()
+        if refusal is not None:
+            return refusal
+        if not is_curator(captured_agent_id):
+            return _err(
+                "pok_curator_required",
+                "pok_census is leader / project-manager only — "
+                f"attribution {captured_agent_id!r} is not a curator "
+                "(attribution ≠ authorization)",
+            )
+        try:
+            from ..services.pok_librarian import (  # noqa: PLC0415 — cycle-neutral
+                read_soft_max,
+                read_store_metrics,
+                tightening_decision,
+            )
+
+            repo = POKRepository(engine)
+            store = read_store_metrics(repo, project_id)
+            state = read_soft_max(engine, project_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("pok_census store error")
+            return _err(
+                "pok_census_error", f"POK census error: {type(exc).__name__}"
+            )
+        decision = tightening_decision(
+            active_count=store.active_count,
+            soft_max=state.value if state else None,
+        )
+        census = {
+            "snapshot_at": store.measured_at,
+            "project_id": project_id,
+            "project_name": project_name,
+            "active_count": store.active_count,
+            "by_family": dict(sorted(store.by_family.items())),
+            "by_author": dict(sorted(store.by_author.items())),
+            "by_domain": dict(sorted(store.by_domain.items())),
+            "tiers": {
+                "pinned": sum(1 for e in store.entries if e.pinned),
+                "disputed": sum(1 for e in store.entries if e.disputed),
+                "curated": sum(1 for e in store.entries if e.is_curated),
+            },
+            "populations": {
+                "never_retrieved": store.never_retrieved,
+                "zero_verify": store.zero_verify,
+                "no_family": store.no_family,
+            },
+            "retrieval": {
+                "ledger_total": store.ledger_retrievals,
+                "ledger_injection": store.ledger_injections,
+                "ledger_query": store.ledger_queries,
+                "working_set": store.working_set,
+            },
+            "verdicts": dict(sorted(store.verdicts.items())),
+            "soft_max": state.value if state else None,
+            "soft_max_inputs": dict(state.inputs) if state else None,
+            "soft_max_drift": dict(state.drift) if state else None,
+            "soft_max_computed_at": state.computed_at if state else None,
+            "tightening": decision.to_payload(),
+        }
+        logger.info(
+            "[POK] census project=%s active=%d snapshot=%s",
+            project_id,
+            store.active_count,
+            store.measured_at,
+        )
+        return census
+
+    return [
+        pok_upsert,
+        pok_query,
+        pok_curate,
+        pok_gate_answer,
+        pok_census,
+    ]

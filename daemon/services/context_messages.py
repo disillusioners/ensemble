@@ -779,7 +779,10 @@ async def _maybe_pok_context_message(
         return None
 
     try:
-        from .pok_injection import admit_view  # noqa: PLC0415 — cycle-neutral
+        from .pok_injection import (  # noqa: PLC0415 — cycle-neutral
+            admit_view,
+            make_retrieval_recorder,
+        )
         from .pok_service import POKService  # noqa: PLC0415
 
         def _build_sync() -> HumanMessage | None:
@@ -793,6 +796,20 @@ async def _maybe_pok_context_message(
                 query=user_query or "",
                 embeddings_map=service._repo.embeddings_map(project_id),
                 rank_fn=service.rank_for_view,
+                # The RETRIEVAL RECORDER (pok-write-gate Phase 10,
+                # T10.13 — the W-1 close): the rows admitted to THIS
+                # view are recorded as ledger RETRIEVAL rows, so the
+                # librarian's J-metric chain (which SUPERSEDES
+                # ``access_count``) reads real data. The recorder is
+                # never-raise (the §4.9 double containment: the
+                # hook site guards it AND the recorder guards each
+                # row), so the injection path stays infallible.
+                on_retrieval=make_retrieval_recorder(
+                    service._repo,
+                    project_id,
+                    agent_id=getattr(agent_meta, "id", None),
+                    source="injection",
+                ),
             )
             return build_pok_context_message(
                 result.entries, project_id, omitted=result.omitted

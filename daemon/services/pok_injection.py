@@ -348,12 +348,15 @@ def admit_view(
     capture degrades to a WARNING, never to a missing POK block
     (§4.9 never-raise discipline).
 
-    ── RETRIEVAL EVENTS: DESIGNED, NOT WIRED (Wave 1) ─────────────
-    No production caller records ``source="query"`` in Wave 1: the
-    ``pok_query`` read path does not append a ledger RETRIEVAL row
-    yet. The hook lands up front so the read path can populate it in
-    Wave 2 without a migration. Until then, retrieval rows that exist
-    carry ``source="injection"`` only.
+    ── RETRIEVAL EVENTS: the INJECTION side is WIRED ───────────────
+    Both live ``admit_view`` call sites (the context-block seam and
+    the ari seam) pass ``on_retrieval=make_retrieval_recorder(...)``
+    (pok-write-gate Phase 10, T10.13 — the W-1 close), so an injected
+    row lands a ledger RETRIEVAL row with ``source="injection"``. The
+    READ side is still open: no production caller records
+    ``source="query"`` — the ``pok_query`` read path does not append
+    a ledger RETRIEVAL row yet. The hook lands up front so the read
+    path can populate it without a migration.
 
     NEVER RAISES (§4.9): any failure degrades to an empty result
     with ``degraded=True`` (no block this turn; the once-flag stays
@@ -663,12 +666,15 @@ def make_retrieval_recorder(
     ``admit_view`` hook site also guards the call, so a raising
     recorder is contained twice over.
 
-    ── RETRIEVAL EVENTS: DESIGNED, NOT WIRED (Wave 1) ─────────────
-    No production caller records ``source="query"`` in Wave 1: the
-    ``pok_query`` read path does not append a ledger RETRIEVAL row
-    yet. The recorder lands up front so the read path can populate
-    it in Wave 2 without a migration. Until then, retrieval rows
-    that exist carry ``source="injection"`` only.
+    ── RETRIEVAL EVENTS: the INJECTION side is WIRED ───────────────
+    Both live ``admit_view`` call sites (the context-block seam and
+    the ari seam) pass this recorder (pok-write-gate Phase 10, T10.13
+    — the W-1 close), so an injected row lands a ledger RETRIEVAL row
+    with ``source="injection"``. The READ side is still open: no
+    production caller records ``source="query"`` — the ``pok_query``
+    read path does not append a ledger RETRIEVAL row yet. The
+    recorder lands up front so the read path can populate it without
+    a migration.
     """
     from daemon.repositories.pok.models import (  # noqa: PLC0415 — cycle-neutral
         POKWriteGateLedger,

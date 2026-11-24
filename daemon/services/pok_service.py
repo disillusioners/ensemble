@@ -384,13 +384,18 @@ class POKService:
         cycle-neutral with ``context_messages``).
 
         ``reason`` (the caller's OPERATIONAL CLAIM) and ``gate_fn``
-        (the injected gate callable) are accepted here as the
-        Wave-2 gate seam and are NOT consulted in Wave 1
-        (AST-verified: zero body references; the tool layer
-        validates ``reason`` but does not forward it). Phase 3
-        enforces ``reason`` presence at the TOOL layer and this
-        service stays LLM-free. Both default to ``None`` so every
-        direct ``svc.upsert(...)`` call site is byte-unchanged.
+        (the injected gate callable) are the Wave-2 gate seam. BOTH
+        are consulted here: ``reason`` is the gate's PRIMARY input
+        (the judge's first question is "what operational claim does
+        this fact protect?") and ``gate_fn`` is called at the gate
+        slot (strictly between the no-op echo and the supersede).
+        Phase 3 enforces ``reason`` presence at the TOOL layer and
+        this service stays LLM-free — the gate callable is INJECTED,
+        never built here. Both default to ``None`` so every direct
+        ``svc.upsert(...)`` call site is byte-unchanged (``gate_fn=
+        None`` is the TRUSTED BYPASS: the gate slot is skipped
+        entirely and the write proceeds unjudged — the answer path
+        re-runs the write that way).
 
         ``execution_audit`` (Wave 2 Phase 8, T8.14) is the LEDGER
         CONTEXT for the EXECUTION row of a write the gate did not judge

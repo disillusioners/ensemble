@@ -833,13 +833,14 @@ class POKRepository:
         query-vs-injection, which ``access_count`` alone cannot
         (design-amendments-v2 §13.2 fork J, amendment 1).
 
-        ── RETRIEVAL EVENTS: DESIGNED, NOT WIRED (Wave 1) ─────────────
-        No production caller records ``source="query"`` in Wave 1:
-        the ``pok_query`` read path does not append a ledger
-        RETRIEVAL row yet. The column lands up front so the read
-        path can populate it in Wave 2 without a migration. Until
-        then, any retrieval rows that exist carry
-        ``source="injection"`` only.
+        ── RETRIEVAL EVENTS: the INJECTION side is WIRED ───────────
+        Both live ``admit_view`` call sites record their admitted
+        rows as ledger RETRIEVAL rows with ``source="injection"``
+        (pok-write-gate Phase 10, T10.13 — the W-1 close). The READ
+        side is still open: no production caller records
+        ``source="query"`` — the ``pok_query`` read path does not
+        append a ledger RETRIEVAL row yet. The column landed up
+        front so that read path can populate it without a migration.
 
         NOTE for Phase 10: an ADMISSION-phase count INCLUDES the
         standing-defect residual rows (they are ADMISSION-phase rows
