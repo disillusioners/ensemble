@@ -129,9 +129,10 @@ The addendum's "65 (80%) of the 81 RAG-DUPLICATE POK rows were written into BOTH
 the SAME kb-writer run (±0s)" is **NOT reproducible** from live data with the available
 method (§3.1) and has **no in-branch source** — the plan itself flags it as one of the
 three "kb-writer trio" figures with no in-branch source (the S-1 hard gate, plan-overview
-T12.2). What IS reproducible: the mechanism (dual grants held simultaneously) and the
-10-row overlap set with its 2 same-second pairs. **The 65-of-81 figure is therefore
-DISCLOSED as unbacked, not repeated as a finding.**
+T12.2). The sibling lane's independent T12.2 record reaches the SAME verdict: the figure
+is **not re-stampable**. What IS reproducible: the mechanism (dual grants held
+simultaneously) and the 10-row overlap set with its 2 same-second pairs. **The 65-of-81
+figure is therefore DISCLOSED as unbacked, not repeated as a finding.**
 
 ## 4. The per-lane refusal transition map (T9.2 — the map this assessment carries)
 
@@ -197,11 +198,14 @@ the routing/capture-duty guidance in the operational agents' prompts.
 | artifact | what it carries |
 |---|---|
 | `evidence-pok-sweep/census-rows-active-2026-11-23.mech-labels.tsv` (sha256 `6737281c…`) | the 499-active creator census @2026-11-23 12:29Z — the feeders' own volume |
-| `evidence-rederiv-2026-11-24/fig1-method-and-limits.md` (snapshot 2026-11-24T11:01:01Z) | the RAG inventory (13,110 docs), the 10-row overlap set, the same-run legs, the dual-grant history, the day-level dual-write table — **a concurrent lane's artifact, untracked at the time of writing** |
+| `evidence-rederiv-2026-11-24/fig1-method-and-limits.md` (snapshot 2026-11-24T11:01:01Z) | the RAG inventory (13,110 docs), the 10-row overlap set, the same-run legs, the dual-grant history, the day-level dual-write table — **a sibling lane's artifact, now COMMITTED in-branch (`c134df2f3`)** |
+| `evidence-rederiv-2026-11-24/kb-writer-trio.md` (the T12.2 hard-gate re-derivation record, sibling lane) | the independent restatement of the trio: the "65 of 81 (±0s)" figure is **NOT RE-STAMPABLE** — the live lower bound is a 10-row overlap set (kb-writer 6), of which 2 fall within ±1 s. **This record AGREES with this assessment's stance** (§3.3) |
 | `evidence-rederiv-2026-11-24/fig2-census-extract.md` (2026-11-24T10:51Z) | the census-artifact inventory + the label vocabulary (the 83.5% figure re-derived as 66/79 = 83.54% under a stated mechanical rule) |
 | this lane's DEV read (2026-11-24 ~11:0xZ) | the dev-store author census (leader 9 / worker 2) |
 
-**NOTE on the concurrent artifact:** `evidence-rederiv-2026-11-24/` was written into this
-worktree by a sibling lane WHILE this lane worked (files timestamped 10:57–11:01Z). It is
-cited above with its snapshot time and is **NOT committed by this lane** — it is the
-sibling lane's artifact to land (this lane's porcelain lists it as untracked).
+**NOTE on the sibling artifact:** `evidence-rederiv-2026-11-24/` was written into this
+worktree by a sibling lane WHILE this lane worked (files timestamped 10:57–11:01Z) and
+landed in-branch as `c134df2f3` (the sibling lane's own commit — this lane did NOT commit
+it). This assessment cites it with its snapshot time; the figures it carries are the
+sibling lane's, and §3.3's stance (the "65 of 81" figure is unbacked) is corroborated by
+their independent `kb-writer-trio.md` record.
