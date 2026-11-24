@@ -86,6 +86,7 @@ __all__ = [
     "pok_family_key",
     "POK_LEDGER_MERGE_KINDS",
     "POK_LEDGER_PHASES",
+    "POK_LEDGER_SOURCES",
     "POK_LEDGER_VERDICTS",
     "POK_PROVENANCE_VALUES",
     "POK_SOURCE_TIERS",
@@ -224,6 +225,13 @@ POK_LEDGER_MERGE_KINDS: tuple[str, ...] = ("no_delta", "delta")
 #: ambiguity the ledger exists to remove. ``query`` is the read-path
 #: side (the ``pok_query`` tool); ``injection`` is the context-block
 #: side. A row that is NOT a retrieval carries NULL.
+#:
+#: ── RETRIEVAL EVENTS: DESIGNED, NOT WIRED (Wave 1) ─────────────
+#: No production caller records ``source="query"`` in Wave 1: the
+#: ``pok_query`` read path does not append a ledger RETRIEVAL row
+#: yet. The column lands up front so the read path can populate it
+#: in Wave 2 without a migration. Until then, retrieval rows that
+#: exist carry ``source="injection"`` only.
 POK_LEDGER_SOURCES: tuple[str, ...] = ("injection", "query")
 
 #: The RULED ARCHIVE BASES — the ONLY grounds on which a row may be
@@ -540,8 +548,8 @@ class POKWriteGateLedger(SQLModel, table=True):
     judge_explanation: Optional[str] = Field(
         default=None, sa_column=Column("judge_explanation", Text, nullable=True)
     )
-    #: The judge's confidence (0..1). A confidence <= 2/3 routes to ASK
-    #: (never auto-reject).
+    #: The judge's confidence (0..1). A confidence <= 0.667 (≈ 2/3)
+    #: routes to ASK (never auto-reject).
     confidence: Optional[float] = Field(
         default=None, sa_column=Column("confidence", Float, nullable=True)
     )
