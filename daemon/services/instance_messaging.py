@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -1044,6 +1045,56 @@ def _usage_messages_fingerprint(messages: list) -> tuple | None:
         return tuple(_usage_message_fingerprint(m) for m in messages)
     except Exception:
         return None
+
+
+#: The generation suffix every DEFERRED idempotency key carries
+#: (``scheduler:{sid}:deferred[:{run_at}]:v{gen}``).  It is the
+#: discriminator that separates the deferred twin from a direct slot
+#: key — the direct slot's trailing segment is the run_at instant, never
+#: a ``v{gen}`` token.  Used by ``is_scheduler_direct_slot_key`` so a
+#: source_id slug that itself carries a ``slot`` segment cannot make a
+#: deferred key look direct.
+_DEFERRED_GENERATION_SUFFIX_RE = re.compile(r"^v\d+$")
+
+
+def is_scheduler_direct_slot_key(key: str | None) -> bool:
+    """R1/R3 (fix/post-outage-recovery b2): is this a DIRECT slot key?
+
+    The direct fire's idempotency key is SLOT-STABLE and namespaced:
+    ``scheduler:{source_id}:slot:{run_at_iso}``.  The DEFERRED twin is
+    ``scheduler:{source_id}:deferred[:{run_at}]:v{gen}`` (DEC-18).
+
+    The classification is SEGMENT-WISE — the key is split on ``:`` and the
+    namespace markers are matched as whole SEGMENTS.  A substring test
+    (``":slot:" in key``) is NOT safe: the ``source_id`` slug is opaque,
+    so a slug that itself contains a ``slot`` segment would make a
+    DEFERRED key look direct — and compensating a deferred delivery
+    would break DEC-18's no-loss guarantee (the deferred path's
+    terminal-bypass re-delivery is a DELIBERATE feature).
+
+    The DEFERRED twin is therefore excluded FIRST: it is identified by
+    its ``deferred`` namespace segment TOGETHER WITH the generation
+    suffix (``v{gen}``) that every deferred key carries.  The exclusion
+    wins even when the slug itself carries a ``slot`` segment.
+
+    Returns ``False`` for anything that is not a scheduler direct-slot
+    key (including non-scheduler callers, which keep their intentional
+    terminal-fallback re-submit semantics).
+    """
+    if not isinstance(key, str):
+        return False
+    parts = key.split(":")
+    if len(parts) < 4 or parts[0] != "scheduler":
+        return False
+    # The deferred twin is excluded FIRST — the generation suffix is the
+    # discriminator (the direct slot's trailing segment is the run_at
+    # instant, never a ``v{gen}`` token).
+    if "deferred" in parts[1:] and _DEFERRED_GENERATION_SUFFIX_RE.match(parts[-1]):
+        return False
+    # A direct slot key carries a whole ``slot`` segment with the run_at
+    # instant AFTER it (``parts[1:-1]`` — the trailing segment is the
+    # instant itself).
+    return "slot" in parts[1:-1]
 
 
 def classify_dedup_outcome(
@@ -3742,9 +3793,10 @@ class InstanceMessagingService:
             returned_job=enqueue_returned_job,
             local_job_id=job_id,
         )
-        # Masquerade compensation is scoped to DIRECT one-shot fires only:
-        # their per-execution key (``scheduler:{sid}:exec:*``) must never
-        # re-deliver — at-most-once per execution (the 6105e198 wedge).
+        # Masquerade compensation is scoped to DIRECT slot fires only:
+        # their SLOT-STABLE key (``scheduler:{sid}:slot:{run_at}``) must
+        # never re-deliver — the slot is already claimed (at-most-once
+        # per slot; the 6105e198 wedge).
         # The DEFERRED path uses generation-scoped keys
         # (``scheduler:{sid}:deferred:*``) and its terminal-bypass is a
         # DELIBERATE feature (re-attempt a delivery whose JobItem went
@@ -3752,12 +3804,12 @@ class InstanceMessagingService:
         # substrate returning a fresh row). Compensating the deferred
         # path would break DEC-18's no-loss guarantee. Non-scheduler
         # callers keep their intentional terminal-fallback re-submit.
-        _is_direct_exec_key = (
-            isinstance(idempotency_key, str)
-            and idempotency_key.startswith("scheduler:")
-            and ":exec:" in idempotency_key
-        )
-        if fallback_masquerade and not _is_direct_exec_key:
+        # R3: the classification is SEGMENT-WISE (see
+        # ``is_scheduler_direct_slot_key``) — a source_id slug that
+        # itself carries a ``slot`` segment must not make a DEFERRED key
+        # look direct (that would compensate a deferred delivery).
+        _is_direct_slot_key = is_scheduler_direct_slot_key(idempotency_key)
+        if fallback_masquerade and not _is_direct_slot_key:
             if source == "scheduler":
                 logger.info(
                     "enqueue_message_job: deferred-path terminal fallback "

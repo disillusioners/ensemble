@@ -2516,19 +2516,21 @@ class TestIdempotencyRestart:
         self, mock_on_message
     ):
         """Simulated restart: two adapters from the SAME config emit the SAME
-        key (byte-for-byte ``scheduler:{source_id}:{run_at.isoformat()}``),
+        key (byte-for-byte ``scheduler:{source_id}:slot:{run_at.isoformat()}``),
         and the substrate holds exactly ONE JobItem row.
         """
         job_repo = _make_job_repo()
         config = self._one_shot_config("idem-restart")
 
-        # F1(a) (fix/post-outage-recovery b2): each fire mints its OWN
-        # per-execution key — two distinct executions (e.g. a restart that
-        # re-fires the one-shot) do NOT collapse onto one JobItem via the
-        # key (the at-most-once authority for a one-shot moved to the
-        # durable consumption gate + the D3 lateness cap). The WITHIN-
-        # execution re-entry latch still collapses a retry of the SAME fire
-        # onto one row.
+        # R1 (fix/post-outage-recovery b2): the key is SLOT-STABLE — it
+        # names the instant the fire is supposed to occupy, NOT the
+        # per-fire execution id.  Two adapters built from the SAME
+        # persisted config (exactly what a daemon restart produces) emit
+        # the SAME slot key, so the second submit collapses onto the
+        # prior JobItem → at-most-once survives the restart.  A
+        # PER-EXECUTION key would mint a fresh key here and the one-shot
+        # would be delivered TWICE (the crash window: the chain re-arm /
+        # source-disable write commits AFTER the delivery).
         manager1, mapper_repo1, results1 = _stub_manager_with_job_repo(job_repo)
         adapter1 = SchedulerAdapter(config, mock_on_message, manager=manager1, source_repo=mapper_repo1)
         manager2, mapper_repo2, results2 = _stub_manager_with_job_repo(job_repo)
@@ -2537,28 +2539,23 @@ class TestIdempotencyRestart:
         kwargs1, _r1 = await _route_once(adapter1, manager1, mapper_repo1, execution_id="exec-1")
         kwargs2, _r2 = await _route_once(adapter2, manager2, mapper_repo2, execution_id="exec-2")
 
-        # Distinct executions → distinct keys.
-        assert kwargs1["idempotency_key"] == "scheduler:idem-restart:exec:exec-1"
-        assert kwargs2["idempotency_key"] == "scheduler:idem-restart:exec:exec-2"
-        assert kwargs1["idempotency_key"] != kwargs2["idempotency_key"]
+        # The SAME slot → the SAME key, even across two executions.
+        expected_key = f"scheduler:idem-restart:slot:{self.RUN_AT_ISO}"
+        assert kwargs1["idempotency_key"] == expected_key
+        assert kwargs2["idempotency_key"] == expected_key
+        assert kwargs1["idempotency_key"] == kwargs2["idempotency_key"]
 
-        # Distinct executions → distinct JobItems (no cross-fire collapse).
+        # At-most-one JobItem landed for the key across the "restart".
         from sqlmodel import Session, select
 
         from daemon.repositories.job_queue.models import JobItem
 
         with Session(job_repo.engine) as session:
             rows = session.exec(select(JobItem)).all()
-        assert len(rows) == 2, f"expected 2 JobItems for 2 distinct fires, got {len(rows)}"
-        assert results1[0].job_id != results2[0].job_id
-
-        # The WITHIN-execution re-entry latch: the SAME execution_id
-        # re-entered collapses onto one JobItem (the genuine-dedup arm).
-        manager3, mapper_repo3, results3 = _stub_manager_with_job_repo(job_repo)
-        adapter3 = SchedulerAdapter(config, mock_on_message, manager=manager3, source_repo=mapper_repo3)
-        kw_a, _ = await _route_once(adapter3, manager3, mapper_repo3, execution_id="exec-same")
-        kw_b, _ = await _route_once(adapter3, manager3, mapper_repo3, execution_id="exec-same")
-        assert kw_a["idempotency_key"] == kw_b["idempotency_key"] == "scheduler:idem-restart:exec:exec-same"
+        assert len(rows) == 1, f"expected 1 JobItem after restart, got {len(rows)}"
+        assert rows[0].idempotency_key == expected_key
+        # Both attempts were handed the SAME (single) JobItem.
+        assert results1[0].job_id == results2[0].job_id == rows[0].job_id
 
     @pytest.mark.asyncio
     async def test_cron_not_affected_by_idempotency_key(self, mock_on_message):
@@ -2566,7 +2563,8 @@ class TestIdempotencyRestart:
 
         Emitting the key unconditionally on the shared ``_route_via_job_queue``
         path would collapse every future cron fire into one JobItem → silent
-        schedule death.
+        schedule death.  A recurring fire has no stable slot to key on
+        (its ``run_at`` is unset), so the direct path emits no key for it.
         """
         job_repo = _make_job_repo()
         manager, mapper_repo, _results = _stub_manager_with_job_repo(job_repo)
@@ -2586,14 +2584,9 @@ class TestIdempotencyRestart:
         await adapter._route_via_job_queue("exec-cron-2", "scheduled message", {"agent": "./agents/developer"})
         kwargs2 = manager.enqueue_message_job.await_args.kwargs
 
-        # F1(a) (fix/post-outage-recovery b2): EVERY scheduled fire —
-        # including recurring cron — now emits a PER-EXECUTION key, so a
-        # fresh UUID per fire cannot collapse recurring fires (the old
-        # cron-guard concern was an artifact of the mutating run_at key).
-        # The property that matters is NO COLLAPSE across distinct fires.
-        assert kwargs1["idempotency_key"] == "scheduler:idem-cron:exec:exec-cron-1"
-        assert kwargs2["idempotency_key"] == "scheduler:idem-cron:exec:exec-cron-2"
-        assert kwargs1["idempotency_key"] != kwargs2["idempotency_key"]
+        # THE gate: the cron path must not emit the key at all.
+        assert "idempotency_key" not in kwargs1
+        assert "idempotency_key" not in kwargs2
 
         # No collapse: two fires → two distinct JobItems.
         from sqlmodel import Session, select

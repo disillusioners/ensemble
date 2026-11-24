@@ -769,13 +769,23 @@ async def _arm_self_alarm(
 
     # ── A fired/paused ONE-SHOT must be re-armed with a STRICTLY later
     #    instant. A message-only re-arm keeps the stored `run_at`, so the
-    #    rebuilt adapter re-enqueues under the SAME
-    #    `scheduler:{source_id}:{run_at}` idempotency key and a still
-    #    non-terminal prior job (within 24 h) collapses the submit — the
-    #    alarm would silently never be delivered. (The recurring families
-    #    never carry that key: the engine emits it for one-time schedules
-    #    ONLY — `scheduler.py:1090-1094` — so a same-time re-arm of a
-    #    paused recurring alarm is safe and is the normal resume flow.)
+    #    rebuilt adapter re-enqueues under the SAME SLOT-STABLE
+    #    `scheduler:{source_id}:slot:{run_at}` idempotency key and the
+    #    submit is collapsed: with a still non-terminal prior job (within
+    #    24 h) the substrate returns the prior row (no new delivery), and
+    #    with an already-terminal prior job the terminal fallback's
+    #    masquerade is compensated (F1(b) — the phantom prelude and the
+    #    orphan fallback JobItem are cancelled). EITHER WAY the alarm
+    #    would silently never be delivered. The guard therefore STAYS
+    #    conservative under the slot-stable key (R1, fix/post-outage-
+    #    recovery b2): relaxing it is NOT provably safe, because the
+    #    slot is already claimed in both substrate arms.
+    #    (The recurring families never carry that key: the engine emits
+    #    it for one-time schedules ONLY — the adapter's
+    #    ``_route_via_job_queue`` gate is
+    #    ``SCHEDULE_TYPE_ONE_TIME and self._run_at is not None`` — so a
+    #    same-time re-arm of a paused recurring alarm is safe and is the
+    #    normal resume flow.)
     if (
         gate.mode == "reuse"
         and stored is not None

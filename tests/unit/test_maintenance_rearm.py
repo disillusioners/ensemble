@@ -129,8 +129,11 @@ def _build_adapter(engine: Engine, row: SourceConfig):
 
 
 def _key(adapter) -> str:
-    """The one-shot idempotency key (``scheduler:{source_id}:{run_at}``)."""
-    return f"scheduler:{adapter.source_id}:{adapter._run_at.isoformat()}"
+    """The one-shot idempotency key — the SLOT key
+    (``scheduler:{source_id}:slot:{run_at}``, R1: the slot is stable
+    across a restart, so a re-fire of the same slot collapses onto the
+    prior JobItem instead of delivering twice)."""
+    return f"scheduler:{adapter.source_id}:slot:{adapter._run_at.isoformat()}"
 
 
 @pytest.fixture
