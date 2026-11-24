@@ -134,7 +134,7 @@ def _seed_wedge_shape(
                 admission_state=admission_state,
                 job_type="message",
                 instance_id=iid,
-                idempotency_key=f"scheduler:sched-1:exec:{uuid4().hex[:8]}",
+                idempotency_key=f"scheduler:sched-1:slot:{uuid4().hex[:8]}",
                 created_at=datetime.now(timezone.utc).isoformat(),
             )
         )

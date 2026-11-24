@@ -578,14 +578,14 @@ def _seed_source_and_mapping(
 
 
 def _expected_run_at_key(source_id: str, run_at: datetime, gen: int = 1) -> str:
-    """F1(a) (fix/post-outage-recovery b2): the DEFERRED one-shot key is
+    """The DEFERRED one-shot key is
     ``scheduler:{sid}:deferred:{run_at}:v{gen}`` — namespaced away from
-    the DIRECT per-execution key (``scheduler:{sid}:exec:{execution_id}``)
-    and generation-scoped (a rollover mints a fresh key). The pre-fix
-    bare ``scheduler:{sid}:{run_at}`` key was SHARED with the direct fire
-    and constant across rollovers — the adjudicated wedge exposure.
-    The key stays stable WITHIN a generation (the DEC-18 marker-miss
-    coalescing latch)."""
+    the DIRECT SLOT key (``scheduler:{sid}:slot:{run_at}``, R1) and
+    generation-scoped (a rollover mints a fresh key). Before the
+    namespace existed the bare ``scheduler:{sid}:{run_at}`` key was SHARED
+    with the direct fire and constant across rollovers — the adjudicated
+    wedge exposure. The key stays stable WITHIN a generation (the DEC-18
+    marker-miss coalescing latch)."""
     return f"scheduler:{source_id}:deferred:{run_at.isoformat()}:v{gen}"
 
 
