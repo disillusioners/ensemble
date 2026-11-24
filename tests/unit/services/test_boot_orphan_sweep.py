@@ -1125,7 +1125,7 @@ def _seed_child(engine, parent_id, child_id, child_status="running"):
 
 
 @pytest.mark.asyncio
-async def test_class_1a_surfaced_not_retired_by_default(task_repo, engine):
+async def test_class_1a_retired_by_default(task_repo, engine):
     """Class 1a: no task/msg/job/descendant/watcher, idle past bound, no
     delivered reports -> SURFACED and NOT retired by default (switch
     default OFF)."""
@@ -1140,13 +1140,13 @@ async def test_class_1a_surfaced_not_retired_by_default(task_repo, engine):
     assert res.class_1a == 1
     assert res.class_2 == 0
     assert res.class_3 == 0
-    assert res.retired == 0
+    assert res.retired == 1
     assert iid in res.surfaced_ids
-    assert mgr.terminated == []
+    assert mgr.terminated == [(iid, "orphan_retired")]
 
 
 @pytest.mark.asyncio
-async def test_class_1b_surfaced_not_retired_by_default(task_repo, engine):
+async def test_class_1b_retired_by_default(task_repo, engine):
     """Class 1b: proven dead + delivered reports -> SURFACED and NOT retired by default."""
     from datetime import timedelta
     iid = f"i-{uuid4().hex[:8]}"
@@ -1158,8 +1158,8 @@ async def test_class_1b_surfaced_not_retired_by_default(task_repo, engine):
     with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", None):
         res = await surface_stranded_running_instances(mgr, boot_epoch)
     assert res.class_1b == 1
-    assert res.retired == 0
-    assert mgr.terminated == []
+    assert res.retired == 1
+    assert mgr.terminated == [(iid, "orphan_retired")]
 
 
 @pytest.mark.asyncio
@@ -1395,7 +1395,7 @@ async def test_p5_fail_closed_clock_skew(task_repo, engine):
 
 
 @pytest.mark.asyncio
-async def test_p8_retire_switch_default_off(task_repo, engine):
+async def test_p8_retire_switch_default_on(task_repo, engine):
     """P8: the retire switch DEFAULTS OFF — unset and explicit =0
     both surface only; the shared switch does not arm it."""
     from datetime import timedelta
@@ -1404,25 +1404,32 @@ async def test_p8_retire_switch_default_off(task_repo, engine):
     _make_instance(engine, iid, last_activity_at=past)
     boot_epoch = now_utc_naive()
     mgr = _MockManager(task_repo)
-    # default (unset) -> surface only, no retire
+    # default (unset) -> retire armed (default ON)
     with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", None):
         res = await surface_stranded_running_instances(mgr, boot_epoch)
-    assert res.retired == 0
-    assert mgr.terminated == []
+    assert res.retired == 1
+    assert mgr.terminated == [(iid, "orphan_retired")]
     # explicit opt-out (=0) -> surface only, no retire
     mgr2 = _MockManager(task_repo)
     with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "0"):
         res2 = await surface_stranded_running_instances(mgr2, boot_epoch)
     assert res2.retired == 0
     assert mgr2.terminated == []
-    # INDEPENDENT of the shared switch: the shared switch being ON
-    # (its default) does not arm the retire path.
+    # INDEPENDENT of the shared switch: with the shared switch ON
+    # (its default) the retire path defaults ON (not gated by it).
     mgr3 = _MockManager(task_repo)
     with _env("ENSEMBLE_AUTO_CONTINUE_RUNNING_ON_RESTART", "1"):
         with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", None):
             res3 = await surface_stranded_running_instances(mgr3, boot_epoch)
-    assert res3.retired == 0
-    assert mgr3.terminated == []
+    assert res3.retired == 1
+    assert mgr3.terminated == [(iid, "orphan_retired")]
+    # shared switch OFF => whole pass skipped (its own semantics)
+    mgr4 = _MockManager(task_repo)
+    with _env("ENSEMBLE_AUTO_CONTINUE_RUNNING_ON_RESTART", "0"):
+        with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", None):
+            res4 = await surface_stranded_running_instances(mgr4, boot_epoch)
+    assert res4.skipped_kill_switch == 1
+    assert res4.candidates == 0
 
 
 @pytest.mark.asyncio
