@@ -365,6 +365,8 @@ class TestSoftMaxPlacement:
         """
         _seed(env, [_row("fam-01-one")])
         repo = POKRepository(env.engine)
+        # The PASS writes the soft max (the daemon-internal writer).
+        run_librarian_pass(env.engine, PROJECT_ID)
         write_soft_max(
             env.engine,
             PROJECT_ID,
@@ -372,8 +374,10 @@ class TestSoftMaxPlacement:
         )
         rows = repo.list_entries(PROJECT_ID, statuses=("active", "archived", "superseded"))
         for row in rows:
-            assert "soft_max" not in (row.slug or "")
-            assert SOFT_MAX_METADATA_KEY not in (row.slug or "")
+            identity = "%s %s" % (row.slug or "", row.body or "")
+            identity = identity.lower().replace("_", "-").replace(".", "-")
+            assert "soft-max" not in identity, row.slug
+            assert SOFT_MAX_METADATA_KEY.lower() not in (row.slug or "").lower()
         # The metadata key lives ONLY in the project metadata table.
         from daemon.repositories.project.repository import (
             SQLModelProjectRepository,

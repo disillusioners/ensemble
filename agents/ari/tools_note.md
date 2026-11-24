@@ -1063,9 +1063,9 @@ POK). The reason is REQUIRED; a write without it is refused.
   (operators); a rule aimed at implementers sets
   `audience: "implementation"`.
 - **Knowledge** (what something IS — reference facts, prior art,
-  background) → the knowledge base (RAG), NOT POK. I READ the KB with
-  `explore`; a knowledge WRITE belongs to the KB writers' lane
-  (kb-writer / kb-importer / experiencer), not mine.
+  background) → the knowledge base (RAG), NOT POK. I hold no KB read
+  tool (the KB writers own that surface); a knowledge WRITE belongs to
+  the KB writers' lane (kb-writer / kb-importer / experiencer), not mine.
 - A RAG twin is NOT redundancy: a rule that also lives in the KB still
   belongs in POK — POK is injected as operating rules, the KB is recalled
   on demand.
