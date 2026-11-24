@@ -467,7 +467,16 @@ class TestTypedEchoTaxonomy:
             current_instance_id="inst-1",
             agent_id="leader",
         )
-        out = curator[2].invoke({"slug": "chain-01-a", "archived": True})
+        out = curator[2].invoke(
+            {
+                "slug": "chain-01-a",
+                "archived": True,
+                # An archive requires a RULED BASIS (pok-write-gate
+                # Phase 1, T1.6 — consolidation happens only under a
+                # ruled basis, never on age or access counts alone).
+                "basis": "covered-by-surviving-row",
+            }
+        )
         assert out.get("code") != "pok_not_found", out
         assert out["id"] == head.id
         assert out["status"] == "archived"
@@ -480,5 +489,13 @@ class TestTypedEchoTaxonomy:
             current_instance_id="inst-1",
             agent_id="leader",
         )
-        out = curator[2].invoke({"slug": "never-written-01-a", "archived": True})
+        out = curator[2].invoke(
+            {
+                "slug": "never-written-01-a",
+                "archived": True,
+                # A valid basis is supplied so the refusal under test
+                # is the not-found one, not the missing-basis one.
+                "basis": "covered-by-surviving-row",
+            }
+        )
         assert out.get("code") == "pok_not_found", out

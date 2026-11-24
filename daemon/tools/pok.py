@@ -25,10 +25,12 @@ IN-BODY role gates from the FACTORY-CAPTURED ``agent_id``
   typed errors; embedding lag surfaced; ``[CURATED]`` renders in
   the lineage surface only (no in-block marker in v1).
 * :func:`pok_curate` — leader/PM only (pinned | disputed | archived
-  | audience | audience_agents | source_tier — the tier flip is
+  | audience | audience_agents | source_tier | basis — the tier flip is
   Phase 2, both directions, addendum T-3). Pin cap 2 PER PROJECT;
   disputed suppresses injection but stays readable; archived
-  forward-only.
+  forward-only AND requires a RULED BASIS (pok-write-gate Phase 1,
+  T1.6) — consolidation happens only under a ruled basis, never on
+  age and never on access counts alone.
 
 PROJECT SCOPING (server-side): every tool resolves the CALLING
 instance's project from the instance row (the
@@ -53,6 +55,7 @@ from typing import Any
 
 
 from ._schema_registry import tool
+from ..repositories.pok.models import POK_ARCHIVE_BASES
 from ..services.pok_service import (
     POKError,
     POK_ACTIVE_CAP_PER_PROJECT,
@@ -416,6 +419,7 @@ def create_pok_tools(
         audience: str | None = None,
         audience_agents: list[str] | None = None,
         source_tier: str | None = None,
+        basis: str | None = None,
     ) -> dict:
         """Curate THIS project's operating knowledge (leader /
         project-manager ONLY).
@@ -436,6 +440,8 @@ def create_pok_tools(
           (laundering guard).
         - ``archived``: TRUE retires the entry. FORWARD-ONLY — an
           archived entry cannot return (write a successor instead).
+          **Archiving REQUIRES a ``basis``** — the ruled ground on
+          which the row was retired (see below).
         - ``audience`` / ``audience_agents``: reclassification /
           curator narrowing. ``audience_agents`` REPLACES the
           audience's default set when non-empty; pass [] to clear
@@ -445,6 +451,16 @@ def create_pok_tools(
           dev-curated immutable reference — it renders in the
           dedicated curated band (cap 2 per view) and requires
           curator authority to supersede.
+        - ``basis``: THE RULED ARCHIVE BASIS. REQUIRED whenever
+          ``archived`` is TRUE, and it MUST be one of:
+          ``covered-by-surviving-row`` (a surviving row already
+          carries the fact), ``relocated-to-routed-home`` (the fact
+          moved to another home), ``NOW-FALSE`` (the rule no longer
+          holds), ``gate-rejection`` (the write gate rejected the
+          row and the curator cites that rejection). An archive with
+          a missing or unknown basis is REFUSED: consolidation
+          happens ONLY under a ruled basis — NEVER on age, NEVER on
+          access counts alone.
         """
         svc = _service()
         if svc is None:
@@ -466,6 +482,30 @@ def create_pok_tools(
                 f"attribution {captured_agent_id!r} is not a curator "
                 "(attribution ≠ authorization)",
             )
+        # RULED ARCHIVE BASIS (pok-write-gate Phase 1, T1.6): an
+        # archive is permitted ONLY under a ruled basis. Validated
+        # BEFORE the service call so a missing/unknown basis can never
+        # archive a row. Consolidation happens ONLY under a ruled basis
+        # — NEVER on age, NEVER on access counts alone
+        # (design-amendments-v2 §9).
+        if archived is True:
+            if not basis or not str(basis).strip():
+                return _err(
+                    "pok_curate_basis_required",
+                    "archiving requires a ruled basis — pass one of "
+                    f"{', '.join(POK_ARCHIVE_BASES)}; an archive without "
+                    "a basis is refused (consolidation happens only "
+                    "under a ruled basis — never on age, never on "
+                    "access counts alone)",
+                    allowed=list(POK_ARCHIVE_BASES),
+                )
+            if basis not in POK_ARCHIVE_BASES:
+                return _err(
+                    "pok_curate_basis_invalid",
+                    f"unknown archive basis {basis!r} — allowed bases "
+                    f"are {', '.join(POK_ARCHIVE_BASES)}",
+                    allowed=list(POK_ARCHIVE_BASES),
+                )
         try:
             row = svc.curate(
                 project_id=project_id,
@@ -490,7 +530,7 @@ def create_pok_tools(
         logger.info(
             "[POK] curate slug=%s project=%s by=%s "
             "pinned=%s disputed=%s archived=%s audience=%s audience_agents=%s "
-            "tier=%s",
+            "tier=%s basis=%s",
             row.slug,
             project_id,
             captured_agent_id,
@@ -500,6 +540,7 @@ def create_pok_tools(
             row.audience,
             row.audience_agents,
             row.source_tier,
+            basis if archived is True else None,
         )
         return {
             "action": "curated",
@@ -511,6 +552,7 @@ def create_pok_tools(
             "audience": row.audience,
             "audience_agents": row.audience_agents,
             "source_tier": row.source_tier,
+            "basis": basis if archived is True else None,
         }
 
     return [pok_upsert, pok_query, pok_curate]

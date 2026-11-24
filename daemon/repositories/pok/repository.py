@@ -15,6 +15,9 @@ What lives here (mechanics only, no policy):
   audience_agents / source_tier — the tier flip is Phase 2, trust-tier
   addendum T-3) with the forward-only archived guard;
 * access/verify counters (query-path bookkeeping);
+* the WRITE-GATE LEDGER surface (append-only + read-only-cheap
+  queries — the decision substrate for the POK write gate, pok-write-gate
+  Phase 1 T1.3/T1.7; there is deliberately no update/delete method);
 * the embeddings-companion CRUD (upsert / map / delete).
 
 Policy (fence, budgets, caps, audience admission, refusal taxonomy)
@@ -33,6 +36,7 @@ from typing import Any, Iterable, Sequence
 from sqlmodel import Session, select
 
 from daemon.repositories.pok.models import (
+    POKWriteGateLedger,
     ProjectOperatingKnowledge,
     ProjectOperatingKnowledgeEmbedding,
     pok_family_key,
@@ -370,6 +374,99 @@ class POKRepository:
                 session.add(row)
             session.commit()
             return len(rows)
+
+    # ── write-gate ledger (pok-write-gate Phase 1, T1.3 + T1.7) ────────
+    #
+    # APPEND-ONLY. There is deliberately NO update and NO delete
+    # method on this surface — the ledger is the audit substrate and a
+    # mutable audit is not an audit. The only mutator is
+    # :meth:`append_ledger`; everything else is a read.
+
+    def append_ledger(
+        self, entry: POKWriteGateLedger
+    ) -> POKWriteGateLedger:
+        """APPEND one ledger row (the only mutator on this surface).
+
+        Read-only-cheap by construction: one INSERT, one commit, no
+        read-modify-write cycle and no counter bump on any other row.
+        The caller owns the CONTENT of the row (the gate owns the
+        verdict row; the tool owns the execution row — the authority
+        split, design-amendments-v2 §8).
+        """
+        with Session(self._engine) as session:
+            session.add(entry)
+            session.commit()
+            session.refresh(entry)
+            return entry
+
+    def query_ledger(
+        self,
+        project_id: str,
+        *,
+        gate_id: str | None = None,
+        phase: str | None = None,
+        entry_id: str | None = None,
+        source: str | None = None,
+        limit: int = 100,
+    ) -> list[POKWriteGateLedger]:
+        """The ledger READ surface (T1.7) — read-only-cheap queries.
+
+        Ordered oldest-first by ``(created_at, id)`` so a gate chain
+        reads in the order it happened (the ASK chain's three rows are
+        separated in time by the answer round-trip, so the ordering is
+        total in practice; ``id`` breaks any residual tie).
+
+        Every filter is OPTIONAL and composable — the common shapes are
+        "the whole chain for one gate", "every retrieval for one row",
+        "every retrieval from one source" and "every phase for one
+        project".
+        """
+        stmt = select(POKWriteGateLedger).where(
+            POKWriteGateLedger.project_id == project_id
+        )
+        if gate_id is not None:
+            stmt = stmt.where(POKWriteGateLedger.gate_id == gate_id)
+        if phase is not None:
+            stmt = stmt.where(POKWriteGateLedger.phase == phase)
+        if entry_id is not None:
+            stmt = stmt.where(POKWriteGateLedger.entry_id == entry_id)
+        if source is not None:
+            stmt = stmt.where(POKWriteGateLedger.source == source)
+        stmt = stmt.order_by(POKWriteGateLedger.created_at, POKWriteGateLedger.id)
+        if limit is not None and limit >= 0:
+            stmt = stmt.limit(limit)
+        with Session(self._engine) as session:
+            return list(session.exec(stmt).all())
+
+    def ledger_gate_chain(
+        self, project_id: str, gate_id: str
+    ) -> list[POKWriteGateLedger]:
+        """The FULL chain for one gate id, oldest-first.
+
+        This is the shape the authority split produces (design-
+        amendments-v2 §13.2 fork G): TWO rows for a plain
+        ACCEPT/MERGE/REJECT chain (the gate's verdict row then the
+        tool's execution row), THREE for an ASK chain
+        (``ASK_MINTED`` → ``ASK_ANSWERED`` → ``ASK_EXECUTED``).
+        """
+        return self.query_ledger(project_id, gate_id=gate_id, limit=None)
+
+    def count_ledger_phase(
+        self, project_id: str, phase: str
+    ) -> int:
+        """How many ledger rows of ONE phase a project has.
+
+        The librarian's metric read (Phase 10): the RETRIEVAL counts
+        here SUPERSEDE ``access_count`` — they disambiguate
+        query-vs-injection, which ``access_count`` alone cannot
+        (design-amendments-v2 §13.2 fork J, amendment 1).
+        """
+        stmt = select(POKWriteGateLedger).where(
+            POKWriteGateLedger.project_id == project_id,
+            POKWriteGateLedger.phase == phase,
+        )
+        with Session(self._engine) as session:
+            return len(list(session.exec(stmt).all()))
 
     def record_verification(self, entry_id: str, *, now: str | None = None) -> bool:
         """verify_count += 1 + last_verified stamp (pok_verify phase-2
