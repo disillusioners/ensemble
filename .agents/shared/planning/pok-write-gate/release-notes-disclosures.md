@@ -62,7 +62,7 @@
 
 **Verbatim (the dated pointer, `design-amendments-v2.md:163`):**
 
-> **[DATED POINTER — leader disposition fold 2026-11-24: this R4 text is RETAINED AS PROVENANCE/HISTORY, not the operative acceptance wording. The ≤8000-char budget is the binding constraint; K=48 is the observed sizing within it, NOT a pinned constant. The operative sites (plan-overview SC#20 + T7.9; phase7-plan.md rows 9/exit) now restate the bound. `architecture-recommendation.md:105` is left untouched as the HISTORICAL architect record.]**
+> **[DATED POINTER — leader disposition fold 2026-11-24: this R4 text is RETAINED AS PROVENANCE/HISTORY, not the operative acceptance wording. The ≤8000-char budget is the binding constraint; K=48 is the observed sizing within it, NOT a pinned constant. The operative sites (plan-overview SC#20 + T7.9; phase7-plan.md rows 9/exit) now restate the bound. architecture-recommendation.md:105 is left untouched as the HISTORICAL architect record.]**
 
 **Operative sites (all bound-carrying):** `plan-overview.md:125` (SC#20), `plan-overview.md:254` (T7.9), `phase7-plan.md:17` (row 9) and `:35` (the exit criterion). The architect document stays byte-frozen and is marked from outside.
 
@@ -102,9 +102,9 @@ The third key is **kept per the architect's F-fork** — the merge policy sits "
 
 ### (f2) The WAVE-2 CODE review's advisories — PENDING, NOT YET COMMITTED
 
-**Gap — flagged, not filled.** The Wave-2 **code** review (the review of the landed Wave-2 code range, through `942055e22`) is **in flight** and its artifact is **not committed in this branch** — the planning dir carries no Wave-2 code-review document (the only code-review artifact committed is `wave1-code-review-1.md`, the WAVE-1 review). Its advisories are therefore **NOT reproduced here**: inventing them would put words in the reviewer's mouth, and the plan's rule is that a relayed figure or claim without a source is a defect class of its own.
+**Gap — flagged, not filled.** The Wave-2 **code** review (the review of the landed Wave-2 code range, through `942055e22`) is **not committed in this branch** — the only COMMITTED code-review artifact is `wave1-code-review-1.md` (the WAVE-1 review). *(The wave-2 review artifact was observed ON DISK but UNTRACKED during the Phase-12 fix round, 2026-11-24 ~14:2xZ — `wave2-code-review-1.md`, verdict APPROVE-WITH-ADVISORIES carrying 1 latent CRITICAL (enforcement-gated) · 1 WARNING · 5 ADVISORIES. It is not committed, so it is not yet an in-branch source of record.)* Its advisories are therefore **NOT reproduced here**: inventing them would put words in the reviewer's mouth, and the plan's rule is that a relayed figure or claim without a source is a defect class of its own.
 
-**What the release-notes author must do:** splice the Wave-2 code review's advisories VERBATIM at Phase-13 authoring, under this section, when the artifact lands. **Do not paraphrase them** — the review's own evidence standard is byte-level mechanical comparison, and a paraphrase would drop exactly the detail that makes the advisory checkable.
+**What the release-notes author must do:** splice the Wave-2 code review's advisories VERBATIM at Phase-13 authoring, under this section, when the artifact is committed. **Do not paraphrase them** — the review's own evidence standard is byte-level mechanical comparison, and a paraphrase would drop exactly the detail that makes the advisory checkable.
 
 **Reference (for the splicer):** the Wave-2 code review's subject range — the gate core (`3f35f9d76`, `96a14de54`, `97f269ea4`), the librarian (`bf23c8c10` … `942055e22`) and the drift-sync merge (`9cf64bacd`). This lane's own commits (`aee27f358` — the query-side wiring + the board sink; `e14001121` — the guideline amendment) **postdate** that range and are outside it.
 
