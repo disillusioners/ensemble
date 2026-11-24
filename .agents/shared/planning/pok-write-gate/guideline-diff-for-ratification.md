@@ -1,11 +1,11 @@
 # POK write-gate guideline — Phase 12 ratification diff
 
 Base: ff89fee9953dda9e455c82a8e995fbacfaec128b (the last commit that touched docs/guidelines/guideline-pok-durable-vs-rolling-state.md before this amendment)
-Head: e14001121233d160fa178df6c5d73e3f4e1eb8f9
-Command: git diff ff89fee9953dda9e455c82a8e995fbacfaec128b..e14001121233d160fa178df6c5d73e3f4e1eb8f9 -- docs/guidelines/guideline-pok-durable-vs-rolling-state.md
+Head: 666880a9b (the Phase-12 amendment + the fix round 1 anchor re-derivation)
+Command: git diff ff89fee9953dda9e455c82a8e995fbacfaec128b..666880a9b -- docs/guidelines/guideline-pok-durable-vs-rolling-state.md
 
 diff --git a/docs/guidelines/guideline-pok-durable-vs-rolling-state.md b/docs/guidelines/guideline-pok-durable-vs-rolling-state.md
-index ad2506b05..f7c624e29 100644
+index ad2506b05..a42e757ea 100644
 --- a/docs/guidelines/guideline-pok-durable-vs-rolling-state.md
 +++ b/docs/guidelines/guideline-pok-durable-vs-rolling-state.md
 @@ -1,30 +1,49 @@
@@ -114,20 +114,26 @@ index ad2506b05..f7c624e29 100644
  - **Why it matters:** this turns the audit's merge clusters from a one-off sweep into a **self-correcting store** — writers converge facts at write time instead of fragmenting them, and the sweep becomes unnecessary.
  
  ### Row lifecycle (orthogonal; matters only for the one sanctioned inventory exception, §4(e))
-@@ -63,8 +96,10 @@ Not config-armed — this is doctrine plus standing knobs; there are no env keys
- - Storage cap: `POK_ACTIVE_CAP_PER_PROJECT` = **1024** (`daemon/services/pok_service.py:105`, this lane's commit rides the 2026-11-23 sonic lane (board wi-1921ba17); the single-source restatement of the sizing set is row **A-13** in `.agents/shared/planning/project-operating-knowledge/decisions.md`). Verify by grep at use time — anchors drift. At the cap, `pok_upsert` REFUSES (`pok_active_cap`) rather than evicting. The count is enforced in Python only — no SQL CHECK, trigger, or migration encodes it (per the 64→256 historical entry, `CHANGELOG.md:226-230` — left byte-intact). `[active cap 1024 — commission 2026-11-23, board wi-1921ba17]`
- - The injection budget is a SEPARATE standing constraint — never confuse it with the storage cap: `POK_BLOCK_MAX_ENTRIES` = 8 and `POK_BLOCK_MAX_CHARS` = 2,900 (`daemon/services/pok_service.py:123` / `:121`; budget enforcement in `daemon/services/pok_injection.py:379-380,474`). The storage cap bounds what may EXIST in the store; the injection budget bounds what may RENDER into a prompt per turn.
- - Refresh mechanism for sanctioned inventory: **SUPERSEDE** — same slug + changed content supersedes the prior row (admission → supersede-or-insert, `daemon/services/pok_service.py:311`; outcome labels `created | superseded | no-op`, `:241`).
+@@ -60,11 +93,13 @@ active → superseded (a SUPERSEDE chain) → archived (leader/PM curate). A suc
+ 
+ Not config-armed — this is doctrine plus standing knobs; there are no env keys, no commands, no restart requirements:
+ 
+-- Storage cap: `POK_ACTIVE_CAP_PER_PROJECT` = **1024** (`daemon/services/pok_service.py:105`, this lane's commit rides the 2026-11-23 sonic lane (board wi-1921ba17); the single-source restatement of the sizing set is row **A-13** in `.agents/shared/planning/project-operating-knowledge/decisions.md`). Verify by grep at use time — anchors drift. At the cap, `pok_upsert` REFUSES (`pok_active_cap`) rather than evicting. The count is enforced in Python only — no SQL CHECK, trigger, or migration encodes it (per the 64→256 historical entry, `CHANGELOG.md:226-230` — left byte-intact). `[active cap 1024 — commission 2026-11-23, board wi-1921ba17]`
+-- The injection budget is a SEPARATE standing constraint — never confuse it with the storage cap: `POK_BLOCK_MAX_ENTRIES` = 8 and `POK_BLOCK_MAX_CHARS` = 2,900 (`daemon/services/pok_service.py:123` / `:121`; budget enforcement in `daemon/services/pok_injection.py:379-380,474`). The storage cap bounds what may EXIST in the store; the injection budget bounds what may RENDER into a prompt per turn.
+-- Refresh mechanism for sanctioned inventory: **SUPERSEDE** — same slug + changed content supersedes the prior row (admission → supersede-or-insert, `daemon/services/pok_service.py:311`; outcome labels `created | superseded | no-op`, `:241`).
 -- Curation: `pok_curate` is **leader/project-manager ONLY** (`daemon/tools/pok.py:410`; authority contract `:13`, `:27`). Regular agents govern content CLASS at write time; they cannot pin, dispute, or archive.
 -- What NOT to do: never encode the count in SQL; never treat the injection budget as the cap; never "cure" the cap by blind-archiving a high-traffic row — the refusal's named archive candidate is the OLDEST row, not the least valuable one.
-+- Curation: `pok_curate` is **leader/project-manager ONLY** (`daemon/tools/pok.py:410`; authority contract `:13`, `:27`). Regular agents govern content CLASS at write time; they cannot pin, dispute, or archive. A `gate-rejection` is a legitimate archive basis a curator may cite.
++- Storage cap: `POK_ACTIVE_CAP_PER_PROJECT` = **1024** (`daemon/services/pok_service.py:131`, this lane's commit rides the 2026-11-23 sonic lane (board wi-1921ba17); the single-source restatement of the sizing set is row **A-13** in `.agents/shared/planning/project-operating-knowledge/decisions.md`). Verify by grep at use time — anchors drift. At the cap, `pok_upsert` REFUSES (`pok_active_cap`) rather than evicting. The count is enforced in Python only — no SQL CHECK, trigger, or migration encodes it (per the 64→256 historical entry, `CHANGELOG.md:226-230` — left byte-intact). `[active cap 1024 — commission 2026-11-23, board wi-1921ba17]`
++- The injection budget is a SEPARATE standing constraint — never confuse it with the storage cap: `POK_BLOCK_MAX_ENTRIES` = 8 and `POK_BLOCK_MAX_CHARS` = 2,900 (`daemon/services/pok_service.py:149` / `:147`; budget enforcement in `daemon/services/pok_injection.py:411-412,506`). The storage cap bounds what may EXIST in the store; the injection budget bounds what may RENDER into a prompt per turn.
++- Refresh mechanism for sanctioned inventory: **SUPERSEDE** — same slug + changed content supersedes the prior row (admission → supersede-or-insert, `daemon/services/pok_service.py:380`; outcome labels `created | superseded | no-op`, `:274`).
++- Curation: `pok_curate` is **leader/project-manager ONLY** (`daemon/tools/pok.py:1812`; authority contract `:13`, `:27`). Regular agents govern content CLASS at write time; they cannot pin, dispute, or archive. A `gate-rejection` is a legitimate archive basis a curator may cite.
 +- The gate's switches are **DB-backed settings keys, not env** (`daemon/services/settings_service.py`): `pok_gate.semantic_enforcement` (bool, default OFF) · `pok_gate.softmax_tightening` (bool, default OFF) · `pok_gate.merge_policy` (enum, default `ASK_WITH_PROPOSAL`). They are read per write through the settings service and take effect with NO daemon restart; there is deliberately **no env tier** (an env flip is a live config change at deploy + restart).
 +- The gate's model alias is the purpose-bound `POK_GATE_MODEL` env (default literal `"quick"`) — NEVER the global model (the global can be silently rewritten by the title-model fallback).
 +- What NOT to do: never encode the count in SQL; never treat the injection budget as the cap; never "cure" the cap by blind-archiving a high-traffic row — the refusal's named archive candidate is the OLDEST row, not the least valuable one; never assume a green `pok_upsert` means the row is durable (§4(i)).
  
  ## 4. The rules that bite
  
-@@ -79,24 +114,54 @@ Not config-armed — this is doctrine plus standing knobs; there are no env keys
+@@ -79,55 +114,97 @@ Not config-armed — this is doctrine plus standing knobs; there are no env keys
    | Human-facing project state — milestones, lane progress, episode narratives | the board / PM ledger | the human-facing ledger; updated in place, never rots silently |
    | Lane working state — a pending fix, episode detail, dated counts | the lane's planning directory (`.agents/shared/planning/<lane>/`) | full documents, versioned with the lane, unlimited length |
  
@@ -187,11 +193,14 @@ index ad2506b05..f7c624e29 100644
  - A probe not run means nothing: an ungoverned snapshot row in the store is an open risk, not a pass.
  
  ## 6. Evidence discipline
-@@ -104,21 +169,24 @@ Why write-time discipline is load-bearing — nothing behind the writer checks c
- - Refusal envelope: `pok_active_cap` (`daemon/services/pok_service.py:461-470`) — refuse-never-evict; the error names the archive-cure vocabulary but never writes an archive itself, and the oldest row is not automatically the right cure.
- - Upsert audit is content-free: action + slug + project + actor + audience (`daemon/tools/pok.py:273`) — never the row body.
- - Supersede outcomes are recorded as `created | superseded | no-op` (`daemon/services/pok_service.py:241`); a superseded row keeps a readable lineage.
+ 
+-- Refusal envelope: `pok_active_cap` (`daemon/services/pok_service.py:461-470`) — refuse-never-evict; the error names the archive-cure vocabulary but never writes an archive itself, and the oldest row is not automatically the right cure.
+-- Upsert audit is content-free: action + slug + project + actor + audience (`daemon/tools/pok.py:273`) — never the row body.
+-- Supersede outcomes are recorded as `created | superseded | no-op` (`daemon/services/pok_service.py:241`); a superseded row keeps a readable lineage.
 -- The "nothing happened" path is the trap: a silently-rotting snapshot row emits NOTHING — no log line, no expiry event. Absence of complaints is not evidence of freshness.
++- Refusal envelope: `pok_active_cap` (`daemon/services/pok_service.py:582-591`) — refuse-never-evict; the error names the archive-cure vocabulary but never writes an archive itself, and the oldest row is not automatically the right cure.
++- Upsert audit is content-free: action + slug + project + actor + audience (`daemon/tools/pok.py:1471`) — never the row body.
++- Supersede outcomes are recorded as `created | superseded | no-op` (`daemon/services/pok_service.py:274`); a superseded row keeps a readable lineage.
 +- **The write-gate ledger is the gate's audit.** One append-only row per gate event, keyed by `gate_id` + `phase`: a plain ACCEPT/MERGE/REJECT chain keeps **two** rows (the gate's verdict row, then the tool's execution row — the authority split, both recorded); an ASK chain keeps **three** (`ASK_MINTED` → `ASK_ANSWERED` → `ASK_EXECUTED`); a **RETRIEVAL** row records a row surfaced from a read (`source="query"`) or a context block (`source="injection"`) — the durable record that supersedes `access_count` (§4(iii)). The ledger is content-light and credential-scrubbed before persist (a credential-shaped value is replaced by a name + hash prefix — the raw value never reaches the store).
 +- **The "nothing happened" path is the trap:** a silently-rotting snapshot row emits NOTHING — no log line, no expiry event. Absence of complaints is not evidence of freshness.
 +- **The capture paths never raise into the read path.** A failed ledger append costs a metric, never a POK block and never a query result — the containment is doubled (the call site guards the capture AND the capture guards each row).
@@ -215,16 +224,20 @@ index ad2506b05..f7c624e29 100644
  
  ## 10. Source-of-truth pointers
  
-@@ -126,8 +194,17 @@ draft — authored 2026-11-17 by the pok-cap-curator lane's TASK-3 executor; a h
+-- Cap constant: `daemon/services/pok_service.py:105` — `POK_ACTIVE_CAP_PER_PROJECT = 1024` (commit rides the 2026-11-23 sonic lane, board wi-1921ba17); verify by grep at use time. `[active cap 1024 — commission 2026-11-23, board wi-1921ba17]`
++- Cap constant: `daemon/services/pok_service.py:131` — `POK_ACTIVE_CAP_PER_PROJECT = 1024` (commit rides the 2026-11-23 sonic lane, board wi-1921ba17); verify by grep at use time. `[active cap 1024 — commission 2026-11-23, board wi-1921ba17]`
  - Active-cap single-source row: `.agents/shared/planning/project-operating-knowledge/decisions.md` **A-13** — the ONE authoritative restatement of the sizing set; the cap-value marker discipline lives there (bare unmarked cap numbers outside it are a defect in that artifact set).
- - Refusal code: `pok_active_cap` — `daemon/services/pok_service.py:462`.
- - Curator tool: `daemon/tools/pok.py:410` (`pok_curate`, leader/PM only; authority contract `:13`, `:27`); service `daemon/services/pok_service.py`; repository `daemon/repositories/pok/` (`models.py`, `repository.py`).
+-- Refusal code: `pok_active_cap` — `daemon/services/pok_service.py:462`.
+-- Curator tool: `daemon/tools/pok.py:410` (`pok_curate`, leader/PM only; authority contract `:13`, `:27`); service `daemon/services/pok_service.py`; repository `daemon/repositories/pok/` (`models.py`, `repository.py`).
+-- Injection budget: `POK_BLOCK_MAX_ENTRIES = 8` (`daemon/services/pok_service.py:123`), `POK_BLOCK_MAX_CHARS = 2_900` (`:121`); enforcement `daemon/services/pok_injection.py:379-380,474`.
++- Refusal code: `pok_active_cap` — `daemon/services/pok_service.py:583`.
++- Curator tool: `daemon/tools/pok.py:1812` (`pok_curate`, leader/PM only; authority contract `:13`, `:27`); service `daemon/services/pok_service.py`; repository `daemon/repositories/pok/` (`models.py`, `repository.py`).
 +- The GATE (the judge — a pure function that NEVER writes): `daemon/services/pok_gate.py` — the verdict vocabulary (`GATE_VERDICTS` = ACCEPT / MERGE / ASK / REJECT), the family vocabulary (`GATE_FAMILIES`), the R0–R5 rule set, the ASK confidence threshold (2/3) and the ASK TTL (default 1200 s). The gate's TOOL surface and the authority split: `daemon/tools/pok.py` (`pok_upsert`, `pok_gate_answer`).
 +- The write-gate LEDGER (the audit of record): `daemon/repositories/pok/models.py` (`POKWriteGateLedger`) + `daemon/repositories/pok/repository.py` (`append_ledger`, `query_ledger`, `count_ledger_phase`).
 +- The LIBRARIAN (the maintenance half): `daemon/services/pok_librarian.py` — the soft max (`pok.soft_max.v1`, in project metadata), the ruled-bases consolidator, the R-RET detection, the H3 periodic pass, and the board sink (`emit_librarian_board_notice`).
 +- The retrieval wiring (both sides): `daemon/services/pok_service.py` (the query path appends `source="query"` rows) + `daemon/services/pok_injection.py` (`make_retrieval_recorder` → `source="injection"`).
 +- The gate's switches (DB-backed, default OFF): `daemon/services/settings_service.py` — `pok_gate.semantic_enforcement`, `pok_gate.softmax_tightening`, `pok_gate.merge_policy`.
- - Injection budget: `POK_BLOCK_MAX_ENTRIES = 8` (`daemon/services/pok_service.py:123`), `POK_BLOCK_MAX_CHARS = 2_900` (`:121`); enforcement `daemon/services/pok_injection.py:379-380,474`.
++- Injection budget: `POK_BLOCK_MAX_ENTRIES = 8` (`daemon/services/pok_service.py:149`), `POK_BLOCK_MAX_CHARS = 2_900` (`:147`); enforcement `daemon/services/pok_injection.py:411-412,506`.
  - Guideline house: `docs/guidelines/README.md` (naming, placement, lifecycle); shape `docs/guidelines/TEMPLATE.md`.
 +- This lane's plan set (READ-ONLY, frozen): `.agents/shared/planning/pok-write-gate/` — `phase12-plan.md` (the measured-figures contract), `plan-overview.md` (the fold ledger), `design-amendments-v2.md` (the binding rulings), `architecture-recommendation.md` (byte-frozen).
 +- The measured evidence (branch-verifiable): `.agents/shared/planning/pok-write-gate/evidence-rederiv-2026-11-24/kb-writer-trio.md` (sha256 `213e743d…c473`) and `.agents/shared/planning/pok-write-gate/evidence-rederiv-2026-11-23/funnel-and-agreement.md` (sha256 `b55101a3…8ada`).
