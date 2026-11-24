@@ -125,6 +125,36 @@ def kill_switch_enabled() -> bool:
     return raw.strip().lower() not in ("0", "false", "no", "off")
 
 
+def _caller_cancel_requested() -> bool:
+    """True iff the CURRENT task itself has a pending cancel request.
+
+    House pattern: ``daemon/mcp/stdio_wrapper.py::_is_caller_cancelled``
+    (and ``daemon/mcp/managed_session.py``'s cancel-scope guard) —
+    ``asyncio.CancelledError`` is a ``BaseException`` since 3.8, so a
+    cancel raised INSIDE a nested await (an inner future cancelled by
+    another party) escapes every ``except Exception`` net. The
+    discriminator lets a periodic sweep tell the two apart:
+
+    * ``cancelling() > 0`` — THIS task was cancelled (shutdown) ⇒ the
+      CancelledError must PROPAGATE (never swallow a shutdown);
+    * ``cancelling() == 0`` — an inner cancellation escaped ⇒ the sweep
+      continues (one candidate's cancel never aborts the sweep).
+
+    NIT-3 (fix/post-outage-recovery b4).
+    """
+    task = None
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:  # pragma: no cover — no running loop (a plain thread)
+        return False
+    if task is None:
+        return False
+    try:
+        return task.cancelling() > 0
+    except AttributeError:  # pragma: no cover — pre-3.11 fallback
+        return bool(getattr(task, "_must_cancel", False))
+
+
 @dataclass
 class SupervisorResult:
     """Per-sweep totals. Every counter zero-initialized for clean fast paths."""
@@ -144,6 +174,17 @@ class SupervisorResult:
     skipped_cas_lost: int = 0
     #: callback refused / found no work — surfaced, re-armed next tick.
     skipped_redrive_refused: int = 0
+    #: NIT-3 — an INNER CancelledError escaped a candidate's re-drive.
+    #: Logged LOUD (never swallowed silently), the candidate is skipped,
+    #: and the sweep CONTINUES. An outer cancel (shutdown) propagates.
+    skipped_redrive_cancelled: int = 0
+    #: NIT-1 — the instance-less leg found LIVE delivery evidence and
+    #: refused to double-drive it.
+    skipped_delivery_in_flight: int = 0
+    #: NIT-1 — the instance-less leg found a LANDED delivery (a done
+    #: JobItem terminalized 'completed') and healed the receipt to
+    #: ``executed`` instead of re-dispatching a SECOND delivery.
+    healed_receipt: int = 0
     skipped_kill_switch: int = 0
     errors: int = 0
     duration_seconds: float = 0.0
@@ -259,6 +300,58 @@ class ScheduledFireSupervisor:
             return {"status": "no_callback"}
         return await self._redrive_callback(candidate)
 
+    async def _heal_landed_receipt(
+        self,
+        execution_id: str,
+        landed: list[dict[str, Any]],
+        result: SupervisorResult,
+    ) -> bool:
+        """Close a receipt whose delivery LANDED but whose dispatched
+        write was LOST (NIT-1).
+
+        The JobItem evidence says the delivery reached ``done`` with
+        ``terminal_reason='completed'`` — the truth is ``executed``, so
+        the row is closed to that terminal state instead of being
+        re-dispatched as a SECOND delivery of the same execution. The
+        instance handle rides along from the evidence row when one is
+        available (it is allowed to stay NULL on this heal — the row is
+        TERMINAL, so the A.1 open-state handle rule does not apply).
+        """
+        healer = getattr(
+            self._source_repo, "heal_execution_receipt_executed", None
+        )
+        if healer is None:
+            return False
+        instance_id = next(
+            (
+                row.get("instance_id")
+                for row in landed
+                if row.get("instance_id")
+            ),
+            None,
+        )
+        try:
+            healed = await asyncio.to_thread(
+                healer, execution_id, "completed", instance_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — fail-soft, re-armed
+            result.errors += 1
+            self._log_db_error("receipt_heal", result, exc)
+            return False
+        if healed is None:
+            return False
+        result.healed_receipt += 1
+        logger.error(
+            "[SCHEDULED_SUPERVISOR_LANDED_DELIVERY_HEALED] execution=%s "
+            "instance=%s — the delivery LANDED (done/completed JobItem) "
+            "but the dispatched-receipt write was lost; the receipt is "
+            "healed to ``executed`` and NO second delivery is minted "
+            "(NIT-1 closed)",
+            str(execution_id)[:8],
+            str(instance_id or "")[:8],
+        )
+        return True
+
     # ── Main sweep ─────────────────────────────────────────────────────────
 
     async def sweep_once(self) -> SupervisorResult:
@@ -302,7 +395,33 @@ class ScheduledFireSupervisor:
 
             for candidate in candidates:
                 try:
-                    await self._process_candidate(candidate, tick_stamp, max_redrives, result)
+                    await self._process_candidate(
+                        candidate, tick_stamp, max_redrives, result,
+                        lookback_cutoff,
+                    )
+                except asyncio.CancelledError:
+                    # NIT-3: CancelledError is a BaseException — it escapes
+                    # the ``except Exception`` below. Distinguish (house
+                    # pattern: ``daemon/mcp/managed_session.py`` /
+                    # ``stdio_wrapper._is_caller_cancelled``):
+                    #   * THIS task was cancelled (shutdown) ⇒ PROPAGATE;
+                    #   * an inner cancellation escaped the candidate's
+                    #     re-drive ⇒ log LOUD (never swallowed silently),
+                    #     count it, and CONTINUE with the remaining
+                    #     candidates — one candidate's cancel never
+                    #     aborts the sweep.
+                    if _caller_cancel_requested():
+                        raise
+                    result.skipped_redrive_cancelled += 1
+                    logger.error(
+                        "[SCHEDULED_SUPERVISOR_REDRIVE_CANCELLED] "
+                        "execution=%s — a CancelledError escaped the "
+                        "candidate's re-drive while this sweep task is NOT "
+                        "being cancelled; the candidate is skipped and the "
+                        "sweep CONTINUES (the cancel is NOT swallowed "
+                        "silently)",
+                        str(candidate.get("execution_id"))[:8],
+                    )
                 except Exception as exc:  # noqa: BLE001 — per-candidate isolation
                     result.errors += 1
                     self._log_db_error(
@@ -318,11 +437,12 @@ class ScheduledFireSupervisor:
         logger.info(
             "[SCHEDULED_SUPERVISOR] summary: candidates=%d redriven=%d "
             "recovered=%d skipped_processing=%d dead_lineage=%d cap_terminal=%d "
-            "cas_lost=%d refused=%d errors=%d duration_s=%.3f mode=%s",
+            "cas_lost=%d refused=%d cancelled=%d errors=%d duration_s=%.3f mode=%s",
             result.candidates, result.redriven, result.recovered,
             result.skipped_processing, result.terminal_dead_lineage,
             result.terminal_cap, result.skipped_cas_lost,
-            result.skipped_redrive_refused, result.errors,
+            result.skipped_redrive_refused, result.skipped_redrive_cancelled,
+            result.errors,
             result.duration_seconds, result.mode,
         )
         return result
@@ -333,12 +453,82 @@ class ScheduledFireSupervisor:
         tick_stamp: str,
         max_redrives: int,
         result: SupervisorResult,
+        lookback_cutoff: str | None = None,
     ) -> None:
         execution_id = candidate.get("execution_id")
         instance_id = candidate.get("instance_id")
         status = candidate.get("status")
         if not execution_id:
             return
+
+        # (0) NIT-1 — the DELIVERY-EVIDENCE gate (instance-less rows only).
+        #     An instance-less 'triggered' row whose dispatched-receipt
+        #     write was LOST (fail-soft) carries no handle, so legs (1)
+        #     and (2) below are both skipped and the re-dispatch would
+        #     mint a SECOND delivery for the same execution (measured
+        #     enqueues 1→2 on a recurring fire, which carries no
+        #     idempotency key). The JobItem rows ARE the durable
+        #     delivery evidence — the fire path stamps
+        #     ``metadata.scheduler.execution_id`` on every scheduled
+        #     enqueue — so the probe answers "did this execution already
+        #     deliver?" cheaply (source-bounded + lookback-bounded +
+        #     LIMIT). Adjudication:
+        #       * a LIVE JobItem (queued/active) ⇒ the delivery is IN
+        #         FLIGHT — never double-drive it (the same protection
+        #         leg (1) gives instance-bearing rows);
+        #       * a DONE JobItem terminalized 'completed' ⇒ the delivery
+        #         LANDED — heal the receipt to ``executed`` (the truth)
+        #         and do NOT re-dispatch;
+        #       * anything else (no evidence / a dead or non-completed
+        #         closure) ⇒ the re-drive IS the recovery intent —
+        #         proceed, the cap bounds it.
+        if not instance_id and self._source_repo is not None and hasattr(
+            self._source_repo, "find_scheduler_delivery_evidence"
+        ):
+            try:
+                evidence = await asyncio.to_thread(
+                    self._source_repo.find_scheduler_delivery_evidence,
+                    execution_id,
+                    lookback_cutoff or "",
+                )
+            except Exception as exc:  # noqa: BLE001 — fail-OPEN on the probe
+                # A probe failure must not blind the lane: log LOUD and
+                # proceed exactly as before the gate existed (the cap
+                # still bounds the re-drive).
+                logger.warning(
+                    "[SCHEDULED_SUPERVISOR_EVIDENCE_PROBE_FAILED] "
+                    "execution=%s — %s: %s (gate fail-open, re-drive "
+                    "proceeds under the cap)",
+                    str(execution_id)[:8], type(exc).__name__, exc,
+                )
+                evidence = []
+            if evidence:
+                live = [
+                    row for row in evidence
+                    if str(row.get("admission_state")) in
+                    ("queued", "active")
+                ]
+                landed = [
+                    row for row in evidence
+                    if str(row.get("admission_state")) == "done"
+                    and str(row.get("terminal_reason")) == "completed"
+                ]
+                if live:
+                    result.skipped_delivery_in_flight += 1
+                    logger.info(
+                        "[SCHEDULED_SUPERVISOR_DELIVERY_IN_FLIGHT] "
+                        "execution=%s — %d live JobItem(s) for this "
+                        "execution; NOT re-dispatched (never double-drive "
+                        "an in-flight delivery)",
+                        str(execution_id)[:8], len(live),
+                    )
+                    return
+                if landed:
+                    healed = await self._heal_landed_receipt(
+                        execution_id, landed, result,
+                    )
+                    if healed:
+                        return
 
         # (1) Observation-safe: a task RUNNING at the deadline is a slow
         #     start — never double-drive it.

@@ -1520,6 +1520,39 @@ class SQLModelSourceRepository:
                 session.refresh(execution)
             return execution
 
+    def heal_execution_receipt_executed(
+        self,
+        execution_id: str,
+        outcome: str,
+        instance_id: str | None = None,
+    ) -> ScheduleExecution | None:
+        """Close a receipt whose delivery LANDED but whose dispatched
+        write was LOST (NIT-1, fix/post-outage-recovery b4).
+
+        Keyed by the execution id (NOT the ``job_item_id`` handle — that
+        handle is exactly what was lost with the fail-soft dispatched
+        write). Bounded to the OPEN states: a row already terminalized
+        by another path is never rewritten. The ``instance_id`` handle
+        rides along when the evidence row carried one; on a healed row
+        it is allowed to stay NULL because the row is TERMINAL (the A.1
+        handle rule governs the OPEN ``dispatched`` state only).
+        """
+        with Session(self.engine) as session:
+            execution = session.get(ScheduleExecution, execution_id)
+            if execution is None:
+                return None
+            if execution.status not in self._RECEIPT_OPEN_STATES:
+                return execution
+            execution.status = ExecutionStatus.EXECUTED.value
+            execution.outcome = outcome
+            execution.completed_at = datetime.now(timezone.utc).isoformat()
+            if instance_id and not execution.instance_id:
+                execution.instance_id = instance_id
+            session.add(execution)
+            session.commit()
+            session.refresh(execution)
+            return execution
+
     # ── Supervisor selection / CAS (Addendum A.4) ──────────────────────────
 
     def select_supervisor_candidates(
@@ -1710,6 +1743,75 @@ class SQLModelSourceRepository:
             session.commit()
             session.refresh(execution)
             return execution
+
+    # ── NIT-1 (fix/post-outage-recovery b4): the delivery-evidence probe ──
+
+    def find_scheduler_delivery_evidence(
+        self,
+        execution_id: str,
+        lookback_cutoff: str,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """The JobItems minted for this scheduled execution — the durable
+        DELIVERY EVIDENCE.
+
+        The fire path writes ``metadata.scheduler.execution_id`` on EVERY
+        scheduled enqueue (the adapter's metadata builder), so a JobItem
+        carrying that id is positive proof the enqueue committed — proof
+        that SURVIVES the loss of the receipt's own fail-soft
+        ``dispatched`` write (the exact NIT-1 shape: a fire whose
+        delivery LANDED but whose receipt never advanced, resting at
+        ``triggered`` with a NULL ``instance_id``, which the supervisor's
+        instance-less leg would otherwise RE-DISPATCH as a SECOND
+        delivery for the same execution).
+
+        Bounded three ways (cheap by construction): ``source='scheduler'``
+        (the metadata predicate only needs to scan scheduler-originated
+        rows), ``created_at >= lookback_cutoff`` (the supervisor's
+        lookback window — the same bound its own selection uses), and
+        ``LIMIT``. The metadata predicate is a dialect-portable
+        ``CAST(metadata AS VARCHAR) LIKE`` — JSONB on PostgreSQL and the
+        TEXT-backed JSON on SQLite both render the id. The needle is a
+        UUID, so no LIKE wildcard can leak into the pattern.
+
+        Read-only — no row mutation. Returns at most ``limit`` rows of
+        ``{job_id, instance_id, admission_state, terminal_reason,
+        created_at}``, newest first.
+        """
+        from sqlalchemy import String, cast
+
+        from daemon.repositories.job_queue.models import JobItem
+
+        needle = f"%{execution_id}%"
+        with Session(self.engine) as session:
+            rows = session.exec(
+                select(
+                    JobItem.job_id,
+                    JobItem.instance_id,
+                    JobItem.admission_state,
+                    JobItem.terminal_reason,
+                    JobItem.created_at,
+                )
+                .where(col(JobItem.source) == "scheduler")
+                .where(col(JobItem.created_at) >= lookback_cutoff)
+                .where(cast(JobItem.job_metadata, String).like(needle))
+                .where(col(JobItem.deleted_at).is_(None))
+                .order_by(col(JobItem.created_at).desc())
+                .limit(limit)
+            ).all()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            mapping = row._mapping if hasattr(row, "_mapping") else row
+            out.append(
+                {
+                    "job_id": mapping["job_id"],
+                    "instance_id": mapping["instance_id"],
+                    "admission_state": mapping["admission_state"],
+                    "terminal_reason": mapping["terminal_reason"],
+                    "created_at": mapping["created_at"],
+                }
+            )
+        return out
 
 
 __all__ = [

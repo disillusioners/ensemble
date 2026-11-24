@@ -673,13 +673,42 @@ def _make_scheduled_fire_redrive(manager: Any):
     """
 
     async def _scheduled_fire_redrive(candidate: dict) -> dict:
-        """F2 make-claimable + wake, or adapter re-dispatch for no-instance."""
+        """F2 make-claimable + wake, or adapter re-dispatch for no-instance.
+
+        NIT-3: ``asyncio.CancelledError`` is a ``BaseException`` and
+        escapes both legs' ``except Exception`` nets. The house
+        discriminator (``sup._caller_cancel_requested`` — mirrors
+        ``daemon/mcp/stdio_wrapper.py::_is_caller_cancelled``) splits the
+        two cases: an OUTER cancel (this sweep task is being cancelled —
+        shutdown) PROPAGATES; an INNER cancellation that escaped a nested
+        await is logged LOUD and returned as a truthful refusal so the
+        supervisor's per-candidate leg records it and the sweep continues.
+        """
+        import daemon.services.scheduled_fire_supervisor as _sup
+
         instance_id = candidate.get("instance_id")
         if instance_id:
             try:
                 resumed = await manager.resume_processing_job(
                     instance_id, message="", silent=True, images=None,
                 )
+            except asyncio.CancelledError:
+                if _sup._caller_cancel_requested():
+                    raise
+                logger.error(
+                    "[SCHEDULED_SUPERVISOR_REDRIVE_CANCELLED] execution=%s "
+                    "instance=%s leg=resume — an inner CancelledError "
+                    "escaped ``resume_processing_job`` while this sweep task "
+                    "is NOT being cancelled; returned as a refusal (the "
+                    "cancel is NOT swallowed silently)",
+                    str(candidate.get("execution_id"))[:8],
+                    str(instance_id)[:8],
+                )
+                return {
+                    "status": "refused",
+                    "error": "cancelled_in_redrive",
+                    "instance_id": instance_id,
+                }
             except Exception as exc:  # noqa: BLE001 — fail-soft into supervisor
                 return {"status": "refused", "error": str(exc)}
             if resumed is None:
@@ -708,6 +737,22 @@ def _make_scheduled_fire_redrive(manager: Any):
             if isinstance(outcome, dict):
                 return outcome
             return {"status": "refused", "error": "bad_adapter_outcome"}
+        except asyncio.CancelledError:
+            if _sup._caller_cancel_requested():
+                raise
+            logger.error(
+                "[SCHEDULED_SUPERVISOR_REDRIVE_CANCELLED] execution=%s "
+                "leg=adapter — an inner CancelledError escaped "
+                "``redrive_execution`` while this sweep task is NOT being "
+                "cancelled; returned as a refusal (the cancel is NOT "
+                "swallowed silently)",
+                str(candidate.get("execution_id"))[:8],
+            )
+            return {
+                "status": "refused",
+                "error": "cancelled_in_redrive",
+                "execution_id": candidate.get("execution_id"),
+            }
         except Exception as exc:  # noqa: BLE001
             return {"status": "refused", "error": str(exc)}
 
