@@ -280,9 +280,11 @@ evidence), with R3/R4/R5/R6/R8/R9 PASS and the missing evidence named.
 
 | Field | Value |
 |---|---|
-| Staged version | **`<SLOT>` — TO BE RE-DERIVED AT CUT TIME by the staging lane.** v0.31.45 was consumed mid-lane (by a concurrent release lane); v0.31.46 was free at 17:30Z. **Do not treat any slot as fixed.** |
-| Staged commit sha | **`<SHA>` — PLACEHOLDER, to be filled by the staging lane** (this lane did not stage, did not tag, did not push) |
-| 4-way artifact sha | **`«4-way-sha»` — PLACEHOLDER, operator re-hash chain** (release dir == dist == manifest == sidecar) |
+| Staged version | **v0.31.49** — re-derived at cut time (2026-11-24 ~01:00Z): 0.31.46/47/48 all taken by concurrent lanes; triple-bump 0.31.46→49, intermediate bump commits dfd49b110 (0.31.47) + 27f13f756 (0.31.48) ride latest untagged |
+| Staged commit sha | **ac34da1d234fd53f23548529088a4a36ac16f408** (bump commit `! New version 0.31.49`, on latest, pushed) |
+| Annotated tag | **v0.31.49 → tag object 6c35d35445f111f45d332616837d472e4b566455, peeled commit ac34da1d2** (tag == latest tip, zero cut-point ambiguity) |
+| 4-way artifact sha | **528e089539f690e9d5bcb7f48f8a6db4fc36c551834d7fbcbaddbc07ec9577e5** — independently re-hashed by giter: release-dir binary == stage-wt dist == manifest.binary_sha256 == sidecar artifact_sha256, all four legs identical |
+| staged_at | **2026-11-24T01:17:05Z** (rollback_safe=true source=explicit; known_schema_gen=20261121_120001_create_engine_runs.sql; NO flip — current stays v0.31.42) |
 
 This lane performed **no** promote, **no** release staging, **no** tag
 cutting, **no** merge, **no** push, **no** live flag flip, **no** daemon
