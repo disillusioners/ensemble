@@ -9,8 +9,10 @@
 #   tests/unit/services/test_stale_running_sweep_pins.py
 #   tests/unit/services/test_stale_running_sweep_rider_pins.py
 #   tests/unit/services/test_supervisor_riders_b4_pins.py
-#   Total: 51 nodes (mechanical `--collect-only` census at this freeze:
-#   51 collected, RC=0, 0 collection errors).
+#   Total: 53 nodes (mechanical `--collect-only` census RE-DERIVED at HEAD
+#   `86a4849eb` after the post-freeze b4 review-fold pin additions
+#   [1ab6cceae +2 nodes; cb1a74cf's F1-N relabel was count-neutral]:
+#   53 collected, RC=0, 0 collection errors).
 #
 #   Shape B — the stale-running sweep must TERMINALIZE (not leave hanging)
 #     every stale-running row it claims, with the terminalization receipt
@@ -33,7 +35,7 @@
 #     census that produced the node count was measured under the SAME filter,
 #     so the pack's node count and the census are comparable.
 #   - SLICING PROOF: the pack re-derives its own node count with
-#     `--collect-only` and FAILS if it drifts from the declared 51 — a
+#     `--collect-only` and FAILS if it drifts from the declared 53 — a
 #     pack that silently runs a different node set is inadmissible.
 #   - VACUOUS-VERDICT GUARD: zero passed tests or no summary line = FAIL
 #     (a pack that can PASS from an empty run is worthless).
@@ -43,7 +45,7 @@
 set -u
 
 PACK_NAME="por_b4_stale_running_sweep_unit_test"
-EXPECTED_NODES=51
+EXPECTED_NODES=53
 
 echo "=== Test Pack: ${PACK_NAME} ==="
 

@@ -8,8 +8,10 @@
 # WHAT IT PINS
 #   tests/unit/services/test_execution_receipt_pins.py
 #   tests/unit/services/test_scheduled_fire_supervisor_pins.py
-#   Total: 32 nodes (mechanical `--collect-only` census at this freeze:
-#   32 collected, RC=0, 0 collection errors).
+#   Total: 34 nodes (mechanical `--collect-only` census RE-DERIVED at HEAD
+#   `86a4849eb` after the post-freeze review-fold + ratification pin
+#   additions [1ab6cceae +1 node, cb1a74cf +1 node]: 34 collected, RC=0,
+#   0 collection errors).
 #
 #   Addendum A — the execution receipt contract: every scheduled fire must
 #     leave a receipt that is shaped correctly and is re-armed exactly once
@@ -31,7 +33,7 @@
 #     census that produced the node count was measured under the SAME filter,
 #     so the pack's node count and the census are comparable.
 #   - SLICING PROOF: the pack re-derives its own node count with
-#     `--collect-only` and FAILS if it drifts from the declared 32 — a
+#     `--collect-only` and FAILS if it drifts from the declared 34 — a
 #     pack that silently runs a different node set is inadmissible.
 #   - VACUOUS-VERDICT GUARD: zero passed tests or no summary line = FAIL
 #     (a pack that can PASS from an empty run is worthless).
@@ -41,7 +43,7 @@
 set -u
 
 PACK_NAME="por_b3_receipt_supervisor_unit_test"
-EXPECTED_NODES=32
+EXPECTED_NODES=34
 
 echo "=== Test Pack: ${PACK_NAME} ==="
 
