@@ -151,9 +151,10 @@ STRANDED_SURFACING_TERMINATE_ENV = "ENSEMBLE_STRANDED_SURFACING_TERMINATE"
 
 
 def _stranded_terminate_enabled() -> bool:
-    """Per-boot read of the retire opt-in. Default OFF (surface-only).
-    Retire proven-dead classes only when explicitly armed (=1)."""
-    return os.environ.get(STRANDED_SURFACING_TERMINATE_ENV, "") == "1"
+    """Per-boot read of the retire switch. Default ON: the proven-dead
+    classes (1a, 1b) are retired by default. Opt out with =0.
+    Independent of ENSEMBLE_AUTO_CONTINUE_RUNNING_ON_RESTART."""
+    return os.environ.get(STRANDED_SURFACING_TERMINATE_ENV, "1") != "0"
 
 
 # Module-level holder for the most recent stranded-surfacing result so
