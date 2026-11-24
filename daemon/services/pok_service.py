@@ -81,6 +81,7 @@ __all__ = [
     "POK_SLUG_PATTERN",
     "POK_VERIFY_WINDOW_DAYS",
     "QueryOutcome",
+    "R0_FENCE_LABEL",
     "UpsertOutcome",
     "content_hash",
     "fence_check",
@@ -187,36 +188,43 @@ def is_default_project(project_id: str | None, project_name: str | None = None) 
 
 _FENCE_TOKENS = ("[SYSTEM CONTEXT:", "```")
 
+#: The canonical R0 label carried on every content-fence refusal so the
+#: mechanical rule NAMES itself (Phase 3 T3.4 — "R0 named fence").
+R0_FENCE_LABEL = "R0 content fence"
+
 
 def fence_check(body: str) -> POKError | None:
     """The write-time structural fence. Returns the typed refusal or
     ``None`` when the body is fence-clean.
 
-    Refused tokens: any NEWLINE (bodies are single-paragraph),
-    a leading ``#`` at body start (forged-header), ``[SYSTEM CONTEXT:``
+    Every refusal NAMES R0 (the mechanical content fence). Refused
+    tokens: any NEWLINE (bodies are single-paragraph), a leading ``#``
+    at body start (forged-header), ``[SYSTEM CONTEXT:``
     (block-boundary forgery), triple-backtick (data-fence escape).
     """
     if not body or not body.strip():
         return POKError(
-            "pok_body_empty", "body is empty — write the fact, not a blank row"
+            "pok_body_empty",
+            f"body is empty — write the fact, not a blank row ({R0_FENCE_LABEL})",
         )
     if "\n" in body or "\r" in body:
         return POKError(
             "pok_body_structural_token",
             "body contains a newline — POK bodies are single-paragraph "
-            "fenced-verbatim facts",
+            f"fenced-verbatim facts ({R0_FENCE_LABEL})",
         )
     if body.startswith("#"):
         return POKError(
             "pok_body_structural_token",
-            "body starts with '#' — forged headers are refused at write",
+            "body starts with '#' — forged headers are refused at write "
+            f"({R0_FENCE_LABEL})",
         )
     for token in _FENCE_TOKENS:
         if token in body:
             return POKError(
                 "pok_body_structural_token",
                 f"body contains the structural token {token!r} — refused "
-                "at write (AC17 forged-header leg)",
+                f"at write (AC17 forged-header leg, {R0_FENCE_LABEL})",
             )
     return None
 
@@ -299,6 +307,8 @@ class POKService:
         project_id: str,
         slug: str,
         body: str,
+        reason: str | None = None,
+        gate_fn: Callable | None = None,
         domain: str = POK_DOMAINS[-1],
         provenance: str = "observed",
         audience: str = POK_DEFAULT_AUDIENCE,
@@ -313,6 +323,12 @@ class POKService:
         ``escape_fn`` is :func:`escape_for_context_block` passed by the
         tool layer (lazy-import discipline keeps this module
         cycle-neutral with ``context_messages``).
+
+        ``reason`` (the caller's OPERATIONAL CLAIM) and ``gate_fn``
+        (the injected gate callable) are accepted here as the gate
+        seam; Phase 3 enforces ``reason`` presence at the TOOL layer
+        and this service stays LLM-free. Both default to ``None`` so
+        every direct ``svc.upsert(...)`` call site is byte-unchanged.
 
         ``source_tier`` (Phase 2 — trust-tier addendum T-1) is the
         OPTIONAL trust-tier statement at capture: omit (``None``) →

@@ -369,7 +369,7 @@ class TestAcT2TypedRefusals:
     def test_non_curator_upsert_curated_refused_tool(self, tool_env) -> None:
         tools = _tools(tool_env, "developer")
         out = tools["pok_upsert"].invoke(
-            {"slug": "guide-01-slug", "body": "a guideline", "source_tier": "curated"}
+            {"slug": "guide-01-slug", "body": "a guideline", "source_tier": "curated", "reason": "unit fixture reason"}
         )
         assert out["code"] == "pok_tier_requires_curator"
         assert "attribution ≠ authorization" in out["error"]
@@ -425,7 +425,7 @@ class TestAcT2TypedRefusals:
 
     def test_non_curator_curate_tier_flip_refused_tool(self, tool_env) -> None:
         tools = _tools(tool_env, "developer")
-        tools["pok_upsert"].invoke({"slug": "plain-01-fact", "body": "a fact"})
+        tools["pok_upsert"].invoke({"slug": "plain-01-fact", "body": "a fact", "reason": "unit fixture reason"})
         out = tools["pok_curate"].invoke(
             {"slug": "plain-01-fact", "source_tier": "curated"}
         )
@@ -779,11 +779,12 @@ class TestAcT5UniversalReadAndLineageMarker:
                 "slug": "guide-01-slug",
                 "body": "the guideline v1",
                 "source_tier": "curated",
+                "reason": "unit fixture reason",
             }
         )
         # curator supersedes with content v2 (tier omitted → inherits)
         tools["pok_upsert"].invoke(
-            {"slug": "guide-01-slug", "body": "the guideline v2"}
+            {"slug": "guide-01-slug", "body": "the guideline v2", "reason": "unit fixture reason"}
         )
         dev_tools = _tools(tool_env, "developer")
         out = dev_tools["pok_query"].invoke({})
@@ -799,8 +800,8 @@ class TestAcT5UniversalReadAndLineageMarker:
 
     def test_agent_tier_lineage_rows_carry_no_marker(self, tool_env) -> None:
         tools = _tools(tool_env, "developer")
-        tools["pok_upsert"].invoke({"slug": "plain-01-fact", "body": "v1"})
-        tools["pok_upsert"].invoke({"slug": "plain-01-fact", "body": "v2"})
+        tools["pok_upsert"].invoke({"slug": "plain-01-fact", "body": "v1", "reason": "unit fixture reason"})
+        tools["pok_upsert"].invoke({"slug": "plain-01-fact", "body": "v2", "reason": "unit fixture reason"})
         out = tools["pok_query"].invoke({})
         lineage = out["entries"][0]["lineage"]
         assert lineage and all("marker" not in r for r in lineage)

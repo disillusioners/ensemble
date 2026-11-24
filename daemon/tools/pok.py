@@ -202,6 +202,7 @@ def create_pok_tools(
     def pok_upsert(
         slug: str,
         body: str,
+        reason: str,
         domain: str = "other",
         provenance: str = "observed",
         audience: str = "operation",
@@ -217,7 +218,12 @@ def create_pok_tools(
           of a family render adjacently.
         - ``body``: ONE paragraph, <=240 chars measured AFTER
           escaping. Newlines, leading '#', '[SYSTEM CONTEXT:' and
-          triple-backticks are REFUSED at write (the content fence).
+          triple-backticks are REFUSED at write (the content fence, R0).
+        - ``reason``: REQUIRED field (the tool schema enforces presence).
+          The OPERATIONAL CLAIM — why this fact belongs in POK (the
+          gate's primary input). Empty/whitespace is refused
+          (``pok_reason_required``). Be specific: state the operational
+          invariant, not "because" or boilerplate.
         - ``audience`` (stated at capture, default 'operation'):
           operation → {ari, leader, devops, sonic-leader,
           sonic-developer}; implementation → {leader, developer,
@@ -250,6 +256,18 @@ def create_pok_tools(
         project_id, project_name, refusal = _scope()
         if refusal is not None:
             return refusal
+        # Reason (the OPERATIONAL CLAIM) is the gate's primary input.
+        # Precedence is load-bearing: store → scope → REASON →
+        # fence/budget/family. This check sits AFTER the store and
+        # scope guards above and BEFORE svc.upsert (where the fence,
+        # budget and family checks live), so a degraded store or a
+        # bad scope always wins over a missing reason.
+        if not reason or not reason.strip():
+            return _err(
+                "pok_reason_required",
+                "a reason (the operational claim) is required — state "
+                "why this fact belongs in POK",
+            )
         try:
             from ..services.context_messages import (  # noqa: PLC0415
                 escape_for_context_block,

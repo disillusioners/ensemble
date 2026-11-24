@@ -155,7 +155,7 @@ class TestServerSideScoping:
             current_instance_id="inst-1",
             agent_id="developer",
         )
-        out = tools[0].invoke({"slug": "sc-01-a", "body": "scoped fact"})
+        out = tools[0].invoke({"slug": "sc-01-a", "body": "scoped fact", "reason": "unit fixture reason"})
         assert out["action"] == "created"
         # the row landed on the CALLER's project (no project_id arg exists)
         from daemon.services.pok_service import POKService
@@ -176,7 +176,7 @@ class TestServerSideScoping:
             if tool.name == "pok_query":
                 out = tool.invoke({})
             else:
-                body = {"body": "x"} if tool.name == "pok_upsert" else {}
+                body = {"body": "x", "reason": "unit fixture reason"} if tool.name == "pok_upsert" else {}
                 out = tool.invoke({"slug": "x", **body})
             assert out.get("code") == "pok_no_project", (
                 f"{tool.name}: {out}"
@@ -194,7 +194,7 @@ class TestAc10DefaultProjectToolLevel:
         )
         tool = tools[tool_idx]
         if tool.name == "pok_upsert":
-            out = tool.invoke({"slug": "x", "body": "fact"})
+            out = tool.invoke({"slug": "x", "body": "fact", "reason": "unit fixture reason"})
         elif tool.name == "pok_query":
             out = tool.invoke({})
         else:
@@ -212,7 +212,7 @@ class TestTwoLayerGate:
                 agent_id=agent,
             )
             out = tools[0].invoke(
-                {"slug": f"w-{agent}", "body": f"written by {agent}"}
+                {"slug": f"w-{agent}", "body": f"written by {agent}", "reason": "unit fixture reason"}
             )
             assert out["action"] == "created", out
 
@@ -224,7 +224,7 @@ class TestTwoLayerGate:
             current_instance_id="inst-1",
             agent_id="developer",
         )
-        w[0].invoke({"slug": "uni-op-a", "body": "operation fact"})
+        w[0].invoke({"slug": "uni-op-a", "body": "operation fact", "reason": "unit fixture reason"})
         for agent in ("worker", "developer", "ari"):
             tools = create_pok_tools(
                 _manager(tool_env, "p1", agent),
@@ -251,7 +251,7 @@ class TestTwoLayerGate:
             current_instance_id="inst-1",
             agent_id="developer",
         )
-        tools[0].invoke({"slug": "cur-a", "body": "curate me"})
+        tools[0].invoke({"slug": "cur-a", "body": "curate me", "reason": "unit fixture reason"})
         for agent in ("leader", "project-manager"):
             tools = create_pok_tools(
                 _manager(tool_env, "p1", agent),
@@ -267,7 +267,7 @@ class TestTwoLayerGate:
             current_instance_id="inst-1",
             agent_id="worker",
         )
-        out = tools[0].invoke({"slug": "attr-a", "body": "who wrote this"})
+        out = tools[0].invoke({"slug": "attr-a", "body": "who wrote this", "reason": "unit fixture reason"})
         assert out["created_by_agent"] == "worker"
 
 
@@ -278,7 +278,7 @@ class TestTypedEchoTaxonomy:
             current_instance_id="inst-1",
             agent_id="developer",
         )
-        out = tools[0].invoke({"slug": "fence-a", "body": "two\nlines"})
+        out = tools[0].invoke({"slug": "fence-a", "body": "two\nlines", "reason": "unit fixture reason"})
         assert out.get("code") == "pok_body_structural_token"
         assert "error" in out
 
@@ -288,7 +288,7 @@ class TestTypedEchoTaxonomy:
             current_instance_id="inst-1",
             agent_id="developer",
         )
-        out = tools[0].invoke({"slug": "fence-b", "body": ">" * 200})
+        out = tools[0].invoke({"slug": "fence-b", "body": ">" * 200, "reason": "unit fixture reason"})
         assert out.get("code") == "pok_body_oversize"
 
     def test_store_unavailable_refuses_never_raises(self, tool_env) -> None:
@@ -296,7 +296,7 @@ class TestTypedEchoTaxonomy:
         the tools are PRESENT and refusing, never silently vanished."""
         mgr = SimpleNamespace(_engine=None, _instance_repository=None)
         tools = create_pok_tools(mgr, current_instance_id="inst-1", agent_id="d")
-        assert tools[0].invoke({"slug": "x", "body": "y"}).get(
+        assert tools[0].invoke({"slug": "x", "body": "y", "reason": "unit fixture reason"}).get(
             "code"
         ) == "pok_store_unavailable"
         assert tools[1].invoke({}).get("code") == "pok_store_unavailable"
@@ -310,12 +310,12 @@ class TestTypedEchoTaxonomy:
         )
         for i in (1, 2, 3):
             tools[0].invoke(
-                {"slug": f"fam-{i:02d}-m", "body": f"member {i}"}
+                {"slug": f"fam-{i:02d}-m", "body": f"member {i}", "reason": "unit fixture reason"}
             )
-        out = tools[0].invoke({"slug": "fam-04-m", "body": "the 4th"})
+        out = tools[0].invoke({"slug": "fam-04-m", "body": "the 4th", "reason": "unit fixture reason"})
         assert out.get("code") == "pok_family_full"
         for slug in ("pa", "pb"):
-            tools[0].invoke({"slug": slug, "body": f"pin {slug}"})
+            tools[0].invoke({"slug": slug, "body": f"pin {slug}", "reason": "unit fixture reason"})
         lead = create_pok_tools(
             _manager(tool_env, "p1", "leader"),
             current_instance_id="inst-2",
@@ -330,7 +330,7 @@ class TestTypedEchoTaxonomy:
             current_instance_id="inst-1",
             agent_id="developer",
         )
-        dev[0].invoke({"slug": "pc", "body": "third pin"})
+        dev[0].invoke({"slug": "pc", "body": "third pin", "reason": "unit fixture reason"})
         out = lead[2].invoke({"slug": "pc", "pinned": True})
         assert out.get("code") == "pok_pin_cap"
 
@@ -340,7 +340,7 @@ class TestTypedEchoTaxonomy:
             current_instance_id="inst-1",
             agent_id="developer",
         )
-        tools[0].invoke({"slug": "shape-a", "body": "the shape body"})
+        tools[0].invoke({"slug": "shape-a", "body": "the shape body", "reason": "unit fixture reason"})
         out = tools[1].invoke({"query": "shape"})
         assert out["count"] == len(out["entries"]) >= 1
         assert isinstance(out["bm25_only"], bool)
@@ -358,8 +358,8 @@ class TestTypedEchoTaxonomy:
             current_instance_id="inst-1",
             agent_id="developer",
         )
-        v1 = tools[0].invoke({"slug": "sup-a", "body": "v1"})
-        v2 = tools[0].invoke({"slug": "sup-a", "body": "v2 differs"})
+        v1 = tools[0].invoke({"slug": "sup-a", "body": "v1", "reason": "unit fixture reason"})
+        v2 = tools[0].invoke({"slug": "sup-a", "body": "v2 differs", "reason": "unit fixture reason"})
         assert v2["action"] == "superseded"
         assert v2["superseded_id"] == v1["id"]
 
@@ -375,7 +375,7 @@ class TestTypedEchoTaxonomy:
             agent_id="developer",
         )
         # seed one row so the supersede leg is reachable
-        tools[0].invoke({"slug": "race-a", "body": "v1"})
+        tools[0].invoke({"slug": "race-a", "body": "v1", "reason": "unit fixture reason"})
         # monkeypatch the repo insert to raise a real IntegrityError
         import sqlalchemy
 
@@ -390,7 +390,7 @@ class TestTypedEchoTaxonomy:
 
         repo_mod.POKRepository.insert = boom
         try:
-            out = tools[0].invoke({"slug": "race-new", "body": "v2 differs"})
+            out = tools[0].invoke({"slug": "race-new", "body": "v2 differs", "reason": "unit fixture reason"})
         finally:
             repo_mod.POKRepository.insert = orig_insert
         assert out.get("code") == "pok_slug_conflict", out
@@ -417,7 +417,7 @@ class TestTypedEchoTaxonomy:
                 current_instance_id="inst-1",
                 agent_id="developer",
             )
-            out = tools[0].invoke({"slug": "unrel-a", "body": "body"})
+            out = tools[0].invoke({"slug": "unrel-a", "body": "body", "reason": "unit fixture reason"})
         finally:
             repo_mod.POKRepository.insert = orig_insert
         assert out.get("code") != "pok_slug_conflict", out
@@ -429,8 +429,8 @@ class TestTypedEchoTaxonomy:
             current_instance_id="inst-1",
             agent_id="developer",
         )
-        tools[0].invoke({"slug": "noop-a", "body": "same"})
-        out = tools[0].invoke({"slug": "noop-a", "body": "same"})
+        tools[0].invoke({"slug": "noop-a", "body": "same", "reason": "unit fixture reason"})
+        out = tools[0].invoke({"slug": "noop-a", "body": "same", "reason": "unit fixture reason"})
         assert out["action"] == "no-op"
         assert "note" in out
 
@@ -449,8 +449,8 @@ class TestTypedEchoTaxonomy:
             current_instance_id="inst-1",
             agent_id="developer",
         )
-        writer[0].invoke({"slug": "chain-01-a", "body": "v1"})
-        writer[0].invoke({"slug": "chain-01-a", "body": "v2 differs"})
+        writer[0].invoke({"slug": "chain-01-a", "body": "v1", "reason": "unit fixture reason"})
+        writer[0].invoke({"slug": "chain-01-a", "body": "v2 differs", "reason": "unit fixture reason"})
         from daemon.services.pok_service import POKService
 
         repo = POKService(tool_env.engine)._repo
@@ -499,3 +499,100 @@ class TestTypedEchoTaxonomy:
             }
         )
         assert out.get("code") == "pok_not_found", out
+
+
+# ═══════════════════════ Phase 3: mechanical gate ═══════════════════════════
+
+
+class TestPhase3MechanicalGate:
+    """Wave 1 Phase 3: `reason` REQUIRED + R0 named fence + typed refusals.
+
+    Precedence pin (canonical string, char-for-char):
+    ``store→scope→reason→fence/budget/family``. The six legacy taxonomy
+    tests each pin ONE code in isolation; the two pairwise tests below
+    pin the ORDER (store-over-scope, scope-over-reason).
+    """
+
+    def test_upsert_schema_requires_reason(self, tool_env) -> None:
+        """T3.2: the tool schema marks ``reason`` required (no default)."""
+        tools = create_pok_tools(
+            _manager(tool_env, "p1", "developer"),
+            current_instance_id="inst-1",
+            agent_id="developer",
+        )
+        required = tools[0].args_schema.model_json_schema()["required"]
+        assert "reason" in required
+        assert "slug" in required and "body" in required
+
+    def test_empty_reason_typed_refusal(self, tool_env) -> None:
+        """T3.3: whitespace-only reason -> ``pok_reason_required``."""
+        tools = create_pok_tools(
+            _manager(tool_env, "p1", "developer"),
+            current_instance_id="inst-1",
+            agent_id="developer",
+        )
+        out = tools[0].invoke(
+            {"slug": "rsn-01-a", "body": "a fact", "reason": "   "}
+        )
+        assert out["code"] == "pok_reason_required"
+
+    def test_typed_refusal_envelope_shape(self, tool_env) -> None:
+        """T3.5: ``_err`` renders ``{error, code, ...details}`` — never a
+        raw traceback, and no stray detail keys for a bare refusal."""
+        tools = create_pok_tools(
+            _manager(tool_env, "p1", "developer"),
+            current_instance_id="inst-1",
+            agent_id="developer",
+        )
+        out = tools[0].invoke(
+            {"slug": "rsn-02-a", "body": "a fact", "reason": ""}
+        )
+        assert set(out) == {"error", "code"}
+        assert out["code"] == "pok_reason_required"
+        assert isinstance(out["error"], str) and out["error"]
+
+    def test_fence_refusal_names_r0(self, tool_env) -> None:
+        """T3.4: the R0 content-fence refusal NAMES R0 / content fence."""
+        tools = create_pok_tools(
+            _manager(tool_env, "p1", "developer"),
+            current_instance_id="inst-1",
+            agent_id="developer",
+        )
+        out = tools[0].invoke(
+            {
+                "slug": "r0-01-a",
+                "body": "two\nlines",
+                "reason": "unit fixture reason",
+            }
+        )
+        assert out["code"] == "pok_body_structural_token"
+        assert "R0" in out["error"]
+        assert "content fence" in out["error"]
+
+    def test_store_precedes_scope_when_both_fail(self, tool_env) -> None:
+        """T3.3 pairwise: store wins when BOTH store and scope fail.
+
+        No engine handle and no project repo — the store guard in
+        ``pok_upsert`` must fire before the scope guard.
+        """
+        mgr = SimpleNamespace(_engine=None, _instance_repository=None)
+        tools = create_pok_tools(mgr, current_instance_id="inst-1", agent_id="d")
+        out = tools[0].invoke(
+            {"slug": "x", "body": "y", "reason": "unit fixture reason"}
+        )
+        assert out["code"] == "pok_store_unavailable"
+
+    def test_scope_precedes_reason_when_both_fail(self, tool_env) -> None:
+        """T3.3 pairwise: scope wins over an empty reason.
+
+        Default-project scope + empty reason — the scope guard must
+        fire before the newly-inserted reason guard.
+        """
+        constants.SYSTEM_DEFAULT_PROJECT_ID = "default-x"
+        tools = create_pok_tools(
+            _manager(tool_env, "default-x", "developer"),
+            current_instance_id="inst-1",
+            agent_id="developer",
+        )
+        out = tools[0].invoke({"slug": "x", "body": "fact", "reason": ""})
+        assert out["code"] == "pok_default_project"
