@@ -39,6 +39,29 @@ Never-raise discipline: query-path failures degrade (typed error
 result objects / BM25-only) rather than raising into the tool
 surface; the injection path has its own swallow contract in
 ``daemon/services/pok_injection.py``.
+
+THE CLASS BOUNDARY — what belongs in POK, what belongs in the KB
+(pok-write-gate Phase 5, T5.4; the routing contract the operational
+agents carry in their ``tools_note.md``):
+
+* **POK holds OPERATIONAL RULES** — how to operate this project: the
+  trap, the convention, the "do it THIS way" an operator must not
+  rediscover. One fact per row, and the ``reason`` (the caller's
+  OPERATIONAL CLAIM — REQUIRED since Phase 3) says WHICH lesson the
+  row carries.
+* **The KNOWLEDGE BASE (RAG) holds KNOWLEDGE** — what something IS:
+  reference facts, prior art, domain background, recalled on demand.
+  A knowledge-shaped fact is NOT a POK row; the write path below
+  serves the operational class only.
+* **A RAG TWIN IS NOT REDUNDANCY.** A rule that also exists in the KB
+  still belongs in POK: the two surfaces answer different questions —
+  POK is INJECTED as operating rules, the KB is RECALLED on demand.
+  The write gate judges the BOUNDARY (operational how-to vs knowledge),
+  never store exclusivity.
+* **NEVER age, NEVER access_count alone.** Retrieval is not use, and a
+  row's age is not a verdict; only a curator retires a row, and only on
+  a ruled basis (covered-by-surviving-row · relocated-to-routed-home ·
+  NOW-FALSE · gate-rejection).
 """
 
 from __future__ import annotations

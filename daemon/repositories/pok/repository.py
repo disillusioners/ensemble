@@ -18,6 +18,9 @@ What lives here (mechanics only, no policy):
 * the WRITE-GATE LEDGER surface (append-only + read-only-cheap
   queries — the decision substrate for the POK write gate, pok-write-gate
   Phase 1 T1.3/T1.7; there is deliberately no update/delete method);
+* the STANDING-DEFECT RESIDUAL rows (pok-write-gate Phase 5 T5.6) — the
+  ledger rows that record the disposition of the subsystem's two
+  standing defects (the same append-only surface, one row per defect);
 * the embeddings-companion CRUD (upsert / map / delete).
 
 Policy (fence, budgets, caps, audience admission, refusal taxonomy)
@@ -42,7 +45,12 @@ from daemon.repositories.pok.models import (
     pok_family_key,
 )
 
-__all__ = ["POKRepository", "UNSET"]
+__all__ = [
+    "POKRepository",
+    "POK_STANDING_DEFECTS",
+    "POK_STANDING_DEFECT_GATE_PREFIX",
+    "UNSET",
+]
 
 
 def _utc_now_iso() -> str:
@@ -57,6 +65,55 @@ class _Unset:
 
 
 UNSET = _Unset()
+
+
+#: The STANDING DEFECTS of the POK write-gate subsystem and their
+#: DISPOSITIONS (pok-write-gate Phase 5, T5.6).
+#:
+#: Each member is ``(defect, disposition, disclosure)``:
+#:
+#: * ``record_verification`` — ``wired-via-gate-path``. The metric has
+#:   NO writer today (zero callers ⇒ ``verify_count`` structurally 0
+#:   on every row). Addendum-3 item 7 REVERSED the earlier
+#:   retire-with-disclosure ruling: the gate path (Wave 2 Phase 7/8)
+#:   becomes the FIRST REAL WRITER — its verdicts, merges, refusals and
+#:   admissions stamp the metric. NOT retired.
+#: * ``vector-leg`` — ``retired-with-disclosure``. The embeddings
+#:   companion is dead: the embeddings table holds 0 rows (2026-11-23
+#:   census), the mint hook ``ensure_embedding`` has zero callers, and
+#:   the query seam never passes a ``query_embedding``. Documented, not
+#:   wired (the operator-decided follow-up P2 may still revive it).
+#:
+#: The vocabulary lives HERE (not in ``models.py``) because these are
+#: DISPOSITIONS of the subsystem, not a store-wide column vocabulary —
+#: the ledger's own vocabularies (``POK_LEDGER_PHASES`` /
+#: ``POK_LEDGER_VERDICTS`` / ``POK_ARCHIVE_BASES``) stay single-sourced
+#: in ``models.py`` and are NOT forked.
+POK_STANDING_DEFECTS: tuple[tuple[str, str, str], ...] = (
+    (
+        "record_verification",
+        "wired-via-gate-path",
+        "verify_count has no writer today (zero callers); the gate path "
+        "(Wave 2 Phase 7/8) becomes the first real writer — verdicts, "
+        "merges, refusals and admissions stamp the metric. Not retired "
+        "(addendum-3 item 7 reversed the retire-with-disclosure ruling).",
+    ),
+    (
+        "vector-leg",
+        "retired-with-disclosure",
+        "The embeddings companion is dead: 0 embedding rows (2026-11-23 "
+        "census), the mint hook ensure_embedding has zero callers, and the "
+        "query seam never passes a query_embedding. Documented, not wired "
+        "(follow-up P2 may still identify a caller).",
+    ),
+)
+
+#: The ``gate_id`` prefix of a standing-defect residual row. The
+#: residual rows are NOT gate events, but they live in the same
+#: APPEND-ONLY ledger — the audit substrate — and the prefix is what
+#: tells a reader (and :meth:`POKRepository.standing_defect_rows`) that
+#: a row is a subsystem DISPOSITION rather than an admission decision.
+POK_STANDING_DEFECT_GATE_PREFIX = "standing-defect:"
 
 #: Slug→row resolution precedence (mechanics, not policy): the row that
 #: OWNS a slug. The ACTIVE row owns it; an ARCHIVED row owns it when no
@@ -516,6 +573,12 @@ class POKRepository:
         here SUPERSEDE ``access_count`` — they disambiguate
         query-vs-injection, which ``access_count`` alone cannot
         (design-amendments-v2 §13.2 fork J, amendment 1).
+
+        NOTE for Phase 10: an ADMISSION-phase count INCLUDES the
+        standing-defect residual rows (they are ADMISSION-phase rows
+        with a NULL verdict). Filter them out with
+        :meth:`standing_defect_rows`, or read the verdict-bearing rows
+        only — a residual disposition is not an admission decision.
         """
         stmt = select(POKWriteGateLedger).where(
             POKWriteGateLedger.project_id == project_id,
@@ -524,9 +587,163 @@ class POKRepository:
         with Session(self._engine) as session:
             return len(list(session.exec(stmt).all()))
 
+    # ── standing-defect residual rows (pok-write-gate Phase 5, T5.6) ────
+
+    def standing_defect_rows(
+        self, project_id: str
+    ) -> list[POKWriteGateLedger]:
+        """The standing-defect RESIDUAL rows for one project (read).
+
+        A residual row records the DISPOSITION of a standing defect of
+        the write-gate subsystem (see :data:`POK_STANDING_DEFECTS`) —
+        not an admission decision about a knowledge row. They are
+        ordinary APPEND-ONLY ledger rows, so the ledger alone can
+        answer "what was decided about the two standing defects?"
+        without a cross-store join.
+        """
+        return [
+            row
+            for row in self.query_ledger(project_id, limit=None)
+            if (row.gate_id or "").startswith(POK_STANDING_DEFECT_GATE_PREFIX)
+        ]
+
+    def record_standing_defects(
+        self, project_id: str
+    ) -> list[POKWriteGateLedger]:
+        """APPEND the standing-defect RESIDUAL rows for one project.
+
+        The minimal way to record the two standing-defect dispositions
+        (pok-write-gate Phase 5, T5.6): ``record_verification`` is
+        reserved for the gate path (Wave 2 Phase 7/8 wires the caller)
+        and the vector leg is retired with disclosure.
+
+        ENCODING (the landed ledger shape — NO schema fork):
+          * ``phase = "ADMISSION"`` — the closed phase vocabulary's
+            decision-record step. The residual rows are dispositions,
+            not retrievals and not executions.
+          * ``verdict = NULL`` — a disposition is NOT a gate outcome;
+            the four verdicts (ACCEPT / MERGE / ASK / REJECT) are
+            reserved for the gate's admission decisions.
+          * ``gate_id = "standing-defect:<defect>"`` — the chain key
+            that marks the row as a disposition.
+          * ``reason`` — the disposition claim; ``judge_explanation``
+            — the disclosure (why, with the citation).
+          * ``basis = NULL`` — nothing was ARCHIVED (a disposition
+            archives nothing); ``executed = False`` — no knowledge row
+            was written.
+
+        IDEMPOTENT PER DEFECT: a defect that already has a residual row
+        for this project is skipped (the ledger is append-only, so a
+        blind re-call would duplicate the audit trail). The rows that
+        were appended (the NEW ones) are returned.
+        """
+        existing = {
+            (row.gate_id or "").removeprefix(POK_STANDING_DEFECT_GATE_PREFIX)
+            for row in self.standing_defect_rows(project_id)
+        }
+        appended: list[POKWriteGateLedger] = []
+        for defect, disposition, disclosure in POK_STANDING_DEFECTS:
+            if defect in existing:
+                continue
+            appended.append(
+                self.append_ledger(
+                    POKWriteGateLedger(
+                        project_id=project_id,
+                        gate_id=f"{POK_STANDING_DEFECT_GATE_PREFIX}{defect}",
+                        phase="ADMISSION",
+                        verdict=None,
+                        reason=disposition,
+                        judge_explanation=disclosure,
+                        basis=None,
+                        executed=False,
+                    )
+                )
+            )
+        return appended
+
     def record_verification(self, entry_id: str, *, now: str | None = None) -> bool:
         """verify_count += 1 + last_verified stamp (pok_verify phase-2
-        path; the 30-day decay reads ``last_verified``)."""
+        path; the 30-day decay reads ``last_verified``).
+
+        ── THE GATE-PATH CALLER IS DESIGNED, NOT WIRED ─────────────────
+        (pok-write-gate Phase 5, T5.1 — the W1 half).
+
+        This method still has ZERO callers: the write gate's judge
+        service lands in WAVE 2 (Phase 7/8), and THAT service is the
+        FIRST REAL WRITER. Its verdicts (ACCEPT / MERGE / ASK / REJECT),
+        its merges, its refusals and its admissions stamp the verify
+        metric HERE, so the librarian's next pass reads the stamps its
+        own activity produced — the metrics are dead code until the
+        gate exists, and the gate is what makes them live
+        (design-amendments-v2 §6, §9 "close the loop").
+
+        Until Wave 2 lands, ``verify_count`` is structurally 0 on every
+        row. That ZERO IS NOT EVIDENCE — it is the absence of a
+        writer, never a quality signal (see the IGNORED list below).
+
+        WAVE 2 OWNS THE ACTUAL CALLS. This note owns the DESIGN: the
+        seam, the stamp set, and what a stamp may and may not be used
+        for — so the librarian's metric contract is settled before the
+        caller exists, and the librarian is not re-litigated when it
+        arrives. No call is wired here.
+
+        ── THE TRUSTED METRIC SET (design-amendments-v2 §9 / §13.2 J) ──
+
+        TRUST:
+          * ``verify_count`` — but ONLY once it is GATE-STAMPED. The
+            pre-stamp value (structurally 0) is IGNORED.
+          * the CURATOR TIERS (``pinned`` / ``disputed`` /
+            ``source_tier`` / ``audience``) — cold signals, read only.
+          * the FAMILY (post the strict per-key count fix) — a family
+            at the cap is a STRUCTURAL signal, never a per-row one.
+          * VERDICT-DERIVED COUNTS — the librarian's own ledger output
+            (ACCEPT / MERGE / ASK / REJECT counts per project).
+          * TIMESTAMPS (``created_at`` / ``updated_at`` /
+            ``last_verified``) — as PROVENANCE. They corroborate a
+            finding; they NEVER trigger one (a NOW-FALSE row usually
+            co-occurs with an ancient ``last_verified``, but staleness
+            alone never fires).
+
+        IGNORE:
+          * ``access_count`` ALONE — retrieval-driven, not use-driven.
+            The ledger's RETRIEVAL counts SUPERSEDE it once they
+            exist, because they disambiguate query-vs-injection via
+            the ``source`` column; ``access_count`` survives as legacy
+            corroboration only.
+          * AGE — never a consolidation basis, never a worthlessness
+            signal.
+          * the VECTOR / EMBEDDINGS leg — dead, retired with
+            disclosure (below).
+          * ``verify_count`` BEFORE gate stamping — structurally 0.
+          * tier=0 as a signal — every tier is inert today.
+
+        PER-ROW vs PER-STORE: per-ROW metrics (a verify stamp on one
+        row, one row's curator tier) drive ROW decisions; per-STORE
+        aggregates (refusal rate, verdict mix) are PASS TELEMETRY and
+        never decide a row.
+
+        ── THE VECTOR LEG — RETIRED WITH DISCLOSURE (Phase 5, T5.2) ──
+
+        The ranking companion (``upsert_embedding`` / ``embeddings_map``
+        / ``ensure_embedding``) is NOT wired and is NOT a metric:
+
+          * the embeddings table is EMPTY (measured at the
+            2026-11-23 census — the store has 0 embedding rows);
+          * the mint hook ``ensure_embedding`` has ZERO callers
+            (WIRED-BUT-DORMANT — the dormancy is marked at its
+            definition in ``pok_service.py``);
+          * the query seam NEVER passes a ``query_embedding`` — the
+            only caller is the ``pok_query`` tool, which does not
+            supply one; and the injection path never populates
+            ``embeddings_map`` from the repository.
+
+        So the selector degrades to BM25-only by design (AC14). This is
+        DISCLOSED, not silently dropped: a caller may still identify
+        one (the operator-decided follow-up P2). Until then the vector
+        leg contributes NO signal — and, per the IGNORED list above, a
+        future one may not be read as a freshness or a worth measure
+        either.
+        """
         stamp = now or _utc_now_iso()
         with Session(self._engine) as session:
             row = session.get(ProjectOperatingKnowledge, entry_id)
