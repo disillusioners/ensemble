@@ -1,11 +1,11 @@
 # POK write-gate guideline — Phase 12 ratification diff
 
 Base: ff89fee9953dda9e455c82a8e995fbacfaec128b (the last commit that touched docs/guidelines/guideline-pok-durable-vs-rolling-state.md before this amendment)
-Head: 4b43be905 (the Phase-12 amendment + fix round 1 + the addendum round + the final docs continuation + the final splice; the GUIDELINE text is unchanged by the last two commits, so the diff BODY is unchanged)
-Command: git diff ff89fee9953dda9e455c82a8e995fbacfaec128b..4b43be905 -- docs/guidelines/guideline-pok-durable-vs-rolling-state.md
+Head: 804013988 (the Phase-12 amendment + fix rounds 1-2 + the addendum round + the final docs continuation + the final splice + the functional-gate fix round: FIX-1 split, FIX-2 re-pin, the findings round I1/I2/I3)
+Command: git diff ff89fee9953dda9e455c82a8e995fbacfaec128b..804013988 -- docs/guidelines/guideline-pok-durable-vs-rolling-state.md
 
 diff --git a/docs/guidelines/guideline-pok-durable-vs-rolling-state.md b/docs/guidelines/guideline-pok-durable-vs-rolling-state.md
-index ad2506b05..ed6f0a1f9 100644
+index ad2506b05..81049ce38 100644
 --- a/docs/guidelines/guideline-pok-durable-vs-rolling-state.md
 +++ b/docs/guidelines/guideline-pok-durable-vs-rolling-state.md
 @@ -1,30 +1,49 @@
@@ -133,18 +133,19 @@ index ad2506b05..ed6f0a1f9 100644
  
  ## 4. The rules that bite
  
-@@ -79,56 +114,98 @@ Not config-armed — this is doctrine plus standing knobs; there are no env keys
+@@ -79,56 +114,99 @@ Not config-armed — this is doctrine plus standing knobs; there are no env keys
    | Human-facing project state — milestones, lane progress, episode narratives | the board / PM ledger | the human-facing ledger; updated in place, never rots silently |
    | Lane working state — a pending fix, episode detail, dated counts | the lane's planning directory (`.agents/shared/planning/<lane>/`) | full documents, versioned with the lane, unlimited length |
  
-+- **The refusal transition map (the boundary, in the product surface).** The gate's refusal envelope names, for the content class it judged, the route and the destination — and whether that destination is **reachable** by the caller (`destination_available`); a refused write whose destination is unreachable is **parked**, never dropped. The four classes:
++- **The refusal transition map (the boundary, in the product surface).** The gate's refusal envelope names, for the content class it judged, the route and the destination — and whether that destination is **reachable** by the caller (`destination_available`); a refused write whose destination is unreachable is **parked**, never dropped. The three classes the gate's closed five-family vocabulary can produce:
 +
 +  | Content class | Destination | Tool category (the grant-check) |
 +  |---|---|---|
 +  | **knowledge** (what something IS) | the knowledge base (RAG) | `rag` |
 +  | **operational** (this project's how-to / rule / trap) | **POK** | `pok` |
-+  | **governance** (a curated project contract agents must read) | the critical notes (a curated, pinned surface) or the board | `critical_notes`, `board` |
 +  | **episode** (lane state, a dated count, a fingerprint) | the board (a human-facing ledger) or the shared KV | `board`, `shared_meta_kv` |
++
++  The doctrine's FOURTH routing class — **governance** (a curated project contract agents must read → the critical notes or the board) — is a ROUTING home in this §4 doctrine, NOT a gate-rejection class: the gate's closed five-family vocabulary (boundary / reason / durability / redundancy / scope) produces knowledge / operational / episode only (boundary → knowledge, reason / redundancy / scope → operational, durability → episode — the measured family map), so no gate refusal can carry it. The functional gate's I1 finding dropped the unreachable class from the product route table (it was dead code there — `route_for_family()` could never return it), and a reachability pin now guards the invariant: every route-table class is produced by ≥1 family.
 +
 +  The map lives in the product surface (`daemon/tools/pok.py` — `CONTENT_CLASS_ROUTES` + `REFUSAL_FAMILY_CLASSES`); this guideline states the doctrine it encodes.
  - **(e) The ONE sanctioned POK exception (unchanged):** IF an inventory must live in POK, it lives as ONE active row per inventory, refreshed by giter via SUPERSEDE (a supersede chain) — never a growing set of dated rows.
