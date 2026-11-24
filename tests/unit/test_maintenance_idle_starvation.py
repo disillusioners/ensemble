@@ -91,9 +91,17 @@ def _busy_service(job_name="skill_orphan_sweep", interval=1.0):
 
 
 class TestIdlePolicyTiering:
-    #: The eleven registered maintenance jobs (daemon/manager.py).
+    #: The twelve registered maintenance jobs (daemon/manager.py).
+    #:
+    #: ``checkpoint_backstop_prune`` joined the set with the SCOPE (c)
+    #: retention lane (2026-11-24): the anti-starvation backstop for
+    #: the checkpoint growth — UN_GATED on purpose, because the idle
+    #: gate is exactly the condition it exists to survive (the measured
+    #: third bloat-class recurrence: 13GB / 94k rows after 47h of
+    #: missed cycles on a continuously busy nest).
     REGISTERED_JOBS = {
         "checkpoint_cleanup",
+        "checkpoint_backstop_prune",
         "room_gc_sweep",
         "vacuum_maintenance",
         "skill_metric_scan",
@@ -154,7 +162,7 @@ class TestIdlePolicyTiering:
         # The defect shape IS representable today (a new gated job with
         # no guarantee) — the guard exists so it is SEEN, never silent.
         assert gated_without_guarantee == ["some_future_reclaim_job"]
-        # And for the eleven REAL registrations the invariant holds:
+        # And for the twelve REAL registrations the invariant holds:
         for name, policy in JOB_IDLE_POLICIES.items():
             if policy == IdlePolicy.IDLE_GATED:
                 assert JOB_MAX_STALENESS_HOURS.get(name) is not None, name
@@ -169,7 +177,7 @@ class TestIdlePolicyTiering:
             if policy == IdlePolicy.UN_GATED
         }
         assert un_gated == self.REGISTERED_JOBS - self.RECLAIM_JOBS
-        assert len(un_gated) == 9
+        assert len(un_gated) == 10
 
     def test_unknown_job_name_defaults_to_idle_gated(self):
         """An unregistered job never runs unattended (conservative)."""

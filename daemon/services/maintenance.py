@@ -55,6 +55,88 @@ SCHEDULER (not of any one job) — the Section-0b state store is the
 narrow persistence seam they share (EXISTING storage surfaces only:
 the ``maintenance_runs`` audit table + the project-metadata KV; ZERO
 new migrations).
+
+RETENTION ESCAPE — THE MEASURED DIAGNOSIS (SCOPE (c), 2026-11-24)
+==============================================================
+The churn class is "finished-but-unreaped threads": the prod census
+(read-only, ``ensemble_prod`` @ 10.44.0.2, 2026-11-24T08:1xZ) found
+1,139 checkpoint threads, 11,273 ``checkpoints`` rows — of which
+**7,829 rows sit on 93 TERMINAL instances** whose newest checkpoint
+was written AFTER the last cleanup cycle ran (the cycle ran
+03:25:25Z–03:38:32Z and deleted 56,312 checkpoint rows / 148,569
+writes / 37,585 blobs; by 08:12Z the table had grown back to 11,273
+rows across 1,139 threads ≈ **30–40 rows/min**).
+
+WHY THE EXISTING LEGS DO NOT REACH THAT CLASS (the escape):
+
+1. **Op D (keep-N per thread) is enforced only at the CYCLE
+   CADENCE.** The per-thread cap is the ONLY bound on a thread's
+   checkpoint/blob mass, and it is applied once per cycle (24h by
+   default). Between cycles a thread accumulates without limit — the
+   measured maximum was 909 versions for one pair at the census and
+   572 for one thread within a single 4.5h window.
+2. **Op B (the 168h TTL on ``instances.updated_at``) cannot touch the
+   class by construction.** ``updated_at`` on a terminal instance is
+   its COMPLETION time (measured: a 572-checkpoint thread's instance
+   carried ``updated_at`` = 07:37:54, the same minute as its newest
+   checkpoint), so a thread that finished an hour ago is 167h59m
+   away from being TTL-reaped. The TTL is an AGE-OF-THE-INSTANCE
+   bound, and the churn class is BY DEFINITION the newest rows.
+3. **Op C (the history cap) is age-ordered, so the churn class is
+   LAST in line.** The cap prunes the OLDEST terminal instances
+   first; the churn class is the most recently finished set. The cap
+   also runs over the ``exclude_kb=True`` candidate set (4,356 of the
+   5,505 terminal instances are KB agents), so the effective cap
+   applies to 1,148 rows, not 5,505.
+
+So the escape is a CADENCE + AGE-ORDERING escape, not a missing
+DELETE: the rows that grow fastest are precisely the ones every
+age-ordered reap leg treats as "too recent".
+
+WHAT THIS MODULE NOW DOES ABOUT IT (two bounded legs):
+
+* **Op B2 — the terminal-thread full reap** (this file,
+  ``_reap_terminal_threads``): a TIGHTER age bound than Op B's 168h
+  (default 24h, env-tunable) on the same thread→instance join, whose
+  disposition is the FULL checkpoint-footprint delete
+  (``adelete_thread`` → checkpoints + writes + blobs). The instance
+  ROW is deliberately preserved — the conversation lives in
+  ``message_queue``; only the checkpoint footprint is expendable.
+* **The backstop job** (``run_backstop_prune``, registered
+  UN_GATED as ``checkpoint_backstop_prune``): a bounded per-thread
+  prune + blob reclaim on a WALL-CLOCK cadence that does NOT consult
+  the idle gate — the anti-starvation path for the growth itself.
+
+POLICY OPTIONS — SURFACED FOR THE LEADER'S ADJUDICATION, NOT BAKED
+==================================================================
+These are the retention knobs this commission deliberately did NOT
+decide. The implementation ships the conservative default of each and
+exposes it as an env-tunable; the leader adjudicates the aggressiveness.
+
+* **Keep-N depth (the per-thread history depth).** Today
+  ``CHECKPOINT_MAX_PER_THREAD`` defaults to 3 — three checkpoints
+  (and their blobs) per thread survive every prune. The measured
+  blob mass floor is therefore ~3 blobs per live thread. Options:
+  keep 3 (today, the default), keep 1 (the floor drops ~3×; a revive
+  loses the deeper checkpoint history), or keep 5 (more revive
+  fidelity, a proportionally larger floor). THIS MODULE CHANGES
+  NOTHING HERE — the knob is untouched.
+* **Per-thread vs global caps.** Today the only cap is per-thread
+  (keep-N). There is NO global cap on the number of threads or on
+  the total checkpoint/blob mass. Options: a global thread cap (the
+  oldest N threads are reaped regardless of per-thread state), a
+  global BYTE cap (the guard in ITEM 2 alerts on it, but nothing
+  enforces it), or the status quo. THIS MODULE CHANGES NOTHING HERE
+  — the byte guard ALERTS, it does not enforce.
+* **Terminal-thread full-reap aggressiveness.** The age bound that
+  makes a finished thread's checkpoint footprint expendable. Options:
+  24h (the shipped default — a full day, 7× tighter than the 168h
+  TTL, and safely outside any realistic revive window), 12h, 6h, or
+  2h (progressively tighter; each step reclaims the finished-work
+  floor sooner and makes a revive of an old conversation start
+  without its checkpoint). THE DEFAULT IS 24h
+  (``ENSEMBLE_CHECKPOINT_TERMINAL_REAP_HOURS``); the leader sets the
+  policy.
 """
 
 import asyncio
@@ -100,6 +182,37 @@ logger = logging.getLogger(__name__)
 def utcnow() -> datetime:
     """Get current UTC time (timezone-aware)."""
     return datetime.now(timezone.utc)
+
+
+def _env_int(name: str, default: int) -> int:
+    """Read an integer env knob, falling back to ``default``.
+
+    A malformed value falls back to the default (never raises) — a
+    typo in an operator's env must not take the maintenance lane down.
+    """
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "maintenance knob %s=%r is not an integer — using the default %s",
+            name, raw, default,
+        )
+        return default
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    """Read a boolean env knob (the house ``=0`` disables convention).
+
+    ``0`` / ``false`` / ``no`` / ``off`` (case-insensitive) ⇒ False;
+    anything else present ⇒ True; absent ⇒ ``default``.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in ("0", "false", "no", "off")
 
 
 class IdlePolicy:
@@ -191,6 +304,19 @@ JOB_IDLE_POLICIES: dict[str, str] = {
     "dependency_bus_lock_reap": IdlePolicy.UN_GATED,
     # Bounded batched age DELETEs over the anomaly tables.
     "anomaly_retention": IdlePolicy.UN_GATED,
+    # SCOPE (c) — the checkpoint BACKSTOP. UN_GATED on purpose: this is
+    # the anti-starvation path for the checkpoint growth itself, and it
+    # runs on its OWN wall-clock cadence with a small pair budget. Its
+    # work (a bounded per-thread prune + blob reclaim) touches only
+    # rows the daily cycle would have touched anyway, and the pair
+    # budget is what keeps each run cheap on a busy nest.
+    #
+    # It is NOT IDLE_GATED because the idle gate is exactly the
+    # condition this lane exists to survive: the measured recurrence
+    # (the third bloat-class recurrence — 13GB / 94k rows after 47h of
+    # missed cycles) happened on a continuously busy nest, where the
+    # gate was never satisfiable.
+    "checkpoint_backstop_prune": IdlePolicy.UN_GATED,
 }
 
 #: The built-in ``max_staleness_hours`` guarantee per job (hours).
@@ -224,6 +350,64 @@ JOB_MAINTENANCE_SECTIONS: dict[str, str] = {
 #: persisted maintenance job state (the same KV the blueprint daily
 #: scan uses for its persisted last-run).
 MAINTENANCE_SYSTEM_PROJECT_ID = "71931ae0-0f25-5fbf-853b-2a78cc978d7e"
+
+
+# ── Retention knobs (SCOPE (c), 2026-11-24) ──────────────────────────────
+#
+# The knobs below are the OPERATOR surface of the two new retention
+# legs. Every one of them is an env var (no new config field, no new
+# migration) and every one of them has a SAFE default.
+
+#: Kill-switch for the Op B2 terminal-thread full reap. ``=0``
+#: disables the leg entirely (the house ``ENSEMBLE_*`` kill-switch
+#: precedent). Default: ON.
+TERMINAL_REAP_KILL_SWITCH_ENV = "ENSEMBLE_CHECKPOINT_TERMINAL_REAP"
+
+#: The Op B2 age bound, in hours — how long a TERMINAL instance's
+#: checkpoint footprint is kept before the full-thread reap may take
+#: it. Default 24h (a full day; 7x tighter than the 168h TTL). The
+#: floor is 1h (a 0 or negative value would reap everything at once).
+TERMINAL_REAP_HOURS_ENV = "ENSEMBLE_CHECKPOINT_TERMINAL_REAP_HOURS"
+
+#: The Op B2 per-cycle batch bound — the maximum number of threads one
+#: cycle may reap. Default 50.
+TERMINAL_REAP_BATCH_ENV = "ENSEMBLE_CHECKPOINT_TERMINAL_REAP_BATCH"
+
+#: The default Op B2 age bound (hours).
+DEFAULT_TERMINAL_REAP_HOURS = 24
+
+#: The default Op B2 per-cycle batch bound (threads).
+DEFAULT_TERMINAL_REAP_BATCH = 50
+
+#: Kill-switch for the backstop job. ``=0`` disables the job's
+#: registration path at boot. Default: ON.
+BACKSTOP_KILL_SWITCH_ENV = "ENSEMBLE_CHECKPOINT_BACKSTOP"
+
+#: The backstop's wall-clock interval, in MINUTES. The backstop runs on
+#: its own cadence and does NOT consult the idle gate — that is its
+#: whole point (the anti-starvation path for the growth itself).
+BACKSTOP_INTERVAL_ENV = "ENSEMBLE_CHECKPOINT_BACKSTOP_INTERVAL_MINUTES"
+
+#: The backstop's per-run PAIR budget — the maximum number of
+#: (thread, namespace) pairs one backstop run may prune. Deliberately
+#: SMALL: the backstop runs on a busy nest, so each run must be cheap.
+BACKSTOP_PAIR_BUDGET_ENV = "ENSEMBLE_CHECKPOINT_BACKSTOP_PAIR_BUDGET"
+
+#: The default backstop interval (minutes).
+DEFAULT_BACKSTOP_INTERVAL_MINUTES = 60
+
+#: The default backstop pair budget (pairs per run).
+DEFAULT_BACKSTOP_PAIR_BUDGET = 25
+
+#: The maintenance_runs SECTION for the backstop job. It is a SEPARATE
+#: section from ``checkpoint-cleanup`` on purpose: the audit table's
+#: partial unique index claims one RUNNING row per section, so a
+#: distinct section lets the backstop claim its own lane (the
+#: process-wide ``MaintenanceRunLock`` still serialises the two lanes
+#: against each other).
+BACKSTOP_SECTION = "checkpoint-backstop"
+
+
 
 
 @dataclass
@@ -1117,6 +1301,101 @@ def _parse_iso_utc(raw: Any) -> datetime | None:
 
 
 @dataclass
+class TerminalReapSummary:
+    """One cycle's Op B2 (terminal-thread full reap) counters.
+
+    Op B2 is the TIGHTER-age sibling of Op B: a terminal instance
+    whose ``updated_at`` is older than the reap bound loses its whole
+    CHECKPOINT FOOTPRINT (``checkpoints`` + ``checkpoint_writes`` +
+    ``checkpoint_blobs`` for that thread) while its instance ROW and
+    its conversation (``message_queue``) survive.
+
+    The counters are the audit surface — a cycle that reaps nothing
+    and a cycle that was switched off must be distinguishable from
+    the row alone, so ``skipped_reason`` names the latter explicitly.
+    """
+
+    #: The age bound the cycle applied (hours).
+    age_hours: int = 0
+    #: The per-cycle batch bound the cycle applied (threads).
+    batch_bound: int = 0
+    #: Terminal instances past the bound (before the batch bound).
+    candidates: int = 0
+    #: Threads whose checkpoint footprint was reaped.
+    reaped_threads: int = 0
+    #: Candidates skipped because the instance was no longer terminal
+    #: at the TOCTOU re-read (a revive landed between the listing and
+    #: the delete).
+    skipped_not_terminal: int = 0
+    #: Candidates skipped because the instance is in a PINNED subtree.
+    skipped_pinned: int = 0
+    #: Per-candidate failures (never raised — the leg is isolated).
+    errors: int = 0
+    #: Why the leg did nothing at all (``None`` when it ran):
+    #: ``"kill_switch"`` / ``"protected_set_unavailable"`` /
+    #: ``"candidate_listing_failed"``.
+    skipped_reason: str | None = None
+
+    def to_summary_dict(self) -> dict[str, Any]:
+        """The ``terminal_reap`` block of ``maintenance_runs.summary_json``."""
+        return {
+            "age_hours": self.age_hours,
+            "batch_bound": self.batch_bound,
+            "candidates": self.candidates,
+            "reaped_threads": self.reaped_threads,
+            "skipped_not_terminal": self.skipped_not_terminal,
+            "skipped_pinned": self.skipped_pinned,
+            "errors": self.errors,
+            "skipped_reason": self.skipped_reason,
+        }
+
+
+@dataclass
+class BackstopPruneSummary:
+    """One backstop run's counters.
+
+    The backstop is the ANTI-STARVATION path: a bounded per-thread
+    prune + blob reclaim on a wall-clock cadence that does NOT consult
+    the idle gate. It is deliberately SMALL per run (the pair budget)
+    so that running it on a continuously busy nest stays cheap.
+    """
+
+    #: The pair budget this run applied.
+    pair_budget: int = 0
+    #: Pairs found over the retention cap (before the budget).
+    excess_pairs: int = 0
+    #: Pairs actually pruned this run.
+    pruned_pairs: int = 0
+    #: Checkpoint rows deleted this run.
+    deleted_checkpoints: int = 0
+    #: Write rows deleted this run.
+    deleted_writes: int = 0
+    #: Blob rows deleted this run.
+    deleted_blobs: int = 0
+    #: Bytes freed by the blob delete (the adapter's measured value).
+    bytes_freed: int = 0
+    #: Per-pair failures (never raised).
+    errors: int = 0
+    #: Why the run did nothing (``None`` when it ran):
+    #: ``"kill_switch"`` / ``"pair_scan_failed"``.
+    skipped_reason: str | None = None
+
+    def to_summary_dict(self) -> dict[str, Any]:
+        """The ``backstop`` block of ``maintenance_runs.summary_json``."""
+        return {
+            "pair_budget": self.pair_budget,
+            "excess_pairs": self.excess_pairs,
+            "pruned_pairs": self.pruned_pairs,
+            "deleted_checkpoints": self.deleted_checkpoints,
+            "deleted_writes": self.deleted_writes,
+            "deleted_blobs": self.deleted_blobs,
+            "bytes_freed": self.bytes_freed,
+            "errors": self.errors,
+            "skipped_reason": self.skipped_reason,
+        }
+
+
+@dataclass
 class CheckpointRowPruneSummary:
     """Op D (per-thread retention) per-cycle counters.
 
@@ -1428,6 +1707,10 @@ class CheckpointRunResult:
     # docstring). ``None`` ⇒ the cycle took no census (the key is
     # absent from the summary — an absent census is NOT a zero census).
     version_census: "CheckpointVersionCensus | None" = None
+    # SCOPE (c) — the Op B2 (terminal-thread full reap) block. ADDITIVE
+    # (no existing key is renamed or removed). ``None`` ⇒ the cycle
+    # took no terminal reap (the key is absent from the summary).
+    terminal_reap: "TerminalReapSummary | None" = None
 
     def to_summary_dict(self) -> dict[str, Any]:
         """The FROZEN wire shape (plan-overview §2 — last_run.summary)."""
@@ -1450,6 +1733,11 @@ class CheckpointRunResult:
             # took a census. Additive only: no existing key is renamed
             # or removed.
             summary["version_census"] = self.version_census.to_summary_dict()
+        if self.terminal_reap is not None:
+            # SCOPE (c) — additive key: the Op B2 (terminal-thread full
+            # reap) counters. An absent block means the cycle took no
+            # reap; a present block with ``skipped_reason`` names why.
+            summary["terminal_reap"] = self.terminal_reap.to_summary_dict()
         return summary
 
 
@@ -1719,6 +2007,24 @@ class CheckpointCleanupJob:
             # Operation B: Cleanup expired terminal instances
             await self._cleanup_expired_terminal()
 
+            # Operation B2 (SCOPE (c), 2026-11-24): the terminal-thread
+            # FULL reap — the TIGHTER-age sibling of Op B. It closes the
+            # measured escape (the churn class = the MOST RECENT rows,
+            # which every age-ordered leg treats as "too recent"): a
+            # terminal instance past the (default 24h) bound loses its
+            # whole checkpoint footprint — checkpoints + writes + blobs
+            # — while its instance row and its conversation survive.
+            #
+            # Isolated like every other op: a failure here never stops
+            # the ops that follow.
+            try:
+                terminal_reap = await self._reap_terminal_threads()
+            except Exception as e:  # noqa: BLE001 — an op never breaks the cycle
+                logger.error(
+                    f"Terminal-thread reap operation failed: {e}", exc_info=True
+                )
+                terminal_reap = TerminalReapSummary()
+
             # Operation C: Enforce history cap
             await self._enforce_history_cap()
 
@@ -1776,6 +2082,7 @@ class CheckpointCleanupJob:
                 blobs=blobs_summary,
                 skipped_truncated=len(blobs_summary.skipped) > 1000,
                 version_census=version_census,
+                terminal_reap=terminal_reap,
             )
 
             # T3 — terminal write on success.
@@ -2055,6 +2362,173 @@ class CheckpointCleanupJob:
 
         except Exception as e:
             logger.error(f"Expired terminal cleanup failed: {e}")
+
+    async def _reap_terminal_threads(self) -> TerminalReapSummary:
+        """(B2) Full checkpoint-footprint reap for AGED terminal instances.
+
+        THE ESCAPE THIS LEG CLOSES (SCOPE (c), measured 2026-11-24):
+        the churn class is "finished-but-unreaped threads" — the
+        fastest-growing rows are, by definition, the MOST RECENT ones,
+        and every instance-level reap leg in this job is AGE-ORDERED:
+        Op B's 168h TTL reads ``instances.updated_at`` (a terminal
+        instance's ``updated_at`` is its COMPLETION time, so a thread
+        that finished an hour ago is 167h59m from being reaped) and
+        Op C's history cap prunes the OLDEST first. Meanwhile the only
+        bound on a thread's mass — Op D's keep-N — is applied once per
+        CYCLE, so between cycles a thread grows without limit (the
+        measured prod census: 7,829 checkpoint rows on 93 terminal
+        instances, all written after the last cycle ran ≈ 30–40
+        rows/min).
+
+        THE PREDICATE (the Operation B shape, a TIGHTER bound):
+
+        * the candidate set is TERMINAL instances whose ``updated_at``
+          is older than ``now - ENSEMBLE_CHECKPOINT_TERMINAL_REAP_HOURS``
+          (default 24h — 7x tighter than the 168h TTL; the leader
+          adjudicates the aggressiveness, see the module docstring's
+          policy-options block);
+        * the join is the thread→instance join ALONE — the thread id IS
+          the instance id (no ``checkpoint_ns``, no ``version``, no
+          blob join: ``checkpoint_ns`` is ``''`` on every row by
+          construction, and ``version`` is a channel-mint string, so
+          neither is a usable join key);
+        * the PINNED subtree is excluded (the same protected set Op B
+          and Op C honour).
+
+        THE DISPOSITION: ``adelete_thread`` — the adapter's whole-thread
+        delete (checkpoints + checkpoint_writes + checkpoint_blobs, one
+        transaction). The INSTANCE ROW IS PRESERVED: the conversation
+        lives in ``message_queue`` and the UI keeps showing it; only
+        the checkpoint footprint (the resumable state + the blob mass)
+        is expendable. Op B still owns the instance-row deletion at
+        168h.
+
+        THE POSTURE (the Op D/E pattern):
+
+        * BOUNDED — a per-cycle batch bound (default 50 threads);
+        * NEVER RAISES — per-candidate and outer isolation;
+        * TOCTOU-GUARDED — the instance is re-read immediately before
+          the delete and a non-terminal row (a revive landed in
+          between) is SKIPPED, never reaped;
+        * PINNED-SAFE — the protected set is honoured, and a failure to
+          resolve it fails CLOSED (the leg does nothing rather than
+          reaping a pinned subtree);
+        * KILL-SWITCHED — ``ENSEMBLE_CHECKPOINT_TERMINAL_REAP=0``
+          disables the leg;
+        * COUNTED — the counters ride the ``terminal_reap`` block of the
+          cycle's audit row.
+
+        Returns:
+            The :class:`TerminalReapSummary` for this cycle.
+        """
+        summary = TerminalReapSummary()
+        summary.age_hours = max(
+            1, _env_int(TERMINAL_REAP_HOURS_ENV, DEFAULT_TERMINAL_REAP_HOURS)
+        )
+        summary.batch_bound = max(
+            1, _env_int(TERMINAL_REAP_BATCH_ENV, DEFAULT_TERMINAL_REAP_BATCH)
+        )
+
+        if not _env_flag(TERMINAL_REAP_KILL_SWITCH_ENV, True):
+            summary.skipped_reason = "kill_switch"
+            logger.info(
+                "checkpoint_cleanup: terminal-thread reap SKIPPED "
+                "(kill switch %s=0)",
+                TERMINAL_REAP_KILL_SWITCH_ENV,
+            )
+            return summary
+
+        try:
+            # The protected set FIRST, and fail-CLOSED: a pinned
+            # subtree must never be reaped, so an unreadable prefs
+            # store means the leg does nothing at all.
+            protected = self._get_protected_instance_ids()
+        except Exception as e:
+            summary.skipped_reason = "protected_set_unavailable"
+            logger.warning(
+                "checkpoint_cleanup: terminal-thread reap SKIPPED — the "
+                "pinned set could not be resolved (fail-closed; a pinned "
+                "subtree must never be reaped): %s",
+                e, exc_info=True,
+            )
+            return summary
+
+        cutoff = utcnow() - timedelta(hours=summary.age_hours)
+        try:
+            expired = self._find_expired_terminal_instances(cutoff)
+        except Exception as e:
+            summary.skipped_reason = "candidate_listing_failed"
+            logger.error(
+                "checkpoint_cleanup: terminal-thread reap candidate listing "
+                "failed: %s", e, exc_info=True,
+            )
+            return summary
+
+        summary.candidates = len(expired)
+        if not expired:
+            logger.info(
+                "checkpoint_cleanup: terminal-thread reap — no terminal "
+                "instance is older than %dh",
+                summary.age_hours,
+            )
+            return summary
+
+        candidates = [i for i in expired if i not in protected]
+        summary.skipped_pinned = len(expired) - len(candidates)
+        if not candidates:
+            logger.info(
+                "checkpoint_cleanup: terminal-thread reap — all %d "
+                "candidates are in pinned subtrees (skipped)",
+                len(expired),
+            )
+            return summary
+
+        reaped = 0
+        for instance_id in candidates[: summary.batch_bound]:
+            # TOCTOU re-read — a revive may have landed between the
+            # listing and this delete. A non-terminal row is NEVER
+            # reaped (the revive would lose its checkpoint mid-turn).
+            try:
+                inst = self._instance_repo.get(instance_id)
+            except Exception as e:
+                summary.errors += 1
+                logger.error(
+                    "checkpoint_cleanup: terminal-thread reap TOCTOU "
+                    "re-read failed for %s: %s",
+                    instance_id[:8], e, exc_info=True,
+                )
+                continue
+            if inst is None:
+                summary.skipped_not_terminal += 1
+                continue
+            if inst.status not in TERMINAL_STATUSES:
+                summary.skipped_not_terminal += 1
+                logger.info(
+                    "checkpoint_cleanup: terminal-thread reap SKIP %s — "
+                    "no longer terminal (status=%s)",
+                    instance_id[:8], inst.status,
+                )
+                continue
+            try:
+                await self._checkpointer.adelete_thread(instance_id)
+                reaped += 1
+            except Exception as e:
+                summary.errors += 1
+                logger.error(
+                    "checkpoint_cleanup: terminal-thread reap FAILED for "
+                    "%s: %s", instance_id[:8], e, exc_info=True,
+                )
+
+        summary.reaped_threads = reaped
+        logger.info(
+            "checkpoint_cleanup: terminal-thread reap — age_hours=%d "
+            "candidates=%d batch_bound=%d reaped=%d skipped_not_terminal=%d "
+            "skipped_pinned=%d errors=%d",
+            summary.age_hours, summary.candidates, summary.batch_bound,
+            summary.reaped_threads, summary.skipped_not_terminal,
+            summary.skipped_pinned, summary.errors,
+        )
+        return summary
 
     async def _enforce_history_cap(self) -> None:
         """(C) Keep only max_instance_history terminal instances.
@@ -2350,6 +2824,263 @@ class CheckpointCleanupJob:
             # (True / None) paths.
             destructive=destructive if destructive is not None else True,
         )
+
+    async def run_backstop_prune(self) -> BackstopPruneSummary:
+        """The BACKSTOP run — the anti-starvation path for the growth.
+
+        WHY THIS EXISTS (SCOPE (c), 2026-11-24): the retention lane's
+        whole bound on a thread's mass is Op D's keep-N, and Op D is
+        applied only when the maintenance CYCLE runs. The cycle is
+        IDLE-GATED (``checkpoint_cleanup`` is one of the two jobs that
+        keeps the idle gate — its work genuinely contends with live
+        traffic for the write path). On a continuously busy nest the
+        gate can be unsatisfiable for days — the measured recurrence
+        (the third bloat-class recurrence: 13GB / 94k rows after 47h of
+        missed cycles) — and the growth is unbounded in the meantime.
+
+        So the BACKSTOP is a SECOND, bounded lane that:
+
+        * runs on its OWN WALL-CLOCK cadence (default 60 min) and does
+          NOT consult the idle gate (it is registered UN_GATED);
+        * prunes only a BOUNDED number of pairs per run (default 25) —
+          the pair budget is what keeps it cheap enough to run on a
+          busy nest;
+        * does the same work as Op D + Op E for those pairs (prune to
+          keep-N, then reclaim the blobs the prune orphaned), so the
+          per-thread mass stays bounded between the daily cycles;
+        * NEVER touches an instance row (no Op A/B/C semantics — the
+          backstop is a prune, not a reap: it never deletes a
+          conversation);
+        * is SINGLE-FLIGHT per section (its own ``maintenance_runs``
+          section, ``checkpoint-backstop``; the process-wide
+          ``MaintenanceRunLock`` serialises it against the daily
+          cycle);
+        * is KILL-SWITCHED (``ENSEMBLE_CHECKPOINT_BACKSTOP=0``) and
+          NEVER RAISES.
+
+        The counters ride the ``backstop`` block of the run's audit
+        row, so an operator can see the lane's effect (and its
+        starvation) without reading logs.
+
+        Returns:
+            The :class:`BackstopPruneSummary` for this run.
+        """
+        summary = BackstopPruneSummary()
+        summary.pair_budget = max(
+            1, _env_int(BACKSTOP_PAIR_BUDGET_ENV, DEFAULT_BACKSTOP_PAIR_BUDGET)
+        )
+
+        if not _env_flag(BACKSTOP_KILL_SWITCH_ENV, True):
+            summary.skipped_reason = "kill_switch"
+            logger.info(
+                "checkpoint_backstop: SKIPPED (kill switch %s=0)",
+                BACKSTOP_KILL_SWITCH_ENV,
+            )
+            return summary
+
+        # Lazy imports (the same cold-import-cycle rationale as the
+        # auto cycle's claim block).
+        from daemon.services.maintenance_run_identity import new_maintenance_run_id
+        from daemon.services.timestamps import now_utc_iso
+        from daemon.services.maintenance_run_lock import MaintenanceRunContext
+        from daemon.repositories.maintenance_runs.models import MaintenanceRun
+
+        ctx: MaintenanceRunContext | None = None
+        if self._run_lock is not None:
+            ctx = MaintenanceRunContext(
+                run_id=new_maintenance_run_id(),
+                kind="auto",
+                started_at=now_utc_iso(),
+                triggered_by="system",
+            )
+            if not await self._run_lock.acquire(ctx):
+                summary.skipped_reason = "in_flight"
+                logger.debug(
+                    "checkpoint_backstop: skipped — a maintenance run is "
+                    "in flight",
+                )
+                return summary
+
+        try:
+            if self._runs_repo is not None and ctx is not None:
+                inserted = True
+                try:
+                    inserted = self._runs_repo.insert(
+                        MaintenanceRun(
+                            run_id=ctx.run_id,
+                            section=BACKSTOP_SECTION,
+                            kind=ctx.kind,
+                            started_at=ctx.started_at,
+                            status="running",
+                            triggered_by=ctx.triggered_by,
+                            env_flags_json={
+                                "destructive": True,
+                                "pair_budget": summary.pair_budget,
+                            },
+                        )
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"maintenance_runs insert failed (backstop run_id="
+                        f"{ctx.run_id}): {type(e).__name__}: {e}; "
+                        f"continuing without audit row",
+                        exc_info=True,
+                    )
+                if not inserted:
+                    summary.skipped_reason = "db_claim_held"
+                    logger.debug(
+                        "checkpoint_backstop: skipped — the DB claim is "
+                        "held by another run",
+                    )
+                    return summary
+
+            try:
+                await self._backstop_prune_pairs(summary)
+            except Exception as e:
+                summary.errors += 1
+                logger.error(
+                    "checkpoint_backstop: run failed: %s", e, exc_info=True,
+                )
+                if self._runs_repo is not None and ctx is not None:
+                    try:
+                        self._runs_repo.mark_terminal(
+                            ctx.run_id,
+                            "failed",
+                            now_utc_iso(),
+                            error_json={
+                                "code": "execution_error",
+                                "message": f"{type(e).__name__}: {e}",
+                            },
+                        )
+                    except Exception as mark_err:
+                        logger.warning(
+                            f"maintenance_runs failed-mark failed "
+                            f"(backstop run_id={ctx.run_id}): "
+                            f"{type(mark_err).__name__}: {mark_err}",
+                            exc_info=True,
+                        )
+                return summary
+
+            logger.info(
+                "checkpoint_backstop: pairs=%d/%d deleted_checkpoints=%d "
+                "deleted_writes=%d deleted_blobs=%d bytes_freed=%d errors=%d",
+                summary.pruned_pairs, summary.pair_budget,
+                summary.deleted_checkpoints, summary.deleted_writes,
+                summary.deleted_blobs, summary.bytes_freed, summary.errors,
+            )
+
+            if self._runs_repo is not None and ctx is not None:
+                try:
+                    self._runs_repo.mark_terminal(
+                        ctx.run_id,
+                        "succeeded",
+                        now_utc_iso(),
+                        summary_json=summary.to_summary_dict(),
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"maintenance_runs succeeded-mark failed (backstop "
+                        f"run_id={ctx.run_id}): {type(e).__name__}: {e}",
+                        exc_info=True,
+                    )
+            return summary
+        finally:
+            if self._run_lock is not None:
+                self._run_lock.release()
+
+    async def _backstop_prune_pairs(self, summary: BackstopPruneSummary) -> None:
+        """The backstop's work — prune up to ``pair_budget`` excess pairs.
+
+        Per pair: the Op D prune (keep the newest N checkpoints +
+        their writes) followed by the Op E per-pair blob reclaim. The
+        blob arm runs AFTER the row prune so the reference set it reads
+        is the POST-prune one (the blobs the prune orphaned are exactly
+        the ones the anti-join frees).
+        """
+        max_per_thread = self._config.checkpoint_max_per_thread
+        try:
+            excess_pairs = await self._checkpointer.find_excess_checkpoint_groups(
+                max_per_thread
+            )
+        except Exception as e:
+            summary.skipped_reason = "pair_scan_failed"
+            logger.error(
+                "checkpoint_backstop: pair scan failed: %s", e, exc_info=True,
+            )
+            return
+
+        summary.excess_pairs = len(excess_pairs)
+        if not excess_pairs:
+            logger.debug(
+                "checkpoint_backstop: no thread exceeds the retention cap"
+            )
+            return
+
+        # The adapter returns the pairs WORST-FIRST (the SCOPE (c)
+        # ordering change), so a bounded run always attacks the
+        # biggest offenders.
+        reclaimed: list[tuple[str, str, int]] = []
+        for thread_id, checkpoint_ns, _cnt in excess_pairs[: summary.pair_budget]:
+            try:
+                ids_to_keep = set(
+                    await self._checkpointer.get_checkpoint_ids(
+                        thread_id, checkpoint_ns, max_per_thread
+                    )
+                )
+                if not ids_to_keep:
+                    # No keep-set ⇒ nothing is safe to delete (the
+                    # silent-no-op wedge the keep-N docstring warns
+                    # about). Skip the pair.
+                    logger.warning(
+                        "checkpoint_backstop: pair %s/%s has no keep-set — "
+                        "skipping (no rows deleted)",
+                        thread_id[:8], checkpoint_ns,
+                    )
+                    continue
+                deleted_cps = await self._checkpointer.delete_checkpoints_excluding(
+                    thread_id, checkpoint_ns, ids_to_keep
+                )
+                deleted_writes = await self._checkpointer.delete_writes_excluding(
+                    thread_id, checkpoint_ns, ids_to_keep
+                )
+                summary.pruned_pairs += 1
+                summary.deleted_checkpoints += int(deleted_cps)
+                summary.deleted_writes += int(deleted_writes)
+                reclaimed.append((thread_id, checkpoint_ns, 0))
+            except Exception as e:
+                summary.errors += 1
+                logger.warning(
+                    "checkpoint_backstop: pair %s/%s failed: %s: %s",
+                    thread_id[:8], checkpoint_ns, type(e).__name__, e,
+                )
+
+        # The blob reclaim for EXACTLY the pairs this run pruned — the
+        # same single-owner algorithm as Op E (the anti-join DELETE with
+        # its zero-refs fail-safe and its chunked, bounded delete), with
+        # the BOUNDED candidate set so the backstop never pays for the
+        # all-pairs enumeration.
+        if not reclaimed:
+            return
+        try:
+            blob_summary = await prune_unreferenced_blobs(
+                self._checkpointer,
+                destructive=True,
+                candidate_pairs=reclaimed,
+            )
+            summary.deleted_blobs += blob_summary.total_deleted
+            summary.bytes_freed += blob_summary.total_bytes_freed
+            for skipped_thread, skipped_ns, reason in blob_summary.skipped:
+                logger.warning(
+                    "checkpoint_backstop: blob reclaim skipped for pair "
+                    "%s/%s (%s) — the row prune already landed",
+                    skipped_thread[:8], skipped_ns, reason,
+                )
+        except Exception as e:
+            summary.errors += 1
+            logger.warning(
+                "checkpoint_backstop: blob reclaim failed: %s: %s",
+                type(e).__name__, e,
+            )
 
     @staticmethod
     def _apply_version_census_fields(

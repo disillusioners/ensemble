@@ -202,6 +202,8 @@ from .services.skill_clone_service import SkillCloneService
 from .services.maintenance import (
     CheckpointCleanupJob,
     MaintenanceService,
+    _env_flag as _env_flag_default_true,
+    _env_int as _env_int_default,
 )
 from .services.todo_manager import TodoManager
 from .services.question_manager import QuestionManager
@@ -4808,6 +4810,49 @@ class InstanceManager:
             self.config.persistence.checkpoint_cleanup_interval,
             checkpoint_cleanup.execute,
         )
+
+        # ── SCOPE (c) — the checkpoint BACKSTOP lane (2026-11-24) ────
+        # The anti-starvation path for the checkpoint growth itself.
+        # The daily ``checkpoint_cleanup`` cycle is IDLE_GATED (its work
+        # genuinely contends with live traffic for the write path), so
+        # on a continuously busy nest the per-thread keep-N cap — the
+        # ONLY bound on a thread's checkpoint/blob mass — can go
+        # unapplied for days (the measured third bloat-class recurrence:
+        # 13GB / 94k rows after 47h of missed cycles).
+        #
+        # The backstop runs on its OWN wall-clock cadence (default 60
+        # min) and is registered UN_GATED, so the idle gate cannot
+        # starve it. Each run is BOUNDED (a small pair budget), never
+        # touches an instance row (a prune, not a reap), is
+        # single-flight per section (its own ``maintenance_runs``
+        # section — the process-wide ``MaintenanceRunLock`` still
+        # serialises it against the daily cycle), and is kill-switched
+        # (``ENSEMBLE_CHECKPOINT_BACKSTOP=0`` ⇒ never registered).
+        #
+        # The interval is read from the env knob (minutes) and floored
+        # at 1 minute; the pair budget is read inside the job.
+        if _env_flag_default_true("ENSEMBLE_CHECKPOINT_BACKSTOP"):
+            backstop_interval_minutes = max(
+                1,
+                _env_int_default(
+                    "ENSEMBLE_CHECKPOINT_BACKSTOP_INTERVAL_MINUTES", 60
+                ),
+            )
+            self._maintenance_service.register(
+                "checkpoint_backstop_prune",
+                backstop_interval_minutes / 60.0,
+                checkpoint_cleanup.run_backstop_prune,
+            )
+            logger.info(
+                "checkpoint_backstop_prune registered (interval=%d min, "
+                "un-gated — the anti-starvation path for checkpoint growth)",
+                backstop_interval_minutes,
+            )
+        else:
+            logger.info(
+                "checkpoint_backstop_prune NOT registered (kill switch "
+                "ENSEMBLE_CHECKPOINT_BACKSTOP=0)"
+            )
 
         # ── agent group chat P6 — the ROOM GC PURGE sweeper (R2) ──────
         # The §2.2 GC job: P-close (closed > 14d) and P-idle (active,

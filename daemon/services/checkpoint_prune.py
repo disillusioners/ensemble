@@ -166,6 +166,7 @@ async def prune_unreferenced_blobs(
     *,
     max_refs_per_thread: int = CHECKPOINT_BLOB_PRUNE_MAX_REFS_PER_THREAD,
     destructive: bool = True,
+    candidate_pairs: list[tuple[str, str, int]] | None = None,
 ) -> BlobPruneSummary:
     """Run one reference-aware blob-prune cycle over all (thread, ns) pairs.
 
@@ -194,6 +195,16 @@ async def prune_unreferenced_blobs(
     separate SERIALIZABLE transaction with the bounded retry wrap. No
     single statement is unbounded — pool-hazard class closed.
 
+    THE BOUNDED CANDIDATE SET (``candidate_pairs``, SCOPE (c),
+    2026-11-24): by default the candidate set is EVERY (thread, ns)
+    pair (``find_all_thread_ns_pairs`` — D21). A caller that already
+    knows WHICH pairs it wants reclaimed may pass them explicitly: the
+    backstop job (the anti-starvation lane) prunes a BOUNDED number of
+    pairs per run and passes exactly those, so it never pays for the
+    all-pairs enumeration. The DEFAULT is unchanged — the enumeration
+    still runs — so the D21 pin (``find_all_thread_ns_pairs`` is
+    awaited) stays green for every existing caller.
+
     Never raises: per-pair failures are logged and skipped; the outer
     try/except makes even candidate-enumeration failures non-fatal (the
     maintenance loop's other operations are unaffected).
@@ -215,7 +226,14 @@ async def prune_unreferenced_blobs(
         # D21: ALL (thread_id, checkpoint_ns) pairs — find_excess_checkpoint_
         # groups' HAVING clause would silently skip single-checkpoint
         # threads whose blobs still need pruning.
-        candidate_pairs = await checkpointer.find_all_thread_ns_pairs()
+        #
+        # A caller-supplied BOUNDED candidate set (the backstop job)
+        # replaces the enumeration — the pair set is then exactly what
+        # the caller already pruned, so the reclaim matches the prune.
+        if candidate_pairs is None:
+            candidate_pairs = await checkpointer.find_all_thread_ns_pairs()
+        else:
+            candidate_pairs = list(candidate_pairs)
         if not candidate_pairs:
             logger.debug("No threads with checkpoints found for blob prune scan")
             return summary
@@ -792,3 +810,4 @@ async def collect_blob_bytes_by_channel(
             )
     outcome.duration_ms = int((time.perf_counter() - t0) * 1000)
     return outcome
+
