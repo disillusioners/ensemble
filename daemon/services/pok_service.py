@@ -83,6 +83,7 @@ from daemon.repositories.pok.models import (
     POK_PROVENANCE_VALUES, pok_family_key,
     POK_SOURCE_TIERS,
     POK_STATUSES,
+    POKWriteGateLedger,
     ProjectOperatingKnowledge,
 )
 from daemon.repositories.pok.repository import POKRepository, UNSET, _utc_now_iso
@@ -105,6 +106,7 @@ __all__ = [
     "POK_VERIFY_WINDOW_DAYS",
     "QueryOutcome",
     "R0_FENCE_LABEL",
+    "AskUpsertOutcome",
     "UpsertOutcome",
     "content_hash",
     "fence_check",
@@ -275,6 +277,39 @@ class UpsertOutcome:
 
 
 @dataclass
+class AskUpsertOutcome:
+    """The ASK VARIANT of the upsert outcome (pok-write-gate T7.14).
+
+    ``UpsertOutcome.entry`` is NON-OPTIONAL in the current shape, so
+    the ASK outcome — which has NO written row (the gate refused to
+    write pending the caller's confirmation) — cannot be one. This
+    sibling carries the gate verdict + the question instead.
+
+    ``action`` is ``"ask"`` for a plain ASK round-trip and ``"merge"``
+    for a MERGE verdict the TOOL must execute (the authority split:
+    the gate returns the verdict, the tool executes).
+    """
+
+    action: str = "ask"  # "ask" | "merge"
+    gate_id: str = ""
+    question: str = ""
+    verdict: Any = None
+    entry: ProjectOperatingKnowledge | None = None
+    superseded_id: str | None = None
+    #: The merge target's FULL body (F2: the ASK payload carries the
+    #: FULL target body, not the 80-char digest slice) so the caller
+    #: can check coverage before confirming.
+    merge_target_body: str | None = None
+    merge_target_slug: str | None = None
+    merge_kind: str | None = None
+    proposed_body: str | None = None
+    candidate_body: str | None = None
+    #: The slug the caller asked for (the pending entry writes HERE
+    #: unless an R-RET rename proposal moved it).
+    candidate_slug: str | None = None
+
+
+@dataclass
 class QueryOutcome:
     """Structured pok_query result (universal read; lag surfaced)."""
 
@@ -332,6 +367,7 @@ class POKService:
         body: str,
         reason: str | None = None,
         gate_fn: Callable | None = None,
+        execution_audit: dict[str, Any] | None = None,
         domain: str = POK_DOMAINS[-1],
         provenance: str = "observed",
         audience: str = POK_DEFAULT_AUDIENCE,
@@ -355,6 +391,16 @@ class POKService:
         enforces ``reason`` presence at the TOOL layer and this
         service stays LLM-free. Both default to ``None`` so every
         direct ``svc.upsert(...)`` call site is byte-unchanged.
+
+        ``execution_audit`` (Wave 2 Phase 8, T8.14) is the LEDGER
+        CONTEXT for the EXECUTION row of a write the gate did not judge
+        at this call — the ANSWER path's ``ASK_EXECUTED`` row (the
+        answer re-runs the write with ``gate_fn=None``, so there is no
+        verdict to derive the row from). Its keys override the row's
+        ``phase`` / ``gate_id`` / ``verdict`` /
+        ``judge_explanation`` / ``confidence`` / ``target_slug`` /
+        ``merge_kind``. ``None`` → the row is derived from the gate
+        verdict (or no row is written at all).
 
         ``source_tier`` (Phase 2 — trust-tier addendum T-1) is the
         OPTIONAL trust-tier statement at capture: omit (``None``) →
@@ -471,7 +517,32 @@ class POKService:
                 prior.updated_at = _utc_now_iso()
                 # persist the stamp via the repo's session-free helper
                 self._repo.stamp_last_verified(prior.id)
+                # A PURE NO-OP SHORT-CIRCUITS BEFORE THE GATE (D5): no
+                # cache lookup, no audit, no judge call — nothing was
+                # written, so there is nothing to judge.
                 return UpsertOutcome(action="no-op", entry=prior)
+            # ── THE GATE SLOT (T8.9) — strictly BETWEEN the no-op echo
+            # above and the supersede below.
+            #
+            # A SUPERSEDE MUST BE JUDGED: the digest carries the prior
+            # row, so the MERGE detection works (the judge can see that
+            # an ACTIVE row already carries the fact). The gate NEVER
+            # writes — it returns a verdict and the TOOL executes.
+            gate_outcome, gate_verdict = self._consult_gate(
+                gate_fn=gate_fn,
+                project_id=project_id,
+                slug=slug,
+                body=body,
+                reason=reason,
+                prior=prior,
+                domain=domain,
+                provenance=provenance,
+                audience=audience,
+                source_tier=source_tier,
+                agent_id=agent_id,
+            )
+            if gate_outcome is not None:
+                return gate_outcome
             return self._supersede(
                 prior=prior,
                 project_id=project_id,
@@ -482,6 +553,9 @@ class POKService:
                 audience=audience,
                 source_tier=source_tier,
                 agent_id=agent_id,
+                gate_verdict=gate_verdict,
+                reason=reason,
+                execution_audit=execution_audit,
             )
         # 6. dispute-laundering guard: the same normalized body cannot
         # re-enter under a NEW slug while a disputed row holds it.
@@ -573,6 +647,28 @@ class POKService:
                     members=members,
                     archive_needed=archive_needed,
                 )
+        # ── THE GATE SLOT (T8.9) — the NEW-write leg.
+        #
+        # Same slot, same contract: the gate NEVER writes; it returns a
+        # verdict and the TOOL executes. It sits AFTER the mechanical
+        # refusals above (the cheap checks run first) and IMMEDIATELY
+        # BEFORE the insert, so a judged write is a write that was
+        # otherwise admissible.
+        gate_outcome, gate_verdict = self._consult_gate(
+            gate_fn=gate_fn,
+            project_id=project_id,
+            slug=slug,
+            body=body,
+            reason=reason,
+            prior=None,
+            domain=domain,
+            provenance=provenance,
+            audience=audience,
+            source_tier=source_tier,
+            agent_id=agent_id,
+        )
+        if gate_outcome is not None:
+            return gate_outcome
         entry = ProjectOperatingKnowledge(
             project_id=project_id,
             slug=slug,
@@ -589,8 +685,28 @@ class POKService:
             source_tier=effective_tier,
             last_verified=_utc_now_iso(),
         )
+        # The EXECUTION ledger row rides the SAME TRANSACTION as the
+        # write it records (design-amendments-v2 §13.10: "EXECUTION rows
+        # are written SAME-TRANSACTION as the write they record" — the
+        # ledger must not be able to claim an execution the store did
+        # not commit).
+        execution_row = self._execution_ledger_row(
+            project_id=project_id,
+            slug=slug,
+            entry=entry,
+            verdict=gate_verdict,
+            agent_id=agent_id,
+            reason=reason,
+            audit=execution_audit,
+        )
         try:
-            self._repo.insert(entry)
+            if execution_row is None:
+                # The UNJUDGED path keeps the byte-unchanged call shape
+                # (every direct ``svc.upsert`` call site + every test
+                # double that patches ``insert``).
+                self._repo.insert(entry)
+            else:
+                self._repo.insert(entry, ledger_row=execution_row)
         except Exception as exc:  # noqa: BLE001 — integrity race → typed
             if not _is_slug_unique_violation(exc):
                 raise  # re-raise: NOT a slug conflict (D-1/H2)
@@ -602,6 +718,178 @@ class POKService:
                 slug=slug,
             ) from exc
         return UpsertOutcome(action="created", entry=entry)
+
+    # ── the gate slot (T8.9) ──────────────────────────────────────────────
+
+    def _consult_gate(
+        self,
+        *,
+        gate_fn: Callable | None,
+        project_id: str,
+        slug: str,
+        body: str,
+        reason: str | None,
+        prior: ProjectOperatingKnowledge | None,
+        domain: str,
+        provenance: str,
+        audience: str,
+        source_tier: str | None,
+        agent_id: str,
+    ) -> tuple[UpsertOutcome | AskUpsertOutcome | None, Any]:
+        """Call the injected gate and apply its verdict (T8.9).
+
+        Returns ``(outcome, verdict)``:
+
+        * ``outcome`` is ``None`` when the write may PROCEED (the gate
+          accepted, or the verdict is ADVISORY — the SHADOW posture
+          never refuses a write);
+        * ``outcome`` is an :class:`AskUpsertOutcome` when the gate
+          ASKED (the caller must confirm) or returned a MERGE (the
+          TOOL executes it);
+        * a REJECT raises :class:`POKError` (``pok_gate_reject``) — the
+          refusal carries the alternative home so the caller can route
+          the fact.
+
+        ``gate_fn=None`` is the TRUSTED BYPASS (D7): the gate slot is
+        skipped entirely and the write proceeds unjudged.
+        """
+        if gate_fn is None:
+            return (None, None)
+        verdict = gate_fn(
+            project_id=project_id,
+            slug=slug,
+            body=body,
+            reason=reason,
+            prior=prior,
+            domain=domain,
+            provenance=provenance,
+            audience=audience,
+            source_tier=source_tier,
+            agent_id=agent_id,
+        )
+        if verdict is None:
+            return (None, None)
+        token = getattr(verdict, "verdict", None)
+        if token is None:
+            return (None, None)
+        if getattr(verdict, "advisory", False):
+            # SHADOW (T8.8): the verdict is ADVISORY — it never refuses
+            # a write, and a shadow ASK mints no pending state.
+            return (None, verdict)
+        if token == "REJECT":
+            raise POKError(
+                "pok_gate_reject",
+                str(getattr(verdict, "explanation", "") or "")
+                or "the write gate rejected this fact",
+                family=getattr(verdict, "family", None),
+                alternative=getattr(verdict, "alternative", None),
+                gate_id=getattr(verdict, "gate_id", None),
+            )
+        if token == "ASK":
+            return (
+                AskUpsertOutcome(
+                    action="ask",
+                    gate_id=str(getattr(verdict, "gate_id", "") or ""),
+                    question=str(getattr(verdict, "question", "") or ""),
+                    verdict=verdict,
+                    candidate_body=body,
+                    candidate_slug=slug,
+                    proposed_body=getattr(verdict, "proposed_slug", None),
+                ),
+                verdict,
+            )
+        if token == "MERGE":
+            target_slug = getattr(verdict, "target_slug", None)
+            target_body = None
+            if target_slug:
+                target = self._repo.resolve_slug_row(
+                    project_id, target_slug, scope="active"
+                )
+                if target is not None:
+                    target_body = target.body
+            return (
+                AskUpsertOutcome(
+                    action="merge",
+                    gate_id=str(getattr(verdict, "gate_id", "") or ""),
+                    question=str(getattr(verdict, "question", "") or ""),
+                    verdict=verdict,
+                    candidate_body=body,
+                    candidate_slug=slug,
+                    merge_target_slug=target_slug,
+                    merge_target_body=target_body,
+                    merge_kind=getattr(verdict, "merge_kind", None),
+                    proposed_body=getattr(verdict, "proposed_body", None),
+                ),
+                verdict,
+            )
+        # ACCEPT — the write proceeds.
+        return (None, verdict)
+
+    def _execution_ledger_row(
+        self,
+        *,
+        project_id: str,
+        slug: str,
+        entry: ProjectOperatingKnowledge,
+        verdict: Any,
+        agent_id: str,
+        reason: str | None,
+        audit: dict[str, Any] | None = None,
+    ) -> POKWriteGateLedger | None:
+        """Build the EXECUTION ledger row for a judged write.
+
+        ``None`` when there was no verdict (the unjudged write path
+        writes no ledger row — the ledger records GATE events, and a
+        bypassed gate is not one).
+
+        The row is written SAME-TRANSACTION as the write (design-
+        amendments-v2 §13.10), so the caller passes it into the
+        repository's write method.
+        """
+        context = audit or {}
+        if verdict is None and not context:
+            return None
+        gate_id = context.get("gate_id") or str(getattr(verdict, "gate_id", "") or "")
+        return POKWriteGateLedger(
+            project_id=project_id,
+            gate_id=gate_id or None,
+            phase=str(context.get("phase") or "EXECUTION"),
+            entry_id=entry.id,
+            candidate_slug=slug,
+            verdict=(
+                str(context["verdict"])
+                if context.get("verdict")
+                else (
+                    str(getattr(verdict, "verdict", "") or "") or None
+                    if getattr(verdict, "verdict", None)
+                    else None
+                )
+            ),
+            reason=(reason or "")[:200] or None,
+            judge_explanation=(
+                context.get("judge_explanation")
+                or getattr(verdict, "explanation", None)
+            ),
+            confidence=(
+                context.get("confidence")
+                if context.get("confidence") is not None
+                else getattr(verdict, "confidence", None)
+            ),
+            executed=True,
+            executed_by=agent_id or "unknown",
+            target_slug=(
+                context.get("target_slug")
+                or getattr(verdict, "target_slug", None)
+            ),
+            merge_kind=(
+                context.get("merge_kind")
+                or getattr(verdict, "merge_kind", None)
+            ),
+            proposed_body_sha256=getattr(verdict, "proposed_body_sha256", None),
+            target_body_sha256=getattr(verdict, "target_body_sha256", None),
+            executed_body_sha256=content_hash(entry.body),
+            agent_id=agent_id or "unknown",
+        )
 
     def _supersede(
         self,
@@ -615,6 +903,9 @@ class POKService:
         audience: str,
         source_tier: str | None,
         agent_id: str,
+        gate_verdict: Any = None,
+        reason: str | None = None,
+        execution_audit: dict[str, Any] | None = None,
     ) -> UpsertOutcome:
         """The supersede leg of the write path.
 
@@ -675,8 +966,24 @@ class POKService:
             created_by_agent=agent_id or "unknown",
             source_tier=effective_tier,
         )
+        # The EXECUTION ledger row rides the SAME TRANSACTION as the
+        # supersede it records (design-amendments-v2 §13.10).
+        execution_row = self._execution_ledger_row(
+            project_id=project_id,
+            slug=slug,
+            entry=successor,
+            verdict=gate_verdict,
+            agent_id=agent_id,
+            reason=reason,
+            audit=execution_audit,
+        )
         try:
-            self._repo.supersede_and_insert(prior, successor)
+            if execution_row is None:
+                self._repo.supersede_and_insert(prior, successor)
+            else:
+                self._repo.supersede_and_insert(
+                    prior, successor, ledger_row=execution_row
+                )
         except Exception as exc:  # noqa: BLE001 — integrity race → typed
             if not _is_slug_unique_violation(exc):
                 raise  # re-raise: NOT a slug conflict (D-1/H2)

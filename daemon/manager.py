@@ -10335,6 +10335,29 @@ class InstanceManager:
                 "ON mission_records (anchor_instance_id) "
                 f"WHERE {OPEN_EPOCH_STATUS_SQL}"
             ),
+            # ── POK write-gate ledger — the GATE-CHAIN partial unique
+            # index (Wave 2 Phase 8, T8.16). At most ONE ledger row
+            # per (project_id, gate_id, phase): the DB-level backstop
+            # for the gate-chain idempotency (the appender used to be
+            # app-level read-then-append only — a race).
+            #
+            # The statement is needed HERE because
+            # ``SQLModel.metadata.create_all(checkfirst=True)`` does
+            # NOT add an index to a table that already exists — a
+            # PostgreSQL database that already carries
+            # ``pok_write_gate_ledger`` (created by the Wave-1 boot)
+            # would otherwise never get the index.
+            #
+            # The index name + predicate MUST stay byte-identical with
+            # the SQLite counterpart
+            # (``daemon/migrations/versions/20261124_093000_add_pok_ledger_gate_chain_unique_index.sql``)
+            # and with the SQLModel ``__table_args__`` declaration in
+            # ``daemon/repositories/pok/models.py`` (3-site pin).
+            (
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_pok_ledger_gate_chain "
+                "ON pok_write_gate_ledger (project_id, gate_id, phase) "
+                "WHERE gate_id IS NOT NULL"
+            ),
             # ── Critical-notes lifecycle columns (Phase 1, 2026-09-15) ──
             # Additive columns on ``critical_notes`` per
             # architecture-recommendation §5.1. The SQLite companion is

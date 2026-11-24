@@ -32,7 +32,10 @@ txn maintains the lineage wire.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
+import re
 from datetime import datetime, timezone
 from typing import Any, Iterable, Sequence
 
@@ -45,16 +48,114 @@ from daemon.repositories.pok.models import (
     pok_family_key,
 )
 
+logger = logging.getLogger(__name__)
+
 __all__ = [
+    "POKLedgerDuplicateError",
     "POKRepository",
     "POK_STANDING_DEFECTS",
     "POK_STANDING_DEFECT_GATE_PREFIX",
     "UNSET",
+    "redact_credential_shapes",
 ]
 
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Credential-shape scan (pok-write-gate Phase 8, T8.18)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# The scan is a PERSIST-TIME guard: a bounded ``reason`` /
+# ``proposed_body`` / ``answer_excerpt`` / ``judge_explanation`` must
+# NEVER carry credential-shaped content. A hit is redacted AND
+# flagged DETERMINISTICALLY — the stored row carries the NAME + the
+# sha256 PREFIX of the value, never the value itself.
+#
+# House precedent: capture a redacted block — name + sha256-prefix
+# only, never the raw value (the 2026-11-05 F7 harness rule; the
+# attestation judge's excerpt redaction at
+# ``daemon/services/attestation_report_judge.py``).
+
+#: ``(name, pattern)`` pairs. A pattern with a capture group redacts
+#: ONLY the group (the value); a pattern without one redacts the whole
+#: match (a key BLOCK).
+CREDENTIAL_SHAPE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "bearer_token",
+        re.compile(r"\bbearer\s+([A-Za-z0-9._\-]{8,})", re.IGNORECASE),
+    ),
+    (
+        "api_key",
+        re.compile(r"\bapi[_-]?key\W*[=:]\W*([A-Za-z0-9._\-]{8,})", re.IGNORECASE),
+    ),
+    (
+        "token",
+        re.compile(r"\btoken\W*[=:]\W*([A-Za-z0-9._\-]{8,})", re.IGNORECASE),
+    ),
+    (
+        "secret",
+        re.compile(r"\bsecret\W*[=:]\W*([A-Za-z0-9._\-]{8,})", re.IGNORECASE),
+    ),
+    (
+        "password",
+        re.compile(r"\bpassw(?:or)?d\W*[=:]\W*([A-Za-z0-9._\-]{8,})", re.IGNORECASE),
+    ),
+    (
+        "private_key",
+        re.compile(
+            r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"
+        ),
+    ),
+    (
+        "aws_access_key",
+        re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
+    ),
+)
+
+#: The sha256 prefix length kept for a redacted value (8 hex chars).
+_CREDENTIAL_SHA_PREFIX_LEN = 8
+
+
+def redact_credential_shapes(text: str | None) -> tuple[str, list[str]]:
+    """Redact credential-shaped content in ``text``.
+
+    Returns ``(redacted_text, flags)`` where ``flags`` is the list of
+    ``"<name>:sha256:<prefix>"`` markers for every hit. The RAW value
+    never survives: the redaction replaces it with
+    ``[REDACTED <name> sha256:<prefix>]``.
+
+    Deterministic: the same input always yields the same output and
+    the same flags.
+    """
+    if not text:
+        return ("", [])
+    redacted = str(text)
+    flags: list[str] = []
+    for name, pattern in CREDENTIAL_SHAPE_PATTERNS:
+        if not pattern.search(redacted):
+            continue
+
+        def _replace(match: "re.Match[str]") -> str:
+            material = match.group(1) if match.re.groups else match.group(0)
+            digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
+            prefix = digest[:_CREDENTIAL_SHA_PREFIX_LEN]
+            marker = f"[REDACTED {name} sha256:{prefix}]"
+            flag = f"{name}:sha256:{prefix}"
+            if flag not in flags:
+                flags.append(flag)
+            if match.re.groups:
+                whole = match.group(0)
+                group_start, group_end = match.span(1)
+                rel_start = group_start - match.start()
+                rel_end = group_end - match.start()
+                return whole[:rel_start] + marker + whole[rel_end:]
+            return marker
+
+        redacted = pattern.sub(_replace, redacted)
+    return (redacted, flags)
 
 
 class _Unset:
@@ -134,6 +235,33 @@ _SLUG_OWNER_STATUS_RANK: dict[str, int] = {
     "archived": 1,
     "superseded": 2,
 }
+
+
+class POKLedgerDuplicateError(Exception):
+    """A duplicate gate-chain row was refused at the DB level (T8.16).
+
+    The ledger's gate-chain rows are keyed by ``(project_id, gate_id,
+    phase)`` under a PARTIAL UNIQUE index. Two concurrent callers can
+    therefore NOT write the same chain step twice — the second INSERT
+    raises an integrity violation, which surfaces here as this typed
+    error.
+
+    The appender used to be app-level read-then-append only, which is
+    a race: the DB uniqueness is the backstop (the single-writer
+    discipline is documentation, not enforcement).
+    """
+
+    code = "pok_ledger_duplicate"
+
+    def __init__(self, project_id: str, gate_id: str | None, phase: str) -> None:
+        self.project_id = project_id
+        self.gate_id = gate_id
+        self.phase = phase
+        super().__init__(
+            "a ledger row for (project_id=%s, gate_id=%s, phase=%s) already "
+            "exists — the gate-chain append is idempotent per chain step"
+            % (project_id, gate_id, phase)
+        )
 
 
 class POKRepository:
@@ -327,17 +455,59 @@ class POKRepository:
 
     # ── writes ───────────────────────────────────────────────────────────
 
-    def insert(self, entry: ProjectOperatingKnowledge) -> ProjectOperatingKnowledge:
+    def insert(
+        self,
+        entry: ProjectOperatingKnowledge,
+        *,
+        ledger_row: POKWriteGateLedger | None = None,
+    ) -> ProjectOperatingKnowledge:
+        """INSERT one knowledge row — optionally with its EXECUTION
+        ledger row in the SAME TRANSACTION.
+
+        The ledger row rides this transaction because it ATTESTS this
+        write (design-amendments-v2 §13.10: "EXECUTION rows are written
+        SAME-TRANSACTION as the write they record" — a ledger that can
+        claim an execution the store did not commit breaks the
+        ledger-alone answerability). ``None`` → no ledger row (the
+        unjudged write path).
+        """
         with Session(self._engine) as session:
             session.add(entry)
+            if ledger_row is not None:
+                self._scrub_ledger_row(ledger_row)
+                session.add(ledger_row)
             session.commit()
             session.refresh(entry)
             return entry
+
+    @staticmethod
+    def _read_for_update(
+        session: Session, entry_id: str
+    ) -> ProjectOperatingKnowledge | None:
+        """Read one row under a row lock (PostgreSQL) / plainly (SQLite).
+
+        ``SELECT ... FOR UPDATE`` is the PostgreSQL path; the SQLite
+        dialect does not render the clause (SQLite serializes writers
+        at the transaction level), so the same statement is used on
+        both drivers and only the lock differs.
+        """
+        stmt = select(ProjectOperatingKnowledge).where(
+            ProjectOperatingKnowledge.id == entry_id
+        )
+        try:
+            dialect = session.get_bind().dialect.name
+        except Exception:  # noqa: BLE001 — defensive (a mock session)
+            dialect = ""
+        if dialect == "postgresql":
+            stmt = stmt.with_for_update()
+        return session.exec(stmt).first()
 
     def supersede_and_insert(
         self,
         prior: ProjectOperatingKnowledge,
         successor: ProjectOperatingKnowledge,
+        *,
+        ledger_row: POKWriteGateLedger | None = None,
     ) -> "tuple[ProjectOperatingKnowledge, str]":
         """THE supersede transaction (§4.2): flip prior → superseded
         (with ``superseded_by_id`` = successor id) and insert the
@@ -377,7 +547,15 @@ class POKRepository:
             # bump would carry STALE counters, and merging that stale
             # snapshot back over the row would ZERO the lineage this
             # method exists to preserve.
-            db_prior = session.get(ProjectOperatingKnowledge, prior_id)
+            #
+            # LOCKED READ (W1-CR advisory 8 — routed to Wave 2): the
+            # read is a ``SELECT ... FOR UPDATE`` on the PostgreSQL
+            # path, so two concurrent supersedes of the SAME prior row
+            # cannot interleave (the second waits for the first to
+            # commit, then re-reads the FLIPPED row). SQLite has no
+            # row locks — the dialect ignores the clause and the write
+            # transaction's own serialization is the fence there.
+            db_prior = self._read_for_update(session, prior_id)
             if db_prior is not None:
                 # Counter carry-over — the successor inherits the
                 # lineage's counters (T2.7). `last_verified` is carried
@@ -409,6 +587,12 @@ class POKRepository:
             prior.pinned = False
             prior.updated_at = _utc_now_iso()
             session.add(successor)
+            if ledger_row is not None:
+                # The EXECUTION row rides THIS transaction (design-
+                # amendments-v2 §13.10): it attests the supersede, so
+                # it must vanish with it.
+                self._scrub_ledger_row(ledger_row)
+                session.add(ledger_row)
             session.commit()
             session.refresh(successor)
         return successor, prior_id
@@ -501,12 +685,84 @@ class POKRepository:
         The caller owns the CONTENT of the row (the gate owns the
         verdict row; the tool owns the execution row — the authority
         split, design-amendments-v2 §8).
+
+        TWO guards ride this method:
+
+        * **DB-LEVEL IDEMPOTENCY (T8.16)** — the partial UNIQUE index
+          ``uq_pok_ledger_gate_chain`` on ``(project_id, gate_id,
+          phase) WHERE gate_id IS NOT NULL`` makes a duplicate
+          gate-chain step impossible. The appender used to be
+          app-level read-then-append only, which is a race: the DB
+          uniqueness is the backstop. A duplicate raises
+          :class:`POKLedgerDuplicateError`.
+        * **CREDENTIAL-SHAPE SCAN (T8.18)** — every bounded body /
+          excerpt (``reason``, ``judge_explanation``, ``answer_excerpt``,
+          ``proposed_body``) is scanned BEFORE the persist; a
+          credential-shaped hit is redacted-and-flagged (name +
+          sha256-prefix only, NEVER the raw value).
         """
+        self._scrub_ledger_row(entry)
         with Session(self._engine) as session:
             session.add(entry)
-            session.commit()
+            try:
+                session.commit()
+            except Exception as exc:  # noqa: BLE001 — typed discrimination
+                if self._is_gate_chain_duplicate(exc):
+                    session.rollback()
+                    raise POKLedgerDuplicateError(
+                        entry.project_id, entry.gate_id, entry.phase
+                    ) from exc
+                raise
             session.refresh(entry)
             return entry
+
+    @staticmethod
+    def _is_gate_chain_duplicate(exc: BaseException) -> bool:
+        """Is this integrity violation the gate-chain unique index?
+
+        ONLY a unique violation naming the gate-chain index (or, on
+        SQLite, the ``(project_id, gate_id, phase)`` tuple) counts —
+        every other integrity error is re-raised untouched so it is
+        never mislabeled (the ``_is_slug_unique_violation`` precedent).
+        """
+        msg = str(exc).upper()
+        orig = getattr(exc, "orig", None)
+        pgcode = getattr(orig, "pgcode", None)
+        if pgcode == "23505":
+            return "UQ_POK_LEDGER_GATE_CHAIN" in msg
+        if "UQ_POK_LEDGER_GATE_CHAIN" in msg:
+            return True
+        # SQLite names the COLUMNS of the violated index, not the index
+        # itself: "UNIQUE constraint failed:
+        # pok_write_gate_ledger.project_id, ...gate_id, ...phase". The
+        # three column names together are the discriminator (the
+        # house ``_is_slug_unique_violation`` precedent).
+        if "UNIQUE" in msg and "GATE_ID" in msg and "PHASE" in msg:
+            return True
+        return False
+
+    @staticmethod
+    def _scrub_ledger_row(entry: POKWriteGateLedger) -> None:
+        """Scan + redact a ledger row's bodies/excerpts before persist.
+
+        The scan is DETERMINISTIC and lossy-on-purpose: a
+        credential-shaped hit is replaced by
+        ``[REDACTED <name> sha256:<prefix>]`` and the flag is logged —
+        the RAW value never reaches the store (T8.18).
+        """
+        for column in ("reason", "judge_explanation", "answer_excerpt", "proposed_body"):
+            value = getattr(entry, column, None)
+            if not value:
+                continue
+            redacted, flags = redact_credential_shapes(value)
+            if flags:
+                logger.warning(
+                    "[pok] ledger %s redacted a credential-shaped value "
+                    "(%s) — the raw value was NOT stored",
+                    column,
+                    ", ".join(flags),
+                )
+                setattr(entry, column, redacted)
 
     def query_ledger(
         self,

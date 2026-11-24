@@ -761,6 +761,79 @@ MANAGED_KEYS: dict[str, ManagedKeySpec] = {
     # from the settings service on EVERY tick (the value is memoised
     # per tick: ONE DB read per tick). A mid-run flip therefore takes
     # effect with NO restart.
+    # ── POK write gate (pok-write-gate Wave 2 Phase 8, T8.11) ──────────
+    #
+    # TWO SIBLING enforcement switches, both default OFF at build:
+    # ``pok_gate.semantic_enforcement`` (the SEMANTIC judge gates
+    # writes) and ``pok_gate.softmax_tightening`` (the librarian's
+    # near-soft-max tightening changes admission outcomes — it rides
+    # the same switch family). A THIRD key of the same family,
+    # ``pok_gate.merge_policy``, carries the F2 merge dial (the
+    # architecture places it "on the same switch family as
+    # enforcement" so the P1 ceremony moves the dial instead of a
+    # rebuild).
+    #
+    # DB-ONLY: ``env_var=""`` means the env tier is INERT for these
+    # keys (an env flip is a live config change at deploy + restart —
+    # design-amendments-v2 §13.3 item 5). The value is read per write
+    # through ``SettingsService.get_overrides()``; a missing row reads
+    # as the registry default (OFF).
+    "pok_gate.semantic_enforcement": ManagedKeySpec(
+        key="pok_gate.semantic_enforcement",
+        config_path=None,  # DB-ONLY — no backing Config field
+        env_var="",  # NO env tier (the env tier is skipped for an empty env_var)
+        value_type="bool",
+        default=False,
+        requires_restart=False,
+        sensitive=False,
+        description=(
+            "POK write-gate SEMANTIC enforcement switch (pok-write-gate "
+            "Phase 8). OFF (the build default) = SHADOW: the judge "
+            "logs its verdict to the ledger and refuses NO write. ON = "
+            "the semantic verdict gates the write (ACCEPT writes, "
+            "REJECT refuses, ASK asks, MERGE executes or asks). "
+            "DB-backed only — there is no env tier (an env flip is a "
+            "live config change at deploy + restart). Read per write; "
+            "takes effect without a daemon restart."
+        ),
+    ),
+    "pok_gate.softmax_tightening": ManagedKeySpec(
+        key="pok_gate.softmax_tightening",
+        config_path=None,  # DB-ONLY — no backing Config field
+        env_var="",  # NO env tier
+        value_type="bool",
+        default=False,
+        requires_restart=False,
+        sensitive=False,
+        description=(
+            "POK librarian SOFT-MAX TIGHTENING switch (pok-write-gate "
+            "Phase 8/10). OFF (the build default) = the librarian never "
+            "tightens admission. ON = near the soft max the librarian "
+            "asks more rounds and prefers MERGE over new rows. "
+            "DB-backed only (no env tier). Read by the librarian pass; "
+            "takes effect without a daemon restart."
+        ),
+    ),
+    "pok_gate.merge_policy": ManagedKeySpec(
+        key="pok_gate.merge_policy",
+        config_path=None,  # DB-ONLY — no backing Config field
+        env_var="",  # NO env tier
+        value_type="str",
+        default="ASK_WITH_PROPOSAL",
+        allowed_values=("ASK_WITH_PROPOSAL", "AUTO", "ASK_NO_PROPOSAL"),
+        requires_restart=False,
+        sensitive=False,
+        description=(
+            "POK write-gate MERGE policy (F2 — the same switch family as "
+            "the enforcement switches, so the P1 ceremony moves the dial "
+            "instead of a rebuild). ASK_WITH_PROPOSAL (the default) = a "
+            "delta merge is a caller-confirmed round-trip carrying the "
+            "judge's merged-body proposal; AUTO = the tool executes the "
+            "judge's proposal as a count-preserving supersede; "
+            "ASK_NO_PROPOSAL = the round-trip carries no proposal. "
+            "DB-backed only (no env tier)."
+        ),
+    ),
     "wedge_notice_emission_enabled": ManagedKeySpec(
         key="wedge_notice_emission_enabled",
         config_path=None,  # DB/ENV-ONLY — no backing Config field (consumed per-tick via get_overrides())
@@ -1021,7 +1094,10 @@ def resolve(
             )
 
     # Tier 2 — os.environ, read DIRECTLY (never pydantic's env tier).
-    raw_env = os.environ.get(spec.env_var)
+    # An EMPTY ``env_var`` means the key has NO env tier at all (the
+    # DB-ONLY pok_gate.* switches: an env flip is a live config change
+    # at deploy + restart — design-amendments-v2 §13.3 item 5).
+    raw_env = os.environ.get(spec.env_var) if spec.env_var else None
     if raw_env is not None:
         ok, value, failure_class, detail = parse_and_validate(spec, raw_env)
         if ok:

@@ -510,6 +510,32 @@ class POKWriteGateLedger(SQLModel, table=True):
         Index("idx_pok_ledger_project_created", "project_id", "created_at"),
         Index("idx_pok_ledger_gate_id", "gate_id"),
         Index("idx_pok_ledger_entry_id", "entry_id"),
+        # DB-LEVEL GATE-CHAIN IDEMPOTENCY (pok-write-gate Phase 8,
+        # T8.16): at most ONE row per (project_id, gate_id, phase).
+        # The appender used to be app-level read-then-append only, so
+        # two concurrent callers could write the SAME chain step
+        # twice — the DB uniqueness is the Wave-2 backstop (the
+        # single-writer discipline is documentation, not enforcement).
+        #
+        # PARTIAL on ``gate_id IS NOT NULL``: a RETRIEVAL row (and any
+        # other gate-less row) belongs to no chain and must never be
+        # constrained.
+        #
+        # 3-SITE PIN (byte-identical name + predicate):
+        #   * this declaration (fresh databases via ``create_all``),
+        #   * ``daemon/migrations/versions/20261124_093000_add_pok_
+        #     ledger_gate_chain_unique_index.sql`` (SQLite),
+        #   * ``daemon/manager.py::_ensure_postgres_columns`` (the
+        #     PostgreSQL mirror — the .sql runner is a NO-OP on PG).
+        Index(
+            "uq_pok_ledger_gate_chain",
+            "project_id",
+            "gate_id",
+            "phase",
+            unique=True,
+            sqlite_where=text("gate_id IS NOT NULL"),
+            postgresql_where=text("gate_id IS NOT NULL"),
+        ),
     )
 
     id: str = Field(
