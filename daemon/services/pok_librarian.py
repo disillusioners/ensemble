@@ -874,6 +874,24 @@ def propose_consolidations(
         if entry.content_sha256:
             by_sha.setdefault(entry.content_sha256, []).append(entry)
 
+    # The GROUP'S J TARGET (the RA-D1 fix, 2026-11-24 — the tester's
+    # one non-skippable item): computed ONCE per duplicate group with
+    # ``family=None`` — the J-partition selector picks the group's
+    # survivor over the WHOLE group. Computed PER ENTRY with
+    # ``entry.family`` (the I3 wiring's shape), a FULL-TIE +
+    # DIFFERENT-FAMILY group made each row its own J target — both
+    # rows skipped, ZERO proposals, the group never surfaced: a
+    # SILENT signal replacing the contradictory one. The family-match
+    # tiebreak belongs to the R-RET re-slug path
+    # (:func:`detect_r_ret_candidates` — unchanged), which picks a
+    # target for a re-slugged row INSIDE its family; the
+    # CONSOLIDATION target is group-global.
+    group_target: dict[str, str | None] = {}
+    for sha, group in by_sha.items():
+        if len(group) > 1:
+            picked = select_merge_target(group)
+            group_target[sha] = picked.slug if picked is not None else None
+
     proposals: list[ConsolidationProposal] = []
     for entry in store.entries:
         signals = classify_metrics(entry)
@@ -887,11 +905,7 @@ def propose_consolidations(
         # and never a MUTUAL pair (two rows each naming the other as
         # the merge target, the contradiction that corrupts the store
         # the moment consolidation is armed).
-        j_target = (
-            select_merge_target(group, family=entry.family)
-            if len(group) > 1
-            else None
-        )
+        j_target_slug = group_target.get(entry.content_sha256)
         basis = consolidation_basis_for(
             entry,
             signals,
@@ -902,17 +916,17 @@ def propose_consolidations(
             continue
         if (
             basis == "covered-by-surviving-row"
-            and j_target is not None
-            and j_target.slug == entry.slug
+            and j_target_slug is not None
+            and j_target_slug == entry.slug
         ):
             # THIS row is the group's J-selected survivor — the others
             # merge into IT. Proposing it away under the same basis
             # would contradict them (the mutual-pair defect shape).
             continue
-        if j_target is not None and j_target.slug != entry.slug:
-            target_slug = j_target.slug
+        if j_target_slug is not None and j_target_slug != entry.slug:
+            target_slug = j_target_slug
         elif survivors:
-            picked = select_merge_target(survivors, family=entry.family)
+            picked = select_merge_target(survivors)
             target_slug = picked.slug if picked is not None else None
         else:
             target_slug = None
