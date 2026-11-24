@@ -209,3 +209,78 @@ Worker artifacts are retained under `/tmp/pok-gate-L{1,2,3,4,5,6,7a,7b,8a,8b,9,1
 - PostgreSQL dialect (L9): ✅ PASS on real PG — the review gap is closed
 - Segregation + hygiene (L10): ✅ PASS
 - **Testing complete: ❌ NOT READY to stage** — land the two pin fixes, re-run the two nodes, and this gate flips to GO-WITH-DISCLOSURES.
+
+---
+---
+
+# RE-ADJUDICATION — the fix round at b919779f7 (2026-11-24, scoped)
+
+**Scope (leader-instructed):** EXACTLY the five fixes + this artifact's prior drivers. No whole-matrix re-run.
+**Fix round `7cd27b29a..b919779f7`** (4 commits, 9 files, +399/−237): `36c755e19` FIX 1 (extract the POK context block into `daemon/services/pok_context.py`) · `43f5d4f44` FIX 2 (re-pin `MANAGED_KEYS == 22 → == 25`) · `804013988` the findings round (I1 governance / I2 board detail / I3 J-partition target) · `b919779f7` regenerate the ratification diff.
+**Measured HEAD:** `b919779f7082935a1eb6e7b7aa3ea0a2a04ddf1a` (unchanged throughout the re-adjudication; porcelain clean before and after every leg).
+
+# VERDICT (re-adjudicated): ✅ GO-WITH-DISCLOSURES
+
+The two NO-GO drivers are green, all five scoped items verify, and every remaining finding is non-blocking under the shipped shadow-default-OFF. The disclosures below are the final list — the release notes splice from §R6.
+
+## R1 — the two NO-GO drivers + the pack matrix: PASS
+- The prior artifact's **verbatim command** → **10 passed, exit 0** (8 split nodes + 2 settings nodes, count verified by `--collect-only`). `context_messages.py` = **2845** lines (was 3015; headroom 155), `pok_context.py` = **224**, `MANAGED_KEYS == 25` at `tests/test_settings_resolution.py:692` with the lane's three keys re-derived present at runtime.
+- **The split is a genuine byte-intact move**: the moved region is 171 lines / 6628 bytes (sha256 `538ffe53c2c0b922…`); diffed against the new module → **one hunk** (2 trailing blank lines dropped at EOF); all 168 content lines byte-identical; the `CONTEXT_KIND_POK` block is *absent* from the old home (moved, not forked). Import identity by **object identity**: all four moved names re-exported, `is`-identical, **zero callers edited**.
+- **The packs reproduce exactly**: family-key **275** / W1 **172** / W2 **255** (exit 0 each), and the W2 fence probe (every `POSTGRES_*` set to `ensemble_prod` @ dead port `:1`) → **255** — no live-store contact.
+
+## R2 — the I1 DROP adjudication: **DROP IS SOUND** (accepted by the tester)
+All three conjuncts hold: (i) **dead code removed** — `CONTENT_CLASS_ROUTES` now holds exactly knowledge/operational/episode (`daemon/tools/pok.py:279-309`); no dangling family→class mapping; `route_for_family()` indexes directly so a dangling class would `KeyError`. (ii) **reachability pinned** — `test_every_content_class_names_a_destination` (`:173-195`) asserts the exact 3-class set, and `test_every_gate_family_routes_to_a_class` (`:203-230`) asserts `not dead` over `route_for_family()` — the exact I1 hole. (iii) **the guideline is true** — `guideline-pok-durable-vs-rolling-state.md:117-127` documents exactly the three runtime-producible classes; `:125` reframes governance as a *routing home in the doctrine*, naming critical notes / the board.
+- **Closed-token rider**: `GATE_FAMILIES` is a CLOSED tuple (`pok_gate.py:118-126`); `parse_verdict_payload` (`:847-867`) rejects any family outside it with `POKGateUnavailable("unparsable")`; the judge prompt hard-codes the five families (`:735`). A sixth family is a rider-level change.
+- **No blocking shape exists**: `route_for_family()` is called at exactly one site (`pok.py:1448`, the refusal/parking seam), so its classes only name homes for *rejected* writes. A governance-shaped fact is never a rejection — a durable invariant is admitted to POK as an `operational` row; a curated doctrine note is routed at authoring time to **critical notes** (`guideline:113`). No refusal from any of the five families needs a governance destination.
+- **Mutation leg**: re-adding `governance` to the route table → **2 RED / 17 passed** (exactly as claimed), restored sha-identical, GREEN 19/19.
+
+## R3 — the I2 + I3 fixes: PASS (both real, mutation-pinned; the fixture update is LEGITIMATE)
+- **I2**: the board body now carries per-proposal lines `- {slug} → {target} (basis: {basis})`; the **pointer is corrected and true** (the old false claim is gone, and the maintenance-run row really does carry the counts + pass summary); **one-item-per-pass re-proven** with a spy + non-vacuity control; the librarian pack **54/54** (the file gained **no** nodes — only assertions inside 3 nodes were rewritten).
+- **I3**: `select_merge_target` is wired over the whole group (`pok_librarian.py:890-894`); the prior gate's exact 3-row probe now yields **2 proposals both targeting the J-selected row, no mutual pair**; an exhaustive sweep of **2592 two-row groups found 0 mutual pairs**; splicing the pre-fix function back reproduces the prior defect **byte-identically**.
+- **The fixture adjudication — no cover-up**: every changed expectation either asserted the *defect shape* (the mutual-pair count, the counts-only body, the false pointer) or was replaced by a **strictly stronger** assertion of the fixed behaviour (the seam re-point *added* a move-identity assertion; the proposal assertion *added* slug + target checks; the no-spam leg kept a real no-dump bound). No previously-correct assertion was weakened; no bound dropped; no coverage removed.
+- **Mutation legs**: I3 revert → **2 RED**; I2 detail-block removal → **1 RED**; I2 false-pointer restoration → **1 RED**. All restored sha-identical (pristine sha `5fc016df…` matches the fix commit's own message), all GREEN at 54/54.
+
+## R4 — the ratification diff: VERIFIED (by the tester directly)
+Embedded body sha256 **`2bfd8c8283a533fbe7e727709cac120d7445407e5082b1b0db2b7340bac3f1cb`** (245 lines) == regenerated at HEAD `b919779f7` == regenerated at the declared Head `804013988`; `cmp` byte-identical both ways. **`embedded == regenerated == ff89fee99..HEAD` holds exactly.**
+
+## R5 — the carried items remain report-only: CONFIRMED
+[I4] (the A9 widening — red at *both* legs, a widening not a net-new red), [A1]–[A3], and the residual PACKS prose staleness are all non-blocking and ride the notes. The fix round did not touch `.agents/tester/`, so the gate's registry corrections (`34b980fa7` + `7cd27b29a`) survive; the "four content classes" census+route prose cell left stale by the DROP is corrected in this round's commit.
+
+## R6 — THE DISCLOSURE LIST (the release notes splice from here)
+
+### Pre-enforcement obligations (must be fixed before the P1 ceremony flips `pok_gate.semantic_enforcement` ON)
+1. **[RA-D1] 🟠 The I3 fix drops duplicate groups to ZERO proposals in the tie + different-family case.** The group's merge target is computed **per entry** with `family=entry.family` (`pok_librarian.py:890-911`), so a duplicate group that ties on verify_count + tier with **different family keys** has each row as its own J target → both skipped → **0 proposals**, and R-RET does not cover it either → the group is **never surfaced**. Two active rows with identical bodies under two different family slugs reproduce this on scratch. The fix traded a *contradictory* signal for a *silent* one. Remedy (verified at the selector level): compute the group's target **once** with `family=None`. Proposal-only, no writes — less dangerous than the mutual pair it replaced, but it must be fixed before enforcement.
+2. **[prior I1→resolved] The `governance` class drop is accepted as a design decision** — dead code removed, reachability pinned, guideline truthful. No action. *(Recorded here so the release notes state the ruling, not just the drop.)*
+
+### Advisory disclosures (non-blocking; fix at the lane's discretion)
+3. **[RA-D2] 🟢 The new `pok_context` extraction has no fork/ownership pin** — `test_context_module_split.py` never references `pok_context`, and a partial re-fork (re-inserting `CONTEXT_KIND_POK = "pok"` into the old module) leaves every pin green (proven on a /tmp copy). The size ceiling is only a coarse backstop. Suggested: a `POK_CONTEXT_NAMES` tuple + a mutation leg.
+4. **[RA-D3] 🟢 A 2-name surface narrowing** — `POK_BLOCK_TITLE` / `POK_HEADER_LINE` are no longer importable from `daemon.services.context_messages` (canonical home `daemon.services.pok_injection` intact; zero in-repo blast radius; the new module's docstring overclaims "the historical import surface is unchanged").
+5. **[RA-D4] 🟢 The board body has no size cap** — n proposals → n lines (measured 1000 → 1007 lines / 58 KB); `BoardService.create_item` validates the title only. The "bounded" claim is per-line, not per-item.
+6. **[RA-D5] 🟢 The grounding evidence is still not persisted** — the proposal payload carries `evidence`, but nothing persisted carries it; the *why* still lives only in the discarded in-memory report. The fix closed the *which-rows* half of I2, not the *why* half.
+7. **[RA-D6] 🟢 One vacuous assertion + one stale docstring** in `tests/unit/services/test_pok_librarian_unit.py` (`:1002` `"the OLD body"` can never fire in this fixture; `:938-950` still describes the counts-only body).
+8. **[carried] The prior gate's advisories stand unchanged**: the stub's REJECT branches are unreachable through the real write path (the mechanical fence is strictly stronger); an omitted `reason` yields a raw pydantic `ValidationError` rather than the typed envelope; the DELTA merge is unreachable from the stub; the A9 offender-set widening (35→39, red at both legs — a widening, not a net-new red); the base-era PACKS row claims 209 where 212 was measured; the grant-pins docstring staleness; `scripts/pok_librarian_mutations.py` mutates the shared worktree in place.
+
+### Scope boundary of this re-adjudication (stated, not hidden)
+- "No **other** net-new red exists at `b919779f7`" is **carried from L8b** (measured at `34b980fa7`), not re-derived: the scoped round proves the two drivers green and the three packs green; the fix round's nine files are covered by those packs plus the driver files, and the one broadly-imported file (`context_messages.py`) is proven import-identity-preserving with zero caller edits — but no whole-tree red-set was re-run, per the leader's scope.
+- No live-store fingerprint was taken this round; the no-live-write claim rests on the fence probe, the in-memory-SQLite packs, and porcelain cleanliness.
+- External (out-of-repo) importers of `daemon.services.context_messages` were not checked.
+
+### Re-adjudication worker roster
+| Leg | Instance | Result |
+|---|---|---|
+| R1 drivers + packs | `b30875f6-903f-4a03-8575-60fe601f043d` | PASS |
+| R2 I1 DROP + reachability pin | `7674ef01-f5b2-41b8-930a-aa682dd52f76` | PASS — DROP IS SOUND |
+| R3 I2 + I3 + fixture adjudication | `5de14b52-794d-44e5-b7a7-05d98b91e952` | PASS (1 new 🟠 disclosure) |
+| R4 ratification-diff shas | the tester, directly | VERIFIED |
+| R5 carried items | the tester, directly | CONFIRMED report-only |
+
+---
+
+### Overall Status (re-adjudicated at b919779f7)
+- The two prior NO-GO drivers: ✅ **GREEN** (10 passed)
+- The I1 DROP: ✅ **sound** (accepted; reachability pinned; guideline truthful)
+- The I2 + I3 fixes: ✅ **real and mutation-pinned**; the fixture update is ✅ **legitimate, not a cover-up**
+- The pack matrix: ✅ 275 / 172 / 255 (fence-probed)
+- The ratification diff: ✅ embedded == regenerated == `ff89fee99..HEAD` (body sha `2bfd8c82…`)
+- The carried items: ✅ report-only
+- **Testing complete: ✅ READY to stage — GO-WITH-DISCLOSURES.** The release notes carry §R6.
