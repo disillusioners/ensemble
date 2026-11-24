@@ -1304,7 +1304,17 @@ class SQLModelSourceRepository:
             if execution is None:
                 logger.warning(f"Execution not found for update: execution_id={execution_id}")
                 return None
-            
+
+            # Addendum A: the generic legacy ``failed`` callback (fire-and-
+            # forget executor) must NOT clobber the more specific receipt
+            # status ``failed-to-dispatch`` written by the adapter's direct
+            # write. The specific terminal status wins.
+            if (
+                status == ExecutionStatus.FAILED.value
+                and execution.status == ExecutionStatus.FAILED_TO_DISPATCH.value
+            ):
+                return execution
+
             execution.status = status
             execution.error_message = error_message
             execution.completed_at = datetime.now(timezone.utc).isoformat()
@@ -1355,6 +1365,266 @@ class SQLModelSourceRepository:
                 .order_by(col(ScheduleExecution.triggered_at).desc())
             )
             return list(session.exec(stmt))
+
+
+    # ── Addendum A receipt writes (fix/post-outage-recovery SCOPE b3) ──────
+    # The missing delivery-completed callback's write side. All methods are
+    # idempotent / guarded: a terminal receipt is NEVER overwritten by a late
+    # dispatch-phase callback, and an absent row is created (the fire-start
+    # callback is fire-and-forget via an executor, so ordering is not assumed).
+
+    #: Transient dispatch-phase states that a durable-handle write may advance.
+    _RECEIPT_OPEN_STATES = (
+        ExecutionStatus.TRIGGERED.value,
+        ExecutionStatus.QUEUED.value,
+        ExecutionStatus.DISPATCHED.value,
+    )
+
+    def upsert_execution_dispatched(
+        self,
+        schedule_id: str,
+        execution_id: str,
+        instance_id: str,
+        task_id: str | None = None,
+        job_item_id: str | None = None,
+    ) -> ScheduleExecution | None:
+        """Open-or-advance a receipt to the OPEN ``dispatched`` state.
+
+        Writes the durable handles (``instance_id`` / ``task_id`` /
+        ``job_item_id``) that make the repair path decidable. A row already
+        in a TERMINAL state (``executed`` / ``never-started`` / …) is left
+        untouched — a late dispatch callback can never resurrect a closed
+        receipt. ``queued``/``triggered`` are transient and may advance.
+        """
+        with Session(self.engine) as session:
+            execution = session.get(ScheduleExecution, execution_id)
+            if execution is None:
+                execution = ScheduleExecution(
+                    execution_id=execution_id,
+                    schedule_id=schedule_id,
+                )
+                session.add(execution)
+            if execution.status in self._RECEIPT_OPEN_STATES:
+                execution.status = ExecutionStatus.DISPATCHED.value
+                execution.instance_id = instance_id
+                execution.task_id = task_id
+                execution.job_item_id = job_item_id
+                execution.completed_at = None
+                execution.error_message = None
+            session.commit()
+            session.refresh(execution)
+            return execution
+
+    def record_execution_never_started(
+        self,
+        schedule_id: str,
+        execution_id: str,
+        reason: str | None = None,
+        *,
+        instance_id: str | None = None,
+    ) -> ScheduleExecution | None:
+        """Terminalize a fire that began NO turn (zero task/message/children).
+
+        ``instance_id`` stays NULL by contract (the only permitted NULL
+        states are never-started / failed-to-dispatch). The truthful status
+        IS the distinction the operator reads.
+        """
+        with Session(self.engine) as session:
+            execution = session.get(ScheduleExecution, execution_id)
+            if execution is None:
+                execution = ScheduleExecution(
+                    execution_id=execution_id,
+                    schedule_id=schedule_id,
+                )
+                session.add(execution)
+            if execution.status in self._RECEIPT_OPEN_STATES or execution.status in (
+                ExecutionStatus.NEVER_STARTED.value,
+                ExecutionStatus.FAILED_TO_DISPATCH.value,
+                ExecutionStatus.FAILED.value,
+                ExecutionStatus.SKIPPED.value,
+                ExecutionStatus.DEFERRED.value,
+            ):
+                execution.status = ExecutionStatus.NEVER_STARTED.value
+                execution.instance_id = instance_id
+                execution.error_message = reason
+                execution.completed_at = datetime.now(timezone.utc).isoformat()
+            session.commit()
+            session.refresh(execution)
+            return execution
+
+    def record_execution_failed_to_dispatch(
+        self,
+        execution_id: str,
+        reason: str | None = None,
+        *,
+        schedule_id: str | None = None,
+    ) -> ScheduleExecution | None:
+        """Terminalize a fire whose enqueue/claim path failed."""
+        with Session(self.engine) as session:
+            execution = session.get(ScheduleExecution, execution_id)
+            if execution is None:
+                if schedule_id is None:
+                    logger.warning(
+                        "failed-to-dispatch receipt %s: row absent and no "
+                        "schedule_id to create it",
+                        execution_id,
+                    )
+                    return None
+                execution = ScheduleExecution(
+                    execution_id=execution_id,
+                    schedule_id=schedule_id,
+                )
+                session.add(execution)
+            if execution.status in self._RECEIPT_OPEN_STATES or execution.status in (
+                ExecutionStatus.NEVER_STARTED.value,
+                ExecutionStatus.FAILED_TO_DISPATCH.value,
+                ExecutionStatus.FAILED.value,
+                ExecutionStatus.SKIPPED.value,
+                ExecutionStatus.DEFERRED.value,
+            ):
+                execution.status = ExecutionStatus.FAILED_TO_DISPATCH.value
+                execution.error_message = reason
+                execution.redrive_reason = reason
+                execution.completed_at = datetime.now(timezone.utc).isoformat()
+            session.commit()
+            session.refresh(execution)
+            return execution
+
+    def record_execution_terminal_by_job(
+        self,
+        job_item_id: str,
+        outcome: str,
+        error_message: str | None = None,
+    ) -> ScheduleExecution | None:
+        """The delivery-completed callback: ``dispatched`` → ``executed``.
+
+        Keyed by the durable ``job_item_id`` handle (== Task.work_id ==
+        JobItem.job_id). Bounded to the OPEN states — a receipt already
+        terminalized by another path is never rewritten. Returns the updated
+        row (or ``None`` when no receipt carries that handle).
+        """
+        with Session(self.engine) as session:
+            stmt = select(ScheduleExecution).where(
+                col(ScheduleExecution.job_item_id) == job_item_id
+            )
+            execution = session.exec(stmt).first()
+            if execution is None:
+                return None
+            if execution.status in self._RECEIPT_OPEN_STATES:
+                execution.status = ExecutionStatus.EXECUTED.value
+                execution.outcome = outcome
+                execution.error_message = error_message
+                execution.completed_at = datetime.now(timezone.utc).isoformat()
+                session.add(execution)
+                session.commit()
+                session.refresh(execution)
+            return execution
+
+    # ── Supervisor selection / CAS (Addendum A.4) ──────────────────────────
+
+    def select_supervisor_candidates(
+        self,
+        stale_before: str,
+        lookback_cutoff: str,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """DB-derived re-drive candidates, bounded by recency.
+
+        Selection = ``status ∈ {never-started, failed-to-dispatch}`` OR
+        ``status = dispatched`` with ``triggered_at < stale_before``. ALL
+        rows are bounded by ``triggered_at >= lookback_cutoff`` so legacy
+        rows (which predate the receipt contract) are never re-driven en
+        masse. Read-only.
+        """
+        open_terminal = (
+            ExecutionStatus.NEVER_STARTED.value,
+            ExecutionStatus.FAILED_TO_DISPATCH.value,
+        )
+        with Session(self.engine) as session:
+            stmt = (
+                select(ScheduleExecution)
+                .where(
+                    col(ScheduleExecution.triggered_at) >= lookback_cutoff,
+                )
+                .where(
+                    col(ScheduleExecution.status).in_(open_terminal)
+                    | (
+                        (col(ScheduleExecution.status) == ExecutionStatus.DISPATCHED.value)
+                        & (col(ScheduleExecution.triggered_at) < stale_before)
+                    )
+                )
+                .order_by(col(ScheduleExecution.triggered_at).asc())
+                .limit(limit)
+            )
+            rows = list(session.exec(stmt))
+        return [
+            {
+                "execution_id": r.execution_id,
+                "schedule_id": r.schedule_id,
+                "instance_id": r.instance_id,
+                "task_id": r.task_id,
+                "job_item_id": r.job_item_id,
+                "status": r.status,
+                "triggered_at": r.triggered_at,
+                "redrive_count": r.redrive_count or 0,
+            }
+            for r in rows
+        ]
+
+    def claim_execution_redrive(
+        self,
+        execution_id: str,
+        tick_stamp: str,
+        max_redrives: int,
+    ) -> str:
+        """CAS stamp for at-most-one-re-drive-per-reason.
+
+        Returns ``"claimed"`` (row advanced to ``dispatched`` with a fresh
+        stamp), ``"cap-exceeded"`` (re-drive budget exhausted — caller must
+        terminalize loudly), or ``"lost"`` (row gone / already stamped this
+        tick / terminal). The ``redriven_at < tick_stamp`` arm re-arms each
+        supervisor tick (mirroring ``boot_re_drive_at``'s epoch CAS).
+        """
+        with Session(self.engine) as session:
+            execution = session.get(ScheduleExecution, execution_id)
+            if execution is None:
+                return "lost"
+            if execution.status not in (
+                ExecutionStatus.NEVER_STARTED.value,
+                ExecutionStatus.FAILED_TO_DISPATCH.value,
+                ExecutionStatus.DISPATCHED.value,
+            ):
+                return "lost"
+            if (execution.redrive_count or 0) >= max_redrives:
+                return "cap-exceeded"
+            prior = execution.redriven_at
+            if prior is not None and prior >= tick_stamp:
+                return "lost"
+            execution.redriven_at = tick_stamp
+            execution.redrive_count = (execution.redrive_count or 0) + 1
+            execution.status = ExecutionStatus.DISPATCHED.value
+            session.add(execution)
+            session.commit()
+            return "claimed"
+
+    def terminalize_execution_redrive_failed(
+        self,
+        execution_id: str,
+        reason: str,
+    ) -> ScheduleExecution | None:
+        """Cap-exhausted / dead-lineage terminal write with a LOUD reason."""
+        with Session(self.engine) as session:
+            execution = session.get(ScheduleExecution, execution_id)
+            if execution is None:
+                return None
+            execution.status = ExecutionStatus.FAILED_TO_DISPATCH.value
+            execution.redrive_reason = reason
+            execution.error_message = reason
+            execution.completed_at = datetime.now(timezone.utc).isoformat()
+            session.add(execution)
+            session.commit()
+            session.refresh(execution)
+            return execution
 
 
 __all__ = [

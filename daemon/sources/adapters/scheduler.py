@@ -119,6 +119,7 @@ this pass records the rationale only.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -1798,6 +1799,82 @@ Original scheduled task:
                 exc,
             )
 
+    # ── Addendum A receipt writes (fail-soft, never wedges the fire) ───────
+    # The adapter OBSERVES the durable dispatch and records the truthful
+    # receipt. These helpers NEVER raise into the fire path — a receipt write
+    # failure is logged, not fatal (the delivery itself already committed).
+
+    async def _call_repo(self, method: Any, *args: Any, **kwargs: Any) -> Any:
+        """Call a repo method off-loop, tolerating AsyncMock test doubles."""
+        if method is None:
+            return None
+        if inspect.iscoroutinefunction(method):
+            return await method(*args, **kwargs)
+        return await asyncio.to_thread(method, *args, **kwargs)
+
+    async def _write_receipt_dispatched(
+        self, execution_id: str, instance_id: str, job_item_id: str | None
+    ) -> None:
+        """Open/advance the receipt to ``dispatched`` with durable handles."""
+        repo = self._source_repo
+        if repo is None or not hasattr(repo, "upsert_execution_dispatched"):
+            return
+        try:
+            task_id: str | None = None
+            task_repo = getattr(self._manager, "_task_repo", None)
+            if task_repo is not None and job_item_id:
+                task = await self._call_repo(
+                    getattr(task_repo, "get_by_work_id", None), job_item_id
+                )
+                tid = getattr(task, "id", None)
+                if isinstance(tid, str):
+                    task_id = tid
+            await self._call_repo(
+                repo.upsert_execution_dispatched,
+                self.source_id, execution_id, instance_id, task_id, job_item_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — fail-soft
+            logger.warning(
+                "Scheduler %s: dispatched receipt write failed for %s: %s",
+                self.source_id, execution_id, exc,
+            )
+
+    async def _write_receipt_never_started(
+        self, execution_id: str, reason: str
+    ) -> None:
+        """Terminalize a fire that began no turn (NULL instance_id)."""
+        repo = self._source_repo
+        if repo is None or not hasattr(repo, "record_execution_never_started"):
+            return
+        try:
+            await self._call_repo(
+                repo.record_execution_never_started,
+                self.source_id, execution_id, reason,
+            )
+        except Exception as exc:  # noqa: BLE001 — fail-soft
+            logger.warning(
+                "Scheduler %s: never-started receipt write failed for %s: %s",
+                self.source_id, execution_id, exc,
+            )
+
+    async def _write_receipt_failed_to_dispatch(
+        self, execution_id: str, reason: str
+    ) -> None:
+        """Terminalize a fire whose enqueue/claim path failed."""
+        repo = self._source_repo
+        if repo is None or not hasattr(repo, "record_execution_failed_to_dispatch"):
+            return
+        try:
+            await self._call_repo(
+                repo.record_execution_failed_to_dispatch,
+                execution_id, reason, schedule_id=self.source_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — fail-soft
+            logger.warning(
+                "Scheduler %s: failed-to-dispatch receipt write failed for %s: %s",
+                self.source_id, execution_id, exc,
+            )
+
     def _display_run_number(self, state: dict[str, Any]) -> int:
         """The occurrence number shown in the deferred body.
 
@@ -2774,6 +2851,11 @@ Original scheduled task:
         """
         rearm_id = f"{_DEFERRED_EXECUTION_ID_PREFIX}{uuid.uuid4()}"
         reason = "semaphore_timeout: max concurrent executions reached; re-armed"
+        # Addendum A: the REAL fire began no turn — leave a truthful
+        # ``never-started`` receipt on its execution_id (NULL instance_id is
+        # permitted ONLY with an explicit never-started/failed-to-dispatch
+        # status). The re-arm's synthetic row below is a separate audit row.
+        await self._write_receipt_never_started(execution_id, reason)
         # W2: the audit-row write failure must not make the fire INVISIBLE
         # (DEC-4 row traceability) — it is recorded as a gap.
         if not self._record_execution_start(rearm_id, None):
@@ -2918,25 +3000,25 @@ Original scheduled task:
             
             # Route through inline message-Job dispatch (scheduled only).
             # Phase 5 (cutover): the inline path is the only path; the
-            # legacy TASK-job poll-loop was removed. ``_project_id`` is
-            # still required (it scopes the InstanceMapper lookup).
+            # legacy TASK-job poll-loop was removed.
             #
-            # The job-queue route is the ONLY route that produces a DURABLE
-            # delivery (MessageQueue + Task + JobItem).  A reuse-mode
-            # schedule ALWAYS has a pinned caller to wake, so it takes the
-            # job-queue route even without a ``project_id`` — routing it
-            # through the immediate path (the registry's ``on_message``
-            # handler) hands the alarm to a handler that may never enqueue
-            # it.  The MANUAL twin keeps its immediate-execution semantics
-            # (DEC-3's disclosed non-goal).
-            if (
-                trigger_type == "scheduled"
-                and self._manager is not None
-                and (
-                    self._project_id
-                    or self._instance_mode == SchedulerInstanceMode.REUSE_INSTANCE
-                )
-            ):
+            # b3 PROJECT-HOLE FIX (v4 §7(b)): the durable job-queue route
+            # is the ONLY route that produces a supervised delivery
+            # (MessageQueue + Task + JobItem + execution receipt). It used
+            # to be gated on ``_project_id`` or REUSE_INSTANCE, so an
+            # unscoped NEW_INSTANCE fire silently fell through to
+            # ``_execute_immediate`` (the registry ``on_message`` handler)
+            # with NO job-queue and NO receipt linkage — the unsupervised
+            # spawn class. ``InstanceMapper.get_or_create_instance`` does
+            # NOT take a project id; it scopes by ``source_id`` and takes
+            # ``force_new`` for NEW_INSTANCE. So NO project id is needed to
+            # take the durable route, and we do NOT fabricate one (the
+            # SEED's project choice is the architect's §4.3 / leader's
+            # adjudication — never the adapter's). The ONLY precondition
+            # is a live ``_manager`` (without one there is no dispatch
+            # substrate at all — the legacy immediate path remains for
+            # manager-less harnesses and MANUAL triggers).
+            if trigger_type == "scheduled" and self._manager is not None:
                 await self._route_via_job_queue(execution_id, formatted_message, metadata)
             else:
                 await self._execute_immediate(execution_id, formatted_message, metadata)
@@ -3139,19 +3221,21 @@ Original scheduled task:
                 message_id=getattr(result, "message_id", None),
             )
 
-            if self._execution_callback:
-                try:
-                    self._execution_callback(
-                        execution_id=execution_id,
-                        schedule_id=self.source_id,
-                        status=ExecutionStatus.QUEUED.value,
-                        instance_id=instance_id,
-                        error_message=None,
-                    )
-                except Exception as e:
-                    logger.warning(f"Execution callback error: {e}")
+            # Addendum A: the durable dispatch leaves a truthful OPEN
+            # receipt with the Task/JobItem handles. This REPLACES the old
+            # ``queued`` callback — ``queued`` is a transient dispatch-phase
+            # state that must never be the resting state an operator reads;
+            # ``dispatched`` (with handles) is the open state.
+            await self._write_receipt_dispatched(
+                execution_id,
+                instance_id,
+                getattr(result, "job_id", None),
+            )
         except Exception as e:
             logger.error(f"Failed to queue scheduled job: {execution_id}, error={e}", exc_info=True)
+            # Addendum A: an enqueue/claim failure terminalizes the receipt
+            # truthfully (NULL instance_id is permitted WITH this status).
+            await self._write_receipt_failed_to_dispatch(execution_id, str(e))
             # Don't call callback here - let _execute_run's outer exception handler
             # call it to avoid double-callback for the same execution_id
             raise

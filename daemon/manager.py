@@ -9206,6 +9206,16 @@ class InstanceManager:
             # PK-scoped. SQLite counterpart:
             # 20261123_190000_add_instance_boot_re_drive_at.sql.
             "ALTER TABLE instances ADD COLUMN IF NOT EXISTS boot_re_drive_at TIMESTAMP",
+            # schedule_executions receipt handles (fix/post-outage-recovery
+            # SCOPE b3, Addendum A): durable Task/JobItem linkage + terminal
+            # outcome + supervisor CAS bookkeeping. SQLite counterpart:
+            # 20261124_000001_add_schedule_execution_receipt.sql.
+            "ALTER TABLE schedule_executions ADD COLUMN IF NOT EXISTS task_id VARCHAR",
+            "ALTER TABLE schedule_executions ADD COLUMN IF NOT EXISTS job_item_id VARCHAR",
+            "ALTER TABLE schedule_executions ADD COLUMN IF NOT EXISTS outcome VARCHAR",
+            "ALTER TABLE schedule_executions ADD COLUMN IF NOT EXISTS redriven_at VARCHAR",
+            "ALTER TABLE schedule_executions ADD COLUMN IF NOT EXISTS redrive_count INTEGER DEFAULT 0",
+            "ALTER TABLE schedule_executions ADD COLUMN IF NOT EXISTS redrive_reason VARCHAR",
             # source_configs.autostart: whether a source auto-starts on boot
             "ALTER TABLE source_configs ADD COLUMN IF NOT EXISTS autostart BOOLEAN DEFAULT TRUE",
             # instance_ui_prefs.icon_tag: optional UI icon for existing prefs tables
