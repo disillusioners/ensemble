@@ -201,6 +201,7 @@ export class ApiService {
     order?: string,
     includeDescendants: boolean = true,
     source?: string,
+    anchor?: string,
   ): Observable<InstanceListResponse> {
     let params = new HttpParams()
       .set('limit', limit.toString())
@@ -229,6 +230,12 @@ export class ApiService {
       // other string is matched as a single source_type value. Omitted →
       // server default (no source filter).
       params = params.set('source', source.trim());
+    }
+    if (anchor) {
+      // Anchor: force the selected instance + its subtree into the list
+      // regardless of page/filters (BE de-dupes + appends them). Omitted
+      // when falsy => URL byte-identical to the pre-anchor contract.
+      params = params.set('anchor', anchor);
     }
     return this.http.get<InstanceListResponse>(`${this.API_BASE}/instances`, { params });
   }

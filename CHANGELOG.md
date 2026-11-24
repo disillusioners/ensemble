@@ -5,6 +5,15 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.31.51] — 2026-11-24
+
+### Added — instance-list anchor: the selected instance + its children are always present (commission instances-list-anchor)
+
+- `GET /api/instances` gains an optional `anchor` query param (uuid). When present and resolvable, the response's `instances` array ADDITIONALLY contains the anchor row and ALL its descendants, appended after the normal rows (anchor first, BFS order), deduped by `instance_id`, merged BEFORE the UI-prefs batch fetch so pin/color/icon prefs cover the family rows. Family rows deliberately bypass `project_id`/`exclude_kb`/`search`/`source`/`order` — an explicit presence request (the same lineage-over-filters precedent as descendant loading). The envelope (`total`/`limit`/`offset`/`has_more`/`truncated`) keeps normal-page semantics; unknown/malformed anchors and family-fetch failures degrade to an unchanged list (HTTP 200, WARN, never 422/500).
+- Implementation stays off the event loop (v0.27.14 discipline): the family fetch is a route-local SECOND `db_offload` call (the prefs-read pattern). New additive seams only: manager facade `get_instance_anchor_family`, lifecycle BFS bounded by `INSTANCE_LIST_ANCHOR_BFS_CAP = 500` (rate-limited WARN on cap hit, mirroring the MAX_DESCENDANTS_PER_PAGE discipline) using the batched `list_child_ids_for_parents` IN-query per level plus a new batched repository `list_by_ids` (one SELECT IN — no N+1). `manager.list_instances` and every existing seam signature are UNTOUCHED.
+- FE (service layer only): `ApiService.listInstances` gains a trailing `anchor?: string` (set only when truthy — absent ⇒ byte-identical URL); `InstanceService` reads `detailVisible() ? activeInstanceId() : null` inside `loadInstances()` at fetch time (the `searchQuery()` threading precedent), so the initial load, pagination and the 60 s sidebar poll all carry the anchor while the detail view is open; the 8 s badge poll / `listInstanceTree` stay anchor-free. Deep links (`/projects/<pid>/instances/<iid>`) now show the selected instance + subtree in the left list; no component/template changes (the parent_id tree builder nests the family rows as-is).
+- Verification on the merged tip: BE scoped shard 44 passed (new packs `tests/api/test_list_instances_anchor_param.py` + `tests/api/test_list_instances_anchor_family.py` plus offload_prefs / response_bytes / tree_loading regressions); FE 5 suites / 236 passed including the rooms-btn regression spec; `tsc --noEmit -p tsconfig.app.json` clean. Pre-existing reds (source_param 6, ui_prefs 13) proven base-identical in env-armed daemon-child shells (older fixtures never strip AuthMiddleware; the new packs do) — NOT this release's regressions. STAGED ONLY — NOT promoted (the Emperor's ceremony owns the flip).
+
 ## [v0.31.50] — 2026-11-24
 
 ### Fixed — POK family count: STRICT family-key membership (commission pok-family-count-strict; board wi-f0a9418c)
