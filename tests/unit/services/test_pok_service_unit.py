@@ -21,6 +21,7 @@ from sqlmodel import SQLModel
 
 import daemon.repositories.pok.models  # noqa: F401 — register the tables
 from daemon.repositories.pok.models import (
+    POKWriteGateLedger,
     ProjectOperatingKnowledge,
     ProjectOperatingKnowledgeEmbedding,
 )
@@ -41,6 +42,7 @@ def svc():
         tables=[
             ProjectOperatingKnowledge.__table__,
             ProjectOperatingKnowledgeEmbedding.__table__,
+            POKWriteGateLedger.__table__,
         ],
     )
     return POKService(engine)
@@ -726,6 +728,108 @@ class TestAc3Ac23UniversalRead:
         assert echo.action == "no-op"
         second = svc._repo.get(out.entry.id).last_verified
         assert second is not None and second > first
+
+
+class TestQueryRetrievalLedger:
+    """pok-write-gate Phase 12 — the QUERY-side retrieval wiring (the
+    last unwired retrieval leg): ``POKService.query`` appends one
+    ledger RETRIEVAL row per returned row with ``source="query"``.
+
+    The ledger's retrieval counts SUPERSEDE ``access_count`` for the
+    librarian because they disambiguate query-vs-injection
+    (design-amendments-v2 §13.2 fork J, amendment 1) — ``access_count``
+    stays the LEGACY corroborator (query-only semantics, its sole
+    increment remains ``bump_access`` on this path). Fence discipline:
+    throwaway in-memory SQLite, scratch fixtures only, no live store.
+    """
+
+    def _seed(self, svc: POKService) -> None:
+        svc.upsert(
+            project_id="p1", slug="qret-01-alpha",
+            body="alpha retrieval fact", agent_id="devops",
+        )
+        svc.upsert(
+            project_id="p1", slug="qret-02-beta",
+            body="beta retrieval fact", agent_id="devops",
+        )
+
+    def test_query_appends_retrieval_rows_source_query(
+        self, svc: POKService
+    ) -> None:
+        """THE wiring leg: one ``source="query"`` RETRIEVAL ledger row
+        per row the query RETURNED, stamped with entry_id, slug and
+        the reading agent."""
+        self._seed(svc)
+        q = svc.query(project_id="p1", query="retrieval fact", agent_id="worker")
+        assert len(q.entries) == 2
+
+        rows = svc._repo.query_ledger("p1", phase="RETRIEVAL")
+        assert len(rows) == 2
+        assert all(r.source == "query" for r in rows)
+        assert all(r.phase == "RETRIEVAL" for r in rows)
+        assert {r.candidate_slug for r in rows} == {"qret-01-alpha", "qret-02-beta"}
+        assert all(r.entry_id for r in rows)
+        assert all(r.agent_id == "worker" for r in rows)
+
+    def test_source_column_disambiguates_query_from_injection(
+        self, svc: POKService
+    ) -> None:
+        """The J-metric chain: the ``source`` filter separates the
+        query side from the injection side — the whole point of the
+        ledger's retrieval counts."""
+        self._seed(svc)
+        svc.query(project_id="p1", query="retrieval fact", agent_id="worker")
+        assert len(svc._repo.query_ledger("p1", source="query")) == 2
+        assert svc._repo.query_ledger("p1", source="injection") == []
+        assert svc._repo.count_ledger_phase("p1", "RETRIEVAL") == 2
+
+    def test_empty_result_logs_nothing(self, svc: POKService) -> None:
+        """A query that returns no entries appends no ledger row —
+        nothing was retrieved."""
+        q = svc.query(project_id="p-empty", query="anything", agent_id="worker")
+        assert q.entries == []
+        assert svc._repo.query_ledger("p-empty", phase="RETRIEVAL") == []
+
+    def test_ledger_append_failure_never_breaks_the_read(
+        self, svc: POKService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """§4.9 never-raise (double containment): a ledger append that
+        fails costs the retrieval metric, NEVER the read."""
+        self._seed(svc)
+        real_append = svc._repo.append_ledger
+
+        def _boom(_entry):  # noqa: ANN001
+            raise RuntimeError("ledger append exploded")
+
+        monkeypatch.setattr(svc._repo, "append_ledger", _boom)
+        q = svc.query(project_id="p1", query="retrieval fact", agent_id="worker")
+        assert len(q.entries) == 2  # the read is unaffected
+        monkeypatch.setattr(svc._repo, "append_ledger", real_append)
+
+    def test_access_count_and_ledger_coexist_not_double_counted(
+        self, svc: POKService
+    ) -> None:
+        """Amendment-1 alignment: ``access_count`` (the legacy
+        corroborator, query-only semantics — its sole increment is
+        ``bump_access`` on this path) and the ledger RETRIEVAL row
+        (the durable record) each increment exactly ONCE per row per
+        query — the wiring adds the ledger leg without double-counting
+        the access counter."""
+        self._seed(svc)
+        out_a = svc.upsert(  # no-op dup: seeds are already written
+            project_id="p1", slug="qret-01-alpha",
+            body="alpha retrieval fact", agent_id="devops",
+        )
+        assert out_a.action == "no-op"
+        svc.query(project_id="p1", query="retrieval fact", agent_id="worker")
+        row = svc._repo.get(out_a.entry.id)
+        assert row.access_count == 1  # bumped exactly once
+        assert row.last_accessed_at is not None
+        assert len(svc._repo.query_ledger("p1", phase="RETRIEVAL")) == 2
+        svc.query(project_id="p1", query="retrieval fact", agent_id="worker")
+        row = svc._repo.get(out_a.entry.id)
+        assert row.access_count == 2  # still exactly one bump per query
+        assert len(svc._repo.query_ledger("p1", phase="RETRIEVAL")) == 4
 
 class TestCountActiveInFamilyBoundary:
     """Item 7 (council micro-fold): count_active_in_family regex verdict.

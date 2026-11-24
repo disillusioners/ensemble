@@ -1088,11 +1088,78 @@ class POKService:
         ]
         outcome.bm25_only = query_embedding is None
         # access bookkeeping (best-effort; never blocks the read).
+        # ``access_count`` is the LEGACY corroborator (query-only
+        # semantics — its sole increment is this site); the ledger
+        # RETRIEVAL row below is the DURABLE record (design-
+        # amendments-v2 §13.2 fork J, amendment 1: ledger retrieval
+        # counts SUPERSEDE ``access_count`` because they disambiguate
+        # query-vs-injection). The two signals coexist by design —
+        # this is NOT a double count: ``access_count`` counts reads,
+        # the ledger row records WHERE a row was surfaced from.
         try:
             self._repo.bump_access([e.id for e in outcome.entries])
         except Exception as exc:  # pragma: no cover - defensive
             logger.info("[POK:Degraded] access bookkeeping failed: %s", exc)
+        # The READ-side retrieval capture (pok-write-gate Phase 12,
+        # the last unwired retrieval leg): one ledger RETRIEVAL row
+        # per row this query RETURNED, ``source="query"`` — never-
+        # raise (§4.9: a failed capture costs a metric, never the
+        # read). Failure containment is double: this try/except and
+        # the per-row containment in ``_record_query_retrievals``.
+        try:
+            self._record_query_retrievals(
+                outcome.entries, project_id=project_id, agent_id=agent_id
+            )
+        except Exception as exc:  # noqa: BLE001 — §4.9 never-raise
+            logger.warning(
+                "[POK:Degraded] query retrieval ledger capture failed: %s "
+                "— the retrieval metric is lost; the read is unaffected",
+                exc,
+            )
         return outcome
+
+    def _record_query_retrievals(
+        self,
+        entries: list[ProjectOperatingKnowledge],
+        *,
+        project_id: str,
+        agent_id: str,
+    ) -> None:
+        """Append one ``source="query"`` RETRIEVAL ledger row per row.
+
+        The query-side sibling of the injection-side recorder
+        (``make_retrieval_recorder`` in ``pok_injection.py``): the
+        READ path records what it returned with ``source="query"``,
+        the INJECTION path records what it admitted with
+        ``source="injection"`` — the ``source`` column is the
+        query-vs-injection disambiguator the librarian's J-metric
+        chain reads (design-amendments-v2 §13.2 fork J, amendment 1).
+
+        Per-row containment (§4.9 double containment): one bad row
+        costs one metric, never the read and never the other rows.
+        ``agent_id`` participates in bookkeeping only — the read
+        itself is universal (ER-1.4).
+        """
+        for row in entries:
+            try:
+                self._repo.append_ledger(
+                    POKWriteGateLedger(
+                        project_id=project_id,
+                        phase="RETRIEVAL",
+                        entry_id=row.id,
+                        candidate_slug=row.slug,
+                        source="query",
+                        agent_id=agent_id,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 — §4.9 never-raise
+                logger.warning(
+                    "[POK:Degraded] retrieval ledger append failed for "
+                    "%s (%s) — the retrieval metric is lost; the read is "
+                    "unaffected",
+                    row.slug,
+                    exc,
+                )
 
     def _lag_aware_embedding_ids(
         self, project_id: str, entries: list[ProjectOperatingKnowledge]

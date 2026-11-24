@@ -226,14 +226,15 @@ POK_LEDGER_MERGE_KINDS: tuple[str, ...] = ("no_delta", "delta")
 #: side (the ``pok_query`` tool); ``injection`` is the context-block
 #: side. A row that is NOT a retrieval carries NULL.
 #:
-#: ── RETRIEVAL EVENTS: the INJECTION side is WIRED (Phase 10, T10.13) ────
+#: ── RETRIEVAL EVENTS: BOTH sides are WIRED ────────────────────────────
 #: Both live ``admit_view`` call sites (the context-block seam and
 #: the ari seam) now pass ``on_retrieval=make_retrieval_recorder(...)``,
 #: so an injected row lands a ledger RETRIEVAL row with
-#: ``source="injection"``. The READ side is still open: no production
-#: caller records ``source="query"`` — the ``pok_query`` read path
-#: does not append a ledger RETRIEVAL row yet. The column landed up
-#: front so that read path can populate it without a migration.
+#: ``source="injection"`` (Phase 10, T10.13). The READ side is wired
+#: too (Phase 12): ``POKService.query`` appends one
+#: ``source="query"`` RETRIEVAL row per returned row — the ``source``
+#: column is the query-vs-injection disambiguator the librarian's
+#: J-metric chain reads.
 POK_LEDGER_SOURCES: tuple[str, ...] = ("injection", "query")
 
 #: The RULED ARCHIVE BASES — the ONLY grounds on which a row may be

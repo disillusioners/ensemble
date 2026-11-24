@@ -836,14 +836,15 @@ class POKRepository:
         query-vs-injection, which ``access_count`` alone cannot
         (design-amendments-v2 §13.2 fork J, amendment 1).
 
-        ── RETRIEVAL EVENTS: the INJECTION side is WIRED ───────────
+        ── RETRIEVAL EVENTS: BOTH sides are WIRED ──────────────────
         Both live ``admit_view`` call sites record their admitted
         rows as ledger RETRIEVAL rows with ``source="injection"``
         (pok-write-gate Phase 10, T10.13 — the W-1 close). The READ
-        side is still open: no production caller records
-        ``source="query"`` — the ``pok_query`` read path does not
-        append a ledger RETRIEVAL row yet. The column landed up
-        front so that read path can populate it without a migration.
+        side is wired too (pok-write-gate Phase 12):
+        ``POKService.query`` appends one ``source="query"`` RETRIEVAL
+        row per returned row — the ``source`` column is the
+        query-vs-injection disambiguator this method's callers
+        filter on.
 
         NOTE for Phase 10: an ADMISSION-phase count INCLUDES the
         standing-defect residual rows (they are ADMISSION-phase rows

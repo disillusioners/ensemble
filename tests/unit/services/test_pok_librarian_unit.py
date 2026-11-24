@@ -32,9 +32,10 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy.engine import create_engine
 from sqlalchemy.pool import StaticPool
-from sqlmodel import SQLModel
+from sqlmodel import SQLModel, select
 
 import daemon.repositories.pok.models  # noqa: F401
+from daemon.models.board import BoardItem, BoardItemTag, BoardNote
 from daemon.repositories.pok.models import (
     POKWriteGateLedger,
     ProjectOperatingKnowledge,
@@ -91,6 +92,12 @@ def env():
             ProjectMetadataRecord.__table__,
             ProjectTagLink.__table__,
             ProjectShortnameLink.__table__,
+            # The board sink (Phase 12) writes ONE bounded notice per
+            # pass that HAS proposals — the board tables must exist
+            # on the scratch engine.
+            BoardItem.__table__,
+            BoardItemTag.__table__,
+            BoardNote.__table__,
         ],
     )
     # The metadata writes need the project row to exist (the I1
@@ -903,3 +910,90 @@ class TestCensusVocabulary:
             "verdicts": dict(sorted(store.verdicts.items())),
         }
         assert json.loads(json.dumps(payload))["active_count"] == 1
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Phase 12 — the BOARD SINK (one bounded notice per pass that HAS proposals)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _board_items(engine) -> list:
+    from sqlmodel import Session
+
+    with Session(engine) as session:
+        return list(session.exec(select(BoardItem)).all())
+
+
+class TestLibrarianBoardSink:
+    """The librarian's board sink (pok-write-gate Phase 12).
+
+    ONE bounded board item per pass WHEN consolidation proposals
+    exist — summary counts only, no per-proposal spam; the ledger rows
+    stay the durable record. The emission is pass-internal and
+    FAIL-SOFT: a board failure NEVER fails the pass.
+
+    The store is seeded with 128 active rows — the cold-start band
+    (SOFT_MAX_BAND_SIZE = 128) ⇒ the derived soft max EQUALS the
+    active count ⇒ the pass TIGHTENS and the consolidator runs. A
+    duplicate pair (the same ``content_sha256``) lights the
+    ``covered-by-surviving-row`` basis.
+    """
+
+    def _seed_band(self, env, *, duplicate: bool) -> None:
+        rows = [
+            _row(f"fam-01-r{i:03d}", content_sha256=f"sha-filler-{i:03d}")
+            for i in range(126)
+        ]
+        if duplicate:
+            rows.append(_row("fam-01-dup", content_sha256="sha-dup"))
+            rows.append(_row("fam-01-survivor", content_sha256="sha-dup"))
+        else:
+            rows.append(_row("fam-01-lonely", content_sha256="sha-lonely"))
+            rows.append(_row("fam-01-other", content_sha256="sha-other"))
+        _seed(env, rows)
+
+    def test_no_proposals_means_no_board_item(self, env):
+        """No consolidation proposals ⇒ the pass says nothing."""
+        self._seed_band(env, duplicate=False)
+        report = run_librarian_pass(env.engine, PROJECT_ID)
+        assert report.proposals == ()
+        assert _board_items(env.engine) == []
+
+    def test_proposals_emit_exactly_one_bounded_item(self, env):
+        """The sink's core leg: ONE item, counts only, no per-proposal
+        spam. The pass is the emitter — the emission is pass-internal."""
+        self._seed_band(env, duplicate=True)
+        report = run_librarian_pass(env.engine, PROJECT_ID)
+        assert len(report.proposals) == 2
+
+        items = _board_items(env.engine)
+        assert len(items) == 1
+        item = items[0]
+        assert item.title == librarian.POK_LIBRARIAN_BOARD_TITLE
+        assert item.project_id == PROJECT_ID
+        assert item.created_by_instance == librarian.POK_LIBRARIAN_BOARD_AUTHOR
+        # Summary counts — and NO per-proposal dump.
+        assert "Consolidation proposals: 2" in item.body_md
+        assert "covered-by-surviving-row=2" in item.body_md
+        assert "fam-01-dup" not in item.body_md
+        assert "fam-01-survivor" not in item.body_md
+        # The tag is the curator's filter key.
+        from sqlmodel import Session
+
+        with Session(env.engine) as session:
+            tags = list(session.exec(select(BoardItemTag)).all())
+        assert [t.tag for t in tags] == [librarian.POK_LIBRARIAN_BOARD_TAG]
+
+    def test_a_board_failure_never_fails_the_pass(self, env, monkeypatch):
+        """Fail-soft: the pass is the job; the notice is a courtesy."""
+        from daemon.services.board_service import BoardService
+
+        def _boom(self, **kwargs):  # noqa: ANN001, ARG001
+            raise RuntimeError("board down")
+
+        monkeypatch.setattr(BoardService, "create_item", _boom)
+        self._seed_band(env, duplicate=True)
+        report = run_librarian_pass(env.engine, PROJECT_ID)
+        assert report.error is None
+        assert len(report.proposals) == 2
+        assert _board_items(env.engine) == []

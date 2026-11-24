@@ -45,7 +45,9 @@ What lives here
 * :func:`classify_metrics` / :func:`consolidation_basis_for` — the J
   metric set (T10.8) and the ruled-bases consolidator (T10.7);
 * :func:`select_merge_target` — the J partition wiring (T10.11);
-* :func:`detect_r_ret_candidates` — the R-RET detection leg (T10.12).
+* :func:`detect_r_ret_candidates` — the R-RET detection leg (T10.12);
+* :func:`emit_librarian_board_notice` — the Phase 12 board sink (ONE
+  bounded notice per pass that HAS proposals; fail-soft).
 
 DOCTRINE (non-negotiable, design-amendments-v2 §9):
 
@@ -63,7 +65,9 @@ DOCTRINE (non-negotiable, design-amendments-v2 §9):
 Layer discipline: this module reads the POK repository + the project
 metadata table and WRITES ONLY the soft-max metadata key (the
 daemon-internal writer the I1 pick sanctions — the authority split
-governs AGENT-FACING tool calls, not this).
+governs AGENT-FACING tool calls, not this) plus, when a pass HAS
+consolidation proposals, ONE bounded board NOTICE (the Phase 12 board
+sink — fail-soft; the ledger rows stay the durable record).
 """
 
 from __future__ import annotations
@@ -1118,6 +1122,106 @@ class LibrarianPassReport:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# The BOARD SINK (pok-write-gate Phase 12) — ONE bounded notice per pass
+# ═══════════════════════════════════════════════════════════════════════════
+
+#: The board-author stamp for the librarian's pass notice (the
+#: ``daemon:<lane>`` precedent — daemon/repositories/source/
+#: maintenance_seed.py:146).
+POK_LIBRARIAN_BOARD_AUTHOR = "daemon:pok-librarian"
+
+#: The board item's title — bounded, counts-only, NEVER a
+#: per-proposal subject line.
+POK_LIBRARIAN_BOARD_TITLE = "POK librarian: consolidation proposals to review"
+
+#: The board item's tag — the key a curator filters on.
+POK_LIBRARIAN_BOARD_TAG = "pok-librarian"
+
+
+def librarian_board_body(report: LibrarianPassReport) -> str:
+    """The bounded, COUNTS-ONLY body of the librarian's board notice.
+
+    The board item is a NOTICE, not the record: the detail lives in
+    the write-gate ledger rows and the ``pok-librarian``
+    ``maintenance_runs`` audit row. So the body carries SUMMARY
+    COUNTS ONLY — never a per-proposal dump, never a slug list (one
+    item per pass, no per-proposal spam).
+    """
+    by_basis: dict[str, int] = {}
+    for proposal in report.proposals:
+        basis = str(proposal.get("basis") or "unspecified")
+        by_basis[basis] = by_basis.get(basis, 0) + 1
+    lines = [
+        f"Project: {report.project_id}",
+        f"Active rows: {report.active_count} (soft max {report.soft_max})",
+        f"Consolidation proposals: {len(report.proposals)}",
+    ]
+    if by_basis:
+        lines.append(
+            "By ruled basis: "
+            + ", ".join(
+                f"{basis}={count}" for basis, count in sorted(by_basis.items())
+            )
+        )
+    lines.append(f"R-RET candidates: {len(report.r_ret)}")
+    lines.append(f"Expired / never-answered ASK gates: {report.expired_asks}")
+    lines.append(
+        "Summary counts only — the write-gate ledger rows and the "
+        "pok-librarian maintenance-run row carry the detail."
+    )
+    return "\n".join(lines)
+
+
+def emit_librarian_board_notice(
+    engine: Any, report: LibrarianPassReport
+) -> bool:
+    """Emit ONE bounded board item for a pass that HAS proposals.
+
+    The board sink (pok-write-gate Phase 12): the librarian's pass
+    surfaces its consolidation proposals to the human-facing board —
+    ONE item per pass, summary counts only. The ledger rows stay the
+    durable record; the board is a notice, never a per-proposal feed.
+
+    The call is the SYNCHRONOUS ``BoardService.create_item`` (never
+    the async offload path — the ``daemon/repositories/source/
+    maintenance_seed.py`` precedent), and it is FAIL-SOFT: a board
+    failure (missing table, validation error, DB down) NEVER fails
+    the pass — the pass is the job, the notice is the courtesy.
+
+    Returns ``True`` when an item was written, ``False`` when there
+    were no proposals (nothing to say) or the write failed.
+    """
+    if not report.proposals:
+        return False
+    try:
+        from daemon.services.board_service import BoardService
+
+        BoardService(engine=engine).create_item(
+            title=POK_LIBRARIAN_BOARD_TITLE,
+            body_md=librarian_board_body(report),
+            project_id=report.project_id,
+            tags=[POK_LIBRARIAN_BOARD_TAG],
+            created_by_instance=POK_LIBRARIAN_BOARD_AUTHOR,
+        )
+        logger.info(
+            "[POK:Librarian] board notice written for project %s "
+            "(%d proposals)",
+            report.project_id,
+            len(report.proposals),
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 — fail-soft by contract
+        logger.warning(
+            "[POK:Librarian] board notice failed for project %s (%s) — "
+            "the pass is unaffected; the proposals remain in the "
+            "pass report",
+            report.project_id,
+            type(exc).__name__,
+        )
+        return False
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # The H3 pass JOB (T10.4) — ONE global MaintenanceService job
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -1372,6 +1476,11 @@ def run_librarian_pass(
             len(proposals),
             len(r_ret),
         )
+        # The BOARD SINK (pok-write-gate Phase 12): ONE bounded
+        # notice per pass that HAS proposals — the pass-internal
+        # emission is FAIL-SOFT (a board failure never fails the
+        # pass). No proposals ⇒ no board item at all.
+        emit_librarian_board_notice(engine, report)
         return report
     except Exception as exc:  # noqa: BLE001 — per-project try/except
         logger.warning(

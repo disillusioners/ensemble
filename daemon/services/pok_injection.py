@@ -348,15 +348,17 @@ def admit_view(
     capture degrades to a WARNING, never to a missing POK block
     (§4.9 never-raise discipline).
 
-    ── RETRIEVAL EVENTS: the INJECTION side is WIRED ───────────────
+    ── RETRIEVAL EVENTS: BOTH sides are WIRED ──────────────────────
     Both live ``admit_view`` call sites (the context-block seam and
     the ari seam) pass ``on_retrieval=make_retrieval_recorder(...)``
     (pok-write-gate Phase 10, T10.13 — the W-1 close), so an injected
     row lands a ledger RETRIEVAL row with ``source="injection"``. The
-    READ side is still open: no production caller records
-    ``source="query"`` — the ``pok_query`` read path does not append
-    a ledger RETRIEVAL row yet. The hook lands up front so the read
-    path can populate it without a migration.
+    READ side is wired too (pok-write-gate Phase 12):
+    :meth:`POKService.query
+    <daemon.services.pok_service.POKService.query>` appends one
+    ``source="query"`` RETRIEVAL row per returned row — the ``source``
+    column is the query-vs-injection disambiguator the librarian's
+    J-metric chain reads.
 
     NEVER RAISES (§4.9): any failure degrades to an empty result
     with ``degraded=True`` (no block this turn; the once-flag stays
@@ -670,11 +672,12 @@ def make_retrieval_recorder(
     Both live ``admit_view`` call sites (the context-block seam and
     the ari seam) pass this recorder (pok-write-gate Phase 10, T10.13
     — the W-1 close), so an injected row lands a ledger RETRIEVAL row
-    with ``source="injection"``. The READ side is still open: no
-    production caller records ``source="query"`` — the ``pok_query``
-    read path does not append a ledger RETRIEVAL row yet. The
-    recorder lands up front so the read path can populate it without
-    a migration.
+    with ``source="injection"``. The READ side is wired by
+    :meth:`POKService.query
+    <daemon.services.pok_service.POKService.query>` (pok-write-gate
+    Phase 12): one ``source="query"`` RETRIEVAL row per returned row,
+    appended through ``POKService._record_query_retrievals`` with the
+    same never-raise posture.
     """
     from daemon.repositories.pok.models import (  # noqa: PLC0415 — cycle-neutral
         POKWriteGateLedger,
