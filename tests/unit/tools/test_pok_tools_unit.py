@@ -25,6 +25,7 @@ from sqlmodel import SQLModel
 import daemon.constants as constants
 import daemon.repositories.pok.models  # noqa: F401
 from daemon.repositories.pok.models import (
+    POKWriteGateLedger,
     ProjectOperatingKnowledge,
     ProjectOperatingKnowledgeEmbedding,
 )
@@ -46,6 +47,9 @@ def tool_env(monkeypatch):
         tables=[
             ProjectOperatingKnowledge.__table__,
             ProjectOperatingKnowledgeEmbedding.__table__,
+            # The write-gate ledger (Wave 2 Phase 7/8): the tool layer
+            # appends the verdict / execution / ASK-chain rows.
+            POKWriteGateLedger.__table__,
         ],
     )
 
@@ -82,13 +86,21 @@ def _manager(tool_env, project_id, agent_id):
 
 
 class TestRegistrationSurface:
-    def test_three_tools_created(self, tool_env) -> None:
+    def test_four_tools_created(self, tool_env) -> None:
+        # The G1 answer tool joined the surface in Wave 2 Phase 8
+        # (T8.5) — the four names are the KNOWN_TOOL_NAMES pin
+        # (269 → 270, design-amendments-v2 §13.2a).
         tools = create_pok_tools(
             _manager(tool_env, "p1", "developer"),
             current_instance_id="inst-1",
             agent_id="developer",
         )
-        assert [t.name for t in tools] == ["pok_upsert", "pok_query", "pok_curate"]
+        assert [t.name for t in tools] == [
+            "pok_upsert",
+            "pok_query",
+            "pok_curate",
+            "pok_gate_answer",
+        ]
 
     def test_category_registered_in_modules(self) -> None:
         assert CATEGORY_NAME == "pok"
@@ -175,19 +187,23 @@ class TestServerSideScoping:
             agent_id="developer",
         )
         for tool in tools:
-            kwargs = {"slug": "x"} if tool.name != "pok_query" else {}
             if tool.name == "pok_query":
                 out = tool.invoke({})
+            elif tool.name == "pok_upsert":
+                out = tool.invoke(
+                    {"slug": "x", "body": "x", "reason": "unit fixture reason"}
+                )
+            elif tool.name == "pok_gate_answer":
+                out = tool.invoke({"gate_id": "g-1", "answer": "yes"})
             else:
-                body = {"body": "x", "reason": "unit fixture reason"} if tool.name == "pok_upsert" else {}
-                out = tool.invoke({"slug": "x", **body})
+                out = tool.invoke({"slug": "x"})
             assert out.get("code") == "pok_no_project", (
                 f"{tool.name}: {out}"
             )
 
 
 class TestAc10DefaultProjectToolLevel:
-    @pytest.mark.parametrize("tool_idx", [0, 1, 2])
+    @pytest.mark.parametrize("tool_idx", [0, 1, 2, 3])
     def test_default_project_typed_refusals(self, tool_env, tool_idx) -> None:
         constants.SYSTEM_DEFAULT_PROJECT_ID = "default-x"
         tools = create_pok_tools(
@@ -200,6 +216,8 @@ class TestAc10DefaultProjectToolLevel:
             out = tool.invoke({"slug": "x", "body": "fact", "reason": "unit fixture reason"})
         elif tool.name == "pok_query":
             out = tool.invoke({})
+        elif tool.name == "pok_gate_answer":
+            out = tool.invoke({"gate_id": "g-1", "answer": "yes"})
         else:
             out = tool.invoke({"slug": "x"})
         assert out.get("code") == "pok_default_project"

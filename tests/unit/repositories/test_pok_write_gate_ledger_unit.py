@@ -37,6 +37,13 @@ from daemon.repositories.pok.repository import POKRepository
 REPO_ROOT = Path(__file__).resolve().parents[3]
 VERSIONS_DIR = REPO_ROOT / "daemon" / "migrations" / "versions"
 LEDGER_SQL = VERSIONS_DIR / "20261124_060000_create_pok_write_gate_ledger.sql"
+#: Wave 2 Phase 8 (T8.16) — the gate-chain partial UNIQUE index rides
+#: its OWN migration file (the house rule: every schema change gets
+#: its own ``.sql`` — the file is the persistent record). The index
+#: lockstep test below reads BOTH files.
+GATE_CHAIN_INDEX_SQL = (
+    VERSIONS_DIR / "20261124_093000_add_pok_ledger_gate_chain_unique_index.sql"
+)
 
 #: The 7 merge-proposal fields the plan's §13.5 "no-pick-foreclosed
 #: rule" requires UP FRONT — a schema that cannot represent a
@@ -245,16 +252,80 @@ class TestLedgerMigration:
             i["name"]: tuple(i["column_names"])
             for i in inspect(eng).get_indexes("pok_write_gate_ledger")
         }
-        up = _up_section(LEDGER_SQL.read_text())
-        sql_idx = {
-            name: tuple(c.strip() for c in cols.split(","))
-            for name, cols in re.findall(
-                r"CREATE INDEX IF NOT EXISTS (\S+)\s*\n\s*ON "
-                r"pok_write_gate_ledger \(([^)]+)\)",
-                up,
+        # The index set is the union of the CREATE migration and the
+        # Wave-2 T8.16 gate-chain-index migration (each schema change
+        # rides its own .sql file — the house rule).
+        sql_idx: dict[str, tuple[str, ...]] = {}
+        for sql_path in (LEDGER_SQL, GATE_CHAIN_INDEX_SQL):
+            up = _up_section(sql_path.read_text())
+            sql_idx.update(
+                {
+                    name: tuple(c.strip() for c in cols.split(","))
+                    for name, cols in re.findall(
+                        r"CREATE (?:UNIQUE )?INDEX IF NOT EXISTS (\S+)\s*\n\s*ON "
+                        r"pok_write_gate_ledger \(([^)]+)\)",
+                        up,
+                    )
+                }
             )
-        }
         assert model_idx == sql_idx
+
+    def test_the_gate_chain_index_is_partial_on_a_non_null_gate_id(self) -> None:
+        """T8.16 — the index is PARTIAL on ``gate_id IS NOT NULL``.
+
+        A RETRIEVAL row belongs to no chain (NULL gate_id) and MANY
+        retrieval rows legitimately share one project — they must
+        never be constrained.
+        """
+        up = _up_section(GATE_CHAIN_INDEX_SQL.read_text())
+        assert "CREATE UNIQUE INDEX IF NOT EXISTS uq_pok_ledger_gate_chain" in up
+        assert "WHERE gate_id IS NOT NULL" in up
+        # The 3-site pin: the model declares the SAME name + predicate.
+        idx = next(
+            i
+            for i in POKWriteGateLedger.__table__.indexes
+            if i.name == "uq_pok_ledger_gate_chain"
+        )
+        assert idx.unique is True
+        assert tuple(c.name for c in idx.columns) == (
+            "project_id",
+            "gate_id",
+            "phase",
+        )
+        where = idx.dialect_options["sqlite"]["where"]
+        assert str(where) == "gate_id IS NOT NULL"
+        # The PostgreSQL mirror in daemon/manager.py carries the SAME
+        # statement (the .sql runner is a NO-OP on PG). The source
+        # splits the statement across string literals, so the three
+        # fragments are checked individually.
+        manager_src = (REPO_ROOT / "daemon" / "manager.py").read_text()
+        assert (
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_pok_ledger_gate_chain"
+            in manager_src
+        )
+        assert (
+            "ON pok_write_gate_ledger (project_id, gate_id, phase)" in manager_src
+        )
+        assert "WHERE gate_id IS NOT NULL" in manager_src
+
+    def test_a_duplicate_gate_chain_row_is_refused_at_the_db_level(
+        self, repo: POKRepository
+    ) -> None:
+        """T8.16 — the appender refuses a duplicate chain step.
+
+        The de-duplication used to be APP-LEVEL read-then-append only
+        (a race); the DB uniqueness is the backstop.
+        """
+        from daemon.repositories.pok.repository import POKLedgerDuplicateError
+
+        _row(repo, gate_id="g-dup", phase="ADMISSION", verdict="ACCEPT")
+        with pytest.raises(POKLedgerDuplicateError):
+            _row(repo, gate_id="g-dup", phase="ADMISSION", verdict="ACCEPT")
+        # A DIFFERENT phase of the SAME gate is fine (the 3-row ASK
+        # chain), and a gate-less row is never constrained.
+        _row(repo, gate_id="g-dup", phase="EXECUTION", verdict="ACCEPT")
+        _row(repo, gate_id=None, phase="RETRIEVAL", source="injection")
+        _row(repo, gate_id=None, phase="RETRIEVAL", source="injection")
 
     def test_check_constraints_are_mirrored_in_both_sides(self) -> None:
         up = _up_section(LEDGER_SQL.read_text())
