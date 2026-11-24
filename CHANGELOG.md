@@ -5,6 +5,12 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.31.52] — 2026-11-24
+
+### Added — POK write-path gate (commission pok-write-gate)
+
+- POK write-path gate — Wave 1 mechanical enforcement + admission ledger + kb-writer grant removal; Wave 2 four-outcome shadow-first judge + ASK contract + soft-max librarian; amended guideline DRAFT for ratification; NO promote (STAGED ONLY — the Emperor's ceremony owns the flip).
+
 ## [v0.31.51] — 2026-11-24
 
 ### Added — instance-list anchor: the selected instance + its children are always present (commission instances-list-anchor)
