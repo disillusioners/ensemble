@@ -940,6 +940,15 @@ class TestP11BootNoBehaviorChange:
         # comment added in the same change). The token is disjoint from
         # the other markers over the span.
         "self-service-promote",
+        # ── RETENTION lane (post-outage-recovery SCOPE (c), 2026-11-24) ──
+        # The lane's sanctioned daemon/manager.py drift: the backstop job
+        # registration (UN_GATED, its own maintenance_runs section) and
+        # the `backstop_registration_params()` seam. Mirrors the decision /
+        # memoir / group-chat / self-service-promote / tool-usage blocks
+        # above. Every hunk of the drift carries the "retention" marker
+        # (the registration block natively — the lane's own name; the
+        # seam import via a minimal non-behavioral marker comment).
+        "retention",
         # ── TOOL-USAGE-METRICS-P1 lane (2026-11-21) — the single marker ──
         # The lane's sanctioned daemon/manager.py drift: the aggregated
         # ledger model registration before create_all + the off-loop

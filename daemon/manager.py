@@ -202,6 +202,7 @@ from .services.skill_clone_service import SkillCloneService
 from .services.maintenance import (
     CheckpointCleanupJob,
     MaintenanceService,
+    # retention lane — the backstop registration seam
     backstop_registration_params,
 )
 from .services.todo_manager import TodoManager
@@ -4811,6 +4812,7 @@ class InstanceManager:
         )
 
         # ── SCOPE (c) — the checkpoint BACKSTOP lane (2026-11-24) ────
+        # retention lane — the backstop registration (UN_GATED)
         # The anti-starvation path for the checkpoint growth itself.
         # The daily ``checkpoint_cleanup`` cycle is IDLE_GATED (its work
         # genuinely contends with live traffic for the write path), so
