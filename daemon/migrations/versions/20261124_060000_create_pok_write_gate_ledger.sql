@@ -30,6 +30,7 @@
 --   merge_kind ∈ no_delta|delta                    (NULL unless a merge)
 --   basis      ∈ covered-by-surviving-row|relocated-to-routed-home|
 --               NOW-FALSE|gate-rejection            (NULL unless archived)
+--   source     ∈ injection|query                  (NULL unless a retrieval)
 --
 -- CHAIN SHAPE (design-amendments-v2 §13.2 fork G): rows of one gate
 -- event are keyed by ``gate_id`` + ``phase``. A PLAIN chain
