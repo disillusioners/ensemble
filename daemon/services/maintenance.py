@@ -756,6 +756,12 @@ class MaintenanceService:
         ``None`` returns from the inner probe (e.g. a missing
         ``_task_repository``) collapse to ``True`` (idle — no
         refusal). Same fail-soft semantics as the private method.
+
+        NOTE (fix/idle-gate-recency, 2026-11-24): the private probe now
+        fails CLOSED on an undeterminable idle state (a probe error ⇒
+        "not idle"), so the exception branch here is reached only for an
+        error raised OUTSIDE the probe itself. The advisory signal stays
+        advisory either way — a busy signal does NOT refuse an execute.
         """
         try:
             return await self._is_idle()
@@ -792,96 +798,158 @@ class MaintenanceService:
         return elapsed_hours >= job.min_interval_hours
 
     async def _is_idle(self) -> bool:
-        """Check if the system is idle (no active work).
+        """Check if the system is idle (no RECENT work).
 
         System is considered idle when ALL of the following hold:
-        - No non-deferred tasks in PENDING or RUNNING status, system-wide
-          (shared ``TaskRepository.has_active_non_deferred_work`` predicate;
-          also folded into ``claim_pending_task`` so the gate and the
-          claim path never disagree — Phase 1 of the defer-seam bugfix,
+        - No RECENT non-deferred tasks in PENDING or RUNNING status,
+          system-wide (shared ``TaskRepository.has_active_non_deferred_work``
+          predicate; also folded into ``claim_pending_task`` so the gate and
+          the claim path never disagree — Phase 1 of the defer-seam bugfix,
           2026-06-30).
-        - No JobItems with ``admission_state`` in ('queued', 'active')
+        - No RECENT JobItems with ``admission_state`` in ('queued', 'active')
           (covers the full admission lifecycle: work waiting to start AND
           work in-flight that holds the queue lock — ``list_all_pending``
           alone missed the 'active' bucket).
         - No active LLM requests in the request registry.
 
+        **RECENCY-BOUNDED witness set (fix/idle-gate-recency,
+        2026-11-24):** "idle" now means "no RECENT meaningful activity",
+        not "no non-terminal row exists". The production path consults
+        ``JobRepository.has_recent_active_work`` — the same work shapes
+        (queued/active job rows on ANY queue, settled ``message`` mirrors
+        of non-terminal instances, in-flight non-deferred tasks) but each
+        witness only counts when the work item itself was created within
+        the activity window (``ENSEMBLE_IDLE_GATE_ACTIVITY_WINDOW_MINUTES``,
+        default 30 minutes, read per evaluation; ``0`` disables the bound
+        and restores the pre-2026-11-24 unbounded semantics).
+
+        WHY (measured on live ensemble_prod, 2026-11-23/24): the
+        unbounded witness set was held forever by the nest's NORMAL SHAPE —
+        always-on sessions whose settled mirrors and long-settled job rows
+        never stop counting — so EVERY idle-gated sweep was starved (the
+        background queue had not drained since 2026-11-14T17:44:35Z and the
+        blueprint pending-lease reaper could never fire: it is registered
+        without an ``idle_policy`` ⇒ ``IDLE_GATED``, and it carries no
+        ``max_staleness_hours`` escape hatch).
+
+        The legacy unbounded probes below are kept for the mock / partial
+        wiring path (a non-``bool`` probe result ⇒ the legacy probes run).
+
+        Fail-CLOSED: a probe error returns False (BUSY) — the safe
+        direction for a gate that protects live work.
+
         Returns:
             True if system is idle and can run maintenance tasks.
         """
-        # 1. Check for active non-deferred tasks (system-wide).
-        # This is the shared ``has_active_non_deferred_work`` predicate
-        # used by ``claim_pending_task`` and other defer-queue call sites
-        # — keeping the gate in sync with the claim path is the whole
-        # point of the Phase 1 refactor (Category B in the bugfix plan).
-        # Wrapped in ``asyncio.to_thread`` because the predicate is a sync
-        # SQLModel/SQLAlchemy call that takes a connection from the engine
-        # pool under SQLite WAL — same rationale as ``list_all_pending``
-        # below. If ``_task_repository`` was never wired (e.g. partial
-        # init or test setup that doesn't care about tasks), the probe is
-        # skipped, matching the existing "missing dependency ⇒ skip the
-        # check" pattern.
+        # 0. RECENCY-BOUNDED busy probe (production path).
         #
-        # Phase 2 (defer-queue idle gate, 2026-07-23): check both
-        # work-tracking tables. The job predicate catches active admission
-        # lifecycle rows, while the task predicate below catches active Tasks
-        # that have no backing JobItem. A non-bool job result is ignored so a
-        # loosely configured Mock cannot make the system look busy.
+        # fix/idle-gate-recency (2026-11-24): the probe that replaced the
+        # unbounded witness set. It covers the job rows AND the task rows
+        # in one query and is recency-bounded (a witness counts only when
+        # the work item was created within the activity window).
+        #
+        # A non-``bool`` result means the repository is a test double
+        # (a ``MagicMock`` returns a truthy Mock) — the legacy probes
+        # below then decide, exactly as before this change.
+        recency_probe_used = False
         if self._job_queue_service is not None:
             repo = getattr(self._job_queue_service, "_repository", None)
-            if repo is not None and hasattr(repo, "has_active_non_deferred_work"):
+            if repo is not None and hasattr(repo, "has_recent_active_work"):
+                try:
+                    busy = await asyncio.to_thread(repo.has_recent_active_work)
+                except Exception as e:
+                    # FAIL-CLOSED on ambiguity: an undeterminable idle
+                    # state must be treated as BUSY (the sweeps defer).
+                    logger.warning(
+                        f"Maintenance idle probe failed: {e} — failing "
+                        "CLOSED (system treated as BUSY; sweeps defer)"
+                    )
+                    return False
+                if isinstance(busy, bool):
+                    recency_probe_used = True
+                    if busy:
+                        return False
+        if not recency_probe_used:
+            # The LEGACY unbounded probes (job defer-predicate + task
+            # defer-predicate + queued/active JobItem probes). They run
+            # ONLY when the recency-bounded probe above did not answer
+            # (a test double / partial wiring). Running them in the
+            # production path would re-introduce the starvation: they
+            # treat the mere EXISTENCE of a non-terminal row as busy.
+            #
+            # 1. Check for active non-deferred tasks (system-wide).
+            # This is the shared ``has_active_non_deferred_work`` predicate
+            # used by ``claim_pending_task`` and other defer-queue call sites
+            # — keeping the gate in sync with the claim path is the whole
+            # point of the Phase 1 refactor (Category B in the bugfix plan).
+            # Wrapped in ``asyncio.to_thread`` because the predicate is a sync
+            # SQLModel/SQLAlchemy call that takes a connection from the engine
+            # pool under SQLite WAL — same rationale as ``list_all_pending``
+            # below. If ``_task_repository`` was never wired (e.g. partial
+            # init or test setup that doesn't care about tasks), the probe is
+            # skipped, matching the existing "missing dependency ⇒ skip the
+            # check" pattern.
+            #
+            # Phase 2 (defer-queue idle gate, 2026-07-23): check both
+            # work-tracking tables. The job predicate catches active admission
+            # lifecycle rows, while the task predicate below catches active Tasks
+            # that have no backing JobItem. A non-bool job result is ignored so a
+            # loosely configured Mock cannot make the system look busy.
+            if self._job_queue_service is not None:
+                repo = getattr(self._job_queue_service, "_repository", None)
+                if repo is not None and hasattr(repo, "has_active_non_deferred_work"):
+                    try:
+                        has_work = await asyncio.to_thread(
+                            repo.has_active_non_deferred_work, None
+                        )
+                        if isinstance(has_work, bool) and has_work:
+                            return False
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to check job repository: has_active_non_deferred_work: {e}"
+                        )
+            if self._task_repository is not None:
                 try:
                     has_work = await asyncio.to_thread(
-                        repo.has_active_non_deferred_work, None
+                        self._task_repository.has_active_non_deferred_work, None
                     )
-                    if isinstance(has_work, bool) and has_work:
+                    if has_work:
                         return False
                 except Exception as e:
-                    logger.warning(
-                        f"Failed to check job repository: has_active_non_deferred_work: {e}"
-                    )
-        if self._task_repository is not None:
-            try:
-                has_work = await asyncio.to_thread(
-                    self._task_repository.has_active_non_deferred_work, None
-                )
-                if has_work:
-                    return False
-            except Exception as e:
-                logger.warning(f"Failed to check task repository: {e}")
+                    logger.warning(f"Failed to check task repository: {e}")
 
-        # 2. Check for queued or active JobItems (queue-policy state).
-        # ``list_all_pending`` only sees ``admission_state='queued'``;
-        # ``find_processing_jobs`` only sees ``admission_state='active'``.
-        # Both must be checked to cover the full admission lifecycle — a
-        # job that has been claimed and is executing still holds the queue
-        # lock and must keep the maintenance job from running. Each call
-        # is wrapped in ``asyncio.to_thread`` so SQLite WAL write
-        # contention cannot block the event loop. This loop runs every
-        # ``check_interval_minutes`` (default 15); if a pending query
-        # deadlocks the event loop, the entire daemon freezes — same
-        # root cause as the ``notify_watchers`` / ``enqueue_message``
-        # deadlock chain.
-        #
-        # ``len(...)`` is used for the truthiness check (not ``if x:``)
-        # so the gate remains correct under ``MagicMock`` test doubles
-        # that don't explicitly stub ``find_processing_jobs`` — a
-        # bare ``MagicMock()`` is truthy via ``__bool__`` but reports
-        # ``len() == 0`` via ``__len__``, matching the production
-        # "empty list ⇒ idle" semantics. ``list_all_pending`` is already
-        # explicitly stubbed by every test (``MagicMock(return_value=[])``)
-        # so plain truthiness is safe for it.
-        if self._job_queue_service is not None:
-            try:
-                repo = self._job_queue_service._repository
-                pending = await asyncio.to_thread(repo.list_all_pending)
-                if pending:
-                    return False
-                processing = await asyncio.to_thread(repo.find_processing_jobs)
-                if len(processing) > 0:
-                    return False
-            except Exception as e:
-                logger.warning(f"Failed to check job queue: {e}")
+            # 2. Check for queued or active JobItems (queue-policy state).
+            # ``list_all_pending`` only sees ``admission_state='queued'``;
+            # ``find_processing_jobs`` only sees ``admission_state='active'``.
+            # Both must be checked to cover the full admission lifecycle — a
+            # job that has been claimed and is executing still holds the queue
+            # lock and must keep the maintenance job from running. Each call
+            # is wrapped in ``asyncio.to_thread`` so SQLite WAL write
+            # contention cannot block the event loop. This loop runs every
+            # ``check_interval_minutes`` (default 15); if a pending query
+            # deadlocks the event loop, the entire daemon freezes — same
+            # root cause as the ``notify_watchers`` / ``enqueue_message``
+            # deadlock chain.
+            #
+            # ``len(...)`` is used for the truthiness check (not ``if x:``)
+            # so the gate remains correct under ``MagicMock`` test doubles
+            # that don't explicitly stub ``find_processing_jobs`` — a
+            # bare ``MagicMock()`` is truthy via ``__bool__`` but reports
+            # ``len() == 0`` via ``__len__``, matching the production
+            # "empty list ⇒ idle" semantics. ``list_all_pending`` is already
+            # explicitly stubbed by every test (``MagicMock(return_value=[])``)
+            # so plain truthiness is safe for it.
+            if self._job_queue_service is not None:
+                try:
+                    repo = self._job_queue_service._repository
+                    pending = await asyncio.to_thread(repo.list_all_pending)
+                    if pending:
+                        return False
+                    processing = await asyncio.to_thread(repo.find_processing_jobs)
+                    if len(processing) > 0:
+                        return False
+                except Exception as e:
+                    logger.warning(f"Failed to check job queue: {e}")
 
         # 3. Check for active LLM requests
         if self._request_registry is not None:

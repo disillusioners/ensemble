@@ -78,12 +78,16 @@ project-scoped and system-wide bodies at module load time).
 
 from __future__ import annotations
 
-from typing import Final
+import logging
+import os
+from typing import Final, Mapping
 
 from sqlalchemy import bindparam, text
 from sqlalchemy.sql.elements import TextClause
 
 from daemon.constants import TERMINAL_INSTANCE_STATUSES
+
+logger = logging.getLogger(__name__)
 
 #: Instance statuses that mean "the mission behind this job is over".
 #: A job whose instance holds any OTHER status (``running``,
@@ -702,3 +706,338 @@ def defer_busy_witness_binds(
     CONSTRUCTION and cannot drift.
     """
     return defer_busy_binds(project_id, requester_instance_id)
+
+# ── Idle-gate ACTIVITY RECENCY (fix/idle-gate-recency, 2026-11-24) ─────────
+#
+# The two idle gates (the BACKGROUND-queue gate in
+# ``JobProcessor._background_idle_check`` and the MAINTENANCE-registry gate
+# in ``MaintenanceService._is_idle``) used to answer "is the nest busy?"
+# with *"does a non-terminal row exist?"* — which is UNSATISFIABLE on a
+# nest whose normal shape is a set of always-on sessions (every settled
+# message mirror of a non-terminal instance witnesses FOREVER). Measured on
+# live ``ensemble_prod``: 67 background-gate witnesses, 52 of them on two
+# long-lived ari sessions; the background queue had not drained since
+# 2026-11-14T17:44:35Z.
+#
+# The fix re-scopes the witness SET (it does not remove the gate): a witness
+# only counts when the WORK ITEM ITSELF is RECENT — i.e. its creation
+# timestamp is within ``W`` minutes of now. The holder instance's
+# ``last_activity_at`` is deliberately NOT part of the anchor: the measured
+# holders are recently active (0–70 min idle) while their witness ROWS are
+# 7 h – 5.7 d old, so a holder anchor cannot discriminate and would keep
+# the gate closed forever.
+#
+# Anchor columns (the only creation clocks the schema offers that an
+# always-on session's mere existence does NOT refresh):
+#   * ``job_queue_items.created_at`` — ISO-8601 string (UTC)
+#   * ``task.created_at``             — timestamp
+#
+# The bodies below are the ENUMERATED witness shapes (one row per witness)
+# for the two recency-bounded probes. The recency filter itself is applied
+# in Python (see ``JobRepository.has_recent_*_work``) so that an
+# unparseable timestamp can fail CLOSED (BUSY) — a string comparison in SQL
+# could not distinguish "old" from "unparseable".
+#
+# The existing gate bodies (defer / background) are UNTOUCHED: the defer
+# gate is a THIRD consumer of the shared bodies with its own witness
+# surface (``GET /api/queues/defer-blocked``) derived from those constants,
+# and re-scoping it is a separate change.
+
+#: Default recency window (minutes) for "recent meaningful activity".
+#:
+#: 30 minutes is the default because it (a) spans a normal agent turn's
+#: dispatch→settle gap — a settled mirror receipt is fresh for 30 min, so a
+#: LIVE mission keeps both gates closed; (b) is 2x the maintenance check
+#: interval (15 min), giving one check of hysteresis; and (c) yields real
+#: open windows on a 24/7 nest — measured over the last 24 h: 8 quiet
+#: stretches longer than 30 min (the longest 113.6 min) against a p50
+#: inter-arrival gap of 0.4 min.
+DEFAULT_IDLE_ACTIVITY_WINDOW_MINUTES: Final[int] = 30
+
+#: Env switch for the recency window (read PER EVALUATION, env-direct).
+#:
+#: * a positive integer ⇒ the recency window in minutes;
+#: * ``0`` ⇒ the recency bound is DISABLED and the gates fall back to the
+#:   pre-2026-11-24 UNBOUNDED witness set (the kill-switch);
+#: * an unparseable or negative value ⇒ the DEFAULT window (never
+#:   "disabled" — an ambiguous knob must never silently open a gate).
+ENV_IDLE_ACTIVITY_WINDOW_MINUTES: Final[str] = "ENSEMBLE_IDLE_GATE_ACTIVITY_WINDOW_MINUTES"
+
+#: Sentinel window value meaning "no recency bound" (legacy semantics).
+IDLE_ACTIVITY_WINDOW_LEGACY: Final[int] = 0
+
+#: Maximum number of witness rows a recency probe will materialise.
+#:
+#: The probes bind ``IDLE_WITNESS_LIMIT + 1`` so that an OVERFLOW is
+#: detectable (the extra row is the overflow marker). Overflow ⇒ the probe
+#: treats the system as BUSY (fail-closed): a witness set too large to
+#: enumerate cannot be proven idle.
+IDLE_WITNESS_LIMIT: Final[int] = 5000
+
+
+def resolve_idle_activity_window_minutes(
+    environ: Mapping[str, str] | None = None,
+) -> int:
+    """Resolve the idle-gate recency window (minutes).
+
+    Read PER EVALUATION from the process environment so an operator can
+    retune (or disable, with ``0``) the bound without a daemon restart.
+
+    Fail-safe posture: an absent, unparseable or negative value resolves to
+    :data:`DEFAULT_IDLE_ACTIVITY_WINDOW_MINUTES`. A broken knob must never
+    silently DISABLE the recency bound (that would re-open the starvation);
+    only the explicit ``0`` disables it.
+    """
+    source = environ if environ is not None else os.environ
+    raw = source.get(ENV_IDLE_ACTIVITY_WINDOW_MINUTES)
+    if raw is None or not str(raw).strip():
+        return DEFAULT_IDLE_ACTIVITY_WINDOW_MINUTES
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        logger.warning(
+            "idle-gate activity window %r is not an integer — using the "
+            "default of %d minutes (the recency bound stays ON)",
+            raw,
+            DEFAULT_IDLE_ACTIVITY_WINDOW_MINUTES,
+        )
+        return DEFAULT_IDLE_ACTIVITY_WINDOW_MINUTES
+    if value < 0:
+        logger.warning(
+            "idle-gate activity window %r is negative — using the default "
+            "of %d minutes (the recency bound stays ON)",
+            raw,
+            DEFAULT_IDLE_ACTIVITY_WINDOW_MINUTES,
+        )
+        return DEFAULT_IDLE_ACTIVITY_WINDOW_MINUTES
+    return value
+
+
+# ── Recency-bounded witness bodies ───────────────────────────────────────
+
+#: Select list for the recency-bounded JOB witnesses. A module-private
+#: literal — no external input ever reaches this string (no injection
+#: surface).
+_IDLE_JOB_WITNESS_SELECT: Final[str] = (
+    " j.job_id AS job_id,"
+    " j.created_at AS created_at,"
+    " j.admission_state AS admission_state,"
+    " j.job_type AS job_type,"
+    " j.instance_id AS instance_id,"
+    " i.status AS instance_status"
+)
+
+#: Recency-bounded JOB witness body — BACKGROUND scope (the background
+#: queue's own lane is excluded so it cannot block itself; the Fix-2B
+#: deadlock carve-out is preserved VERBATIM: a ``queued`` job row whose
+#: linked Task is still ``pending`` is UNCLAIMABLE and must not hold the
+#: gate).
+#:
+#: The busy-set disjunction is the SAME shared clause composition the
+#: unbounded background body uses (:data:`_BACKGROUND_BUSY_DISJUNCTION`) —
+#: the legacy clause (queued/active job row whose instance is absent or
+#: non-terminal) OR the post-Fix-B settled-mirror clause (``message`` /
+#: ``done`` whose instance is non-terminal).
+IDLE_JOB_WITNESS_BODY_BACKGROUND: Final[str] = (
+    "SELECT" + _IDLE_JOB_WITNESS_SELECT +
+    " FROM job_queue_items j"
+    " LEFT JOIN job_queues q ON j.queue_id = q.queue_id"
+    " LEFT JOIN instances i ON j.instance_id = i.instance_id"
+    " LEFT JOIN task t ON t.work_id = j.job_id"
+    " WHERE j.deleted_at IS NULL"
+    " AND (q.queue_type IS NULL"
+    "      OR q.queue_type NOT IN :excluded_queue_types)"
+    " AND " + _BACKGROUND_BUSY_DISJUNCTION
+    + " AND (j.admission_state != 'queued'"
+    "      OR t.status IS NULL"
+    "      OR t.status != 'pending')"
+    " LIMIT :witness_limit"
+)
+
+#: Recency-bounded JOB witness body — MAINTENANCE scope (ANY queue type:
+#: the maintenance sweeps contend with the whole nest, so the background
+#: lane's own rows count as activity too — exactly as the pre-2026-11-24
+#: maintenance probe did via ``list_all_pending`` + ``find_processing_jobs``).
+#:
+#: No Fix-2B carve-out here: the maintenance probe never had one (a queued
+#: job row IS pending work for a sweep to defer behind).
+IDLE_JOB_WITNESS_BODY_ALL_QUEUES: Final[str] = (
+    "SELECT" + _IDLE_JOB_WITNESS_SELECT +
+    " FROM job_queue_items j"
+    " LEFT JOIN instances i ON j.instance_id = i.instance_id"
+    " WHERE j.deleted_at IS NULL"
+    " AND ( (j.admission_state IN ('queued', 'active')"
+    "        AND (j.instance_id IS NULL"
+    "             OR i.status NOT IN :terminal_statuses))"
+    "       OR (j.job_type = 'message'"
+    "           AND j.admission_state = 'done'"
+    "           AND j.instance_id IS NOT NULL"
+    "           AND i.status NOT IN :terminal_statuses) )"
+    " LIMIT :witness_limit"
+)
+
+#: Select list for the recency-bounded TASK witnesses.
+_IDLE_TASK_WITNESS_SELECT: Final[str] = (
+    " t.work_id AS work_id,"
+    " t.created_at AS created_at,"
+    " t.status AS status,"
+    " t.instance_id AS instance_id,"
+    " i.status AS instance_status"
+)
+
+#: Recency-bounded TASK witness body — BACKGROUND scope.
+#:
+#: The shape is the mirror of ``TaskRepository.has_active_non_background_work``:
+#: a RUNNING/PAUSED non-background task, or a PENDING non-background task
+#: whose linked JobItem is NOT still ``queued`` (the Fix-2A deadlock
+#: exclusion — a PENDING task whose JobItem is still queued is UNCLAIMABLE
+#: and must not hold the gate), with the Phase-2 defensive exclusion of
+#: tasks whose linked JobItem is already terminal (``done``/``dead``).
+#:
+#: The ``instances`` join is an INNER join (a task with no instance row is
+#: not a witness) — identical to the task repository's predicate.
+IDLE_TASK_WITNESS_BODY_BACKGROUND: Final[str] = (
+    "SELECT" + _IDLE_TASK_WITNESS_SELECT +
+    " FROM task t"
+    " JOIN instances i ON t.instance_id = i.instance_id"
+    " WHERE t.is_background = :is_background_false"
+    " AND NOT EXISTS ("
+    "      SELECT 1 FROM job_queue_items _qi"
+    "      WHERE _qi.job_id = t.work_id"
+    "        AND _qi.admission_state IN (:qi_done, :qi_dead)"
+    "        AND _qi.deleted_at IS NULL)"
+    " AND ( t.status IN (:status_running, :status_paused)"
+    "       OR (t.status = :status_pending"
+    "           AND NOT EXISTS ("
+    "              SELECT 1 FROM job_queue_items _qi"
+    "              WHERE _qi.job_id = t.work_id"
+    "                AND _qi.admission_state = :qi_queued"
+    "                AND _qi.deleted_at IS NULL)) )"
+    " LIMIT :witness_limit"
+)
+
+#: Recency-bounded TASK witness body — MAINTENANCE scope.
+#:
+#: The mirror of ``TaskRepository.has_active_non_deferred_work`` (system-wide
+#: probe): the DEFER flag is what the maintenance probe excludes (a
+#: deferred task is not contention for the sweeps), and the same Fix-2A +
+#: Phase-2 defensive exclusions apply.
+IDLE_TASK_WITNESS_BODY_ALL_QUEUES: Final[str] = (
+    "SELECT" + _IDLE_TASK_WITNESS_SELECT +
+    " FROM task t"
+    " JOIN instances i ON t.instance_id = i.instance_id"
+    " WHERE t.is_deferred = :is_deferred_false"
+    " AND NOT EXISTS ("
+    "      SELECT 1 FROM job_queue_items _qi"
+    "      WHERE _qi.job_id = t.work_id"
+    "        AND _qi.admission_state IN (:qi_done, :qi_dead)"
+    "        AND _qi.deleted_at IS NULL)"
+    " AND ( t.status IN (:status_running, :status_paused)"
+    "       OR (t.status = :status_pending"
+    "           AND NOT EXISTS ("
+    "              SELECT 1 FROM job_queue_items _qi"
+    "              WHERE _qi.job_id = t.work_id"
+    "                AND _qi.admission_state = :qi_queued"
+    "                AND _qi.deleted_at IS NULL)) )"
+    " LIMIT :witness_limit"
+)
+
+
+def _declare_idle_witness_binds(body: str) -> TextClause:
+    """Attach the bindparams shared by the recency-bounded JOB bodies.
+
+    The ALL-QUEUES (maintenance) body has no queue filter, so it does not
+    declare ``:excluded_queue_types`` — declaring an unused bindparam would
+    make it REQUIRED at execution time.
+    """
+    return text(body).bindparams(
+        bindparam("terminal_statuses", expanding=True),
+        bindparam("witness_limit"),
+    )
+
+
+def _declare_idle_witness_binds_background(body: str) -> TextClause:
+    """Like :func:`_declare_idle_witness_binds` plus the queue exclusion."""
+    return text(body).bindparams(
+        bindparam("terminal_statuses", expanding=True),
+        bindparam("excluded_queue_types", expanding=True),
+        bindparam("witness_limit"),
+    )
+
+
+def _declare_idle_task_witness_binds(body: str) -> TextClause:
+    """Attach the bindparams shared by the recency-bounded TASK bodies."""
+    return text(body).bindparams(
+        bindparam("witness_limit"),
+        bindparam("status_running"),
+        bindparam("status_paused"),
+        bindparam("status_pending"),
+        bindparam("qi_queued"),
+        bindparam("qi_done"),
+        bindparam("qi_dead"),
+    )
+
+
+def idle_job_witness_statement_background() -> TextClause:
+    """Recency-bounded JOB witnesses — BACKGROUND scope."""
+    return _declare_idle_witness_binds_background(IDLE_JOB_WITNESS_BODY_BACKGROUND)
+
+
+def idle_job_witness_binds_background() -> dict[str, object]:
+    """Bind values for :func:`idle_job_witness_statement_background`."""
+    return {
+        "terminal_statuses": list(JOB_TERMINAL_STATUSES),
+        "excluded_queue_types": list(BACKGROUND_EXCLUDED_QUEUE_TYPES),
+        "witness_limit": IDLE_WITNESS_LIMIT + 1,
+    }
+
+
+def idle_job_witness_statement_all_queues() -> TextClause:
+    """Recency-bounded JOB witnesses — MAINTENANCE scope (any queue)."""
+    return _declare_idle_witness_binds(IDLE_JOB_WITNESS_BODY_ALL_QUEUES)
+
+
+def idle_job_witness_binds_all_queues() -> dict[str, object]:
+    """Bind values for :func:`idle_job_witness_statement_all_queues`."""
+    return {
+        "terminal_statuses": list(JOB_TERMINAL_STATUSES),
+        "witness_limit": IDLE_WITNESS_LIMIT + 1,
+    }
+
+
+def idle_task_witness_statement_background() -> TextClause:
+    """Recency-bounded TASK witnesses — BACKGROUND scope."""
+    return _declare_idle_task_witness_binds(IDLE_TASK_WITNESS_BODY_BACKGROUND)
+
+
+def idle_task_witness_binds_background() -> dict[str, object]:
+    """Bind values for :func:`idle_task_witness_statement_background`."""
+    return {
+        "witness_limit": IDLE_WITNESS_LIMIT + 1,
+        "status_running": "running",
+        "status_paused": "paused",
+        "status_pending": "pending",
+        "qi_queued": "queued",
+        "qi_done": "done",
+        "qi_dead": "dead",
+        "is_background_false": False,
+    }
+
+
+def idle_task_witness_statement_all_queues() -> TextClause:
+    """Recency-bounded TASK witnesses — MAINTENANCE scope."""
+    return _declare_idle_task_witness_binds(IDLE_TASK_WITNESS_BODY_ALL_QUEUES)
+
+
+def idle_task_witness_binds_all_queues() -> dict[str, object]:
+    """Bind values for :func:`idle_task_witness_statement_all_queues`."""
+    return {
+        "witness_limit": IDLE_WITNESS_LIMIT + 1,
+        "status_running": "running",
+        "status_paused": "paused",
+        "status_pending": "pending",
+        "qi_queued": "queued",
+        "qi_done": "done",
+        "qi_dead": "dead",
+        "is_deferred_false": False,
+    }

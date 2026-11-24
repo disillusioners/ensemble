@@ -15,7 +15,22 @@ from sqlmodel import Session as SQLModelSession, select, col, update as sqlmodel
 
 from .models import ACTIVE_ADMISSION_STATES, AdmissionState, JobItem, JobLock, JobQueue, QueueType
 from daemon.constants import NON_TERMINAL_TASK_STATUSES
-from ._idle_predicate_sql import background_busy_binds, background_busy_statement, defer_busy_binds, defer_busy_statement
+from ._idle_predicate_sql import (
+    background_busy_binds,
+    background_busy_statement,
+    defer_busy_binds,
+    defer_busy_statement,
+    idle_job_witness_binds_all_queues,
+    idle_job_witness_binds_background,
+    idle_job_witness_statement_all_queues,
+    idle_job_witness_statement_background,
+    idle_task_witness_binds_all_queues,
+    idle_task_witness_binds_background,
+    idle_task_witness_statement_all_queues,
+    idle_task_witness_statement_background,
+    resolve_idle_activity_window_minutes,
+)
+from ._idle_predicate_sql import IDLE_ACTIVITY_WINDOW_LEGACY, IDLE_WITNESS_LIMIT
 
 logger = logging.getLogger(__name__)
 
@@ -324,6 +339,87 @@ class ZombieActiveCandidate(NamedTuple):
     task_id: int
     task_status: str
     terminal_stamp: datetime | None
+
+
+# ── Recency helpers for the idle gates (fix/idle-gate-recency, 2026-11-24) ──
+
+
+def _parse_witness_timestamp(value: Any) -> datetime | None:
+    """Parse a witness timestamp into an aware UTC datetime.
+
+    Accepts:
+
+    * a ``datetime`` (the PG ``timestamp`` column comes back typed);
+    * an ISO-8601 string with an offset (``2026-11-23T23:41:03.281284+00:00``
+      — the shape ``job_queue_items.created_at`` carries);
+    * a naive ISO-8601 string (the SQLite ``DATETIME`` storage format,
+      ``2026-11-23 23:51:50.527540``) — treated as UTC.
+
+    Returns ``None`` when the value cannot be parsed — the caller then
+    fails CLOSED (the witness counts, the gate holds).
+    """
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(
+            tzinfo=timezone.utc
+        )
+    if not isinstance(value, str):
+        return None
+    text_value = value.strip()
+    if not text_value:
+        return None
+    if text_value.endswith("Z"):
+        text_value = text_value[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text_value)
+    except ValueError:
+        parsed = None
+        for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+            try:
+                parsed = datetime.strptime(text_value, fmt)
+                break
+            except ValueError:
+                continue
+        if parsed is None:
+            return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(
+        tzinfo=timezone.utc
+    )
+
+
+def _witness_set_is_busy(
+    job_rows: list[Any],
+    task_rows: list[Any],
+    window_minutes: int,
+) -> bool:
+    """Return True iff the witness set holds the gate.
+
+    ``window_minutes == 0`` means "no recency bound" — every witness counts
+    (the pre-2026-11-24 unbounded semantics, reachable through the
+    kill-switch).
+
+    Otherwise a witness counts only when its creation timestamp is within
+    the window. Fail-CLOSED: an unparseable / absent timestamp counts as a
+    witness (the gate holds), and a witness set larger than
+    :data:`IDLE_WITNESS_LIMIT` counts as busy (it cannot be proven idle).
+    """
+    if window_minutes == IDLE_ACTIVITY_WINDOW_LEGACY:
+        return bool(job_rows) or bool(task_rows)
+    if len(job_rows) > IDLE_WITNESS_LIMIT or len(task_rows) > IDLE_WITNESS_LIMIT:
+        return True
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=window_minutes)
+    for row in list(job_rows) + list(task_rows):
+        try:
+            created_at = row._mapping["created_at"]
+        except (AttributeError, KeyError, TypeError):
+            # A witness whose anchor cannot be read at all → fail CLOSED.
+            return True
+        stamp = _parse_witness_timestamp(created_at)
+        if stamp is None:
+            # Unparseable / absent anchor → fail CLOSED (BUSY).
+            return True
+        if stamp >= cutoff:
+            return True
+    return False
 
 
 class JobRepository:
@@ -1246,6 +1342,119 @@ class JobRepository:
             )
             return True
         return bool(row[0]) if row is not None else False
+
+    # ── Recency-bounded idle probes (fix/idle-gate-recency, 2026-11-24) ──
+    #
+    # The two gates below answer "is the nest BUSY?" with a RECENCY-bounded
+    # witness set instead of the unbounded "does a non-terminal row exist?"
+    # question. See the module docstring of
+    # ``daemon/repositories/job_queue/_idle_predicate_sql.py`` for the full
+    # rationale (the measured starvation, the anchor choice and the
+    # fail-closed posture).
+    #
+    # The recency filter is applied in PYTHON (not in SQL) so that an
+    # unparseable / absent timestamp can fail CLOSED (BUSY) — a string
+    # comparison in SQL could not tell "old" from "unparseable".
+
+    def has_recent_non_background_work(
+        self, window_minutes: int | None = None
+    ) -> bool:
+        """Return True iff RECENT non-background work exists (system-wide).
+
+        The BACKGROUND-queue gate's probe (Gate A in
+        ``JobProcessor._background_idle_check``). Semantically identical to
+        :meth:`has_active_non_background_work` (the shared busy-set, the
+        Fix-2B deadlock carve-out, the background lane excluded so it
+        cannot block itself) EXCEPT that a witness only counts when the
+        work item itself is recent:
+
+        * job rows — anchor ``job_queue_items.created_at``;
+        * task rows — anchor ``task.created_at``.
+
+        "Recent" means "created within ``window_minutes`` minutes of now".
+        ``window_minutes=None`` resolves the window from the environment
+        (``ENSEMBLE_IDLE_GATE_ACTIVITY_WINDOW_MINUTES``, default 30) on
+        EVERY evaluation; ``window_minutes=0`` disables the recency bound
+        and restores the pre-2026-11-24 unbounded semantics (the
+        kill-switch).
+
+        Fail-CLOSED: a DB error, an unparseable/absent timestamp, or a
+        witness set too large to enumerate all return True (BUSY) — the
+        safe direction for a gate that protects live work.
+        """
+        window = (
+            resolve_idle_activity_window_minutes()
+            if window_minutes is None
+            else int(window_minutes)
+        )
+        try:
+            with self.engine.begin() as conn:
+                job_rows = conn.execute(
+                    idle_job_witness_statement_background(),
+                    idle_job_witness_binds_background(),
+                ).fetchall()
+                task_rows = conn.execute(
+                    idle_task_witness_statement_background(),
+                    idle_task_witness_binds_background(),
+                ).fetchall()
+        except Exception as e:
+            logger.warning(
+                f"has_recent_non_background_work failed: {e} — treating as "
+                "True (fail-CLOSED on DB error; the background queue waits "
+                "for the next tick instead of admitting)"
+            )
+            return True
+        return _witness_set_is_busy(job_rows, task_rows, window)
+
+    def has_recent_active_work(self, window_minutes: int | None = None) -> bool:
+        """Return True iff RECENT work of ANY kind exists (system-wide).
+
+        The MAINTENANCE-registry gate's probe (``MaintenanceService.
+        _is_idle``). It covers the same work shapes the pre-2026-11-24
+        maintenance probe covered —
+
+        * every QUEUED or ACTIVE job row (any queue type — the sweeps
+          contend with the whole nest, so the background lane's own rows
+          count too, exactly as ``list_all_pending`` +
+          ``find_processing_jobs`` did),
+        * every settled ``message`` mirror whose instance is non-terminal,
+        * every in-flight (running / paused / claimable-pending) NON-DEFERRED
+          task,
+
+        — but each witness only counts when the work item itself was
+        created within ``window_minutes`` minutes of now.
+
+        ``window_minutes=None`` resolves the window from the environment
+        (``ENSEMBLE_IDLE_GATE_ACTIVITY_WINDOW_MINUTES``, default 30) on
+        EVERY evaluation; ``window_minutes=0`` disables the recency bound
+        (the kill-switch).
+
+        Fail-CLOSED: a DB error, an unparseable/absent timestamp, or a
+        witness set too large to enumerate all return True (BUSY).
+        """
+        window = (
+            resolve_idle_activity_window_minutes()
+            if window_minutes is None
+            else int(window_minutes)
+        )
+        try:
+            with self.engine.begin() as conn:
+                job_rows = conn.execute(
+                    idle_job_witness_statement_all_queues(),
+                    idle_job_witness_binds_all_queues(),
+                ).fetchall()
+                task_rows = conn.execute(
+                    idle_task_witness_statement_all_queues(),
+                    idle_task_witness_binds_all_queues(),
+                ).fetchall()
+        except Exception as e:
+            logger.warning(
+                f"has_recent_active_work failed: {e} — treating as True "
+                "(fail-CLOSED on DB error; the maintenance sweeps wait for "
+                "the next tick instead of running under load)"
+            )
+            return True
+        return _witness_set_is_busy(job_rows, task_rows, window)
 
     def backfill_system_default_project_id(self, project_id: str) -> int:
         """Idempotently assign ``project_id`` to job rows missing one.
