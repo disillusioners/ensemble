@@ -715,12 +715,17 @@ class TestE1RefusesStrangerSpawn:
             stop_timer.cancel()
 
         exec_rows = _schedule_executions(pin_engine, source_id)
-        failed_rows = [e for e in exec_rows if e.status == "failed"]
+        # Addendum A (binding contract of record) vocabulary: the refused
+        # delivery completes the execution row as 'failed-to-dispatch'
+        # (carrying redrive_reason / typed refusal reason). DEC-9 CRIT-1's
+        # information requirement (a failed row carrying the refusal reason)
+        # is preserved via the reason assertion below.
+        failed_rows = [e for e in exec_rows if e.status == "failed-to-dispatch"]
         assert failed_rows, (
-            "no 'failed' execution row was written for the refused delivery "
-            f"(schedule_executions statuses: {[e.status for e in exec_rows]}) — "
-            "the refusal must complete the execution row as FAILED with the "
-            "refusal reason (DEC-9 CRIT-1 narrow catch)"
+            "no 'failed-to-dispatch' execution row was written for the refused "
+            f"delivery (schedule_executions statuses: {[e.status for e in exec_rows]}) — "
+            "the refusal must complete the execution row as FAILED-TO-DISPATCH "
+            "with the refusal reason (Addendum A vocabulary; DEC-9 info req. preserved)"
         )
         assert failed_rows[-1].error_message, (
             "the failed execution row must carry the refusal reason in "

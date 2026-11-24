@@ -1821,13 +1821,13 @@ class SQLModelSourceRepository:
         for row in rows:
             mapping = row._mapping if hasattr(row, "_mapping") else row
             out.append(
-                {
-                    "job_id": mapping["job_id"],
-                    "instance_id": mapping["instance_id"],
-                    "admission_state": mapping["admission_state"],
-                    "terminal_reason": mapping["terminal_reason"],
-                    "created_at": mapping["created_at"],
-                }
+                dict(
+                    job_id=mapping["job_id"],
+                    instance_id=mapping["instance_id"],
+                    admission_state=mapping["admission_state"],
+                    terminal_reason=mapping["terminal_reason"],
+                    created_at=mapping["created_at"],
+                )
             )
         return out
 

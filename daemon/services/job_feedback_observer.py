@@ -1853,13 +1853,13 @@ class JobFeedbackObserver:
             # can NEVER wedge the completing job. Only a real terminal
             # transition (not skip / gate_deferred) closes a receipt.
             if (
-                self._execution_receipt_callback is not None
+                getattr(self, "_execution_receipt_callback", None) is not None
                 and ctx.job_id
                 and not db_result.skip
                 and not db_result.gate_deferred
             ):
                 try:
-                    await self._execution_receipt_callback(
+                    await getattr(self, "_execution_receipt_callback")(
                         ctx.job_id, terminal_status
                     )
                 except Exception as exc:  # noqa: BLE001 — belt-and-braces
