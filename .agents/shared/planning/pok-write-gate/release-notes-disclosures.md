@@ -136,3 +136,17 @@ The third key is **kept per the architect's F-fork** — the merge policy sits "
 **Fail-closed where it matters:** a gate that cannot judge returns the typed `pok_gate_unavailable` and **no write** — it never falls open into an accept.
 
 **Anchors:** `design-amendments-v2.md` §2 (`reason` = REQUIRED), §3 (the shadow/enforcement split — "MECHANICAL — enforce NOW: `reason` REQUIRED + R0 named fence. SEMANTIC — SHADOW default OFF"), §13.3 item 5 (the switch family, no env tier), §13.9 item 2 (the parked `merge_policy`-at-P1 decision); `daemon/tools/pok.py:1340` (the `pok_reason_required` refusal + the precedence comment at `:1332`); `daemon/services/settings_service.py:781` / `:800` (the two OFF keys); `daemon/services/pok_gate.py` (the rule set + the fail-closed discriminator).
+
+---
+
+## (h) The FE content of this release — drift-carried, lane-clean (staged-verification N1, reworded)
+
+**Disclosure:** FE ships the instances-list-anchor change absorbed from origin/latest (drift commit 1ad33a170; lane-clean — zero frontend/ paths touched by this lane). The v0.31.49 → v0.31.52 FE delta is exactly that drift (83 shared files byte-identical; 15+15 chunk-name deltas; a one-line `index.html` main-bundle tag); the earlier "FE unaffected / byte-identical" wording is RETIRED as false-as-worded.
+
+**Anchors:** `.agents/tester/RESULTS/2026-11-24-pok-write-gate-functional-gate-results.md` [N1] (the drift attribution and the file-level delta census).
+
+## (i) The pok tool set — 3→5 (staged-verification N2, reworded)
+
+**Disclosure:** pok tool set 3→5 (pok_gate_answer + pok_census added; KNOWN_TOOL_NAMES 271, verified by live import + source-parse). The earlier "3→4 tools" claim understated the flip by omitting `pok_census`.
+
+**Anchors:** same RESULTS file [N2] (269 measured at the live-era source by the same method — validates the parse; the registry comments pin 269→270→271).
