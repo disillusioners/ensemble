@@ -85,7 +85,7 @@ def _write(tool_env, slug: str, agent_id: str = "worker") -> None:
         current_instance_id="inst-1",
         agent_id=agent_id,
     )
-    out = tools[0].invoke({"slug": slug, "body": "an operational rule"})
+    out = tools[0].invoke({"slug": slug, "body": "an operational rule", "reason": "unit fixture reason"})
     assert "error" not in out, out
 
 
