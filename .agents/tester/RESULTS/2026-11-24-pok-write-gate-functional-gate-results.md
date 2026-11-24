@@ -284,3 +284,55 @@ Embedded body sha256 **`2bfd8c8283a533fbe7e727709cac120d7445407e5082b1b0db2b7340
 - The ratification diff: ✅ embedded == regenerated == `ff89fee99..HEAD` (body sha `2bfd8c82…`)
 - The carried items: ✅ report-only
 - **Testing complete: ✅ READY to stage — GO-WITH-DISCLOSURES.** The release notes carry §R6.
+
+---
+---
+
+# STAGED VERIFICATION — v0.31.52 (the artifact gate; appended 2026-11-24)
+
+**Scope (leader-instructed):** S1 artifact integrity · S2 isolated boot smoke · S3 one-way content · S4 ceremony inputs. No whole-tree re-sweep — the functional gate above owns the code verdict; this is the artifact gate.
+**Target:** v0.31.52 staged at `/home/nea/agents-ensemble/releases/v0.31.52`, tag `7908b3bb0` → `ca440288b`, binary 4-way sha `5a836184a8a9043d9dc05cc8aa179673e774649767fc2e0c4b60e448a69fef42`, stage worktree `/home/nea/ensemble-src-wt-stage-v03152`. Live: `current → v0.31.49`.
+
+# VERDICT: ✅ STAGED-VERIFIED — PASS-WITH-NOTES
+
+All four legs PASS with zero artifact defects. The notes are **claim-precision corrections to the ceremony report**, not staging blockers — but two of them must be reworded in the release notes before the ceremony, because as currently worded they are factually wrong.
+
+## S1 — Artifact Integrity: PASS (0 defects)
+4-way sha independently re-hashed at all four sites (release binary == dist binary == manifest `binary_sha256` == sidecar `artifact_sha256` == `5a836184…fef42`). Both provenance sidecars `git_head=ca440288b`, `git_dirty=false`; stage worktree at that HEAD, porcelain clean; the FE sidecar correctly excluded from the payload. Tag peels **identically locally and on origin** (`7908b3bb0…` → `ca440288b`, annotated confirmed). Migration census exact: the 4 claimed files present-staged, **141 SQL files / 141 unique prefixes / 0 duplicates**, max prefix `20261124_093000` == `known_schema_gen`, all four UP sections additive (DROPs only in DOWN sections). Payload source-less as scoped (5,499 files / 168.6 MB; no daemon core or gate modules; the 3-file promote-time compat slice disclosed as intentional). **Prompt baseline in the release tree: 217/217, exit 0**, read-only confirmed. The manifest verifies entry-by-entry: all six per-file maps, 0 missing, 0 hash mismatches, all six tree aggregates recomputed equal.
+
+## S2 — Isolated Boot Smoke: PASS (the dangerous leg; 10/10 fences attested individually)
+Binary **copied** to scratch (sha verified; never executed in place); `ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0` **pinned** (never `env -u`; `/proc` confirms `=0`); `ENSEMBLE_SELF_ENV=sandbox`; the full per-variable poison scrub; a throwaway PG DB (`ens_s2_smoke_v03152_s2`) created, used, **dropped and verified gone**; free port 19090 (bind-probed first; never 8079/8088/9797/7979); LLM dead-pointed. **Asserts:** banner `Starting Ensemble v0.31.52`; **livez 200 at 32 s** (Boot SLO 120 s — 27% of budget); the **`pok_write_gate_ledger` table materialized** (24 columns) **and the partial unique index materialized**, indexdef quoted verbatim: `CREATE UNIQUE INDEX uq_pok_ledger_gate_chain ON public.pok_write_gate_ledger USING btree (project_id, gate_id, phase) WHERE (gate_id IS NOT NULL)` — matching the functional gate's four-site byte-identical predicate. No live DB contact (`/proc` environ + `pg_stat_activity`). **Live fence byte-identical**: `state.json` sha `fb0b9a7b…` before == after; `current → releases/v0.31.49` throughout; zero install-state delta. Teardown SIGTERM-only, graceful in 2 s, port freed.
+*Design fact for the ceremony notes:* `schema_migrations` is empty on PG **by design** — the boot log says migrations are skipped for non-SQLite and schema evolution runs through `EnsembleManager._ensure_postgres_columns`; the applied state is proven by the physical table + index.
+
+## S3 — One-Way Content Proof: PASS (4 claim-precision corrections)
+**The load-bearing binary proof:** the module paths `daemon.services.{pok_gate, pok_librarian, pok_context, pok_gate_timeout_resolver}` appear in the **staged** binary (×2/×1/×1/×2) and are **0 hits in the live v0.31.49 binary**. Both ledger migration filenames are embedded in the staged binary only. The kb-writer flip is exactly one key (`pok` present live, absent staged). All four operational agents' capture-duty guidance ships. The three settings keys are source-verified (all DB-only, defaults OFF/OFF/`ASK_WITH_PROPOSAL`). The lane's full footprint touches **zero** `frontend/` paths.
+
+## S4 — Ceremony Inputs: PASS (0 defects)
+`state.json`: current=**v0.31.49**, previous=v0.31.42, in_flight=null, pending_op=null. `current` → `releases/v0.31.49` (mtime unchanged since 02:53:58Z). Journal tail = the two sanctioned rows (`19:49:12Z stage-scripts-advance`, `19:49:25Z staged`) and **no promote entry for v0.31.52**. The three sanctioned live-install writes verified individually; the negative mtime check over the install structure is clean. The promote command is verified against `promote.sh` itself — argv accepted, env-first `VERSION` supported, the scripts-pin floor `46d55b00…` **is an ancestor of the scripts-pin HEAD `ca440288b`** — no unsatisfied precondition.
+
+## THE NOTES (claim-precision corrections — two need release-note rewording before the ceremony)
+
+**[N1] 🟠 The "FE unaffected (byte-identical)" claim is FALSE as worded.** The two FE builds are **different**: 83 shared files byte-identical, but 15 chunk names exist only in v0.31.52 and 15 different ones only in v0.31.49, and `index.html` differs in exactly one line (the main-bundle script tag). The difference is **entirely drift, not lane-caused** — exactly one commit touched `frontend/` between the two releases' source commits: `1ad33a170` "feat(instances): thread selected-instance anchor into instance-list fetches", merged from `origin/latest`, and the lane's own footprint touches zero `frontend/` paths. **Reword the release note to:** "FE ships the instances-list-anchor change absorbed from origin/latest (lane-clean: the pok-write-gate lane touched no frontend path)" — not "byte-identical".
+
+**[N2] 🟠 The "3→4 tools" claim understates the flip: it is 3→5.** The lane added **both** `pok_gate_answer` and `pok_census`. `KNOWN_TOOL_NAMES` measures **271** two independent ways (a live import against the lane venv, and a source-parse of the frozenset literal at `ca440288b` — the same parse at the live-era `ac34da1d` yields 269, validating the method). The registry comments pin 269→270→271.
+
+**[N3] 🟢 "Present-staged/absent-live" holds at the binary level for daemon content.** The release trees ship no daemon source and no `daemon/migrations/` — the gate modules and migrations ride inside `ensemble-prod` (proven by the module-path strings probe and the embedded migration filenames). The symbol-level proof is source-based (PYZ compression hides function names); the module-path probe is the binary-level anchor.
+
+**[N4] 🟢 Two of the twelve probe symbols are relocations, not additions.** `build_pok_context_message` and `_maybe_pok_context_message` pre-existed in live-era `context_messages.py` (:680/:726); the lane **moved** them into `pok_context.py` (:71/:117). The **module** is one-way; the symbols are moved. (Consistent with the functional gate's byte-intact-move proof at R1.)
+
+**[N5] 🟢 The "only a std staged-marker row" wording is slightly imprecise.** The journal also carries the `stage-scripts-advance` row at 19:49:12Z — both rows are sanctioned; both should be named.
+
+**[N6] 🟢 Residual proof limits (disclosed):** `uq_pok_ledger_gate_chain` is not string-recoverable from either binary (it sits inside the compressed migration payload) — its one-way status rests on the embedded migration filename + the lane source + **S2's physical materialization on a real PG boot**, which is the strongest form anyway. The binary-internal payload equality of the two migration files was not decompressed. FE bit-reproducibility was not tested (no rebuild — out of scope for a read-only leg). F2 closure is operator-attested by design.
+
+## Staged-verification worker roster
+| Leg | Instance | Result |
+|---|---|---|
+| S1 integrity | `7b81af77-840e-4239-be36-3748b59e12a1` | PASS |
+| S2 boot smoke | `6224b0be-34ce-4d06-8e32-b2c8121dd2ea` | PASS |
+| S3 one-way content | `1ff9d98b-ce83-46ea-96c2-598f53165d76` | PASS |
+| S4 ceremony inputs | `99b3e825-c463-42c5-a5f7-fc1cf0570069` | PASS |
+
+### Overall Status (staged verification)
+- S1/S2/S3/S4: ✅ all PASS, zero artifact defects
+- Live fence: ✅ byte-identical throughout; promote NOT executed
+- **STAGED-VERIFIED: ✅ PASS-WITH-NOTES** — clear to proceed to the ceremony once N1 and N2 are reworded in the release notes (both are one-line wording fixes; neither requires a re-stage).
