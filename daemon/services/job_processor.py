@@ -427,8 +427,24 @@ class JobProcessor:
         legacy ``count_active_jobs_in_non_defer_queues`` keep working
         until the Phase 3 background-seam test migration lands.
 
+        **Recency-bounded witness set (fix/idle-gate-recency,
+        2026-11-24):** the production path consults
+        ``JobRepository.has_recent_non_background_work`` — the SAME
+        busy-set shapes (job rows + task rows, the Fix-2B deadlock
+        carve-out, the background lane excluded so it cannot block
+        itself) but each witness only counts when the work item itself
+        was created within the activity window
+        (``ENSEMBLE_IDLE_GATE_ACTIVITY_WINDOW_MINUTES``, default 30
+        minutes, read per evaluation; ``0`` disables the bound and
+        restores the pre-2026-11-24 unbounded semantics). The unbounded
+        witness set was UNSATISFIABLE on a nest whose normal shape is a
+        set of always-on sessions (measured: 52 of 67 witnesses on two
+        ari sessions; the background queue had not drained since
+        2026-11-14T17:44:35Z) — the gate now means "no RECENT
+        meaningful activity" instead of "no non-terminal row exists".
+
         Returns:
-            Truthy ``int`` (1) when non-background work is
+            Truthy ``int`` (1) when RECENT non-background work is
             active ANYWHERE in the system — i.e. the caller should
             ``continue`` past this background queue. Falsy ``0`` when
             every project's non-background lanes are idle
@@ -445,6 +461,49 @@ class JobProcessor:
         # background queue waits during a transient DB failure.
         # Mirrors the defer-gate posture in :meth:`_defer_idle_check`.
         queue_repo = getattr(self._queue_service, "_repository", None)
+        if (
+            queue_repo is not None
+            and not self._looks_like_mock(queue_repo)
+            and hasattr(queue_repo, "has_recent_non_background_work")
+        ):
+            # RECENCY-BOUNDED probe (fix/idle-gate-recency, 2026-11-24).
+            #
+            # This is the PRODUCTION path. It replaces the unbounded
+            # "does a non-terminal row exist?" witness set with a
+            # RECENCY-bounded one: a witness only counts when the work
+            # item itself was created within the activity window
+            # (``ENSEMBLE_IDLE_GATE_ACTIVITY_WINDOW_MINUTES``, default 30
+            # minutes, read per evaluation; ``0`` disables the bound and
+            # restores the pre-2026-11-24 semantics).
+            #
+            # WHY (measured on live ensemble_prod, 2026-11-23/24): the
+            # unbounded witness set was held by the nest's NORMAL SHAPE —
+            # long-lived, always-on sessions whose settled message mirrors
+            # (and long-settled job rows) never stop counting. 52 of the
+            # 67 measured witnesses sat on TWO ari sessions; the background
+            # queue had not drained since 2026-11-14T17:44:35Z. The
+            # holders are RECENTLY ACTIVE (0–70 min idle) while their
+            # witness ROWS are 7 h – 5.7 d old, so a holder-recency
+            # anchor cannot discriminate — the witness ROW's own age is
+            # the discriminator, and it is what this probe uses.
+            #
+            # The probe covers the job rows AND the task rows in one
+            # query (the shared busy-set, the Fix-2B deadlock carve-out
+            # and the background lane's self-exclusion preserved).
+            #
+            # W3 (fail-CLOSED): a DB error here is treated as BUSY
+            # (return 1) so the background queue waits for the next tick.
+            try:
+                active = await asyncio.to_thread(
+                    queue_repo.has_recent_non_background_work
+                )
+            except Exception as e:
+                logger.warning(
+                    f"JobProcessor._background_idle_check: recency-bounded "
+                    f"predicate raised {e!r} — failing CLOSED (returning 1)"
+                )
+                return 1
+            return int(bool(active))
         if (
             queue_repo is not None
             and not self._looks_like_mock(queue_repo)
