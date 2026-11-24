@@ -401,10 +401,6 @@ class POKRepository:
             else:
                 # The prior was never persisted — fall back to the
                 # caller's snapshot (the historical behaviour).
-                prior.status = "superseded"
-                prior.superseded_by_id = successor.id
-                prior.pinned = False
-                prior.updated_at = _utc_now_iso()
                 session.add(prior)
             # Keep the caller's object observably consistent with the
             # row (the historical contract of this method).
@@ -520,7 +516,7 @@ class POKRepository:
         phase: str | None = None,
         entry_id: str | None = None,
         source: str | None = None,
-        limit: int = 100,
+        limit: int | None = 100,
     ) -> list[POKWriteGateLedger]:
         """The ledger READ surface (T1.7) — read-only-cheap queries.
 
@@ -569,10 +565,25 @@ class POKRepository:
     ) -> int:
         """How many ledger rows of ONE phase a project has.
 
+        Counts a phase IN AGGREGATE: this method filters on
+        ``project_id`` + ``phase`` only and takes NO ``source``
+        argument, so it cannot tell query-driven retrievals from
+        injection-driven ones. To disambiguate, use
+        :meth:`query_ledger` with ``source=...`` (the ``source``
+        column is what tells them apart).
+
         The librarian's metric read (Phase 10): the RETRIEVAL counts
         here SUPERSEDE ``access_count`` — they disambiguate
         query-vs-injection, which ``access_count`` alone cannot
         (design-amendments-v2 §13.2 fork J, amendment 1).
+
+        ── RETRIEVAL EVENTS: DESIGNED, NOT WIRED (Wave 1) ─────────────
+        No production caller records ``source="query"`` in Wave 1:
+        the ``pok_query`` read path does not append a ledger
+        RETRIEVAL row yet. The column lands up front so the read
+        path can populate it in Wave 2 without a migration. Until
+        then, any retrieval rows that exist carry
+        ``source="injection"`` only.
 
         NOTE for Phase 10: an ADMISSION-phase count INCLUDES the
         standing-defect residual rows (they are ADMISSION-phase rows
