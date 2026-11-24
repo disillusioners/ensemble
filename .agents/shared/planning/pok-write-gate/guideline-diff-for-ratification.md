@@ -1,11 +1,11 @@
 # POK write-gate guideline — Phase 12 ratification diff
 
 Base: ff89fee9953dda9e455c82a8e995fbacfaec128b (the last commit that touched docs/guidelines/guideline-pok-durable-vs-rolling-state.md before this amendment)
-Head: 666880a9b (the Phase-12 amendment + the fix round 1 anchor re-derivation)
-Command: git diff ff89fee9953dda9e455c82a8e995fbacfaec128b..666880a9b -- docs/guidelines/guideline-pok-durable-vs-rolling-state.md
+Head: 7d37d4888 (the Phase-12 amendment + fix round 1 + the addendum round: C-1/W-1 code fixes, the Q2 receipts, the CHANGELOG pointer fix)
+Command: git diff ff89fee9953dda9e455c82a8e995fbacfaec128b..7d37d4888 -- docs/guidelines/guideline-pok-durable-vs-rolling-state.md
 
 diff --git a/docs/guidelines/guideline-pok-durable-vs-rolling-state.md b/docs/guidelines/guideline-pok-durable-vs-rolling-state.md
-index ad2506b05..a42e757ea 100644
+index ad2506b05..d383dd5dc 100644
 --- a/docs/guidelines/guideline-pok-durable-vs-rolling-state.md
 +++ b/docs/guidelines/guideline-pok-durable-vs-rolling-state.md
 @@ -1,30 +1,49 @@
@@ -123,7 +123,7 @@ index ad2506b05..a42e757ea 100644
 -- Refresh mechanism for sanctioned inventory: **SUPERSEDE** — same slug + changed content supersedes the prior row (admission → supersede-or-insert, `daemon/services/pok_service.py:311`; outcome labels `created | superseded | no-op`, `:241`).
 -- Curation: `pok_curate` is **leader/project-manager ONLY** (`daemon/tools/pok.py:410`; authority contract `:13`, `:27`). Regular agents govern content CLASS at write time; they cannot pin, dispute, or archive.
 -- What NOT to do: never encode the count in SQL; never treat the injection budget as the cap; never "cure" the cap by blind-archiving a high-traffic row — the refusal's named archive candidate is the OLDEST row, not the least valuable one.
-+- Storage cap: `POK_ACTIVE_CAP_PER_PROJECT` = **1024** (`daemon/services/pok_service.py:131`, this lane's commit rides the 2026-11-23 sonic lane (board wi-1921ba17); the single-source restatement of the sizing set is row **A-13** in `.agents/shared/planning/project-operating-knowledge/decisions.md`). Verify by grep at use time — anchors drift. At the cap, `pok_upsert` REFUSES (`pok_active_cap`) rather than evicting. The count is enforced in Python only — no SQL CHECK, trigger, or migration encodes it (per the 64→256 historical entry, `CHANGELOG.md:226-230` — left byte-intact). `[active cap 1024 — commission 2026-11-23, board wi-1921ba17]`
++- Storage cap: `POK_ACTIVE_CAP_PER_PROJECT` = **1024** (`daemon/services/pok_service.py:131`, this lane's commit rides the 2026-11-23 sonic lane (board wi-1921ba17); the single-source restatement of the sizing set is row **A-13** in `.agents/shared/planning/project-operating-knowledge/decisions.md`). Verify by grep at use time — anchors drift. At the cap, `pok_upsert` REFUSES (`pok_active_cap`) rather than evicting. The count is enforced in Python only — no SQL CHECK, trigger, or migration encodes it (per the 64→256 historical entry, `CHANGELOG.md:598-602` — left byte-intact). `[active cap 1024 — commission 2026-11-23, board wi-1921ba17]`
 +- The injection budget is a SEPARATE standing constraint — never confuse it with the storage cap: `POK_BLOCK_MAX_ENTRIES` = 8 and `POK_BLOCK_MAX_CHARS` = 2,900 (`daemon/services/pok_service.py:149` / `:147`; budget enforcement in `daemon/services/pok_injection.py:411-412,506`). The storage cap bounds what may EXIST in the store; the injection budget bounds what may RENDER into a prompt per turn.
 +- Refresh mechanism for sanctioned inventory: **SUPERSEDE** — same slug + changed content supersedes the prior row (admission → supersede-or-insert, `daemon/services/pok_service.py:380`; outcome labels `created | superseded | no-op`, `:274`).
 +- Curation: `pok_curate` is **leader/project-manager ONLY** (`daemon/tools/pok.py:1812`; authority contract `:13`, `:27`). Regular agents govern content CLASS at write time; they cannot pin, dispute, or archive. A `gate-rejection` is a legitimate archive basis a curator may cite.
@@ -133,7 +133,7 @@ index ad2506b05..a42e757ea 100644
  
  ## 4. The rules that bite
  
-@@ -79,55 +114,97 @@ Not config-armed — this is doctrine plus standing knobs; there are no env keys
+@@ -79,56 +114,98 @@ Not config-armed — this is doctrine plus standing knobs; there are no env keys
    | Human-facing project state — milestones, lane progress, episode narratives | the board / PM ledger | the human-facing ledger; updated in place, never rots silently |
    | Lane working state — a pending fix, episode detail, dated counts | the lane's planning directory (`.agents/shared/planning/<lane>/`) | full documents, versioned with the lane, unlimited length |
  
@@ -239,10 +239,12 @@ index ad2506b05..a42e757ea 100644
 +- The gate's switches (DB-backed, default OFF): `daemon/services/settings_service.py` — `pok_gate.semantic_enforcement`, `pok_gate.softmax_tightening`, `pok_gate.merge_policy`.
 +- Injection budget: `POK_BLOCK_MAX_ENTRIES = 8` (`daemon/services/pok_service.py:149`), `POK_BLOCK_MAX_CHARS = 2_900` (`:147`); enforcement `daemon/services/pok_injection.py:411-412,506`.
  - Guideline house: `docs/guidelines/README.md` (naming, placement, lifecycle); shape `docs/guidelines/TEMPLATE.md`.
+-- CHANGELOG: entry titled exactly "POK active-entry storage cap 256 → 512; curator slug→row resolver fix" — landed as commit `3f3072429` under `## [Unreleased]`; historical arc: `## [0.29.11] — 2026-11-10` "POK active-entry admission cap raised 64 → 256" at `CHANGELOG.md:226-230` (byte-intact).
 +- This lane's plan set (READ-ONLY, frozen): `.agents/shared/planning/pok-write-gate/` — `phase12-plan.md` (the measured-figures contract), `plan-overview.md` (the fold ledger), `design-amendments-v2.md` (the binding rulings), `architecture-recommendation.md` (byte-frozen).
 +- The measured evidence (branch-verifiable): `.agents/shared/planning/pok-write-gate/evidence-rederiv-2026-11-24/kb-writer-trio.md` (sha256 `213e743d…c473`) and `.agents/shared/planning/pok-write-gate/evidence-rederiv-2026-11-23/funnel-and-agreement.md` (sha256 `b55101a3…8ada`).
 +- The ratification diff (this amendment, before → after): `.agents/shared/planning/pok-write-gate/guideline-diff-for-ratification.md`.
 +- The release-notes disclosures that ride this lane: `.agents/shared/planning/pok-write-gate/release-notes-disclosures.md`.
- - CHANGELOG: entry titled exactly "POK active-entry storage cap 256 → 512; curator slug→row resolver fix" — landed as commit `3f3072429` under `## [Unreleased]`; historical arc: `## [0.29.11] — 2026-11-10` "POK active-entry admission cap raised 64 → 256" at `CHANGELOG.md:226-230` (byte-intact).
++- CHANGELOG: entry titled exactly "POK active-entry storage cap 256 → 512; curator slug→row resolver fix" — landed as commit `3f3072429` under `## [Unreleased]`; historical arc: `## [0.29.11] — 2026-11-10` "POK active-entry admission cap raised 64 → 256" at `CHANGELOG.md:598-602` (byte-intact).
  - Critical note (doctrine): `571c4019-f44d-4a46-bbe2-aba4911bf1c2` — "DOCTRINE — POK holds DURABLE operating knowledge only; rolling state routes to KV / critical notes / board / release tree; storage cap ≠ injection budget" (convention, high); paired POK pointer row: `pok-scope-01-rolling-state-out` (slug reserved — row lands in a later lane).
  - Board item: none found (searched `.agents/shared/` + `git log --grep`, read-only, 2026-11-17).
+ - Lane commission: tracked via shared_meta_kv claim `wt.claim.pok-cap-curator` (worktree `ensemble-src-wt-pok-cap`, branch `feature/pok-cap-curator-resolver`, no promote).
