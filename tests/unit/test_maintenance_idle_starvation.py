@@ -91,7 +91,13 @@ def _busy_service(job_name="skill_orphan_sweep", interval=1.0):
 
 
 class TestIdlePolicyTiering:
-    #: The eleven registered maintenance jobs (daemon/manager.py).
+    #: The twelve registered maintenance jobs (daemon/manager.py).
+    #: The twelfth is the POK LIBRARIAN pass (pok-write-gate Phase 10,
+    #: T10.4 — the H3 pick): a bounded, read-heavy, idempotent pass
+    #: whose write set (one project-metadata row per project + the
+    #: ledger's ASK_EXPIRED audit rows) is disjoint from the rows live
+    #: traffic touches ⇒ UN_GATED (an IDLE_GATED job starves on a
+    #: continuously busy nest).
     REGISTERED_JOBS = {
         "checkpoint_cleanup",
         "room_gc_sweep",
@@ -104,6 +110,7 @@ class TestIdlePolicyTiering:
         "malloc_trim",
         "dependency_bus_lock_reap",
         "anomaly_retention",
+        "pok_librarian",
     }
 
     #: The two jobs whose work genuinely contends with live traffic.
@@ -117,7 +124,7 @@ class TestIdlePolicyTiering:
 
         Derived from the POLICY TABLE, not from a name literal: every
         IDLE_GATED job must have a non-``None`` ``max_staleness_hours``.
-        A future 12th job registered WITHOUT a policy entry silently
+        A future 13th job registered WITHOUT a policy entry silently
         defaults to ``IDLE_GATED`` (the unknown-name default) and, with
         no ``JOB_MAX_STALENESS_HOURS`` entry, would starve forever on a
         busy nest — exactly the defect this composite fixes. This pin
@@ -154,7 +161,7 @@ class TestIdlePolicyTiering:
         # The defect shape IS representable today (a new gated job with
         # no guarantee) — the guard exists so it is SEEN, never silent.
         assert gated_without_guarantee == ["some_future_reclaim_job"]
-        # And for the eleven REAL registrations the invariant holds:
+        # And for the twelve REAL registrations the invariant holds:
         for name, policy in JOB_IDLE_POLICIES.items():
             if policy == IdlePolicy.IDLE_GATED:
                 assert JOB_MAX_STALENESS_HOURS.get(name) is not None, name
@@ -169,7 +176,7 @@ class TestIdlePolicyTiering:
             if policy == IdlePolicy.UN_GATED
         }
         assert un_gated == self.REGISTERED_JOBS - self.RECLAIM_JOBS
-        assert len(un_gated) == 9
+        assert len(un_gated) == 10
 
     def test_unknown_job_name_defaults_to_idle_gated(self):
         """An unregistered job never runs unattended (conservative)."""
