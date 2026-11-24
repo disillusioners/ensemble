@@ -35,6 +35,7 @@ from sqlmodel import Session, select
 from daemon.repositories.pok.models import (
     ProjectOperatingKnowledge,
     ProjectOperatingKnowledgeEmbedding,
+    pok_family_key,
 )
 
 __all__ = ["POKRepository", "UNSET"]
@@ -219,38 +220,27 @@ class POKRepository:
             return len(list(session.exec(stmt).all()))
 
     def count_active_in_family(self, project_id: str, family: str) -> int:
-        """Active rows whose slug starts ``<family>-`` (§4.5 family key).
+        """Active rows whose FAMILY KEY EQUALS ``family`` (§4.5).
 
-        DELIBERATE SUPERSET (documented, not a bug): the ``startswith``
-        prefix count deliberately includes (i) unnumbered active rows that
-        merely share the ``<family>-`` prefix and (ii) rows that belong to
-        a LONGER family whose name begins with ``family`` (e.g. an
-        ``skill-e6-01-x`` row counts toward both ``skill-e6`` and
-        ``skill``). Quantified in the Phase-1 census artifact
-        ``.agents/shared/planning/pok-sweep/dual-key-census-2026-11-18.md``
-        §3d (9 cross-family rows, 72 unnumbered). The refusal gate
-        (``pok_family_full``) is therefore conservative: a family can
-        trip its bound on prefix-shared rows it does not "own".
+        STRICT MEMBERSHIP (was a PREFIX SUPERSET — the doctrine is OVERTURNED by
+        commission pok-family-count-strict, 2026-11-24): every active row's
+        canonical family key is derived with ``pok_family_key`` and compared
+        for EQUALITY.
 
-        MULTI-TOKEN REACH (fix iteration 2): the family key is now the
-        maximal run of letter-led tokens before the leftmost ``-NN-``
-        ordinal, so the superset reaches shapes the single-token key
-        could not express. An admission of ``skill-01-z`` (family
-        ``skill``) prefix-counts the ``skill-e6-*`` rows (family
-        ``skill-e6``) — a LONGER family inflates the count of a SHORTER
-        prefix. The inverse does NOT hold: ``skill-e6`` never counts
-        ``skill-*`` rows (its prefix is hyphen-terminated). The leak is
-        ONE-DIRECTIONAL (long → short); the count stays
-        pattern-independent (a ``startswith`` query, never a
-        family-membership test).
+        Consequences (MEASURED on the 2026-11-23 census, 499 active rows): a
+        LONGER family never inflates a SHORTER one (``skill-e6-*`` no longer
+        counts toward ``skill``); an UNNUMBERED slug (``verify-something-
+        unnumbered``) has NO family and never counts; a family's count is the
+        number of rows it actually OWNS. The bound (POK_FAMILY_MAX) is
+        unchanged — only the COUNT's meaning is corrected.
         """
         stmt = select(ProjectOperatingKnowledge).where(
             ProjectOperatingKnowledge.project_id == project_id,
             ProjectOperatingKnowledge.status == "active",
-            ProjectOperatingKnowledge.slug.startswith(f"{family}-"),
         )
         with Session(self._engine) as session:
-            return len(list(session.exec(stmt).all()))
+            rows = list(session.exec(stmt).all())
+        return sum(1 for r in rows if pok_family_key(r.slug) == family)
 
     def lineage(self, entry_id: str) -> list[ProjectOperatingKnowledge]:
         """The supersede chain for one slug lineage, oldest first.
