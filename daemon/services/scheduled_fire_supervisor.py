@@ -12,9 +12,12 @@ Design (house pattern: interval-driven, first tick IMMEDIATE, fail-loud)
   ``triggered_at`` lookback so legacy rows (which predate the receipt
   contract) are NEVER re-driven en masse.
 * **Re-drive is an ACTION, not a status** — the CAS stamp
-  (``claim_execution_redrive``) advances the row to ``dispatched``; the
-  actual re-drive goes through the F2 make-claimable + wake path via the
-  injected callback. There is NO direct claim: ``claim_pending_task``'s
+  (``claim_execution_redrive``) advances ONLY the re-drive COUNT
+  (``redriven_at`` + ``redrive_count``); the actual re-drive goes through
+  the F2 make-claimable + wake path via the injected callback. The row's
+  status moves to ``dispatched`` ONLY AFTER a successful re-drive (and
+  only with a non-NULL instance handle — A.1: ``dispatched`` means a turn
+  started). There is NO direct claim: ``claim_pending_task``'s
   pending→running UPDATE stays the single consumer CAS (at-most-one turn).
 * **Observation-safe** — a task already RUNNING on the instance at the
   deadline is a slow start, NEVER double-driven (``find_running_by_instance``).
@@ -68,6 +71,36 @@ DEFAULT_MAX_REDRIVES = 2
 DEFAULT_BATCH_LIMIT = 200
 
 _TERMINAL_INSTANCE_STATUSES = ("terminated", "completed", "error", "failed")
+
+#: The TRUTHFUL re-drive outcomes (the injected callback's ``status``).
+#: Everything else is a REFUSAL: the row keeps its prior truthful status,
+#: the re-drive is re-armed, and the cap bounds it.
+#:
+#: * ``pending_redrive``  — the F2 make-claimable + wake found the durable
+#:   task and made it claimable (the turn starts).
+#: * ``redriven``         — the adapter re-dispatched the fire (the
+#:   instance-less leg) — a turn started.
+#: * ``dispatched``       — the re-drive reported a durable dispatch.
+#: * ``resuming``         — the paused-resume leg scheduled a graph resume.
+#: * ``already_resuming`` — a resume is ALREADY in flight (the work IS
+#:   covered — never a refusal).
+#: * ``wake_enqueued``    — the WAITING_CHILDREN wake leg enqueued a turn.
+_REDRIVE_ACCEPTED_STATUSES = frozenset(
+    {
+        "pending_redrive",
+        "redriven",
+        "dispatched",
+        "resuming",
+        "already_resuming",
+        "wake_enqueued",
+    }
+)
+
+#: The prior-status classes the supervisor distinguishes. ``dispatched`` and
+#: ``triggered`` are the STALE class (today's open states — the fire's
+#: receipt is open); ``never-started`` / ``failed-to-dispatch`` are the
+#: never-began class.
+_STALE_OPEN_STATUSES = frozenset({"dispatched", "triggered"})
 
 
 def _env_int(name: str, default: int) -> int:
@@ -184,6 +217,23 @@ class ScheduledFireSupervisor:
             pass_name, result.errors, detail, type(exc).__name__, exc,
         )
 
+    @staticmethod
+    def _log_cas_error(pass_name: str, result: SupervisorResult, exc: BaseException, **ctx: Any) -> None:
+        """The CAS-leg marker — SPLIT from the DB marker.
+
+        A failed CAS arm is NOT a database failure: the arm can raise for
+        a signature/logic reason (a mis-bound call site) as well as for a
+        DB reason. Labelling every claim failure ``[..._DB_ERROR]``
+        mislabels the CAS class — the exact blindness the reconciler's
+        N4-corrected marker discipline forbids (distinct markers per
+        failure class).
+        """
+        detail = " ".join(f"{k}={v}" for k, v in ctx.items())
+        logger.error(
+            "[SCHEDULED_SUPERVISOR_CAS_ERROR] pass=%s errors=%d %s: %s: %s",
+            pass_name, result.errors, detail, type(exc).__name__, exc,
+        )
+
     def _instance_status(self, instance_id: str) -> str | None:
         """Best-effort live instance status (None = unresolvable)."""
         if self._instance_repo is None:
@@ -292,6 +342,12 @@ class ScheduledFireSupervisor:
 
         # (1) Observation-safe: a task RUNNING at the deadline is a slow
         #     start — never double-drive it.
+        #     NOTE (instance-less rows): the processing-check needs an
+        #     INSTANCE handle, so an instance-less row skips it. That gap
+        #     is covered by the ADAPTER's own slot discipline post-fix
+        #     (the re-dispatch acquires the execution semaphore — a fire
+        #     still holding the slot makes the re-drive time out and
+        #     refuse), so a concurrent fire is never double-dispatched.
         if instance_id and self._task_is_processing(instance_id):
             result.skipped_processing += 1
             logger.info(
@@ -324,6 +380,9 @@ class ScheduledFireSupervisor:
                 return
 
         # (3) CAS stamp — at-most-one re-drive per reason (per tick).
+        #     COUNT-ONLY: the stamp advances redriven_at + redrive_count;
+        #     the STATUS is never written here (the A.1 invariant — a
+        #     claimed-then-refused row keeps its prior truthful status).
         try:
             claim = await asyncio.to_thread(
                 self._source_repo.claim_execution_redrive,
@@ -331,7 +390,8 @@ class ScheduledFireSupervisor:
             )
         except Exception as exc:  # noqa: BLE001
             result.errors += 1
-            self._log_db_error("claim", result, exc)
+            self._log_cas_error("claim", result, exc,
+                                execution=str(execution_id)[:8])
             return
         if claim == "cap-exceeded":
             try:
@@ -351,21 +411,38 @@ class ScheduledFireSupervisor:
             )
             return
         if claim != "claimed":
+            # CAS LOST (row gone / already stamped this tick / terminal) —
+            # its own marker, never a "DB error" (the N4-corrected marker
+            # discipline: distinct markers per failure class).
             result.skipped_cas_lost += 1
+            logger.info(
+                "[SCHEDULED_SUPERVISOR_CAS_LOST] execution=%s — the re-drive "
+                "CAS was lost (row gone / already stamped this tick / "
+                "terminal); no action taken",
+                str(execution_id)[:8],
+            )
             return
 
         # (4) The ACTION — F2 make-claimable + wake (never a direct claim).
         outcome = await self._redrive(candidate)
         out_status = str(outcome.get("status", "")) if isinstance(outcome, dict) else ""
-        if out_status in ("pending_redrive", "redriven", "dispatched", "resuming"):
-            if status == "dispatched":
+        if out_status in _REDRIVE_ACCEPTED_STATUSES:
+            # (5) The TRUTHFUL ADVANCE — only a successful re-drive may move
+            #     the row to the open ``dispatched`` state, and only with a
+            #     NON-NULL instance handle (A.1). A refused/failed re-drive
+            #     leaves the prior truthful status in place.
+            await self._advance_to_dispatched(candidate, outcome, result)
+            task_wake = out_status == "pending_redrive" or bool(
+                outcome.get("task_id")
+            )
+            if status in _STALE_OPEN_STATUSES and task_wake:
                 result.recovered += 1
             else:
                 result.redriven += 1
             logger.info(
                 "[SCHEDULED_SUPERVISOR_REDRIVE] execution=%s instance=%s "
-                "task=%s — found task on instance (make-claimable + wake, "
-                "single consumer CAS)",
+                "task=%s — re-drive accepted (make-claimable + wake / "
+                "adapter re-dispatch; single consumer CAS)",
                 str(execution_id)[:8],
                 str(outcome.get("instance_id") or instance_id)[:8],
                 str(outcome.get("task_id"))[:8],
@@ -374,10 +451,91 @@ class ScheduledFireSupervisor:
             result.skipped_redrive_refused += 1
             logger.error(
                 "[SCHEDULED_SUPERVISOR_REDRIVE_REFUSED] execution=%s "
-                "outcome=%r — re-drive did not claim work; row stamped and "
-                "re-armed (bounded by cap)",
+                "outcome=%r — re-drive did not claim work; the PRIOR "
+                "truthful status is kept (count+1, bounded by the cap)",
                 str(execution_id)[:8], outcome,
             )
+
+    async def _advance_to_dispatched(
+        self,
+        candidate: dict[str, Any],
+        outcome: dict[str, Any],
+        result: SupervisorResult,
+    ) -> bool:
+        """Move a RE-DRIVEN row to the open ``dispatched`` state.
+
+        The A.1 invariant: ``dispatched`` means a turn started, so the row
+        carries a NON-NULL ``instance_id``. The handle comes from the
+        re-drive's own dispatch (the adapter's receipt write used the same
+        value); when the re-drive cannot name one, the row keeps its prior
+        truthful status and the re-drive is re-armed (the cap bounds it).
+
+        A delivery that already TERMINATED before this advance (the
+        delivery-completed callback is bounded to the open states, so a
+        callback that landed while the row sat in a re-drive-able state was
+        skipped by it) is closed as ``executed`` instead of resting open
+        forever — the outcome is the truth and must not be dropped.
+        """
+        execution_id = candidate.get("execution_id")
+        instance_id = outcome.get("instance_id") or candidate.get("instance_id")
+        if not execution_id or not instance_id:
+            logger.warning(
+                "[SCHEDULED_SUPERVISOR_ADVANCE_REFUSED] execution=%s — the "
+                "re-drive named no instance handle; the row keeps its prior "
+                "truthful status (a 'dispatched' receipt never carries a "
+                "NULL instance_id)",
+                str(execution_id)[:8],
+            )
+            return False
+        job_item_id = outcome.get("job_item_id")
+        terminal_outcome = await self._delivered_outcome(job_item_id)
+        advance = getattr(
+            self._source_repo, "advance_execution_redrive_dispatched", None
+        )
+        if advance is None:
+            logger.error(
+                "[SCHEDULED_SUPERVISOR_ADVANCE_UNAVAILABLE] execution=%s — "
+                "the source repo exposes no advance_execution_redrive_"
+                "dispatched; the row keeps its prior truthful status",
+                str(execution_id)[:8],
+            )
+            return False
+        try:
+            row = await asyncio.to_thread(
+                advance, execution_id, instance_id, outcome=terminal_outcome,
+            )
+        except Exception as exc:  # noqa: BLE001 — fail-soft, never raise
+            result.errors += 1
+            self._log_db_error("advance_write", result, exc,
+                               execution=str(execution_id)[:8])
+            return False
+        return row is not None
+
+    async def _delivered_outcome(self, job_item_id: Any) -> str | None:
+        """The terminal outcome of the delivered turn, if it already ended.
+
+        Read from the TASK row (the work_id == the job_item_id) — the
+        delivery-completed callback is bounded to the open receipt states,
+        so a callback that landed while the row was still in a
+        re-drive-able state was SKIPPED by it; without this read the
+        outcome would be dropped and the receipt would rest open forever.
+        """
+        if not job_item_id or self._task_repo is None:
+            return None
+        try:
+            task = await asyncio.to_thread(
+                self._task_repo.get_by_work_id, job_item_id,
+            )
+        except Exception:  # noqa: BLE001 — unresolvable ⇒ no outcome
+            return None
+        status = getattr(task, "status", None)
+        if status == "completed":
+            return "completed"
+        if status == "failed":
+            return "error"
+        if status == "cancelled":
+            return "cancelled"
+        return None
 
 
 __all__ = [

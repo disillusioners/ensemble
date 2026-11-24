@@ -1531,14 +1531,26 @@ class SQLModelSourceRepository:
         """DB-derived re-drive candidates, bounded by recency.
 
         Selection = ``status ∈ {never-started, failed-to-dispatch}`` OR
-        ``status = dispatched`` with ``triggered_at < stale_before``. ALL
-        rows are bounded by ``triggered_at >= lookback_cutoff`` so legacy
-        rows (which predate the receipt contract) are never re-driven en
-        masse. Read-only.
+        ``status ∈ {dispatched, triggered}`` with ``triggered_at <
+        stale_before``. ALL rows are bounded by ``triggered_at >=
+        lookback_cutoff`` so legacy rows (which predate the receipt
+        contract) are never re-driven en masse. Read-only.
+
+        ``triggered`` JOINS the stale class (Addendum A.4 fix): it is
+        today's OPEN state — the fire-start callback writes it, and the
+        receipt write that would advance it to ``dispatched`` can be lost
+        (the fire path's ``CancelledError`` leg and the fail-soft
+        receipt write). A row resting at ``triggered`` past the deadline
+        is a fire whose receipt never landed — invisible to the
+        supervisor unless it is selected here.
         """
         open_terminal = (
             ExecutionStatus.NEVER_STARTED.value,
             ExecutionStatus.FAILED_TO_DISPATCH.value,
+        )
+        stale_dispatched = (
+            ExecutionStatus.DISPATCHED.value,
+            ExecutionStatus.TRIGGERED.value,
         )
         with Session(self.engine) as session:
             stmt = (
@@ -1549,7 +1561,7 @@ class SQLModelSourceRepository:
                 .where(
                     col(ScheduleExecution.status).in_(open_terminal)
                     | (
-                        (col(ScheduleExecution.status) == ExecutionStatus.DISPATCHED.value)
+                        col(ScheduleExecution.status).in_(stale_dispatched)
                         & (col(ScheduleExecution.triggered_at) < stale_before)
                     )
                 )
@@ -1579,11 +1591,21 @@ class SQLModelSourceRepository:
     ) -> str:
         """CAS stamp for at-most-one-re-drive-per-reason.
 
-        Returns ``"claimed"`` (row advanced to ``dispatched`` with a fresh
-        stamp), ``"cap-exceeded"`` (re-drive budget exhausted — caller must
-        terminalize loudly), or ``"lost"`` (row gone / already stamped this
-        tick / terminal). The ``redriven_at < tick_stamp`` arm re-arms each
-        supervisor tick (mirroring ``boot_re_drive_at``'s epoch CAS).
+        Returns ``"claimed"`` (the re-drive stamp advanced), ``"cap-exceeded"``
+        (re-drive budget exhausted — caller must terminalize loudly), or
+        ``"lost"`` (row gone / already stamped this tick / terminal). The
+        ``redriven_at < tick_stamp`` arm re-arms each supervisor tick
+        (mirroring ``boot_re_drive_at``'s epoch CAS).
+
+        THE STAMP IS COUNT-ONLY (Addendum A.4 fix — the A.1 invariant):
+        it advances ``redriven_at`` + ``redrive_count`` and NEVER the
+        STATUS. The truthful prior status (``never-started`` /
+        ``failed-to-dispatch`` / ``dispatched`` / ``triggered``) stands
+        until a re-drive actually dispatches — a claimed-then-refused row
+        must NOT rest at ``dispatched`` (the receipt contract: ``dispatched``
+        means a turn started, and its ``instance_id`` handle is never NULL).
+        The status transition is :meth:`advance_execution_redrive_dispatched`
+        (the supervisor's post-action step), not this CAS.
         """
         with Session(self.engine) as session:
             execution = session.get(ScheduleExecution, execution_id)
@@ -1593,6 +1615,7 @@ class SQLModelSourceRepository:
                 ExecutionStatus.NEVER_STARTED.value,
                 ExecutionStatus.FAILED_TO_DISPATCH.value,
                 ExecutionStatus.DISPATCHED.value,
+                ExecutionStatus.TRIGGERED.value,
             ):
                 return "lost"
             if (execution.redrive_count or 0) >= max_redrives:
@@ -1602,10 +1625,72 @@ class SQLModelSourceRepository:
                 return "lost"
             execution.redriven_at = tick_stamp
             execution.redrive_count = (execution.redrive_count or 0) + 1
-            execution.status = ExecutionStatus.DISPATCHED.value
+            # NOTE: the STATUS is deliberately NOT written here — see the
+            # docstring (the A.1 invariant: a refused re-drive leaves the
+            # prior truthful status in place).
             session.add(execution)
             session.commit()
             return "claimed"
+
+    def advance_execution_redrive_dispatched(
+        self,
+        execution_id: str,
+        instance_id: str | None,
+        *,
+        outcome: str | None = None,
+    ) -> ScheduleExecution | None:
+        """Advance a RE-DRIVEN row to the OPEN ``dispatched`` state.
+
+        Called ONLY after a SUCCESSFUL re-drive (the supervisor's
+        post-action step) — the claim itself never writes a status.
+
+        ``instance_id`` is REQUIRED: ``dispatched`` means a turn started,
+        so the handle is never NULL (A.1). A row that cannot carry a
+        handle keeps its prior truthful status (the caller re-arms the
+        re-drive; the cap bounds it).
+
+        ``outcome`` (the terminal outcome of the delivered turn) closes the
+        receipt as ``executed`` instead of resting it open: the
+        delivery-completed callback is bounded to the OPEN states, so a
+        callback that landed while the row still sat in a re-drive-able
+        state was SKIPPED by it — the outcome is the truth and must not be
+        dropped.
+
+        A row already in a TERMINAL state is never rewritten.
+        """
+        with Session(self.engine) as session:
+            execution = session.get(ScheduleExecution, execution_id)
+            if execution is None:
+                return None
+            if execution.status not in (
+                ExecutionStatus.NEVER_STARTED.value,
+                ExecutionStatus.FAILED_TO_DISPATCH.value,
+                ExecutionStatus.DISPATCHED.value,
+                ExecutionStatus.TRIGGERED.value,
+            ):
+                # Already terminal (executed / skipped / …) — never rewritten.
+                return execution
+            if not instance_id:
+                # A.1: 'dispatched' REQUIRES the instance handle. The row
+                # keeps its prior truthful status instead.
+                logger.warning(
+                    "source-repo: redrive advance for execution %s refused — "
+                    "no instance handle (a 'dispatched' receipt never "
+                    "carries a NULL instance_id)",
+                    execution_id,
+                )
+                return execution
+            if outcome:
+                execution.status = ExecutionStatus.EXECUTED.value
+                execution.outcome = outcome
+                execution.completed_at = datetime.now(timezone.utc).isoformat()
+            else:
+                execution.status = ExecutionStatus.DISPATCHED.value
+            execution.instance_id = instance_id
+            session.add(execution)
+            session.commit()
+            session.refresh(execution)
+            return execution
 
     def terminalize_execution_redrive_failed(
         self,

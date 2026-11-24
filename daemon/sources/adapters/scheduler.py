@@ -218,6 +218,15 @@ def _scheduler_direct_idempotency_key(source_id: str, run_at_iso: str) -> str:
     addressable at all; the compensation is what makes the terminal case
     reconcile.
 
+    THE MASQUERADE ARM'S RECEIPT (accepted, but read it with care): the
+    compensation CANCELS the orphan fallback JobItem, so the
+    delivery-completed callback closes the receipt keyed by THAT row with
+    ``outcome='cancelled'`` — the receipt therefore points at the
+    CANCELLED PHANTOM, not at the prior live delivery.  That is
+    ACCEPTABLE (the net delivery is ONE, and the receipt is loud about
+    the cancellation rather than silent), but it must not be read as
+    "the prior fire was cancelled".
+
     The D3 lateness cap is an OPTIONAL operator backstop (off by
     default) — it is NOT the at-most-once authority.
     """
@@ -2926,16 +2935,68 @@ Original scheduled task:
             return None
         return instance_id, getattr(instance, "status", None)
     
-    async def _execute_run(self, execution_id: str, trigger_type: str) -> None:
+    async def _execute_run(
+        self,
+        execution_id: str,
+        trigger_type: str,
+        *,
+        semaphore_held: bool = False,
+    ) -> dict[str, Any]:
         """Shared execution logic for scheduled and manual triggers.
         
         Args:
             execution_id: Unique execution identifier
             trigger_type: "scheduled" or "manual"
+            semaphore_held: True when the CALLER already holds the
+                execution slot (the fire path: ``_emit_scheduled_message``
+                / ``_execute_trigger`` acquire it through
+                ``_acquire_execution_slot``). False means the caller does
+                NOT hold it — the slot is acquired HERE so the release in
+                the ``finally`` stays BALANCED.
+
+                The supervisor's re-dispatch used to call this method
+                directly (no acquire) while the ``finally`` released the
+                slot anyway: an ``asyncio.Semaphore`` over-release does
+                not raise, so the adapter's concurrency cap was inflated
+                by one per re-drive, forever (the verifier measured
+                1 → 2). Acquiring here makes acquire/release symmetric
+                for EVERY caller.
+
+        Returns:
+            A truthful outcome dict — ``{"status": "dispatched",
+            "instance_id": ..., "job_item_id": ...}`` when the durable
+            dispatch landed, ``{"status": "no_dispatch"/"failed", ...}``
+            otherwise. The re-drive path needs the handles to write a
+            truthful receipt.
         
         Queue routing is ONLY for "scheduled" triggers with project_id configured.
         Manual triggers always use immediate execution (deliberate design).
         """
+        # The slot discipline — symmetric acquire/release for EVERY caller.
+        acquired_here = False
+        if not semaphore_held:
+            if self._execution_semaphore is None:
+                logger.warning(
+                    "Scheduler %s: no execution semaphore — the run %s is "
+                    "NOT started (the adapter is not initialized)",
+                    self.source_id, execution_id,
+                )
+                return {"status": "no_dispatch", "error": "no_semaphore"}
+            try:
+                await asyncio.wait_for(
+                    self._execution_semaphore.acquire(),
+                    timeout=SCHEDULER_SEMAPHORE_TIMEOUT_S,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Scheduler %s: execution %s could not take an execution "
+                    "slot within %ss — the run is NOT started",
+                    self.source_id, execution_id, SCHEDULER_SEMAPHORE_TIMEOUT_S,
+                )
+                return {"status": "no_dispatch", "error": "semaphore_timeout"}
+            acquired_here = True
+
+        dispatch_info: dict[str, Any] = {}
         self._running_executions += 1
         logger.debug(f"Starting execution {execution_id}, running={self._running_executions}")
         
@@ -3019,12 +3080,18 @@ Original scheduled task:
             # substrate at all — the legacy immediate path remains for
             # manager-less harnesses and MANUAL triggers).
             if trigger_type == "scheduled" and self._manager is not None:
-                await self._route_via_job_queue(execution_id, formatted_message, metadata)
+                dispatch_info = await self._route_via_job_queue(
+                    execution_id, formatted_message, metadata
+                ) or {}
             else:
                 await self._execute_immediate(execution_id, formatted_message, metadata)
 
         except asyncio.CancelledError:
             logger.info(f"Execution cancelled: {execution_id}")
+            # The receipt write is SKIPPED here (the fire never reached its
+            # dispatch): the row rests at the legacy ``triggered`` state —
+            # an OPEN state the supervisor now selects (the stale class),
+            # so the fire is repairable instead of invisible.
             raise  # finally still runs, semaphore released
         except BoundCallerRefusal as refusal:
             # CRIT-1 (decisions.md DEC-9): the mapper's TYPED refusal is
@@ -3044,6 +3111,10 @@ Original scheduled task:
                 self.FIRE_OUTCOME_REFUSED_PERMANENT,
             )
             self._fire_outcome = self.FIRE_OUTCOME_REFUSED_PERMANENT
+            dispatch_info = {
+                "status": "failed",
+                "error": str(getattr(refusal, "reason", refusal)),
+            }
             if self._execution_callback:
                 try:
                     self._execution_callback(
@@ -3062,6 +3133,7 @@ Original scheduled task:
         except Exception as e:
             logger.error(f"Failed to execute {trigger_type} message: {execution_id}, error={e}", exc_info=True)
             self._fire_outcome = self.FIRE_OUTCOME_FAILED
+            dispatch_info = {"status": "failed", "error": str(e)}
             if self._execution_callback:
                 try:
                     self._execution_callback(
@@ -3076,10 +3148,151 @@ Original scheduled task:
         finally:
             self._running_executions -= 1
             logger.debug(f"Execution {execution_id} finished, running={self._running_executions}")
-            if self._execution_semaphore:
+            if self._execution_semaphore and (semaphore_held or acquired_here):
+                # BALANCED release: the slot is released exactly once —
+                # by whoever acquired it (the caller's slot when
+                # ``semaphore_held`` is True, ours when we acquired it).
                 self._execution_semaphore.release()
+        if dispatch_info.get("instance_id"):
+            return {
+                "status": "dispatched",
+                "instance_id": dispatch_info.get("instance_id"),
+                "job_item_id": dispatch_info.get("job_item_id"),
+            }
+        return {
+            "status": dispatch_info.get("status") or "no_dispatch",
+            "error": dispatch_info.get("error"),
+        }
 
-    async def _route_via_job_queue(self, execution_id: str, formatted_message: str, metadata: dict) -> None:
+    async def redrive_execution(self, execution_id: str) -> dict[str, Any]:
+        """Guarded re-dispatch entrypoint (the supervisor's instance-less leg).
+
+        The fire path's guard chain, in the SAME order as
+        ``_emit_scheduled_message``:
+
+          1. the age-cap coverage (READ-ONLY — see the note below),
+          2. the deferrable-target resolution (read-only): a BUSY pinned
+             caller is never double-driven,
+          3. the SEMAPHORE ACQUIRE — the fire path's slot discipline. The
+             concurrency cap is NEVER inflated by a re-drive (the old
+             direct ``_execute_run`` call released a slot it never
+             acquired; an ``asyncio.Semaphore`` over-release does not
+             raise, so the cap grew by one per re-drive, forever),
+          4. ``_execute_run`` — the real dispatch.
+
+        Returns a truthful outcome dict:
+
+          * ``{"status": "redriven", "instance_id": ..., "job_item_id":
+            ...}`` — the fire was dispatched (a turn started);
+          * ``{"status": "refused", "error": ...}`` — NOTHING was
+            dispatched (the caller keeps the row's prior truthful status
+            and the cap bounds the retries).
+        """
+        if self._execution_semaphore is None:
+            return {"status": "refused", "error": "adapter_not_initialized"}
+
+        # (1) The age-cap coverage — READ-ONLY.
+        #     The age-cap BREACH handler is evaluated at EXACTLY ONE site
+        #     (the fire path — DEC-19's single-evaluation-site rule): a
+        #     second evaluation site would duplicate the work and risk a
+        #     double consumption of the occurrence. The re-drive therefore
+        #     only READS the carrier's age and refuses to resurrect an
+        #     episode that is already past its cap; the VISIBLE terminal
+        #     disposition stays with the fire path's breach handler.
+        try:
+            _cap, max_age = self._defer_bounds()
+        except Exception:  # noqa: BLE001 — bootstrap-safety
+            _cap, max_age = 16, 86400
+        since = None
+        try:
+            state = self._defer_state()
+            since = state.get("_defer_since") or self._defer_since_in_memory
+        except Exception:  # noqa: BLE001 — the read is best-effort
+            since = None
+        if since:
+            try:
+                since_dt = datetime.fromisoformat(str(since))
+            except (TypeError, ValueError):
+                since_dt = None
+            if since_dt is not None:
+                if since_dt.tzinfo is None:
+                    since_dt = since_dt.replace(tzinfo=timezone.utc)
+                age = (datetime.now(timezone.utc) - since_dt).total_seconds()
+                if age >= max_age:
+                    logger.warning(
+                        "Scheduler %s: the re-drive of %s is REFUSED — the "
+                        "non-delivery episode is already past its %ss cap "
+                        "(age=%.0fs); the fire path owns the visible "
+                        "terminal disposition",
+                        self.source_id, execution_id, max_age, age,
+                    )
+                    return {
+                        "status": "refused",
+                        "error": f"age_cap_exceeded:{int(age)}s",
+                    }
+
+        # (2) The deferrable-target resolution (READ-ONLY — the mapper is
+        #     never re-entered). A BUSY pinned caller is never
+        #     double-driven: the re-drive refuses and the row keeps its
+        #     truthful status (the cap bounds the retries).
+        defer_target = self._resolve_deferrable_target()
+        if defer_target is not None:
+            target_instance_id, target_status = defer_target
+            if target_status in (
+                InstanceStatus.RUNNING.value,
+                InstanceStatus.WAITING.value,
+                InstanceStatus.WAITING_CHILDREN.value,
+            ):
+                logger.info(
+                    "Scheduler %s: the re-drive of %s is REFUSED — the "
+                    "pinned caller %s is %s (never double-driven)",
+                    self.source_id, execution_id, target_instance_id,
+                    target_status,
+                )
+                return {
+                    "status": "refused",
+                    "error": f"pinned_caller_busy:{target_status}",
+                }
+
+        # (3) The execution slot — the SAME discipline as the fire path.
+        try:
+            await asyncio.wait_for(
+                self._execution_semaphore.acquire(),
+                timeout=SCHEDULER_SEMAPHORE_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Scheduler %s: the re-drive of %s could not take an "
+                "execution slot within %ss — nothing was dispatched",
+                self.source_id, execution_id, SCHEDULER_SEMAPHORE_TIMEOUT_S,
+            )
+            return {"status": "refused", "error": "semaphore_timeout"}
+
+        # (4) The dispatch. ``semaphore_held=True`` — WE hold the slot and
+        #     ``_execute_run``'s finally releases it exactly once.
+        try:
+            run_outcome = await self._execute_run(
+                execution_id, "scheduled", semaphore_held=True,
+            )
+        except asyncio.CancelledError:
+            return {"status": "refused", "error": "cancelled"}
+        if (
+            isinstance(run_outcome, dict)
+            and run_outcome.get("status") == "dispatched"
+            and run_outcome.get("instance_id")
+        ):
+            return {
+                "status": "redriven",
+                "instance_id": run_outcome.get("instance_id"),
+                "job_item_id": run_outcome.get("job_item_id"),
+                "execution_id": execution_id,
+            }
+        return {
+            "status": "refused",
+            "error": (run_outcome or {}).get("error") or "no_dispatch",
+        }
+
+    async def _route_via_job_queue(self, execution_id: str, formatted_message: str, metadata: dict) -> dict[str, Any]:
         """Route scheduled execution through the inline message-Job path.
 
         Phase 5 (cutover): the inline path is the ONLY path. Get/create
@@ -3090,6 +3303,12 @@ Original scheduled task:
         poll-loop path through :meth:`JobQueueService.enqueue` was
         removed in Phase 5 — messages must always carry a JobItem now
         so the public facade can read both sides of the union.
+
+        Returns:
+            The durable dispatch handles — ``{"instance_id": ...,
+            "job_item_id": ...}`` — so the caller (and the supervisor's
+            re-drive leg) can write a TRUTHFUL receipt: a ``dispatched``
+            receipt always carries the instance handle (A.1).
         """
         try:
             agent_id = self._agent
@@ -3231,6 +3450,10 @@ Original scheduled task:
                 instance_id,
                 getattr(result, "job_id", None),
             )
+            return {
+                "instance_id": instance_id,
+                "job_item_id": getattr(result, "job_id", None),
+            }
         except Exception as e:
             logger.error(f"Failed to queue scheduled job: {execution_id}, error={e}", exc_info=True)
             # Addendum A: an enqueue/claim failure terminalizes the receipt
@@ -3369,7 +3592,7 @@ Original scheduled task:
                     return  # finally still runs, releases semaphore
 
             # Execute the scheduled run (its finally handles semaphore release)
-            await self._execute_run(execution_id, "scheduled")
+            await self._execute_run(execution_id, "scheduled", semaphore_held=True)
             semaphore_held = False  # _execute_run's finally releases it
             if self._fire_outcome == self.FIRE_OUTCOME_DIRECT:
                 # A DELIVERED occurrence closes the non-delivery episode
@@ -3423,7 +3646,7 @@ Original scheduled task:
                     return  # finally still runs, releases semaphore
             
             # Execute the manual trigger (its finally handles semaphore release)
-            await self._execute_run(execution_id, "manual")
+            await self._execute_run(execution_id, "manual", semaphore_held=True)
             semaphore_held = False  # _execute_run's finally releases it
         finally:
             if semaphore_held and self._execution_semaphore:

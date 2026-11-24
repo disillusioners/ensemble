@@ -643,6 +643,77 @@ def _poignancy_llm_config(config: Any) -> dict[str, Any]:
     return _memoir_lane_llm_config(config)
 
 
+def _make_scheduled_fire_redrive(manager: Any):
+    """Build the scheduled-fire supervisor's re-drive callback.
+
+    Module-level (NOT nested in ``lifespan``) so the pin can drive the
+    REAL callback path: the lifespan wiring below passes THIS callable to
+    the supervisor, so a pin against it is a pin against production — not
+    against a test-side copy (the copy-goes-green failure mode).
+
+    Two legs, both TRUTHFUL:
+
+    * **instance-bearing** → the F2 entry ``manager.resume_processing_job``
+      (make-claimable + wake, then the single-consumer CAS). NOT
+      ``manager._schedule_explicit_handle_resume``: that method is
+      KEYWORD-ONLY with FOUR MORE required kwargs, so the old positional
+      call raised ``TypeError`` on EVERY attempt and the leg never
+      repaired anything (the supervisor logged a refusal and moved on).
+      The truthful outcomes are handled as they are:
+      ``pending_redrive`` (the durable task was found + made claimable),
+      the paused-resume legs (``resuming`` / ``already_resuming`` /
+      ``wake_enqueued``) and the no-work cases (``None`` →
+      ``no_task_found``; a refusal dict → surfaced as-is).
+
+    * **instance-less** → the adapter's GUARDED re-dispatch entrypoint
+      (``adapter.redrive_execution``): the same slot discipline as the
+      fire path (the execution semaphore is acquired — the concurrency
+      cap is never inflated by a re-drive) plus the age-cap and
+      deferrable-target coverage the direct call skipped.
+    """
+
+    async def _scheduled_fire_redrive(candidate: dict) -> dict:
+        """F2 make-claimable + wake, or adapter re-dispatch for no-instance."""
+        instance_id = candidate.get("instance_id")
+        if instance_id:
+            try:
+                resumed = await manager.resume_processing_job(
+                    instance_id, message="", silent=True, images=None,
+                )
+            except Exception as exc:  # noqa: BLE001 — fail-soft into supervisor
+                return {"status": "refused", "error": str(exc)}
+            if resumed is None:
+                # ``invalid_or_missing_handle`` — there is no durable work
+                # to re-drive. The row keeps its prior truthful status
+                # (never-started stays never-started, count+1, bounded by
+                # the cap) — a refusal, never a fake dispatch.
+                return {
+                    "status": "refused",
+                    "error": "no_task_found",
+                    "instance_id": instance_id,
+                }
+            if isinstance(resumed, dict):
+                return resumed
+            return {"status": "resuming", "instance_id": instance_id}
+        # No instance handle — re-dispatch the fire through the adapter. The
+        # source registry owns the adapters; find the one for this schedule.
+        try:
+            registry = manager.get_source_registry()
+            adapter = registry.get(candidate.get("schedule_id"))
+            if adapter is None or not hasattr(adapter, "redrive_execution"):
+                return {"status": "refused", "error": "no_adapter"}
+            outcome = await adapter.redrive_execution(
+                candidate["execution_id"]
+            )
+            if isinstance(outcome, dict):
+                return outcome
+            return {"status": "refused", "error": "bad_adapter_outcome"}
+        except Exception as exc:  # noqa: BLE001
+            return {"status": "refused", "error": str(exc)}
+
+    return _scheduled_fire_redrive
+
+
 def _wire_skills_router_services(manager: Any) -> None:
     """Wire the skills router's collaborators at BOOT — the production seam.
 
@@ -2261,43 +2332,21 @@ async def lifespan(app: FastAPI):
     # failed-to-dispatch) or whose dispatched row is stale past a bounded
     # deadline. Always-on, interval-driven, first tick IMMEDIATE; kill-switch
     # ENSEMBLE_SCHEDULED_FIRE_SUPERVISOR (default ON, =0 disables). Wired after
-    # the infrastructure sweeps; the re-drive callback uses the F2
-    # make-claimable + wake path (manager._schedule_explicit_handle_resume) for
-    # instance-bearing rows and re-dispatches via the scheduler adapter for
-    # instance-less rows. Never a direct claim (single consumer CAS).
+    # the infrastructure sweeps; the re-drive callback (the module-level
+    # ``_make_scheduled_fire_redrive`` — the REAL callback path the pin
+    # drives) uses the F2 make-claimable + wake path
+    # (manager.resume_processing_job) for instance-bearing rows and
+    # re-dispatches through the adapter's GUARDED entrypoint
+    # (adapter.redrive_execution) for instance-less rows. Never a direct
+    # claim (single consumer CAS).
     from daemon.services.scheduled_fire_supervisor import (
         ScheduledFireSupervisor,
         kill_switch_enabled as _scheduled_supervisor_enabled,
     )
 
-    async def _scheduled_fire_redrive(candidate: dict) -> dict:
-        """F2 make-claimable + wake, or adapter re-dispatch for no-instance."""
-        instance_id = candidate.get("instance_id")
-        if instance_id:
-            try:
-                resumed = await manager._schedule_explicit_handle_resume(
-                    instance_id, message="", silent=True, images=None,
-                )
-                if isinstance(resumed, dict):
-                    return resumed
-                return {"status": "resuming", "instance_id": instance_id}
-            except Exception as exc:  # noqa: BLE001 — fail-soft into supervisor
-                return {"status": "refused", "error": str(exc)}
-        # No instance handle — re-dispatch the fire through the adapter. The
-        # source registry owns the adapters; find the one for this schedule.
-        try:
-            registry = manager.get_source_registry()
-            adapter = registry.get(candidate.get("schedule_id"))
-            if adapter is None or not hasattr(adapter, "_execute_run"):
-                return {"status": "refused", "error": "no_adapter"}
-            await adapter._execute_run(candidate["execution_id"], "scheduled")
-            return {"status": "redriven", "execution_id": candidate["execution_id"]}
-        except Exception as exc:  # noqa: BLE001
-            return {"status": "refused", "error": str(exc)}
-
     scheduled_fire_supervisor = ScheduledFireSupervisor(
         manager,
-        redrive_callback=_scheduled_fire_redrive,
+        redrive_callback=_make_scheduled_fire_redrive(manager),
     )
     scheduled_fire_supervisor.start()
     app.state.scheduled_fire_supervisor = scheduled_fire_supervisor
