@@ -136,10 +136,18 @@ class TestAuthoritySplit:
         )
         assert out["action"] == "created"
         # ONE knowledge row exists — the tool wrote it, not the gate.
+        # The STANDING-DEFECT RESIDUAL rows ride along: they are the
+        # gate path's own writer (the Q-2 ruling — no boot-time seed),
+        # and they are dispositions, not gate events.
         rows = POKRepository(tool_env.engine).query_ledger("p1", limit=None)
-        assert len(rows) == 2  # the ADMISSION verdict + the EXECUTION
-        assert {r.phase for r in rows} == {"ADMISSION", "EXECUTION"}
-        assert all(r.gate_id == "g-1" for r in rows)
+        gate_rows = [r for r in rows if not (r.gate_id or "").startswith("standing-defect:")]
+        assert len(gate_rows) == 2  # the ADMISSION verdict + the EXECUTION
+        assert {r.phase for r in gate_rows} == {"ADMISSION", "EXECUTION"}
+        assert all(r.gate_id == "g-1" for r in gate_rows)
+        residual = [
+            r for r in rows if (r.gate_id or "").startswith("standing-defect:")
+        ]
+        assert len(residual) == 2  # the two standing defects
 
     def test_the_execution_row_rides_the_write_transaction(self, tool_env, monkeypatch) -> None:
         """§13.10 — the EXECUTION row is written with the write."""
@@ -216,8 +224,12 @@ class TestAskRoundTrip:
         rows = POKRepository(tool_env.engine).query_ledger("p1", limit=None)
         entry_rows = [r for r in rows if r.phase == "EXECUTION"]
         assert entry_rows == []
-        # The ASK_MINTED row IS there.
-        assert [r.phase for r in rows] == ["ASK_MINTED"]
+        # The ASK_MINTED row IS there (the standing-defect residual rows
+        # ride along on the gate path — dispositions, not gate events).
+        gate_rows = [
+            r for r in rows if not (r.gate_id or "").startswith("standing-defect:")
+        ]
+        assert [r.phase for r in gate_rows] == ["ASK_MINTED"]
 
     def test_a_confirming_answer_executes_the_write(self, tool_env, monkeypatch) -> None:
         _enforce(monkeypatch)
@@ -763,7 +775,10 @@ class TestToolRegistration:
         from daemon.tools._tool_registry import KNOWN_TOOL_NAMES
 
         assert "pok_gate_answer" in KNOWN_TOOL_NAMES
-        assert len(KNOWN_TOOL_NAMES) == 270
+        # The census tool joined the surface in Wave 2 Phase 9 (T9.1):
+        # 270 → 271 (the T8.5 pin's 270 + the census tool).
+        assert "pok_census" in KNOWN_TOOL_NAMES
+        assert len(KNOWN_TOOL_NAMES) == 271
 
     def test_the_registry_has_no_drift(self) -> None:
         from daemon.tools._tool_registry import (

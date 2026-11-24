@@ -88,8 +88,9 @@ def _manager(tool_env, project_id, agent_id):
 class TestRegistrationSurface:
     def test_four_tools_created(self, tool_env) -> None:
         # The G1 answer tool joined the surface in Wave 2 Phase 8
-        # (T8.5) — the four names are the KNOWN_TOOL_NAMES pin
-        # (269 → 270, design-amendments-v2 §13.2a).
+        # (T8.5) and the census tool in Wave 2 Phase 9 (T9.1) — the
+        # five names are the KNOWN_TOOL_NAMES pin (269 → 270 → 271,
+        # design-amendments-v2 §13.2a).
         tools = create_pok_tools(
             _manager(tool_env, "p1", "developer"),
             current_instance_id="inst-1",
@@ -100,6 +101,7 @@ class TestRegistrationSurface:
             "pok_query",
             "pok_curate",
             "pok_gate_answer",
+            "pok_census",
         ]
 
     def test_category_registered_in_modules(self) -> None:
