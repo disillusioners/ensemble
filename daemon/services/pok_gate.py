@@ -1769,6 +1769,18 @@ class PendingGate:
     merge_target_body: str | None = None
     merge_kind: str | None = None
     proposed_body: str | None = None
+    #: The R-RET COUNT-NEUTRALITY CARRIER (Wave-2 code review C-1,
+    #: fixed in the Phase-12 addendum round): when the gate converted
+    #: an ACCEPT into an ASK-with-rename, this is the slug the CALLER
+    #: passed — the PRE-RENAME slug. If an ACTIVE row lives under it,
+    #: the confirming answer must SUPERSEDE that row under the renamed
+    #: slug (``supersede_and_insert`` — the count-preserving,
+    #: FOR-UPDATE-locked, counter-carry-over machinery, T8.15) instead
+    #: of inserting a fresh row; without it, every confirmed rename
+    #: leaves the mis-slugged row ACTIVE and adds a second row (+1
+    #: active per write). ``None`` on every non-rename ASK — the
+    #: plain-ASK behavior is byte-unchanged.
+    prior_slug: str | None = None
     answered: bool = False
     #: The ASK is ROUTED TO THE CURATOR (T8.12): the merge target is
     #: pinned / curated, so only a curator (leader / project-manager)

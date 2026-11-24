@@ -80,6 +80,7 @@ from ..repositories.pok.models import POK_ARCHIVE_BASES, POKWriteGateLedger
 from ..repositories.pok.repository import POKRepository
 from ..services.pok_gate import (
     DEFAULT_MERGE_POLICY,
+    MERGE_POLICIES,
     ActiveRow,
     GateVerdict,
     PendingGate,
@@ -553,12 +554,22 @@ def active_rows_for_digest(engine: Any, project_id: str) -> list[ActiveRow]:
     ]
 
 
-def merge_policy_override() -> str | None:
-    """The F2 merge-policy dial (``None`` = the default).
+def merge_policy_override(engine: Any = None) -> str:
+    """The F2 merge-policy dial — the EFFECTIVE policy (Wave-2 code
+    review W-1, fixed in the Phase-12 addendum round).
 
     The dial lives on the same DB-backed switch family as the
-    enforcement switches (``pok_gate.merge_policy``); an absent row
-    reads as the DEFAULT (``ASK_WITH_PROPOSAL``).
+    enforcement switches (``pok_gate.merge_policy``); the row is read
+    PER CALL through the settings-read seam the sibling switches use
+    (``SettingsService.get_overrides()`` — a fresh session each call,
+    NEVER cached across a settings write), so a P1 ceremony write is
+    visible to the very next call.
+
+    Fail-safe direction (the same posture as ``read_gate_switches``):
+    an absent row, a missing engine, an invalid value or a degraded
+    read all resolve to the DEFAULT (``ASK_WITH_PROPOSAL``) — the
+    caller-confirmation direction. The value is validated against
+    :data:`MERGE_POLICIES` before use.
     """
     from ..services.settings_service import (  # noqa: PLC0415
         MANAGED_KEYS,
@@ -566,7 +577,22 @@ def merge_policy_override() -> str | None:
     )
 
     spec = MANAGED_KEYS.get(POK_GATE_MERGE_POLICY_KEY)
-    default = spec.default if spec is not None else "ASK_WITH_PROPOSAL"
+    default = spec.default if spec is not None else DEFAULT_MERGE_POLICY
+    if engine is None:
+        return default
+    try:
+        overrides = SettingsService(engine=engine).get_overrides()
+    except Exception as exc:  # noqa: BLE001 — degraded read ⇒ default
+        logger.warning(
+            "[POK] merge-policy dial read failed (%s) — the policy "
+            "stays at the default %s (fail-safe: caller confirmation)",
+            type(exc).__name__,
+            default,
+        )
+        return default
+    value = overrides.get(POK_GATE_MERGE_POLICY_KEY)
+    if value in MERGE_POLICIES:
+        return value
     return default
 
 
@@ -906,6 +932,7 @@ def create_pok_tools(
         merge_kind: str | None = None,
         proposed_body: str | None = None,
         effective_slug: str | None = None,
+        prior_slug: str | None = None,
         routed_to_curator: bool = False,
     ) -> PendingGate:
         """Mint the IN-PROCESS pending ASK state (T8.6).
@@ -915,6 +942,10 @@ def create_pok_tools(
         bypassed (the scope/fence/budget/no-op/caps checks re-run at
         answer time). NO live-store writes: the pending state is
         process memory only.
+
+        ``prior_slug`` (Wave-2 code review C-1) carries the PRE-RENAME
+        slug of an R-RET rename — the count-neutrality carrier the
+        confirming answer routes on (see :class:`PendingGate`).
         """
         ttl = _PENDING_GATES.ttl_s
         now = time.monotonic()
@@ -938,6 +969,7 @@ def create_pok_tools(
             merge_target_body=merge_target_body,
             merge_kind=merge_kind,
             proposed_body=proposed_body,
+            prior_slug=prior_slug,
         )
         pending.routed_to_curator = routed_to_curator
         _PENDING_GATES.mint(pending)
@@ -995,10 +1027,11 @@ def create_pok_tools(
         # ── A plain ASK ──
         question = outcome.question or "the write gate needs your confirmation"
         proposed_slug = getattr(verdict, "proposed_slug", None)
+        candidate_slug = outcome.candidate_slug or ""
         pending = _mint_pending(
             project_id=project_id,
             verdict=verdict,
-            slug=outcome.candidate_slug or "",
+            slug=candidate_slug,
             body=outcome.candidate_body or "",
             reason=reason,
             domain=domain,
@@ -1007,6 +1040,16 @@ def create_pok_tools(
             source_tier=source_tier,
             question=question,
             effective_slug=proposed_slug,
+            # R-RET COUNT-NEUTRALITY (Wave-2 code review C-1): the
+            # pre-rename slug rides the pending entry, so the
+            # confirming answer supersedes the mis-slugged ACTIVE row
+            # instead of inserting a second one. None on a plain ASK
+            # (no rename proposed) — byte-unchanged behavior.
+            prior_slug=(
+                candidate_slug
+                if (proposed_slug and proposed_slug != candidate_slug)
+                else None
+            ),
         )
         _append_verdict_row(
             engine,
@@ -1163,9 +1206,9 @@ def create_pok_tools(
             }
 
         # ── THE DELTA MERGE — the policy decides (F2) ──
-        policy = DEFAULT_MERGE_POLICY
-        if merge_policy_override() is not None:
-            policy = merge_policy_override()
+        # The dial is READ HERE, per call, from the DB-backed settings
+        # row (W-1: the P1 ceremony must actually be able to move it).
+        policy = merge_policy_override(engine)
         if policy == "AUTO":
             merged_body = proposal or candidate_body
             svc = POKService(engine)
@@ -1752,7 +1795,10 @@ def create_pok_tools(
             "verdict": "ASK",
             "judge_explanation": getattr(pending.verdict, "explanation", None),
             "confidence": getattr(pending.verdict, "confidence", None),
-            "target_slug": pending.merge_target_slug,
+            # On a confirmed R-RET rename the SUPERSEDED prior is the
+            # pre-rename slug (C-1) — the ledger row records which
+            # active row the count-preserving supersede flipped.
+            "target_slug": pending.merge_target_slug or pending.prior_slug,
             "merge_kind": pending.merge_kind,
         }
         target_slug = pending.merge_target_slug
@@ -1777,6 +1823,14 @@ def create_pok_tools(
                 project_name=project_name,
                 gate_fn=None,  # the answer path does NOT re-enter the gate
                 execution_audit=execution_audit,
+                # R-RET COUNT-NEUTRALITY (Wave-2 code review C-1): a
+                # confirmed RENAME resolves the prior under the
+                # PRE-RENAME slug and takes the supersede leg — the
+                # mis-slugged active row is superseded under the
+                # renamed slug (count-preserving, counters carried),
+                # never left behind while a second row is inserted.
+                # None on every non-rename ASK (byte-unchanged).
+                prior_slug=pending.prior_slug,
             )
         except POKError as exc:
             return _err(exc.code, exc.message, **exc.details)

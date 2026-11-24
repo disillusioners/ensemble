@@ -32,6 +32,7 @@ from sqlmodel import SQLModel
 
 import daemon.constants as constants
 import daemon.repositories.pok.models  # noqa: F401
+from daemon.models.app_settings import AppSetting
 from daemon.repositories.pok.models import (
     POKWriteGateLedger,
     ProjectOperatingKnowledge,
@@ -56,6 +57,9 @@ def tool_env(monkeypatch):
             ProjectOperatingKnowledge.__table__,
             ProjectOperatingKnowledgeEmbedding.__table__,
             POKWriteGateLedger.__table__,
+            # The merge-policy dial tests (W-1) read/write the
+            # DB-backed settings row through the real service.
+            AppSetting.__table__,
         ],
     )
 
@@ -500,6 +504,123 @@ class TestRetrievabilityRename:
         assert [r.slug for r in rows] == ["deploy-01-smoke-gate"]
 
 
+class TestRetrievabilityRenameCountNeutrality:
+    """Wave-2 code review C-1 (fixed in the Phase-12 addendum round).
+
+    The previously UNTESTED combination: an ACTIVE prior under the
+    mis-slugged slug + an R-RET rename + a confirming answer. The
+    confirming write must take the COUNT-PRESERVING supersede leg —
+    the prior row is superseded under the renamed slug (T8.15 count-
+    neutrality), never left active while a second row is inserted.
+    """
+
+    def _seed_prior(self, tool_env, slug="zzz-99-placeholder"):
+        repo = POKRepository(tool_env.engine)
+        row = ProjectOperatingKnowledge(
+            project_id="p1",
+            slug=slug,
+            domain="other",
+            audience="operation",
+            audience_agents=None,
+            body="the OLD body under the mis-slugged row",
+            provenance="observed",
+            status="active",
+            disputed=False,
+            superseded_by_id=None,
+            content_sha256="sha-c1-prior",
+            created_by_agent="developer",
+            verify_count=3,  # a lineage the successor must inherit
+            last_verified="2026-11-01T00:00:00+00:00",
+        )
+        repo.insert(row)
+        return row
+
+    def test_a_confirmed_rename_supersedes_the_prior_count_neutral(
+        self, tool_env, monkeypatch
+    ) -> None:
+        """C-1: prior + rename + confirm ⇒ SUPERSEDE, not new-write."""
+        _enforce(monkeypatch)
+        prior = self._seed_prior(tool_env)
+        _install_judge(
+            monkeypatch,
+            GateVerdict(
+                verdict="ASK",
+                family="boundary",
+                gate_id="g-c1",
+                question="re-slug it",
+                proposed_slug="deploy-01-smoke-gate",
+                retrievability_flagged=True,
+                rule_applied="R-RET",
+            ),
+        )
+        tools = _tools(tool_env)
+        out = tools[0].invoke(
+            {
+                "slug": "zzz-99-placeholder",
+                "body": "the deploy pipeline must run the smoke gate",
+                "reason": "the invariant",
+            }
+        )
+        assert out["action"] == "confirmation_required"
+        assert out["proposed_slug"] == "deploy-01-smoke-gate"
+        answer = tools[3].invoke(
+            {"gate_id": out["gate_id"], "answer": "yes, confirmed"}
+        )
+        assert answer["written"] is True
+        # The write is a SUPERSEDE of the prior, under the renamed slug.
+        assert answer["action"] == "superseded"
+        assert answer["superseded_id"] == prior.id
+        assert answer["slug"] == "deploy-01-smoke-gate"
+        repo = POKRepository(tool_env.engine)
+        # COUNT-NEUTRAL (T8.15): exactly ONE active row — one before,
+        # one after. The new-write leg would have left TWO.
+        active = repo.list_entries("p1", statuses=("active",))
+        assert len(active) == 1
+        assert active[0].slug == "deploy-01-smoke-gate"
+        # The OLD slug is superseded — not active, not lost.
+        old = repo.get(prior.id)
+        assert old.status == "superseded"
+        assert old.superseded_by_id == active[0].id
+        # The verify_count lineage CARRIED (the T11.16 counter-pin
+        # family: the counter carry-over at supersede_and_insert).
+        assert (active[0].verify_count or 0) == 3
+        assert active[0].last_verified == "2026-11-01T00:00:00+00:00"
+
+    def test_the_rename_execution_is_ledgered_with_the_superseded_prior(
+        self, tool_env, monkeypatch
+    ) -> None:
+        """The ASK_EXECUTED audit row records WHICH prior was
+        superseded (the pre-rename slug) — the durable record of the
+        count-neutral rename."""
+        _enforce(monkeypatch)
+        prior = self._seed_prior(tool_env)
+        _install_judge(
+            monkeypatch,
+            GateVerdict(
+                verdict="ASK",
+                family="boundary",
+                gate_id="g-c1-ledger",
+                question="re-slug it",
+                proposed_slug="deploy-01-smoke-gate",
+                retrievability_flagged=True,
+                rule_applied="R-RET",
+            ),
+        )
+        tools = _tools(tool_env)
+        out = tools[0].invoke(
+            {
+                "slug": "zzz-99-placeholder",
+                "body": "the deploy pipeline must run the smoke gate",
+                "reason": "the invariant",
+            }
+        )
+        tools[3].invoke({"gate_id": out["gate_id"], "answer": "yes, confirmed"})
+        rows = _ledger(tool_env, project_id="p1")
+        executed = [r for r in rows if r.phase == "ASK_EXECUTED"]
+        assert len(executed) == 1
+        assert executed[0].target_slug == "zzz-99-placeholder"
+
+
 # ── the shadow posture (T8.8) ──────────────────────────────────────────────
 
 
@@ -765,6 +886,112 @@ class TestSwitchPins:
         from daemon.services.pok_gate import POK_GATE_DEFAULT_MODEL
 
         assert POK_GATE_DEFAULT_MODEL == "quick"
+
+
+class TestMergePolicyDial:
+    """Wave-2 code review W-1 (fixed in the Phase-12 addendum round):
+    the F2 merge-policy dial is READ from the DB-backed settings row —
+    the P1 ceremony must actually be able to move it.
+
+    The read goes through the same seam the SIBLING switches use
+    (``SettingsService.get_overrides()``, a fresh session each call),
+    so a settings write is visible to the VERY NEXT call.
+    """
+
+    def _settings(self, tool_env):
+        from daemon.services.settings_service import SettingsService
+
+        return SettingsService(engine=tool_env.engine)
+
+    def test_an_absent_row_reads_as_the_default(self, tool_env) -> None:
+        assert pok_tools.merge_policy_override(tool_env.engine) == (
+            "ASK_WITH_PROPOSAL"
+        )
+
+    def test_a_set_row_is_read_non_default_and_default(self, tool_env) -> None:
+        settings = self._settings(tool_env)
+        # A NON-default value: the AUTO branch becomes reachable.
+        settings.set_override("pok_gate.merge_policy", "AUTO")
+        assert pok_tools.merge_policy_override(tool_env.engine) == "AUTO"
+        # The DEFAULT value, set EXPLICITLY as a row: the read returns
+        # the ROW value (not merely the fallback).
+        settings.set_override("pok_gate.merge_policy", "ASK_WITH_PROPOSAL")
+        assert (
+            pok_tools.merge_policy_override(tool_env.engine) == "ASK_WITH_PROPOSAL"
+        )
+
+    def test_a_settings_write_is_visible_to_the_next_call(self, tool_env) -> None:
+        """No staleness: the dial is read PER CALL (never cached across
+        a settings write) — a ceremony flip moves the very next write."""
+        settings = self._settings(tool_env)
+        settings.set_override("pok_gate.merge_policy", "AUTO")
+        assert pok_tools.merge_policy_override(tool_env.engine) == "AUTO"
+        # Flip it back through the settings surface — the next read sees it.
+        settings.set_override("pok_gate.merge_policy", "ASK_NO_PROPOSAL")
+        assert pok_tools.merge_policy_override(tool_env.engine) == (
+            "ASK_NO_PROPOSAL"
+        )
+        settings.clear_override("pok_gate.merge_policy")
+        assert pok_tools.merge_policy_override(tool_env.engine) == (
+            "ASK_WITH_PROPOSAL"
+        )
+
+    def test_no_engine_reads_as_the_default(self) -> None:
+        assert pok_tools.merge_policy_override(None) == "ASK_WITH_PROPOSAL"
+        assert pok_tools.merge_policy_override() == "ASK_WITH_PROPOSAL"
+
+    def test_an_invalid_row_value_falls_back_to_the_default(
+        self, tool_env
+    ) -> None:
+        """Belt-and-braces: a raw bogus row (bypassing the validating
+        write path) never reaches the policy decision."""
+        from sqlmodel import Session
+
+        with Session(tool_env.engine) as session:
+            session.merge(
+                AppSetting(
+                    key="pok_gate.merge_policy",
+                    value_json='"NOT_A_POLICY"',
+                    value_type="str",
+                    updated_at="2026-11-24T00:00:00+00:00",
+                )
+            )
+            session.commit()
+        assert pok_tools.merge_policy_override(tool_env.engine) == (
+            "ASK_WITH_PROPOSAL"
+        )
+
+    def test_the_dial_moves_the_merge_behavior_auto_executes(
+        self, tool_env, monkeypatch
+    ) -> None:
+        """END-TO-END: with the dial at AUTO, a delta MERGE executes
+        WITHOUT a confirmation round-trip (the previously unreachable
+        branch — the W-1 defect)."""
+        _enforce(monkeypatch)
+        TestMergeLegs()._seed_target(tool_env)
+        self._settings(tool_env).set_override("pok_gate.merge_policy", "AUTO")
+        _install_judge(
+            monkeypatch,
+            GateVerdict(
+                verdict="MERGE",
+                family="redundancy",
+                gate_id="g-w1-auto",
+                target_slug="target-01",
+                merge_kind="delta",
+                proposed_body="the target row body plus the nuance",
+                proposed_body_sha256="deadbeef",
+            ),
+        )
+        tools = _tools(tool_env)
+        out = tools[0].invoke(
+            {"slug": "new-auto", "body": "the same fact", "reason": "the invariant"}
+        )
+        assert out["action"] == "merged"
+        assert out["executed"] is True
+        rows = POKRepository(tool_env.engine).list_entries("p1", statuses=("active",))
+        assert len(rows) == 1
+        assert rows[0].slug == "target-01"
+        assert rows[0].body == "the target row body plus the nuance"
 
 
 # ── the tool-registration pin (phase11 T11) ────────────────────────────────

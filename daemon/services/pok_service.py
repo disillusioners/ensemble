@@ -375,6 +375,7 @@ class POKService:
         agent_id: str,
         project_name: str | None = None,
         escape_fn: Callable[[str], str] | None = None,
+        prior_slug: str | None = None,
     ) -> UpsertOutcome:
         """The write path: fence → budgets → scope → dedup/launder →
         admission → supersede-or-insert.
@@ -396,6 +397,16 @@ class POKService:
         None`` is the TRUSTED BYPASS: the gate slot is skipped
         entirely and the write proceeds unjudged — the answer path
         re-runs the write that way).
+
+        ``prior_slug`` (Wave-2 code review C-1, fixed in the Phase-12
+        addendum round) is the R-RET rename carrier: when a confirmed
+        rename executes, the write lands under the RENAMED slug while
+        the prior is resolved under the PRE-RENAME slug, so the
+        confirming answer takes the COUNT-PRESERVING supersede leg
+        (``supersede_and_insert``) instead of the new-write leg —
+        T8.15 count-neutrality. ``None`` (the default) resolves the
+        prior under the write slug — byte-unchanged behavior for
+        every other caller.
 
         ``execution_audit`` (Wave 2 Phase 8, T8.14) is the LEDGER
         CONTEXT for the EXECUTION row of a write the gate did not judge
@@ -507,7 +518,17 @@ class POKService:
         # forward-only — superseding it would resurrect it) and a
         # SUPERSEDED row is an ancestor. Same resolver as the curation
         # path, one explicit scope apart.
-        prior = self._repo.resolve_slug_row(project_id, slug, scope="active")
+        #
+        # R-RET COUNT-NEUTRALITY (Wave-2 code review C-1): when a
+        # confirmed rename executes, ``prior_slug`` names the
+        # PRE-RENAME slug — the prior is resolved under IT, so the
+        # successor (built under the renamed slug below) SUPERSEDES
+        # the mis-slugged active row instead of leaving it behind
+        # while a second row is inserted (+1 active per write). The
+        # null default resolves under the write slug (byte-unchanged).
+        prior = self._repo.resolve_slug_row(
+            project_id, prior_slug or slug, scope="active"
+        )
         if prior is not None:
             if normalize_body(prior.body) == normalize_body(body):
                 # Exact-dup no-op echo (Phase-1 behavior): the tier
@@ -931,6 +952,16 @@ class POKService:
         Family admission counts the successor against the family
         bound; the prior row leaves ``active`` in the SAME transaction
         it enters ``superseded``.
+
+        CROSS-SLUG (the R-RET rename execution, Wave-2 code review
+        C-1): when the write arrives through ``prior_slug``, the
+        successor carries the RENAMED slug while the prior carries the
+        pre-rename one — the ACTIVE COUNT stays neutral (the T8.15
+        contract: one row leaves ``active``, one enters it) and the
+        counter lineage carries over exactly as on the same-slug
+        path. The FAMILY MIX may move (the prior's family loses a
+        member, the successor's gains one); the family bound remains
+        owned by the NEW-slug admission path, unchanged.
         """
         if prior.pinned and not is_curator(agent_id):
             raise POKError(
