@@ -42,6 +42,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -102,7 +103,11 @@ class FakeSourceRepo:
 
     def heal_execution_receipt_executed(self, execution_id, outcome, instance_id=None):
         self.healed.append((execution_id, outcome, instance_id))
-        return object()
+        # F1: the REAL heal returns the updated row with status closed
+        # to ``executed``; the supervisor now consumes that status, so
+        # the fake must carry it (an anonymous ``object()`` would read
+        # as an A.1 refusal).
+        return SimpleNamespace(status="executed")
 
 
 class FakeTaskRepo:
@@ -475,6 +480,7 @@ class TestNit1RealSubstrate:
                 schedule_id="sched-1",
                 status=ExecutionStatus.TRIGGERED.value,
                 triggered_at="2026-11-24T00:00:00+00:00",
+                instance_id="inst-7",  # F1: the heal needs a handle
             ))
             session.commit()
         repo.heal_execution_receipt_executed("exec-C", "completed", None)
@@ -484,6 +490,66 @@ class TestNit1RealSubstrate:
             stale_before, lookback, 200,
         )
         assert [c["execution_id"] for c in candidates] == []
+
+    def test_heal_refuses_without_an_instance_handle(self, src_engine, repo):
+        """F1 (leader decision — the deviation is NOT ratified): A.1
+        forbids a completed fire with a NULL instance handle, so the
+        heal REFUSES an open row that carries no handle (none passed,
+        none on the row) and keeps its prior truthful state.
+
+        FAIL-HONEST: at the pre-F1 base this heal WROTE
+        ``status='executed'`` with ``instance_id IS NULL`` — the pin
+        REDs there (asserts the untouched open row) and GREENs after
+        the fix."""
+        from sqlmodel import Session
+
+        from daemon.repositories.source.models import ScheduleExecution
+        with Session(src_engine) as session:
+            session.add(ScheduleExecution(
+                execution_id="exec-R",
+                schedule_id="sched-1",
+                status=ExecutionStatus.TRIGGERED.value,
+                triggered_at="2026-11-24T00:00:00+00:00",
+            ))
+            session.commit()
+        healed = repo.heal_execution_receipt_executed("exec-R", "completed", None)
+        assert healed is not None
+        # The prior truthful OPEN state — untouched.
+        assert healed.status == ExecutionStatus.TRIGGERED.value
+        assert healed.outcome is None
+        assert healed.completed_at is None
+        assert healed.instance_id is None
+        # The refusal also holds when the ARG carries the NULL and the
+        # row itself carries none — the union of the two sources is
+        # empty. (Same call shape as the supervisor's landed path.)
+        with Session(src_engine) as session:
+            re_read = session.get(ScheduleExecution, "exec-R")
+        assert re_read is not None
+        assert re_read.status == ExecutionStatus.TRIGGERED.value
+
+    def test_heal_succeeds_when_the_row_carries_the_handle(self, src_engine, repo):
+        """The F1 counterpart: a handle ALREADY on the open row
+        satisfies A.1 — the heal closes it without needing the
+        argument, and never rewrites the existing handle."""
+        from sqlmodel import Session
+
+        from daemon.repositories.source.models import ScheduleExecution
+        with Session(src_engine) as session:
+            session.add(ScheduleExecution(
+                execution_id="exec-H2",
+                schedule_id="sched-1",
+                status=ExecutionStatus.TRIGGERED.value,
+                triggered_at="2026-11-24T00:00:00+00:00",
+                instance_id="inst-already",
+            ))
+            session.commit()
+        healed = repo.heal_execution_receipt_executed(
+            "exec-H2", "completed", None,
+        )
+        assert healed is not None
+        assert healed.status == ExecutionStatus.EXECUTED.value
+        assert healed.instance_id == "inst-already"
+        assert healed.completed_at is not None
 
 
 # ---------------------------------------------------------------------------

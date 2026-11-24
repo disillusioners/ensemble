@@ -1532,16 +1532,27 @@ class SQLModelSourceRepository:
         Keyed by the execution id (NOT the ``job_item_id`` handle — that
         handle is exactly what was lost with the fail-soft dispatched
         write). Bounded to the OPEN states: a row already terminalized
-        by another path is never rewritten. The ``instance_id`` handle
-        rides along when the evidence row carried one; on a healed row
-        it is allowed to stay NULL because the row is TERMINAL (the A.1
-        handle rule governs the OPEN ``dispatched`` state only).
+        by another path is never rewritten.
+
+        A.1 HANDLE RULE (fix/post-outage-recovery F1, leader decision —
+        the deviation is NOT ratified): a completed fire may never
+        carry a NULL ``instance_id``. The heal therefore REQUIRES a
+        non-NULL instance handle — from the ``instance_id`` argument
+        or already on the row — and REFUSES otherwise, keeping the
+        row's prior truthful (open) state. A refused heal is retried
+        by the next sweep pass if a handle surfaces; the row is never
+        closed ``executed`` with a NULL handle.
         """
         with Session(self.engine) as session:
             execution = session.get(ScheduleExecution, execution_id)
             if execution is None:
                 return None
             if execution.status not in self._RECEIPT_OPEN_STATES:
+                return execution
+            if not (instance_id or execution.instance_id):
+                # F1: refuse — A.1 forbids a completed fire with a NULL
+                # instance handle. The row keeps its prior truthful
+                # (open) state; no exception, no partial write.
                 return execution
             execution.status = ExecutionStatus.EXECUTED.value
             execution.outcome = outcome

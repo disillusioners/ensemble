@@ -314,8 +314,16 @@ class ScheduledFireSupervisor:
         the row is closed to that terminal state instead of being
         re-dispatched as a SECOND delivery of the same execution. The
         instance handle rides along from the evidence row when one is
-        available (it is allowed to stay NULL on this heal — the row is
-        TERMINAL, so the A.1 open-state handle rule does not apply).
+        available.
+
+        F1 (fix/post-outage-recovery): the heal REFUSES when no
+        non-NULL instance handle is available (A.1 — a completed fire
+        never carries a NULL handle, deviation NOT ratified). On a
+        refusal the row keeps its prior truthful OPEN state: the
+        candidate is NOT counted as healed, and it is still NOT
+        re-driven here (the delivery DID land — a landed delivery is
+        never double-driven); the open row stays visible to the next
+        sweep pass.
         """
         healer = getattr(
             self._source_repo, "heal_execution_receipt_executed", None
@@ -340,6 +348,20 @@ class ScheduledFireSupervisor:
             return False
         if healed is None:
             return False
+        if getattr(healed, "status", None) != "executed":
+            # F1 refusal (A.1: no non-NULL instance handle): the row
+            # keeps its prior OPEN state — never counted as healed.
+            # The delivery DID land, so the candidate is still not
+            # re-driven here (a landed delivery is never double-driven);
+            # the open row is re-examined by the next sweep pass.
+            logger.warning(
+                "[SCHEDULED_SUPERVISOR_HEAL_REFUSED] execution=%s — the "
+                "landed-delivery heal REFUSED (no non-NULL instance "
+                "handle; A.1 forbids a completed fire with a NULL "
+                "handle); the row keeps its open state",
+                str(execution_id)[:8],
+            )
+            return True
         result.healed_receipt += 1
         logger.error(
             "[SCHEDULED_SUPERVISOR_LANDED_DELIVERY_HEALED] execution=%s "

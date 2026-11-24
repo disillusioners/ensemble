@@ -131,6 +131,50 @@ def test_mutation_completed_null_instance_is_red(receipt_repo):
     assert row.instance_id is not None
 
 
+def test_addendum_a_closed_vocabulary_membership():
+    """D3 (reviewer fold, fix/post-outage-recovery): the Addendum-A
+    closed vocabulary is EXACTLY these members — pinned structurally.
+
+    ``suppressed`` is RESERVED: a member of the enum and accepted on
+    the registry callback path (``daemon/sources/registry.py``), but
+    NO writer mints it today (the re-arm's ``skipped_operator``
+    outcome is consumed log-locally and never reaches the receipt
+    write). The pin freezes the membership so a silent vocabulary
+    change (a member removed, or one added without a ratification
+    note in the enum comment) is visible.
+    """
+    members = {m.value for m in ExecutionStatus}
+    # The full closed vocabulary: the LEGACY members (triggered /
+    # running / completed / failed / skipped), the dispatch-phase pair
+    # (queued / deferred), and the Addendum-A receipt block — of which
+    # ``suppressed`` is RESERVED (see the enum comment).
+    assert members == {
+        "triggered", "running", "completed", "failed", "skipped",
+        "queued", "deferred",
+        "executed", "dispatched", "never-started",
+        "failed-to-dispatch", "suppressed",
+    }
+    # The Addendum-A receipt block is present in full...
+    for value in (
+        "executed", "dispatched", "never-started",
+        "failed-to-dispatch", "suppressed",
+    ):
+        assert ExecutionStatus.is_valid(value)
+    # ...and the RESERVED member is the one the commission names:
+    assert ExecutionStatus.SUPPRESSED.value == "suppressed"
+    # But its comment must carry the RESERVED ratification
+    # note — the vocabulary never grows silently.
+    import inspect
+
+    import daemon.repositories.source.models as source_models
+
+    enum_src = inspect.getsource(source_models)
+    assert "RESERVED" in enum_src, (
+        "the 'suppressed' member's comment must carry the RESERVED "
+        "ratification note (fix/post-outage-recovery D3)"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 3. Closing-callback pin — terminal closes receipt; never wedges the job
 # ---------------------------------------------------------------------------

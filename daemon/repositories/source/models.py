@@ -62,6 +62,12 @@ class ExecutionStatus(str, enum.Enum):
     DISPATCHED = "dispatched"                # turn started, outcome pending (the ONLY open state)
     NEVER_STARTED = "never-started"          # fired; zero checkpoints/task/message/children
     FAILED_TO_DISPATCH = "failed-to-dispatch"  # enqueue/claim path failed
+    # RESERVED vocabulary (fix/post-outage-recovery D3, leader decision):
+    # accepted on the registry callback path and member of the closed
+    # Addendum-A vocabulary, but NO writer mints it today — the re-arm's
+    # ``skipped_operator`` outcome (scheduler.py) is consumed log-locally
+    # and never reaches the receipt write. Do NOT invent a writer to
+    # exercise it; a future suppression path ratifies the member first.
     SUPPRESSED = "suppressed"                # operator intent won (mirrors re-arm skipped_operator)
 
     @classmethod

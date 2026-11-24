@@ -152,6 +152,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import text
+from sqlalchemy.sql.elements import TextClause
 from sqlmodel import Session, func, select
 
 from daemon.constants import NON_TERMINAL_TASK_STATUSES
@@ -272,6 +273,131 @@ def is_proven_terminal_message_status(status: str | None) -> bool:
     unless proven terminal.
     """
     return (status or "") in _TERMINAL_MESSAGE_STATUSES
+
+
+def _candidate_selection_statement() -> TextClause:
+    """The anchored candidate-selection SQL — the D1 PG fix.
+
+    THE DERIVED-TABLE WRAPPER (fix/post-outage-recovery D1,
+    reviewer-specified shape): the inner SELECT projects the two
+    evidence aliases (``task_completed_at``, ``message_completed_at``);
+    the OUTER query ranks by them. The pre-fix shape referenced those
+    SELECT-list aliases INSIDE the ORDER BY's CASE expression — legal
+    SQLite, but PostgreSQL rejects an output-alias reference inside an
+    ORDER-BY expression with ``UndefinedColumn`` (executed repro:
+    psycopg ``ProgrammingError: column "task_completed_at" does not
+    exist``). Wrapped, the aliases are REAL columns of the derived
+    table, so both engines accept the statement.
+
+    Ranking semantics are UNCHANGED — NIT-4's newest-evidence max, the
+    portable two-column CASE (no ``MAX(a, b)`` aggregate — that is
+    PG-only), TEXT/naive-UTC stamps that compare chronologically on
+    both engines. The wrapper changes ONLY the alias resolution, not
+    one byte of the ranking.
+
+    The builder exists as a module function so the PG-executed pin
+    (``tests/unit/services/test_stale_running_sweep_pg_selection_pins.py``)
+    can execute the REAL production SQL on a transaction it controls
+    — the durable lesson: SQLite-substrate pins false-pass PG-dialect
+    SQL, so dialect-sensitive SQL needs at least one PG-executed leg.
+    """
+    non_terminal_tasks = ",".join(
+        f"'{s}'" for s in sorted(NON_TERMINAL_TASK_STATUSES)
+    )
+    terminal_msgs = ",".join(
+        f"'{s}'" for s in sorted(_TERMINAL_MESSAGE_STATUSES)
+    )
+    return text(
+        f"""
+        SELECT
+            instance_id,
+            task_completed_at,
+            message_completed_at,
+            parent_id,
+            agent_id,
+            version
+        FROM (
+            SELECT
+                i.instance_id AS instance_id,
+                (SELECT t2.completed_at FROM task t2
+                 WHERE t2.instance_id = i.instance_id
+                   AND t2.status = 'completed'
+                   AND t2.completed_at IS NOT NULL
+                 ORDER BY t2.completed_at DESC, t2.id DESC LIMIT 1
+                ) AS task_completed_at,
+                (SELECT m2.completed_at FROM message_queue m2
+                 WHERE m2.instance_id = i.instance_id
+                   AND m2.status = 'completed'
+                 ORDER BY m2.completed_at DESC LIMIT 1
+                ) AS message_completed_at,
+                i.parent_id AS parent_id,
+                i.agent_id AS agent_id,
+                i.version AS version
+            FROM instances i
+            WHERE i.status = 'running'
+              AND NOT EXISTS (
+                  SELECT 1 FROM task t
+                  WHERE t.instance_id = i.instance_id
+                    AND t.status IN ({non_terminal_tasks})
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM message_queue mq
+                  WHERE mq.instance_id = i.instance_id
+                    AND mq.status NOT IN ({terminal_msgs})
+              )
+              AND (
+                  EXISTS (
+                      SELECT 1 FROM task t3
+                      WHERE t3.instance_id = i.instance_id
+                        AND t3.status = 'completed'
+                        AND t3.completed_at IS NOT NULL
+                  )
+                  OR EXISTS (
+                      SELECT 1 FROM message_queue m3
+                      WHERE m3.instance_id = i.instance_id
+                        AND m3.status = 'completed'
+                  )
+              )
+        ) AS stale_candidates
+        ORDER BY
+            -- NIT-4 (fix/post-outage-recovery SCOPE (c) rider):
+            -- the ORDER BY must rank by the SAME evidence the
+            -- PYTHON age leg uses — the NEWEST completion stamp
+            -- (max of the completed-task stamp and the completed
+            -- message stamp). The old shape ranked by
+            -- COALESCE(task_completed_at, message_completed_at):
+            -- that is the OLDEST of the two when the task stamp
+            -- exists. A row whose task evidence is OLD but whose
+            -- message evidence is NEW therefore sorted to the FRONT
+            -- of the candidate window, consumed a cap slot, and
+            -- was then skipped by the age leg ("young") — starving
+            -- a genuinely eligible row behind it (the cap
+            -- starvation). Ranking by the NEWEST evidence puts the
+            -- eligible rows first.
+            --
+            -- PORTABLE MAX over two TEXT columns: both stamps are
+            -- naive-UTC SQLAlchemy DateTime columns with the SAME
+            -- storage format ("YYYY-MM-DD HH:MM:SS.ffffff"), so the
+            -- lexicographic comparison IS chronological (the
+            -- healer's dialect-soundness lesson — no datetime
+            -- function, so SQLite and PostgreSQL agree). The CASE
+            -- expression is the two-argument max that both engines
+            -- implement (``MAX(a, b)`` is an aggregate in PG).
+            --
+            -- D1: the CASE columns are REAL columns of the
+            -- ``stale_candidates`` derived table (see the builder
+            -- docstring) — PG rejects the same expression when it
+            -- references the bare SELECT-list aliases.
+            CASE
+                WHEN task_completed_at IS NULL THEN message_completed_at
+                WHEN message_completed_at IS NULL THEN task_completed_at
+                WHEN task_completed_at >= message_completed_at
+                    THEN task_completed_at
+                ELSE message_completed_at
+            END ASC
+        LIMIT :cap
+        """
+    )
 
 
 @dataclass
@@ -400,89 +526,12 @@ class StaleRunningSweepService:
         outside that pair (ready/processing/retrying/pending AND any
         off-shape value) keeps the instance out of the candidate set.
         """
-        non_terminal_tasks = ",".join(
-            f"'{s}'" for s in sorted(NON_TERMINAL_TASK_STATUSES)
-        )
-        terminal_msgs = ",".join(
-            f"'{s}'" for s in sorted(_TERMINAL_MESSAGE_STATUSES)
-        )
-        statement = text(
-            f"""
-            SELECT
-                i.instance_id AS instance_id,
-                (SELECT t2.completed_at FROM task t2
-                 WHERE t2.instance_id = i.instance_id
-                   AND t2.status = 'completed'
-                   AND t2.completed_at IS NOT NULL
-                 ORDER BY t2.completed_at DESC, t2.id DESC LIMIT 1
-                ) AS task_completed_at,
-                (SELECT m2.completed_at FROM message_queue m2
-                 WHERE m2.instance_id = i.instance_id
-                   AND m2.status = 'completed'
-                 ORDER BY m2.completed_at DESC LIMIT 1
-                ) AS message_completed_at,
-                i.parent_id AS parent_id,
-                i.agent_id AS agent_id,
-                i.version AS version
-            FROM instances i
-            WHERE i.status = 'running'
-              AND NOT EXISTS (
-                  SELECT 1 FROM task t
-                  WHERE t.instance_id = i.instance_id
-                    AND t.status IN ({non_terminal_tasks})
-              )
-              AND NOT EXISTS (
-                  SELECT 1 FROM message_queue mq
-                  WHERE mq.instance_id = i.instance_id
-                    AND mq.status NOT IN ({terminal_msgs})
-              )
-              AND (
-                  EXISTS (
-                      SELECT 1 FROM task t3
-                      WHERE t3.instance_id = i.instance_id
-                        AND t3.status = 'completed'
-                        AND t3.completed_at IS NOT NULL
-                  )
-                  OR EXISTS (
-                      SELECT 1 FROM message_queue m3
-                      WHERE m3.instance_id = i.instance_id
-                        AND m3.status = 'completed'
-                  )
-              )
-            ORDER BY
-                -- NIT-4 (fix/post-outage-recovery SCOPE (c) rider):
-                -- the ORDER BY must rank by the SAME evidence the
-                -- PYTHON age leg uses — the NEWEST completion stamp
-                -- (max of the completed-task stamp and the completed
-                -- message stamp). The old shape ranked by
-                -- COALESCE(task_completed_at, message_completed_at):
-                -- that is the OLDEST of the two when the task stamp
-                -- exists. A row whose task evidence is OLD but whose
-                -- message evidence is NEW therefore sorted to the FRONT
-                -- of the candidate window, consumed a cap slot, and
-                -- was then skipped by the age leg ("young") — starving
-                -- a genuinely eligible row behind it (the cap
-                -- starvation). Ranking by the NEWEST evidence puts the
-                -- eligible rows first.
-                --
-                -- PORTABLE MAX over two TEXT columns: both stamps are
-                -- naive-UTC SQLAlchemy DateTime columns with the SAME
-                -- storage format ("YYYY-MM-DD HH:MM:SS.ffffff"), so the
-                -- lexicographic comparison IS chronological (the
-                -- healer's dialect-soundness lesson — no datetime
-                -- function, so SQLite and PostgreSQL agree). The CASE
-                -- expression is the two-argument max that both engines
-                -- implement (``MAX(a, b)`` is an aggregate in PG).
-                CASE
-                    WHEN task_completed_at IS NULL THEN message_completed_at
-                    WHEN message_completed_at IS NULL THEN task_completed_at
-                    WHEN task_completed_at >= message_completed_at
-                        THEN task_completed_at
-                    ELSE message_completed_at
-                END ASC
-            LIMIT :cap
-            """
-        )
+        # D1 (fix/post-outage-recovery): the statement lives in the
+        # module-level builder — the derived-table wrapper that makes
+        # the ORDER-BY alias references PG-sound while keeping the
+        # NIT-4 newest-evidence ranking byte-for-byte. The PG-executed
+        # pin executes THIS builder's output directly.
+        statement = _candidate_selection_statement()
         with self._manager.engine.connect() as conn:
             rows = conn.execute(statement, {"cap": int(cap)}).mappings().all()
         return [dict(row) for row in rows]
