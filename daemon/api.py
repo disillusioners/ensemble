@@ -2256,6 +2256,56 @@ async def lifespan(app: FastAPI):
     )
 
     # ─────────────────────────────────────────────────────────────
+    # ScheduledFireSupervisor (Addendum A.4, 2026-11-24) — consumes the
+    # execution receipt to re-drive fires that began no turn (never-started /
+    # failed-to-dispatch) or whose dispatched row is stale past a bounded
+    # deadline. Always-on, interval-driven, first tick IMMEDIATE; kill-switch
+    # ENSEMBLE_SCHEDULED_FIRE_SUPERVISOR (default ON, =0 disables). Wired after
+    # the infrastructure sweeps; the re-drive callback uses the F2
+    # make-claimable + wake path (manager._schedule_explicit_handle_resume) for
+    # instance-bearing rows and re-dispatches via the scheduler adapter for
+    # instance-less rows. Never a direct claim (single consumer CAS).
+    from daemon.services.scheduled_fire_supervisor import (
+        ScheduledFireSupervisor,
+        kill_switch_enabled as _scheduled_supervisor_enabled,
+    )
+
+    async def _scheduled_fire_redrive(candidate: dict) -> dict:
+        """F2 make-claimable + wake, or adapter re-dispatch for no-instance."""
+        instance_id = candidate.get("instance_id")
+        if instance_id:
+            try:
+                resumed = await manager._schedule_explicit_handle_resume(
+                    instance_id, message="", silent=True, images=None,
+                )
+                if isinstance(resumed, dict):
+                    return resumed
+                return {"status": "resuming", "instance_id": instance_id}
+            except Exception as exc:  # noqa: BLE001 — fail-soft into supervisor
+                return {"status": "refused", "error": str(exc)}
+        # No instance handle — re-dispatch the fire through the adapter. The
+        # source registry owns the adapters; find the one for this schedule.
+        try:
+            registry = manager.get_source_registry()
+            adapter = registry.get(candidate.get("schedule_id"))
+            if adapter is None or not hasattr(adapter, "_execute_run"):
+                return {"status": "refused", "error": "no_adapter"}
+            await adapter._execute_run(candidate["execution_id"], "scheduled")
+            return {"status": "redriven", "execution_id": candidate["execution_id"]}
+        except Exception as exc:  # noqa: BLE001
+            return {"status": "refused", "error": str(exc)}
+
+    scheduled_fire_supervisor = ScheduledFireSupervisor(
+        manager,
+        redrive_callback=_scheduled_fire_redrive,
+    )
+    scheduled_fire_supervisor.start()
+    app.state.scheduled_fire_supervisor = scheduled_fire_supervisor
+    manager._scheduled_fire_supervisor = scheduled_fire_supervisor
+    logger.info("ScheduledFireSupervisor started: kill_switch=%s",
+                "on" if _scheduled_supervisor_enabled() else "off")
+
+    # ─────────────────────────────────────────────────────────────
     # clipboard-image-chat Phase 3 (Tasks 4-5) — tmp-image retention
     # sweep. ALWAYS-ON infrastructure (NO kill-switch env var — per
     # the project owner's HARD POLICY on Batch A, architect amendment
@@ -5045,6 +5095,17 @@ async def lifespan(app: FastAPI):
                 f"PlaneSyncWatchdogService shutdown error: {e}"
             )
         app.state.plane_sync_watchdog = None
+
+    # --- ScheduledFireSupervisor shutdown (Addendum A.4) ---
+    _sched_fire_supervisor = getattr(
+        app.state, "scheduled_fire_supervisor", None
+    )
+    if _sched_fire_supervisor is not None:
+        try:
+            await _sched_fire_supervisor.stop()
+        except Exception as e:
+            logger.warning(f"ScheduledFireSupervisor shutdown error: {e}")
+        app.state.scheduled_fire_supervisor = None
 
     # --- WatchReconcileSweepService shutdown (U1-SLICE) ---
     # Stop the held-watcher reconcile + zombie-GC sweep BEFORE
