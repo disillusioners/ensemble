@@ -1,8 +1,8 @@
 # POK write-gate guideline — Phase 12 ratification diff
 
 Base: ff89fee9953dda9e455c82a8e995fbacfaec128b (the last commit that touched docs/guidelines/guideline-pok-durable-vs-rolling-state.md before this amendment)
-Head: 5ce666511 (the Phase-12 amendment + fix round 1 + the addendum round + the final docs continuation: the boundary-split line)
-Command: git diff ff89fee9953dda9e455c82a8e995fbacfaec128b..5ce666511 -- docs/guidelines/guideline-pok-durable-vs-rolling-state.md
+Head: 4b43be905 (the Phase-12 amendment + fix round 1 + the addendum round + the final docs continuation + the final splice; the GUIDELINE text is unchanged by the last two commits, so the diff BODY is unchanged)
+Command: git diff ff89fee9953dda9e455c82a8e995fbacfaec128b..4b43be905 -- docs/guidelines/guideline-pok-durable-vs-rolling-state.md
 
 diff --git a/docs/guidelines/guideline-pok-durable-vs-rolling-state.md b/docs/guidelines/guideline-pok-durable-vs-rolling-state.md
 index ad2506b05..ed6f0a1f9 100644
