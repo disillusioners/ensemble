@@ -291,14 +291,70 @@ class POKRepository:
         ``uq_pok_active_slug`` fires. One commit = no window.
         ``pinned`` does NOT carry over (the successor is unpinned;
         re-pinning is an explicit curator act via pok_curate).
+
+        COUNTER CARRY-OVER (pok-write-gate Phase 2, T2.7 — design-
+        amendments-v2 §13.4 defect #2): the successor INHERITS the
+        prior row's counters (``verify_count`` + ``access_count``) and
+        the prior ``last_verified`` / ``last_accessed_at`` stamps
+        instead of defaulting to 0. Rationale: every merge is a
+        supersede, and a supersede that silently resets the counters
+        breaks the J trusted-metric chain (gate-stamped verify_count
+        IS the trusted metric) — the chain would restart at every
+        merge, making the metric self-defending against exactly the
+        rows the librarian most needs to judge.
+
+        The counters ADD to whatever the successor already carries
+        (``prior + successor``) rather than overwriting it: the
+        successor is normally a fresh row with 0, so the sum is the
+        inherited value; a caller that pre-set a counter keeps it.
+        ``verify_count`` is the metric the librarian trusts
+        (design-amendments-v2 §13.2 fork J); ``access_count`` rides
+        along as LEGACY corroboration only.
         """
         prior_id = prior.id
-        prior.status = "superseded"
-        prior.superseded_by_id = successor.id
-        prior.pinned = False
-        prior.updated_at = _utc_now_iso()
         with Session(self._engine) as session:
-            session.add(prior)
+            # The PERSISTED prior row is the authority for the
+            # carry-over and for the status flip. Reading it here (not
+            # trusting the caller's in-memory snapshot) matters twice
+            # over: a snapshot taken before a ``record_verification``
+            # bump would carry STALE counters, and merging that stale
+            # snapshot back over the row would ZERO the lineage this
+            # method exists to preserve.
+            db_prior = session.get(ProjectOperatingKnowledge, prior_id)
+            if db_prior is not None:
+                # Counter carry-over — the successor inherits the
+                # lineage's counters (T2.7). `last_verified` is carried
+                # with them: the verify stamp IS the provenance of the
+                # count.
+                successor.verify_count = (db_prior.verify_count or 0) + (
+                    successor.verify_count or 0
+                )
+                successor.access_count = (db_prior.access_count or 0) + (
+                    successor.access_count or 0
+                )
+                if successor.last_verified is None:
+                    successor.last_verified = db_prior.last_verified
+                if successor.last_accessed_at is None:
+                    successor.last_accessed_at = db_prior.last_accessed_at
+                db_prior.status = "superseded"
+                db_prior.superseded_by_id = successor.id
+                db_prior.pinned = False
+                db_prior.updated_at = _utc_now_iso()
+                session.add(db_prior)
+            else:
+                # The prior was never persisted — fall back to the
+                # caller's snapshot (the historical behaviour).
+                prior.status = "superseded"
+                prior.superseded_by_id = successor.id
+                prior.pinned = False
+                prior.updated_at = _utc_now_iso()
+                session.add(prior)
+            # Keep the caller's object observably consistent with the
+            # row (the historical contract of this method).
+            prior.status = "superseded"
+            prior.superseded_by_id = successor.id
+            prior.pinned = False
+            prior.updated_at = _utc_now_iso()
             session.add(successor)
             session.commit()
             session.refresh(successor)
