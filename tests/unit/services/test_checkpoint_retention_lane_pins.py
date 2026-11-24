@@ -936,3 +936,49 @@ class TestBlobAntiJoinIsNamespaceScoped:
                 thread_id,
             )
         assert [r["version"] for r in rows] == [kept_version]
+
+
+class TestBackstopRegistrationSeam:
+    """The registration seam (the knobs the manager reads at boot).
+
+    The manager's registration block calls ``backstop_registration_params()``
+    rather than reading the env knobs inline — so the knob SHAPE (the
+    arity of the flag/int reads, the interval floor) is pinned by a
+    test that CALLS the seam. (An inline read with the wrong arity is a
+    TypeError at manager-initialize time — hours away from the edit
+    that caused it.)
+    """
+
+    def test_the_default_registration_is_enabled_on_the_hour(
+        self, monkeypatch,
+    ):
+        monkeypatch.delenv(mt.BACKSTOP_KILL_SWITCH_ENV, raising=False)
+        monkeypatch.delenv(mt.BACKSTOP_INTERVAL_ENV, raising=False)
+        enabled, interval = mt.backstop_registration_params()
+        assert enabled is True
+        assert interval == mt.DEFAULT_BACKSTOP_INTERVAL_MINUTES
+
+    def test_the_kill_switch_disables_the_registration(self, monkeypatch):
+        monkeypatch.setenv(mt.BACKSTOP_KILL_SWITCH_ENV, "0")
+        enabled, _interval = mt.backstop_registration_params()
+        assert enabled is False
+
+    def test_the_interval_is_floored_at_one_minute(self, monkeypatch):
+        monkeypatch.setenv(mt.BACKSTOP_INTERVAL_ENV, "0")
+        _enabled, interval = mt.backstop_registration_params()
+        assert interval == 1, (
+            "a 0 interval means 'never due' under the service's disable "
+            "convention — the kill switch is the way to express 'off'"
+        )
+
+    def test_the_manager_registers_the_backstop_through_the_seam(self):
+        """The manager's registration block uses the seam (a source
+        pin — the wiring itself lives in a deep initialize() path)."""
+        import inspect
+
+        from daemon import manager as manager_mod
+
+        source = inspect.getsource(manager_mod)
+        assert "backstop_registration_params()" in source
+        assert '"checkpoint_backstop_prune"' in source
+        assert "checkpoint_cleanup.run_backstop_prune" in source

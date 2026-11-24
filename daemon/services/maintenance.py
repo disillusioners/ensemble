@@ -396,6 +396,28 @@ BACKSTOP_PAIR_BUDGET_ENV = "ENSEMBLE_CHECKPOINT_BACKSTOP_PAIR_BUDGET"
 #: The default backstop interval (minutes).
 DEFAULT_BACKSTOP_INTERVAL_MINUTES = 60
 
+
+def backstop_registration_params() -> tuple[bool, int]:
+    """``(enabled, interval_minutes)`` for the backstop job's registration.
+
+    A tiny, EXECUTABLE seam: the manager's registration block calls
+    this instead of reading the env knobs inline, so the knob shape
+    (the arity of the flag/int reads, the interval floor) is pinned by
+    a test that CALLS it rather than by a source-grep.
+
+    * ``enabled`` is False when ``ENSEMBLE_CHECKPOINT_BACKSTOP`` is
+      ``0``/``false``/``no``/``off`` — the kill switch that keeps the
+      job unregistered.
+    * ``interval_minutes`` is floored at 1 (a 0 or negative interval
+      would mean "never due" under the service's ``min_interval_hours
+      <= 0`` disable convention — the wrong way to express "off").
+    """
+    enabled = _env_flag(BACKSTOP_KILL_SWITCH_ENV, True)
+    interval = max(
+        1, _env_int(BACKSTOP_INTERVAL_ENV, DEFAULT_BACKSTOP_INTERVAL_MINUTES)
+    )
+    return enabled, interval
+
 #: The default backstop pair budget (pairs per run).
 DEFAULT_BACKSTOP_PAIR_BUDGET = 25
 

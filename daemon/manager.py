@@ -202,8 +202,7 @@ from .services.skill_clone_service import SkillCloneService
 from .services.maintenance import (
     CheckpointCleanupJob,
     MaintenanceService,
-    _env_flag as _env_flag_default_true,
-    _env_int as _env_int_default,
+    backstop_registration_params,
 )
 from .services.todo_manager import TodoManager
 from .services.question_manager import QuestionManager
@@ -4831,13 +4830,11 @@ class InstanceManager:
         #
         # The interval is read from the env knob (minutes) and floored
         # at 1 minute; the pair budget is read inside the job.
-        if _env_flag_default_true("ENSEMBLE_CHECKPOINT_BACKSTOP"):
-            backstop_interval_minutes = max(
-                1,
-                _env_int_default(
-                    "ENSEMBLE_CHECKPOINT_BACKSTOP_INTERVAL_MINUTES", 60
-                ),
-            )
+        (
+            backstop_enabled,
+            backstop_interval_minutes,
+        ) = backstop_registration_params()
+        if backstop_enabled:
             self._maintenance_service.register(
                 "checkpoint_backstop_prune",
                 backstop_interval_minutes / 60.0,
