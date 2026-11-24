@@ -811,3 +811,137 @@ async def collect_blob_bytes_by_channel(
     outcome.duration_ms = int((time.perf_counter() - t0) * 1000)
     return outcome
 
+
+# ── ITEM 2: the RELATION-SIZE bytes guard (SCOPE (c), 2026-11-24) ─────────
+#
+# WHY RELATION SIZE AND NOT n_dead_tup
+# -----------------------------------
+# The checkpoint-blob bloat class is DEAD-TUP-BLIND: the measured
+# incident (2026-11-23, the PG18 host) found ``n_dead_tup`` reading
+# ZERO on BOTH ``checkpoint_blobs`` and its TOAST relation, while the
+# relation carried ~29MB of heap + ~39.1GiB of TOAST (5,128,590 pages,
+# ~87% empty). Autovacuum runs on the table WITHOUT reclaiming: the
+# space is not dead tuples to be reused, it is the physical footprint
+# of a table whose LIVE rows are large (the TOAST space inside live
+# rows). A dead-tuple-driven threshold therefore reads "healthy" on
+# exactly the class it is supposed to catch — it is the wrong signal,
+# not a weak one.
+#
+# The right signal is BYTES: ``pg_total_relation_size`` (the whole
+# relation: heap + TOAST + indexes) and the TOAST size via
+# ``reltoastrelid`` (the house SQL precedent —
+# ``docs/runbooks/checkpoint-maintenance.md`` §P6b and
+# ``daemon/tools/ens_db_tools.py``'s inspect arm).
+#
+# WHAT THIS IS AND IS NOT
+# -----------------------
+# This guard ALERTS. It does not reclaim, and it does not enforce: the
+# ~39GiB is TOAST space inside LIVE rows and returns only via a
+# REWRITE (pg_repack — the Emperor's decision — or VACUUM FULL, which
+# is EXCLUDED by the no-downtime posture). The guard's promise is
+# "relieve growth", never "return the space" — see
+# ``docs/runbooks/checkpoint-escalation-lane.md``.
+
+_BLOB_RELATION_BYTES_SQL = (
+    "SELECT c.relname AS parent_table, "
+    "pg_total_relation_size(c.oid) AS total_bytes, "
+    "pg_relation_size(c.oid) AS heap_bytes, "
+    "CASE WHEN c.reltoastrelid <> 0 "
+    "THEN pg_relation_size(c.reltoastrelid) ELSE 0 END AS toast_bytes "
+    "FROM pg_class c "
+    "JOIN pg_namespace n ON n.oid = c.relnamespace "
+    "WHERE c.relname = 'checkpoint_blobs' AND n.nspname = 'public'"
+)
+
+
+@dataclass
+class BlobRelationBytes:
+    """The RELATION-SIZE measurement of ``checkpoint_blobs``.
+
+    ``ran`` is True only when the measurement actually reached the
+    server. ``skipped_reason`` explains a non-run:
+    ``no_shared_engine`` / ``not_postgresql`` (nothing to run
+    against), ``engine_build_failed`` / ``query_failed`` (the
+    observation failed — the cycle that preceded it is unaffected),
+    or ``kill_switch`` (the guard is switched off).
+    """
+
+    ran: bool = False
+    skipped_reason: str | None = None
+    total_bytes: int = 0
+    heap_bytes: int = 0
+    toast_bytes: int = 0
+    duration_ms: int = 0
+
+
+def _collect_blob_relation_bytes_sync(engine: Engine) -> tuple[int, int, int]:
+    """Run the relation-size measurement. Returns
+    ``(total_bytes, heap_bytes, toast_bytes)``."""
+    with engine.connect() as conn:
+        row = conn.execute(text(_BLOB_RELATION_BYTES_SQL)).fetchone()
+    if row is None:
+        return (0, 0, 0)
+    return (int(row[1] or 0), int(row[2] or 0), int(row[3] or 0))
+
+
+async def collect_blob_relation_bytes(
+    shared_engine: Engine | None,
+    *,
+    statement_ms: int = VACUUM_STATEMENT_TIMEOUT_MS,
+    lock_ms: int = VACUUM_LOCK_TIMEOUT_MS,
+    idle_ms: int = VACUUM_IDLE_IN_TXN_TIMEOUT_MS,
+) -> BlobRelationBytes:
+    """Measure the ``checkpoint_blobs`` RELATION size (heap + TOAST).
+
+    The BYTES-based occupancy signal — the one that sees the bloat
+    class ``n_dead_tup`` cannot (the measured incident: ``n_dead_tup``
+    = 0 on a relation carrying ~39GiB of TOAST).
+
+    Never raises: a failed measurement is reported as ``ran=False``
+    plus a ``skipped_reason``. Runs on the DEDICATED per-cycle
+    maintenance engine (the census's shape) — never on the hot saver
+    pool, never on the adapter's shared asyncpg pool.
+    """
+    outcome = BlobRelationBytes()
+    if shared_engine is None:
+        outcome.skipped_reason = "no_shared_engine"
+        return outcome
+    if shared_engine.dialect.name != "postgresql":
+        outcome.skipped_reason = "not_postgresql"
+        return outcome
+    try:
+        engine = create_vacuum_engine(
+            shared_engine,
+            statement_ms=statement_ms,
+            lock_ms=lock_ms,
+            idle_ms=idle_ms,
+        )
+    except Exception as exc:  # noqa: BLE001 — never fatal to the cycle
+        outcome.skipped_reason = "engine_build_failed"
+        logger.warning(
+            "[CheckpointPerf] blob relation-bytes guard skipped: dedicated "
+            "engine build failed (%s: %s)",
+            type(exc).__name__,
+            exc,
+        )
+        return outcome
+
+    t0 = time.perf_counter()
+    try:
+        total, heap, toast = await asyncio.to_thread(
+            _collect_blob_relation_bytes_sync, engine
+        )
+        outcome.ran = True
+        outcome.total_bytes = total
+        outcome.heap_bytes = heap
+        outcome.toast_bytes = toast
+    except Exception as exc:  # noqa: BLE001 — never fatal to the cycle
+        outcome.skipped_reason = "query_failed"
+        logger.warning(
+            "[CheckpointPerf] blob relation-bytes guard failed (%s: %s) — "
+            "the occupancy signal is unavailable this cycle",
+            type(exc).__name__,
+            exc,
+        )
+    outcome.duration_ms = int((time.perf_counter() - t0) * 1000)
+    return outcome

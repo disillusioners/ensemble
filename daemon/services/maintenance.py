@@ -407,6 +407,34 @@ DEFAULT_BACKSTOP_PAIR_BUDGET = 25
 #: against each other).
 BACKSTOP_SECTION = "checkpoint-backstop"
 
+# ── The checkpoint_blobs BYTES guard (ITEM 2, SCOPE (c)) ───────────────────
+#
+# The checkpoint-blob bloat class is DEAD-TUP-BLIND: the measured
+# incident (2026-11-23) found ``n_dead_tup`` reading ZERO on BOTH
+# ``checkpoint_blobs`` and its TOAST relation while the relation
+# carried ~29MB of heap + ~39.1GiB of TOAST (~87% of the TOAST pages
+# empty). Autovacuum runs on the table without reclaiming: the space
+# is the physical footprint of a table whose LIVE rows are large, not
+# dead tuples waiting to be reused. A dead-tuple threshold therefore
+# reads "healthy" on exactly the class it must catch.
+#
+# The guard measures BYTES (``pg_total_relation_size`` + the TOAST
+# size via ``reltoastrelid`` — the house SQL precedent,
+# ``docs/runbooks/checkpoint-maintenance.md`` §P6b) and ALERTS. It
+# does not reclaim and it does not enforce: the space returns only via
+# a REWRITE (see ``docs/runbooks/checkpoint-escalation-lane.md``).
+
+#: Kill-switch for the bytes guard. ``=0`` disables the measurement
+#: entirely. Default: ON.
+BLOB_BYTES_GUARD_KILL_SWITCH_ENV = "ENSEMBLE_CHECKPOINT_BLOB_BYTES_GUARD"
+
+#: The alert threshold, in BYTES. Default 32 GiB — the measured prod
+#: state (~40GB total, ~39.1GiB of it TOAST) is ABOVE it, so the
+#: guard fires on the class it exists to surface.
+BLOB_BYTES_ALERT_THRESHOLD_ENV = "ENSEMBLE_CHECKPOINT_BLOB_BYTES_ALERT"
+
+#: The default alert threshold in bytes (32 GiB).
+DEFAULT_BLOB_BYTES_ALERT_THRESHOLD = 32 * 1024 * 1024 * 1024
 
 
 
@@ -1396,6 +1424,56 @@ class BackstopPruneSummary:
 
 
 @dataclass
+class BlobBytesGuard:
+    """The checkpoint_blobs BYTES guard of one maintenance cycle.
+
+    THE SIGNAL IS BYTES, NOT DEAD TUPS: the bloat class this guard
+    exists to surface is dead-tuple-BLIND (the measured incident:
+    ``n_dead_tup`` = 0 on a relation carrying ~39.1GiB of TOAST).
+
+    The guard ALERTS and COUNTS. It never reclaims — the space returns
+    only via a rewrite (the escalation lane's decision), and the
+    guard's promise is "relieve growth", never "return the space".
+    """
+
+    #: The measurement reached the server.
+    ran: bool = False
+    #: Why it did not run (``None`` when it ran): ``kill_switch`` /
+    #: ``no_shared_engine`` / ``not_postgresql`` /
+    #: ``engine_build_failed`` / ``query_failed``.
+    skipped_reason: str | None = None
+    #: The alert threshold the cycle applied (bytes).
+    threshold_bytes: int = 0
+    #: ``pg_total_relation_size`` of ``checkpoint_blobs`` (heap + TOAST
+    #: + indexes).
+    total_bytes: int = 0
+    #: The heap alone.
+    heap_bytes: int = 0
+    #: The TOAST relation (``reltoastrelid``) — where the mass lives.
+    toast_bytes: int = 0
+    #: The total is ABOVE the threshold.
+    over_threshold: bool = False
+    #: The operator-visible alert was emitted this cycle.
+    alerted: bool = False
+    #: The measurement timestamp.
+    captured_at: str = ""
+
+    def to_summary_dict(self) -> dict[str, Any]:
+        """The ``blob_bytes_guard`` block of ``maintenance_runs.summary_json``."""
+        return {
+            "ran": self.ran,
+            "skipped_reason": self.skipped_reason,
+            "threshold_bytes": self.threshold_bytes,
+            "total_bytes": self.total_bytes,
+            "heap_bytes": self.heap_bytes,
+            "toast_bytes": self.toast_bytes,
+            "over_threshold": self.over_threshold,
+            "alerted": self.alerted,
+            "captured_at": self.captured_at,
+        }
+
+
+@dataclass
 class CheckpointRowPruneSummary:
     """Op D (per-thread retention) per-cycle counters.
 
@@ -1711,6 +1789,10 @@ class CheckpointRunResult:
     # (no existing key is renamed or removed). ``None`` ⇒ the cycle
     # took no terminal reap (the key is absent from the summary).
     terminal_reap: "TerminalReapSummary | None" = None
+    # ITEM 2 (SCOPE (c)) — the checkpoint_blobs BYTES guard block.
+    # ADDITIVE. ``None`` ⇒ the cycle took no measurement (the key is
+    # absent from the summary).
+    blob_bytes_guard: "BlobBytesGuard | None" = None
 
     def to_summary_dict(self) -> dict[str, Any]:
         """The FROZEN wire shape (plan-overview §2 — last_run.summary)."""
@@ -1738,6 +1820,13 @@ class CheckpointRunResult:
             # reap) counters. An absent block means the cycle took no
             # reap; a present block with ``skipped_reason`` names why.
             summary["terminal_reap"] = self.terminal_reap.to_summary_dict()
+        if self.blob_bytes_guard is not None:
+            # ITEM 2 (SCOPE (c)) — additive key: the checkpoint_blobs
+            # BYTES guard. The occupancy signal is bytes, NOT dead
+            # tuples (the bloat class is dead-tuple-blind).
+            summary["blob_bytes_guard"] = (
+                self.blob_bytes_guard.to_summary_dict()
+            )
         return summary
 
 
@@ -2077,12 +2166,25 @@ class CheckpointCleanupJob:
                 )
                 version_census = None
 
+            # ITEM 2 (SCOPE (c)) — the checkpoint_blobs BYTES guard.
+            # Taken AFTER the prune ops so the number describes the
+            # post-prune relation. Never wedges: a failed measurement is
+            # reported in the block itself.
+            try:
+                blob_bytes_guard = await self._collect_blob_bytes_guard()
+            except Exception as e:  # noqa: BLE001 — a guard never breaks a cycle
+                logger.error(
+                    f"Blob bytes guard failed: {e}", exc_info=True
+                )
+                blob_bytes_guard = BlobBytesGuard()
+
             result = CheckpointRunResult(
                 rows=rows_summary,
                 blobs=blobs_summary,
                 skipped_truncated=len(blobs_summary.skipped) > 1000,
                 version_census=version_census,
                 terminal_reap=terminal_reap,
+                blob_bytes_guard=blob_bytes_guard,
             )
 
             # T3 — terminal write on success.
@@ -3184,6 +3286,93 @@ class CheckpointCleanupJob:
             len(census.blob_bytes_by_channel),
         )
         return census
+
+    async def _collect_blob_bytes_guard(self) -> BlobBytesGuard:
+        """The checkpoint_blobs BYTES guard (ITEM 2, SCOPE (c)).
+
+        Measures the RELATION size — ``pg_total_relation_size`` plus
+        the TOAST size via ``reltoastrelid`` — and ALERTS when the
+        total is above the threshold.
+
+        WHY BYTES AND NOT ``n_dead_tup``: the bloat class is
+        dead-tuple-BLIND (the measured incident: ``n_dead_tup`` = 0 on
+        BOTH the table and its TOAST relation while the relation
+        carried ~39.1GiB of TOAST). A dead-tuple threshold reads
+        "healthy" on exactly the class it must catch.
+
+        The guard ALERTS; it does not reclaim and it does not enforce.
+        The space returns only via a rewrite, and the rewrite is the
+        escalation lane's (operator-nudged, never automatic) decision.
+
+        NEVER WEDGES: the measurement runs on the dedicated per-cycle
+        maintenance engine with the VACUUM lane's timeouts, and every
+        failure is reported in the block itself.
+        """
+        from daemon.services.timestamps import now_utc_iso
+
+        guard = BlobBytesGuard()
+        guard.captured_at = now_utc_iso()
+        guard.threshold_bytes = max(
+            0,
+            _env_int(
+                BLOB_BYTES_ALERT_THRESHOLD_ENV,
+                DEFAULT_BLOB_BYTES_ALERT_THRESHOLD,
+            ),
+        )
+
+        if not _env_flag(BLOB_BYTES_GUARD_KILL_SWITCH_ENV, True):
+            guard.skipped_reason = "kill_switch"
+            logger.info(
+                "checkpoint_cleanup: blob-bytes guard SKIPPED "
+                "(kill switch %s=0)",
+                BLOB_BYTES_GUARD_KILL_SWITCH_ENV,
+            )
+            return guard
+
+        from daemon.services.checkpoint_prune import collect_blob_relation_bytes
+
+        try:
+            measured = await collect_blob_relation_bytes(self._shared_engine)
+        except Exception as exc:  # noqa: BLE001 — belt-and-braces
+            logger.warning(
+                "[CheckpointPerf] blob relation-bytes guard raised "
+                "(%s: %s) — the occupancy signal is unavailable this cycle",
+                type(exc).__name__,
+                exc,
+            )
+            guard.skipped_reason = "query_failed"
+            return guard
+
+        guard.ran = measured.ran
+        guard.skipped_reason = measured.skipped_reason
+        guard.total_bytes = measured.total_bytes
+        guard.heap_bytes = measured.heap_bytes
+        guard.toast_bytes = measured.toast_bytes
+
+        if measured.ran and guard.threshold_bytes > 0:
+            guard.over_threshold = guard.total_bytes >= guard.threshold_bytes
+            if guard.over_threshold:
+                # The OPERATOR-VISIBLE alert. One WARNING line per
+                # cycle (the cycle runs at most daily; the backstop
+                # does not run this measurement) — the numbers are in
+                # the line AND in the audit row.
+                guard.alerted = True
+                logger.warning(
+                    "[CheckpointPerf] CHECKPOINT_BLOB_BYTES_OVER_THRESHOLD "
+                    "total_bytes=%d (%.2f GiB) threshold_bytes=%d "
+                    "(%.2f GiB) heap_bytes=%d toast_bytes=%d (%.2f GiB) — "
+                    "the checkpoint-blob relation is above the alert "
+                    "threshold (the space returns only via a rewrite; "
+                    "see docs/runbooks/checkpoint-escalation-lane.md)",
+                    guard.total_bytes,
+                    guard.total_bytes / (1024 ** 3),
+                    guard.threshold_bytes,
+                    guard.threshold_bytes / (1024 ** 3),
+                    guard.heap_bytes,
+                    guard.toast_bytes,
+                    guard.toast_bytes / (1024 ** 3),
+                )
+        return guard
 
     async def _analyze_after_destructive_prune(
         self,

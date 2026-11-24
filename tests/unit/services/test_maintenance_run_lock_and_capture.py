@@ -311,8 +311,10 @@ class TestAutoCycleWiring:
         #
         # SCOPE (c) (2026-11-24): the shape gained a SECOND additive
         # key — ``terminal_reap`` — the Op B2 (terminal-thread full
-        # reap) counters. Same discipline: additive only, no key
-        # renamed or removed, the four frozen keys unchanged.
+        # reap) counters, and a THIRD — ``blob_bytes_guard`` — the
+        # checkpoint_blobs BYTES guard (ITEM 2). Same discipline:
+        # additive only, no key renamed or removed, the four frozen
+        # keys unchanged.
         summary = row.summary_json
         assert set(summary.keys()) == {
             "checkpoint_rows",
@@ -321,6 +323,7 @@ class TestAutoCycleWiring:
             "duration_ms",
             "version_census",
             "terminal_reap",
+            "blob_bytes_guard",
         }
         assert summary["checkpoint_rows"]["deleted"] == 0  # no excess staged
         assert summary["blobs"]["destructive"] is False
