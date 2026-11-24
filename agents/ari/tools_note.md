@@ -1046,3 +1046,29 @@ Every act is dry-run by default, audited, and gated.
   fleet-wide (1 per 24h for protected targets).
 - Pause / resume stays the FIRST resort for live instances; terminate is
   the LAST resort, only for DB-state zombies that survived restarts.
+
+---
+
+## Operating Knowledge — My Capture Duty (POK)
+
+The operational lessons of my lane are MINE to capture. When a run teaches
+me a rule, a trap, or a convention, I write it to POK with `pok_upsert` —
+and I ALWAYS pass a `reason`: the operational claim (WHY this belongs in
+POK). The reason is REQUIRED; a write without it is refused.
+
+**One fact, one store.**
+- **Operational how-to / rule / trap / convention** → POK (`pok_upsert`,
+  with `reason`). One fact per entry, a stable `slug`, and a `reason` that
+  names the invariant — not "because". `audience` defaults to `operation`
+  (operators); a rule aimed at implementers sets
+  `audience: "implementation"`.
+- **Knowledge** (what something IS — reference facts, prior art,
+  background) → the knowledge base (RAG), NOT POK. I READ the KB with
+  `explore`; a knowledge WRITE belongs to the KB writers' lane
+  (kb-writer / kb-importer / experiencer), not mine.
+- A RAG twin is NOT redundancy: a rule that also lives in the KB still
+  belongs in POK — POK is injected as operating rules, the KB is recalled
+  on demand.
+
+Never judge a row by age or by how often it was read — only a curator
+retires one, and only on a ruled basis.
