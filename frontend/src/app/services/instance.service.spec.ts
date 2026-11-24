@@ -5,6 +5,7 @@ import { InstanceInfo, InstanceStatus } from '../models';
 import { ApiService } from './api.service';
 import { SseService } from './sse.service';
 import { InstanceService } from './instance.service';
+import { InstancesViewStateService } from './instances-view-state.service';
 
 const PAGE_SIZE = 10;
 
@@ -1424,5 +1425,119 @@ describe('InstanceService — the visibility gate (hidden tab stops polling)', (
     expect(gateApiMock.listInstances).toHaveBeenCalledTimes(2);
     jest.advanceTimersByTime(60_000);
     expect(gateApiMock.listInstances).toHaveBeenCalledTimes(3);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Anchor threading — the REAL InstanceService (not the mirror above) reads
+// the anchor from InstancesViewStateService INSIDE loadInstances() at fetch
+// time. Pins: initial load, detailVisible=false drop, no-id drop, the 60 s
+// poll tick, and pagination. Mock ApiService; assert call args.
+// ─────────────────────────────────────────────────────────────────────────
+describe('InstanceService — anchor threading (selected instance + subtree)', () => {
+  type ListResp = { instances: InstanceInfo[]; total: number; has_more: boolean };
+  const anchorApiMock = {
+    listInstances: jest.fn(
+      (
+        _limit?: number,
+        _offset?: number,
+        _projectId?: string,
+        _excludeKb?: boolean,
+        _search?: string,
+        _order?: string,
+        _includeDescendants?: boolean,
+        _source?: string,
+        _anchor?: string,
+      ): Observable<ListResp> => of({ instances: [], total: 0, has_more: false }),
+    ),
+    getInstance: jest.fn(() => throwError(() => ({ status: 404 }))),
+  };
+  const anchorSseMock = {
+    statusChange: signal<{ instance_id: string; status: string; agent_id?: string } | null>(null),
+    instanceCreatedQueue: signal<InstanceInfo[]>([]),
+  };
+  let service: InstanceService;
+  let viewState: InstancesViewStateService;
+
+  // The 9th positional arg of api.listInstances is the anchor.
+  const lastAnchorArg = (): string | undefined => {
+    const calls = anchorApiMock.listInstances.mock.calls;
+    return calls[calls.length - 1][8];
+  };
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    anchorApiMock.listInstances.mockClear();
+    anchorApiMock.listInstances.mockReturnValue(of({ instances: [], total: 0, has_more: false }));
+    TestBed.configureTestingModule({
+      providers: [
+        { provide: ApiService, useValue: anchorApiMock },
+        { provide: SseService, useValue: anchorSseMock },
+      ],
+    });
+    service = TestBed.inject(InstanceService);
+    viewState = TestBed.inject(InstancesViewStateService);
+    viewState.detailVisible.set(false);
+    viewState.activeInstanceId.set(null);
+  });
+
+  afterEach(() => {
+    service.stopPolling();
+    jest.useRealTimers();
+  });
+
+  it('passes the anchor when detailVisible + activeInstanceId are set', async () => {
+    viewState.activeInstanceId.set('anchor-inst-123');
+    viewState.detailVisible.set(true);
+
+    await service.loadInstances();
+
+    expect(anchorApiMock.listInstances).toHaveBeenCalledTimes(1);
+    expect(lastAnchorArg()).toBe('anchor-inst-123');
+  });
+
+  it('drops the anchor when detailVisible=false even if an id is cached', async () => {
+    viewState.activeInstanceId.set('anchor-inst-123');
+    viewState.detailVisible.set(false);
+
+    await service.loadInstances();
+
+    expect(anchorApiMock.listInstances).toHaveBeenCalledTimes(1);
+    expect(lastAnchorArg()).toBeUndefined();
+  });
+
+  it('drops the anchor when detailVisible=true but no id is cached', async () => {
+    viewState.activeInstanceId.set(null);
+    viewState.detailVisible.set(true);
+
+    await service.loadInstances();
+
+    expect(lastAnchorArg()).toBeUndefined();
+  });
+
+  it('the 60 s poll tick keeps passing the anchor (read at fetch time)', async () => {
+    viewState.activeInstanceId.set('anchor-poll-456');
+    viewState.detailVisible.set(true);
+
+    service.startPolling();
+    expect(anchorApiMock.listInstances).toHaveBeenCalledTimes(1);
+    expect(lastAnchorArg()).toBe('anchor-poll-456');
+
+    jest.advanceTimersByTime(60_000);
+    expect(anchorApiMock.listInstances).toHaveBeenCalledTimes(2);
+    expect(lastAnchorArg()).toBe('anchor-poll-456');
+  });
+
+  it('pagination (loadMore) keeps passing the anchor', async () => {
+    viewState.activeInstanceId.set('anchor-more-789');
+    viewState.detailVisible.set(true);
+    anchorApiMock.listInstances.mockReturnValue(of({ instances: [], total: 100, has_more: true }));
+
+    await service.loadInstances();
+    service.loadMore();
+    await Promise.resolve();
+
+    expect(anchorApiMock.listInstances).toHaveBeenCalledTimes(2);
+    expect(lastAnchorArg()).toBe('anchor-more-789');
   });
 });
