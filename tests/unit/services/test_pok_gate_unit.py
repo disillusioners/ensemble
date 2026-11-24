@@ -567,6 +567,148 @@ class TestJudge:
         assert second.cache_hit is True
         assert len(calls) == 1  # the replay did NOT call the LLM again
 
+    def test_a_shadow_era_cache_entry_is_re_judged_under_enforcement(
+        self,
+    ) -> None:
+        """F2 — the MODE-MATCH replay (the fail-open hole).
+
+        A verdict cached while the gate was in SHADOW must NOT replay
+        after the enforcement switch flips ON: an advisory replay
+        refuses nothing, so the gate would FAIL OPEN under enforcement
+        (D2 is fail-CLOSED). The stale entry is treated as a cache MISS
+        and the write is RE-JUDGED.
+        """
+        cache = VerdictCache()
+        calls: list = []
+
+        def _llm(prompt: str) -> str:
+            calls.append(prompt)
+            return __import__("json").dumps(_judge())
+
+        shadow_verdict = judge_pok_write(
+            project_id=PROJECT,
+            project_name="proj",
+            slug="s",
+            body="a body",
+            reason="the claim",
+            rows=[],
+            mode="llm",
+            is_production=False,
+            shadow=True,
+            llm_call=_llm,
+            cache=cache,
+        )
+        assert shadow_verdict.advisory is True
+        assert len(calls) == 1
+
+        # The enforcement switch flips ON (the same key, a new mode).
+        enforce_verdict = judge_pok_write(
+            project_id=PROJECT,
+            project_name="proj",
+            slug="s",
+            body="a body",
+            reason="the claim",
+            rows=[],
+            mode="llm",
+            is_production=False,
+            shadow=False,
+            llm_call=_llm,
+            cache=cache,
+        )
+        assert len(calls) == 2, (
+            "the shadow-era entry replayed under enforcement — the gate "
+            "fails OPEN (D2 is fail-closed)"
+        )
+        assert enforce_verdict.advisory is False
+        assert enforce_verdict.cache_hit is False
+
+    def test_an_enforcement_era_cache_entry_is_re_judged_under_shadow(
+        self,
+    ) -> None:
+        """F2 — the reverse direction: an enforcement-era entry must not
+        replay under SHADOW either (it would gate a write the operator
+        has switched to advisory)."""
+        cache = VerdictCache()
+        calls: list = []
+
+        def _llm(prompt: str) -> str:
+            calls.append(prompt)
+            return __import__("json").dumps(_judge())
+
+        judge_pok_write(
+            project_id=PROJECT,
+            project_name="proj",
+            slug="s",
+            body="a body",
+            reason="the claim",
+            rows=[],
+            mode="llm",
+            is_production=False,
+            shadow=False,
+            llm_call=_llm,
+            cache=cache,
+        )
+        assert len(calls) == 1
+        judge_pok_write(
+            project_id=PROJECT,
+            project_name="proj",
+            slug="s",
+            body="a body",
+            reason="the claim",
+            rows=[],
+            mode="llm",
+            is_production=False,
+            shadow=True,
+            llm_call=_llm,
+            cache=cache,
+        )
+        assert len(calls) == 2, (
+            "the enforcement-era entry replayed under shadow — the "
+            "verdict would gate a write the operator switched to advisory"
+        )
+
+    def test_a_same_mode_cache_entry_still_replays(self) -> None:
+        """F2 — the mode-match must not break the replay it protects:
+        the SAME mode still replays (the ASK re-mint semantics are
+        unchanged)."""
+        cache = VerdictCache()
+        calls: list = []
+
+        def _llm(prompt: str) -> str:
+            calls.append(prompt)
+            return __import__("json").dumps(_judge(verdict="ASK", question="q?"))
+
+        first = judge_pok_write(
+            project_id=PROJECT,
+            project_name="proj",
+            slug="s",
+            body="a body",
+            reason="the claim",
+            rows=[],
+            mode="llm",
+            is_production=False,
+            shadow=False,
+            llm_call=_llm,
+            cache=cache,
+        )
+        second = judge_pok_write(
+            project_id=PROJECT,
+            project_name="proj",
+            slug="s",
+            body="a body",
+            reason="the claim",
+            rows=[],
+            mode="llm",
+            is_production=False,
+            shadow=False,
+            llm_call=_llm,
+            cache=cache,
+        )
+        assert len(calls) == 1
+        assert second.cache_hit is True
+        assert second.verdict == "ASK"
+        assert second.gate_id != first.gate_id
+
     def test_the_gate_writes_nothing(self) -> None:
         """T8.1 — the gate is a pure function: no store write."""
         from sqlalchemy import create_engine
@@ -812,6 +954,26 @@ class TestPendingGateStore:
             "pok_gate_answer_required",
             "pok_gate_answer_unrecognized",
         }
+
+    def test_a_routed_gate_is_still_owner_scoped(self) -> None:
+        """F1 — ``routed_to_curator`` is a ROUTING ANNOTATION, not an
+        authority carve-out.
+
+        The answer path is OWNER-SCOPED (T8.5): a curator role does NOT
+        unlock another agent's pending gate — a non-owner is refused
+        with ``pok_gate_not_owner`` even when the gate is routed to the
+        curator.
+        """
+        store = PendingGateStore()
+        _pending(store, routed_to_curator=True)
+        pending, refusal = store.resolve(
+            "g-1",
+            agent_id="leader",  # a CURATOR, but NOT the owner
+            instance_id="inst-1",
+            answer="yes, confirmed",
+        )
+        assert pending is None
+        assert refusal == "pok_gate_not_owner"
 
     def test_the_answer_classifier_never_defaults_to_accept(self) -> None:
         assert classify_answer("yes, confirmed") == "confirm"

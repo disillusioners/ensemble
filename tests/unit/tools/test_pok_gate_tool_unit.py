@@ -531,6 +531,109 @@ class TestShadowPosture:
         assert "ASK_MINTED" not in phases
 
 
+# ── the mode-match replay (F2) ─────────────────────────────────────────────
+
+
+class TestModeMatchReplay:
+    """F2 — a cached verdict replays ONLY in the mode it was judged in.
+
+    A shadow-era entry replayed after the enforcement switch flips ON
+    would fail OPEN (an advisory verdict refuses nothing); an
+    enforcement-era entry replayed under shadow would gate a write the
+    operator switched to advisory. Either mismatch ⇒ RE-JUDGE.
+    """
+
+    def _install_llm(self, monkeypatch) -> list:
+        """Replace the house LLM seam with a counting fake."""
+        from daemon.services import pok_gate as gate_mod
+
+        calls: list = []
+
+        def _fake(llm_config, prompt, **kwargs):
+            calls.append(prompt)
+            return json.dumps(
+                {
+                    "verdict": "ACCEPT",
+                    "family": "scope",
+                    "explanation": "ok",
+                    "alternative": None,
+                    "confidence": 0.9,
+                }
+            )
+
+        monkeypatch.setattr(gate_mod, "_house_llm_call", _fake)
+        return calls
+
+    def test_the_next_upsert_re_judges_after_the_switch_flips(
+        self, tool_env, monkeypatch
+    ) -> None:
+        """The dispatch's acceptance: cache under shadow, flip the
+        switch ON in-process, and prove the next upsert RE-JUDGES."""
+        calls = self._install_llm(monkeypatch)
+        pok_tools._GATE_CACHE.clear()
+        _enforce(monkeypatch, on=False)  # SHADOW
+        tools = _tools(tool_env)
+        first = tools[0].invoke(
+            {
+                "slug": "deploy-01-gate",
+                "body": "the deploy gate runs first",
+                "reason": "the invariant",
+            }
+        )
+        assert first["action"] == "created"
+        assert len(calls) == 1
+
+        # The active row is retired so the SAME (slug, body, reason)
+        # write is no longer a no-op — it reaches the gate again, with
+        # the SAME cache key (project + slug + body hash + reason hash).
+        curator = _tools(tool_env, agent_id="leader")
+        archived = curator[2].invoke(
+            {"slug": "deploy-01-gate", "archived": True, "basis": "NOW-FALSE"}
+        )
+        assert archived["action"] == "curated"
+
+        # The enforcement switch flips ON (in-process).
+        _enforce(monkeypatch, on=True)
+        second = tools[0].invoke(
+            {
+                "slug": "deploy-01-gate",
+                "body": "the deploy gate runs first",
+                "reason": "the invariant",
+            }
+        )
+        assert second["action"] == "created"
+        assert len(calls) == 2, (
+            "the shadow-era verdict replayed after the enforcement flip — "
+            "the gate fails OPEN (D2 is fail-closed)"
+        )
+
+    def test_a_same_mode_upsert_still_replays(self, tool_env, monkeypatch) -> None:
+        """The mode-match must not break the replay it protects."""
+        calls = self._install_llm(monkeypatch)
+        pok_tools._GATE_CACHE.clear()
+        _enforce(monkeypatch, on=False)  # SHADOW
+        tools = _tools(tool_env)
+        tools[0].invoke(
+            {
+                "slug": "deploy-02-gate",
+                "body": "the deploy gate runs first",
+                "reason": "the invariant",
+            }
+        )
+        curator = _tools(tool_env, agent_id="leader")
+        curator[2].invoke(
+            {"slug": "deploy-02-gate", "archived": True, "basis": "NOW-FALSE"}
+        )
+        tools[0].invoke(
+            {
+                "slug": "deploy-02-gate",
+                "body": "the deploy gate runs first",
+                "reason": "the invariant",
+            }
+        )
+        assert len(calls) == 1, "the same-mode entry did not replay"
+
+
 # ── the D2 fail-closed pin (phase11 T6) ────────────────────────────────────
 
 

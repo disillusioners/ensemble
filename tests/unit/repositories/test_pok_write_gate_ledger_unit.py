@@ -69,6 +69,72 @@ REQUIRED_RECORD_FIELDS = (
 )
 
 
+#: ══════════════════════════════════════════════════════════════════════
+#: THE TRIPLE-HOMING VOCABULARY PINS (F4)
+#: ══════════════════════════════════════════════════════════════════════
+#:
+#: Every ledger vocabulary lives in THREE homes: the models tuple
+#: constant, the model's CHECK constraint, and the migration's CHECK
+#: tokens. A SINGLE-TOKEN drift in one home is invisible to a
+#: name/count-level pin — so the pin below asserts the EXACT TOKEN SET
+#: in all three, for EVERY declared token (the triple-homing drift
+#: trap: ``ASK_EXPIRED`` was asserted NOWHERE before this pin).
+#:
+#: The expected sets are FROZENSET LITERALS: adding a token to any
+#: home without adding it here makes the pin RED — a future token
+#: forces an explicit three-home update.
+EXPECTED_LEDGER_VOCABULARIES: dict[str, frozenset[str]] = {
+    "phase": frozenset(
+        {
+            "ADMISSION",
+            "RETRIEVAL",
+            "EXECUTION",
+            "ASK_MINTED",
+            "ASK_ANSWERED",
+            "ASK_EXECUTED",
+            "ASK_EXPIRED",
+            "ASK_SHADOW",
+        }
+    ),
+    "verdict": frozenset({"ACCEPT", "MERGE", "ASK", "REJECT"}),
+    "merge_kind": frozenset({"no_delta", "delta"}),
+    "basis": frozenset(
+        {
+            "covered-by-surviving-row",
+            "relocated-to-routed-home",
+            "NOW-FALSE",
+            "gate-rejection",
+        }
+    ),
+    "source": frozenset({"injection", "query"}),
+}
+
+#: The models tuple constant that owns each vocabulary.
+LEDGER_VOCABULARY_CONSTANTS: dict[str, tuple[str, ...]] = {
+    "phase": POK_LEDGER_PHASES,
+    "verdict": POK_LEDGER_VERDICTS,
+    "merge_kind": POK_LEDGER_MERGE_KINDS,
+    "basis": POK_ARCHIVE_BASES,
+    "source": POK_LEDGER_SOURCES,
+}
+
+#: The model's CHECK constraint that owns each vocabulary.
+LEDGER_CHECK_CONSTRAINT_NAMES: dict[str, str] = {
+    "phase": "ck_pok_ledger_phase",
+    "verdict": "ck_pok_ledger_verdict",
+    "merge_kind": "ck_pok_ledger_merge_kind",
+    "basis": "ck_pok_ledger_basis",
+    "source": "ck_pok_ledger_source",
+}
+
+
+def _check_tokens(sql_text: str, column: str) -> list[str]:
+    """The tokens of one ``<column> IN (...)`` CHECK expression."""
+    match = re.search(rf"{column}\s+IN\s*\(([^)]*)\)", sql_text, re.IGNORECASE)
+    assert match, f"no CHECK expression for {column!r} in: {sql_text[:200]!r}"
+    return re.findall(r"'([^']*)'", match.group(1))
+
+
 @pytest.fixture()
 def engine():
     eng = create_engine("sqlite://")
@@ -351,6 +417,86 @@ def _row(repo: POKRepository, **kwargs) -> POKWriteGateLedger:
     base = {"project_id": "p1", "phase": "ADMISSION"}
     base.update(kwargs)
     return repo.append_ledger(POKWriteGateLedger(**base))
+
+
+class TestLedgerVocabularyTripleHoming:
+    """F4 — every ledger vocabulary is pinned TOKEN FOR TOKEN in all
+    three homes (the models constant, the model's CHECK constraint and
+    the migration's CHECK tokens).
+
+    The pin is DATA-DRIVEN over the declared vocabularies: a future
+    token forces an explicit three-home update (the pin REDS until the
+    frozenset literal below is extended).
+    """
+
+    @pytest.mark.parametrize("column", sorted(EXPECTED_LEDGER_VOCABULARIES))
+    def test_the_vocabulary_is_triple_homed_token_for_token(
+        self, column: str
+    ) -> None:
+        expected = EXPECTED_LEDGER_VOCABULARIES[column]
+
+        # HOME 1 — the models tuple constant.
+        constant = LEDGER_VOCABULARY_CONSTANTS[column]
+        assert set(constant) == expected, (
+            f"{column}: the models tuple constant drifted "
+            f"(missing={sorted(expected - set(constant))} "
+            f"extra={sorted(set(constant) - expected)})"
+        )
+        assert len(constant) == len(expected), f"{column}: a duplicate token"
+
+        # HOME 2 — the model's CHECK constraint.
+        constraint = next(
+            c
+            for c in POKWriteGateLedger.__table__.constraints
+            if c.name == LEDGER_CHECK_CONSTRAINT_NAMES[column]
+        )
+        model_tokens = _check_tokens(str(constraint.sqltext), column)
+        assert set(model_tokens) == expected, (
+            f"{column}: the model CHECK constraint drifted "
+            f"(missing={sorted(expected - set(model_tokens))} "
+            f"extra={sorted(set(model_tokens) - expected)})"
+        )
+        assert len(model_tokens) == len(expected), (
+            f"{column}: a duplicate token in the model CHECK constraint"
+        )
+
+        # HOME 3 — the migration's CHECK tokens.
+        migration_tokens = _check_tokens(
+            _up_section(LEDGER_SQL.read_text()), column
+        )
+        assert set(migration_tokens) == expected, (
+            f"{column}: the migration CHECK tokens drifted "
+            f"(missing={sorted(expected - set(migration_tokens))} "
+            f"extra={sorted(set(migration_tokens) - expected)})"
+        )
+        assert len(migration_tokens) == len(expected), (
+            f"{column}: a duplicate token in the migration CHECK"
+        )
+
+    def test_every_ask_chain_phase_token_is_pinned(self) -> None:
+        """``ASK_EXPIRED`` and ``ASK_SHADOW`` were asserted NOWHERE
+        before F4 — the triple-homing pin names all of them.
+
+        ``ASK_EXPIRED`` is the librarian-pass phase (Phase 9/10 writes
+        it); the PIN is what this lane owns — there is deliberately NO
+        production writer for it yet.
+        """
+        for token in (
+            "ASK_MINTED",
+            "ASK_ANSWERED",
+            "ASK_EXECUTED",
+            "ASK_EXPIRED",
+            "ASK_SHADOW",
+        ):
+            assert token in POK_LEDGER_PHASES, token
+            assert token in EXPECTED_LEDGER_VOCABULARIES["phase"], token
+        assert len(POK_LEDGER_PHASES) == 8
+
+    def test_the_gate_rejection_basis_is_pinned(self) -> None:
+        """The fourth ruled basis (``gate-rejection`` — the curator's
+        citation of a gate rejection) is pinned in every home."""
+        assert "gate-rejection" in POK_ARCHIVE_BASES
+        assert "gate-rejection" in EXPECTED_LEDGER_VOCABULARIES["basis"]
 
 
 class TestLedgerRepository:

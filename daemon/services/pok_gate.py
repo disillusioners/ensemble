@@ -1208,6 +1208,26 @@ def judge_pok_write(
         mode=effective_mode,
     )
     cached = cache.get(key) if cache is not None else None
+    if cached is not None and cached.advisory != shadow:
+        # ── MODE-MATCH REPLAY (D2 fail-closed) ─────────────────────────
+        # A cached verdict replays ONLY when the mode it was judged in
+        # EQUALS the mode in force for THIS write. The recorded mode is
+        # the verdict's ``advisory`` flag (every verdict carries
+        # ``advisory=shadow`` — see :func:`_finalize_verdict`).
+        #
+        # WHY (the fail-open hole this closes): up to 512 stale LRU
+        # entries judged while the gate was in SHADOW would otherwise
+        # replay as ADVISORY after ``pok_gate.semantic_enforcement``
+        # flips ON — an advisory verdict refuses nothing, so the gate
+        # would fail OPEN under enforcement (D2 is fail-CLOSED). The
+        # reverse direction matters too: an enforcement-era entry
+        # replayed under SHADOW would gate a write the operator has
+        # switched to advisory.
+        #
+        # Either mismatch ⇒ the entry is STALE for the current mode ⇒
+        # treat it as a CACHE MISS and RE-JUDGE. The re-judged verdict
+        # replaces the entry (the cache holds one verdict per key).
+        cached = None
     if cached is not None:
         # Replay: ACCEPT / REJECT replay byte-identically; an ASK
         # replays AS-ASK with the SAME question but a FRESH gate_id
@@ -1216,7 +1236,7 @@ def judge_pok_write(
             cached,
             gate_id=str(uuid.uuid4()),
             cache_hit=True,
-            advisory=shadow or cached.advisory,
+            advisory=shadow,
             latency_ms=int((time.monotonic() - started) * 1000),
         )
 
@@ -1598,8 +1618,16 @@ class PendingGate:
     answered: bool = False
     #: The ASK is ROUTED TO THE CURATOR (T8.12): the merge target is
     #: pinned / curated, so only a curator (leader / project-manager)
-    #: may execute it. A curator may therefore answer this gate even
-    #: though the minting agent owns it.
+    #: may execute it.
+    #:
+    #: THIS IS A ROUTING ANNOTATION, NOT AN AUTHORITY CARVE-OUT. The
+    #: answer path stays OWNER-SCOPED (T8.5): a non-owner is refused
+    #: with ``pok_gate_not_owner`` — a curator role does NOT unlock
+    #: another agent's pending gate. The flag is consumed by the
+    #: ROUTED PAYLOAD (the ``routed_to`` / ``curator_agents`` fields the
+    #: caller sees), which tells the caller that the confirmation has to
+    #: reach a curator. A curator who wants to merge into a pinned row
+    #: answers as the OWNING agent (or performs the merge themselves).
     routed_to_curator: bool = False
 
 

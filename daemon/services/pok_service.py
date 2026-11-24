@@ -794,7 +794,11 @@ class POKService:
                     verdict=verdict,
                     candidate_body=body,
                     candidate_slug=slug,
-                    proposed_body=getattr(verdict, "proposed_slug", None),
+                    # NOTE: no ``proposed_body`` here. A plain ASK carries
+                    # no merged body — the field is body-typed and a slug
+                    # would be a type lie (the R-RET rename proposal
+                    # travels on ``verdict.proposed_slug``, which the
+                    # tool reads directly).
                 ),
                 verdict,
             )
