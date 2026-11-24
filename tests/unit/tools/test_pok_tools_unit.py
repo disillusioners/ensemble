@@ -94,7 +94,10 @@ class TestRegistrationSurface:
         assert CATEGORY_NAME == "pok"
         assert CATEGORY_MODULES.get("pok") == "daemon.tools.pok"
         assert "pok" not in (
-            __import__("daemon.tools._tool_registry", fromlist=["PRIVILEGED_TOOL_CATEGORIES"]).PRIVILEGED_TOOL_CATEGORIES
+            __import__(
+                "daemon.tools._tool_registry",
+                fromlist=["PRIVILEGED_TOOL_CATEGORIES"],
+            ).PRIVILEGED_TOOL_CATEGORIES
         )
 
     def test_upsert_description_renders_the_live_cap(self, tool_env) -> None:
@@ -385,7 +388,11 @@ class TestTypedEchoTaxonomy:
 
         def boom(self, entry):
             raise sqlalchemy.exc.IntegrityError(
-                "INSERT ...", {}, Exception("UNIQUE constraint failed: project_operating_knowledge.project_id, project_operating_knowledge.slug")
+                "INSERT ...",
+                {},
+                Exception(
+                    "UNIQUE constraint failed: project_operating_knowledge.project_id, project_operating_knowledge.slug"
+                ),
             )
 
         repo_mod.POKRepository.insert = boom

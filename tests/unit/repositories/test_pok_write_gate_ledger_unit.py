@@ -51,7 +51,8 @@ MERGE_PROPOSAL_FIELDS = (
     "executed_by",
 )
 
-#: The 5 record kinds the ledger must carry (phase1-plan.md T1.1).
+#: The 5 record-kind fields the ledger must carry (phase1-plan.md
+#: T1.1): verdict, reason, judge_explanation, executed, basis.
 REQUIRED_RECORD_FIELDS = (
     "verdict",       # the gate's outcome (admission decision)
     "reason",        # the caller's operational claim (the excerpt)
@@ -104,7 +105,7 @@ class TestLedgerSchema:
         assert not missing, f"merge-proposal fields missing: {missing}"
 
     def test_all_five_record_kinds_are_representable(self) -> None:
-        """admission + retrieval + verdict + execution + basis."""
+        """verdict + reason + judge_explanation + executed + basis."""
         cols = set(POKWriteGateLedger.__table__.columns.keys())
         missing = [f for f in REQUIRED_RECORD_FIELDS if f not in cols]
         assert not missing, f"record-kind fields missing: {missing}"
