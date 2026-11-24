@@ -4131,6 +4131,21 @@ async def lifespan(app: FastAPI):
         # engine start + watchdog start) must be <=250ms. The UNGATED total
         # (block entry incl. imports/construction/build_observer_specs through
         # watchdog start) is reported as telemetry (D4.9 concern visibility).
+        #
+        # HONESTY (Phase-2 pilot, 2026-11-23): ``executable_specs`` states
+        # how many registered specs have an executor ATTACHED right now.
+        # Without it the line says "observer specs (execute_fn withheld)"
+        # even in the pilot's OWNED posture, where the engine really does
+        # execute the orphan watcher — the ceremony reads this line, so it
+        # must not understate the posture. The field is ADDITIVE: the pinned
+        # substrings ("...registrations=%d" / "specs (execute_fn withheld);
+        # use_engine_flags=%s;") are unchanged.
+        _executable_job_ids = sorted(
+            getattr(_engine_svc, "_executors", {}) or {}
+        )
+        _executable_specs = f"{len(_executable_job_ids)}"
+        if _executable_job_ids:
+            _executable_specs += f" ({', '.join(_executable_job_ids)})"
         _engine_gated_elapsed_ms = (time.perf_counter() - _engine_gated_t0) * 1000.0
         _engine_block_total_elapsed_ms = (
             time.perf_counter() - _engine_block_entry_t0
@@ -4138,11 +4153,13 @@ async def lifespan(app: FastAPI):
         logger.info(
             "engine boot posture: enabled=%s shadow=%s registrations=%d observer "
             "specs (execute_fn withheld); use_engine_flags=%s; "
+            "executable_specs=%s; "
             "block_elapsed_ms_gated=%.3f block_elapsed_ms_total=%.3f",
             _engine_cfg.enabled,
             _engine_cfg.shadow_mode,
             len(_observer_specs),
             describe_use_engine_flags(_observer_specs),
+            _executable_specs,
             _engine_gated_elapsed_ms,
             _engine_block_total_elapsed_ms,
         )

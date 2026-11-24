@@ -1,0 +1,128 @@
+================================================================================
+RO-GUARD PROBE — OrphanWatcher engine pilot soak harness
+Central Engine Phase-2 pilot · fix turn 2026-11-23 · review #5 (F1) + #6 (F2)
+
+WHAT THIS TRANSCRIPT PROVES
+  1. F1 (review #5): the PRE-FIX read-only guard (a connect-event
+     `SET default_transaction_read_only = on`) is INERT under psycopg3 —
+     the write attempt SUCCEEDED ("WRITE ALLOWED"). This reproduces the
+     reviewer's finding on this host.
+  2. F1 (AFTER): the FIXED guard
+     (connect_args={"options": "-c default_transaction_read_only=on"})
+     is enforced by the SERVER: the same write attempt is REFUSED with
+     psycopg.errors.ReadOnlySqlTransaction, while the harness's actual
+     workload (SELECT) still works.
+  3. F2 (review #6): a PROD-SHAPED target with a WRITE-CAPABLE role is
+     REFUSED LOUDLY by the harness's role assertion.
+
+TARGET: the FENCED DEV database (ensemble_dev) — the probe never touches
+prod. The prod-shaped refusal leg uses a stub connection (no network).
+
+PROBE SOURCE (reproducible):
+"""RO-GUARD PROBE — BEFORE (old connect-event SET) vs AFTER (fixed connect option).
+
+Review #5 method: build the harness's engine, then attempt a write.
+"""
+import sys, datetime
+sys.path.insert(0, "/home/nea/ensemble-src-wt-engine-pilot-ow")
+from sqlalchemy import create_engine, event, text
+from scripts.soak.engine_pilot_orphan_soak import _ro_engine, _assert_read_only_role
+
+env = {}
+for line in open("/home/nea/ensemble-src-wt-engine-pilot-ow/.env"):
+    line = line.strip()
+    if line and not line.startswith("#") and "=" in line:
+        k, v = line.split("=", 1); env[k] = v
+DSN = (f"postgresql+psycopg://{env['POSTGRES_USER']}:{env['POSTGRES_PASSWORD']}"
+       f"@{env['POSTGRES_HOST']}:{env['POSTGRES_PORT']}/{env['POSTGRES_DB']}")
+
+
+def old_engine(dsn):
+    """The PRE-FIX implementation: SET default_transaction_read_only from a
+    connect event hook (INERT under psycopg3's implicit BEGIN ordering)."""
+    e = create_engine(dsn, pool_pre_ping=True, future=True)
+
+    @event.listens_for(e, "connect")
+    def _set_readonly(dbapi_conn, _rec):
+        with dbapi_conn.cursor() as cur:
+            cur.execute("SET default_transaction_read_only = on")
+
+    return e
+
+
+def write_probe(engine):
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("CREATE TEMP TABLE _ro_probe_tmp (id int)"))
+            conn.execute(text("INSERT INTO _ro_probe_tmp (id) VALUES (1)"))
+            conn.commit()
+        return "WRITE ALLOWED  <-- NOT READ-ONLY (guard INERT)"
+    except Exception as exc:
+        return f"WRITE REFUSED — {type(exc).__name__}: {str(exc).splitlines()[0]}"
+
+
+print(f"probe_utc={datetime.datetime.now(datetime.timezone.utc).isoformat()}")
+print(f"target_database={env['POSTGRES_DB']}  (the FENCED DEV database — the probe never touches prod)")
+print(f"connected_role=READ FROM THE LIVE CONNECTION via SELECT current_user")
+print()
+
+print("=== BEFORE: the pre-fix guard (connect-event SET default_transaction_read_only) ===")
+e_old = old_engine(DSN)
+with e_old.connect() as c:
+    print("  connected role:", c.execute(text("SELECT current_user")).scalar())
+print("  write attempt ->", write_probe(e_old))
+e_old.dispose()
+print()
+
+print("=== AFTER: the fixed guard (connect_args options=-c default_transaction_read_only=on) ===")
+e_new = _ro_engine(DSN)
+print("  role assertion ->", _assert_read_only_role(e_new, DSN))
+print("  write attempt ->", write_probe(e_new))
+with e_new.connect() as c:
+    print("  SELECT still works -> engine_runs rows =", c.execute(text("SELECT count(*) FROM engine_runs")).scalar())
+e_new.dispose()
+print()
+
+print("=== F2: prod-shaped target + write-capable role -> must REFUSE LOUDLY ===")
+
+
+class _FakeConn:
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def execute(self, *a, **k):
+        class _R:
+            def scalar(self): return "ensemble_prod_writer"
+        return _R()
+
+
+class _FakeEngine:
+    def connect(self): return _FakeConn()
+
+
+try:
+    _assert_read_only_role(
+        _FakeEngine(),
+        "postgresql+psycopg://u:p@127.0.0.1:5432/ensemble_prod",
+    )
+    print("  -> ACCEPTED (WRONG: a write-capable prod role was accepted)")
+except RuntimeError as exc:
+    print(f"  -> REFUSED LOUDLY: {exc}")
+
+================================================================================
+PROBE OUTPUT:
+================================================================================
+probe_utc=2026-11-23T19:33:26.792368+00:00
+target_database=ensemble_dev  (the FENCED DEV database — the probe never touches prod)
+connected_role=READ FROM THE LIVE CONNECTION via SELECT current_user
+
+=== BEFORE: the pre-fix guard (connect-event SET default_transaction_read_only) ===
+  connected role: ensemble_dev_app
+  write attempt -> WRITE ALLOWED  <-- NOT READ-ONLY (guard INERT)
+
+=== AFTER: the fixed guard (connect_args options=-c default_transaction_read_only=on) ===
+  role assertion -> {'role': 'ensemble_dev_app', 'database': 'ensemble_dev', 'prod_shaped': False, 'role_is_read_only': False, 'role_asserted': True}
+  write attempt -> WRITE REFUSED — InternalError: (psycopg.errors.ReadOnlySqlTransaction) cannot execute CREATE TABLE in a read-only transaction
+  SELECT still works -> engine_runs rows = 283
+
+=== F2: prod-shaped target + write-capable role -> must REFUSE LOUDLY ===
+  -> REFUSED LOUDLY: REFUSING to run: the target database 'ensemble_prod' is PROD-SHAPED but the connected role 'ensemble_prod_writer' is not read-only-shaped (expected a *_ro / ro role). Pass the read-only role's DSN (e.g. ensemble_prod_ro) — the harness must never be pointed at a write-capable production role.
