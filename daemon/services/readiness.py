@@ -457,6 +457,14 @@ class ReadinessComposite:
     # /readyz (503 + reason). On SQLite installs this is always True
     # (no probe runs; SQLite saver has no long-lived conn to monitor).
     checkpoint_saver: bool = True
+    # fix/post-outage-recovery SCOPE (b): the boot-consistency reconciler
+    # leg. DEFAULT True so every existing caller (SQLite installs, hand-
+    # built composites, older tests) is byte-identical. The lane publishes
+    # ``False`` via the process-global state in
+    # ``daemon/services/boot_consistency_reconciler.py`` when it hit a
+    # DB/unreachable error at boot; readiness then reports degraded
+    # (503-with-reason) while the daemon still boots (never-wedge holds).
+    boot_recovery_ok: bool = True
     reasons: list[str] = field(default_factory=list)
     queue_max_age_seconds: Optional[float] = None
     # WHY the age is (or is not) there — see the QUEUE_AGE_REASON_*
@@ -567,6 +575,7 @@ class ReadinessComposite:
             and self.queue_freshness
             and self.services
             and self.checkpoint_saver
+            and self.boot_recovery_ok
             and not self.forced_degraded
         )
 
@@ -627,6 +636,18 @@ class ReadinessComposite:
             },
             "draining": draining,
         }
+        # fix/post-outage-recovery SCOPE (b): the boot_recovery leg is
+        # published ONLY when degraded, so the healthy payload stays
+        # byte-identical (the exact-components OFF-state contract).
+        if not self.boot_recovery_ok:
+            payload["components"]["boot_recovery"] = False
+            payload["detail"]["boot_recovery"] = {
+                "status": "degraded",
+                "reason": (
+                    "boot-consistency reconciler hit DB/unreachable errors "
+                    "at boot (see [BOOT_RECOVERY_DB_ERROR] logs)"
+                ),
+            }
         if self.auth_dependency_status is not None:
             payload["auth_dependency_status"] = self.auth_dependency_status
             payload["detail"]["auth_dependency_status"] = (
@@ -1300,6 +1321,9 @@ def compute_readiness_composite(
     checkpoint_saver_ok: bool = True,
     auth_dependency_status: Optional[str] = None,
     component_classes: Optional[dict[str, str]] = None,
+    # fix/post-outage-recovery SCOPE (b): the boot-consistency reconciler
+    # leg. DEFAULT True (healthy) so every existing caller is unchanged.
+    boot_recovery_ok: bool = True,
     first_seen_degraded: Optional[datetime] = None,
     failure_streak: Optional[dict[str, int]] = None,
     pool_state_sqlalchemy: Optional[dict] = None,
@@ -1399,11 +1423,17 @@ def compute_readiness_composite(
             "checkpoint_saver: sentinel checkpoint read (aget_tuple) "
             f"failed or timed out{ckpt_class_suffix}"
         )
+    if not boot_recovery_ok:
+        reasons.append(
+            "boot_recovery: boot-consistency reconciler hit DB/unreachable "
+            "errors at boot ([BOOT_RECOVERY_DB_ERROR])"
+        )
     return ReadinessComposite(
         database=database_ok,
         queue_freshness=queue_fresh_ok,
         services=services_ok,
         checkpoint_saver=checkpoint_saver_ok,
+        boot_recovery_ok=boot_recovery_ok,
         reasons=reasons,
         queue_max_age_seconds=queue_max_age_seconds,
         queue_max_age_seconds_reason=queue_max_age_seconds_reason,
@@ -1505,6 +1535,7 @@ def apply_forced_degradation(
         queue_freshness=composite.queue_freshness,
         services=composite.services,
         checkpoint_saver=composite.checkpoint_saver,
+        boot_recovery_ok=composite.boot_recovery_ok,
         queue_max_age_seconds=composite.queue_max_age_seconds,
         checked_at=composite.checked_at,
         forced_degraded=True,
@@ -1523,6 +1554,24 @@ def apply_forced_degradation(
             f"readiness: degraded forced by {READINESS_FORCE_DEGRADED_ENV} (drill)",
         ]
     return ReadinessComposite(**degraded_copy)
+
+
+def _boot_recovery_leg_ok() -> bool:
+    """Read the boot-consistency reconciler's readyz leg (fail-healthy default).
+
+    Lazy import avoids a module-load cycle (the lane imports
+    auto_continue_boot_pass, not readiness). Any failure to read the leg
+    defaults to healthy — readiness must never wedge on the observability
+    seam itself.
+    """
+    try:
+        from daemon.services.boot_consistency_reconciler import (
+            get_boot_recovery_state,
+        )
+
+        return bool(get_boot_recovery_state().get("ok", True))
+    except Exception:  # noqa: BLE001 — observability seam never wedges readiness
+        return True
 
 
 async def refresh_readiness_composite(
@@ -1872,6 +1921,10 @@ async def refresh_readiness_composite(
         extra_reasons=extra_reasons,
         inflight_turns=inflight_turns,
         checkpoint_saver_ok=checkpoint_saver_ok,
+        # fix/post-outage-recovery SCOPE (b): the boot-consistency lane's
+        # process-global readyz leg. Lazy import keeps readiness decoupled
+        # from the lane at module load (no cycle); the getter is O(1).
+        boot_recovery_ok=_boot_recovery_leg_ok(),
         auth_dependency_status=auth_dependency_status,
         component_classes=component_classes,
         # The failure CLASS of a degraded checkpoint-saver component —

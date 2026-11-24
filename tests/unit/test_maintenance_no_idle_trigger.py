@@ -175,7 +175,7 @@ class TestR2NoIdleBehavioral:
         a non-empty request registry is the "system is busy" signal that used
         to make ``MaintenanceService._is_idle`` return False (→ 500 skips).
         Here the chain one-shot MUST dispatch anyway, with the deterministic
-        ``scheduler:{source_id}:{run_at.isoformat()}`` dedup key, and the idle
+        ``scheduler:{source_id}:slot:{run_at.isoformat()}`` dedup key, and the idle
         probe is NEVER consulted on the dispatch path.
         """
         # ── Busy fixture (non-empty request registry) ───────────────────
@@ -226,7 +226,7 @@ class TestR2NoIdleBehavioral:
         enqueue.assert_awaited_once()
         kwargs = enqueue.await_args.kwargs
         assert kwargs["idempotency_key"] == (
-            f"scheduler:{SOURCE_ID}:{RUN_AT.isoformat()}"
+            f"scheduler:{SOURCE_ID}:slot:{RUN_AT.isoformat()}"
         )
         assert kwargs["source"] == "scheduler"
 

@@ -129,8 +129,11 @@ def _build_adapter(engine: Engine, row: SourceConfig):
 
 
 def _key(adapter) -> str:
-    """The one-shot idempotency key (``scheduler:{source_id}:{run_at}``)."""
-    return f"scheduler:{adapter.source_id}:{adapter._run_at.isoformat()}"
+    """The one-shot idempotency key — the SLOT key
+    (``scheduler:{source_id}:slot:{run_at}``, R1: the slot is stable
+    across a restart, so a re-fire of the same slot collapses onto the
+    prior JobItem instead of delivering twice)."""
+    return f"scheduler:{adapter.source_id}:slot:{adapter._run_at.isoformat()}"
 
 
 @pytest.fixture
@@ -179,6 +182,96 @@ class TestConsumingFireRearms:
         assert refreshed.status == SourceStatus.RUNNING.value
         assert completions == [], (
             "the chain-aware skip did not skip the completion callback"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_persisted_run_at_keeps_the_chain_weekday(
+        self, rearm_engine, monkeypatch,
+    ):
+        """D2 (reviewer fold, fix/post-outage-recovery): the PERSISTED
+        next-fire keeps the chain's weekday after a consuming fire.
+
+        The commissioned assertion was pinned by NEITHER existing pin:
+        ``test_execution_receipt_pins.py`` asserts the weekday only on
+        the IN-MEMORY ``_get_next_trigger_time()`` value (the cron
+        shape), and ``test_a_consuming_fire_mints_the_next_week``
+        asserts only freshness of the PERSISTED ``run_at`` — never its
+        weekday. This pin drives the maintenance-chain re-arm (the
+        ``pick_next_fire_instant`` path), reads the row the re-arm
+        actually WROTE, and asserts weekday equality end-to-end.
+
+        FRAME NOTE (P5B F2): the stored ``run_at`` is a UTC instant
+        that legitimately lands on the PRIOR UTC date (Sun 02:48 ICT =
+        Sat 19:48Z) — so the weekday is asserted in the KNOB TIMEZONE,
+        the frame the weekly cadence is anchored on, never on the raw
+        UTC date. The knobs are pinned via their env contract so the
+        pin is deterministic regardless of ambient env (0 = Sunday,
+        canonical 0=Sun..6=Sat).
+        """
+        from zoneinfo import ZoneInfo
+
+        import daemon.services.maintenance_schedule_knobs as knobs_mod
+
+        monkeypatch.setenv(knobs_mod.ENV_WINDOW_START, "01:00")
+        monkeypatch.setenv(knobs_mod.ENV_WINDOW_END, "05:00")
+        monkeypatch.setenv(knobs_mod.ENV_WEEKDAY, "0")  # 0 = Sunday
+        monkeypatch.setenv(knobs_mod.ENV_TIMEZONE, "Asia/Ho_Chi_Minh")
+
+        tz = ZoneInfo("Asia/Ho_Chi_Minh")
+        local_now = datetime.now(tz)
+        # The most recent PAST Sunday 03:00 local — the chain cadence
+        # (weekday knob 0 = Sunday) the re-arm must keep. If that
+        # instant is closer than 2h to now (running inside Sunday's
+        # window), fall back a full week so the slot is solidly
+        # past-due but still inside the unlimited default lateness cap.
+        days_since_sunday = (local_now.weekday() + 1) % 7
+        stale_local = (local_now - timedelta(days=days_since_sunday)).replace(
+            hour=3, minute=0, second=0, microsecond=0,
+        )
+        if (local_now - stale_local) < timedelta(hours=2):
+            stale_local = stale_local - timedelta(days=7)
+        assert stale_local.weekday() == 6, "fixture must be a Sunday (py 6)"
+        assert stale_local < local_now, "fixture must be past-due"
+        stale = stale_local.astimezone(timezone.utc)
+
+        row = _insert_row(rearm_engine, _chain_config(stale))
+        adapter, completions = _build_adapter(rearm_engine, row)
+
+        async def _fake_emit() -> None:
+            adapter._fire_outcome = adapter.FIRE_OUTCOME_DIRECT
+            adapter._stop_event.set()
+
+        adapter._emit_scheduled_message = _fake_emit  # type: ignore[assignment]
+        await adapter._run_schedule()
+
+        refreshed = _row(rearm_engine)
+        assert refreshed is not None, "the consuming fire must persist a row"
+        persisted = datetime.fromisoformat(refreshed.config["run_at"])
+        assert persisted > datetime.now(timezone.utc), (
+            "the persisted slot must be future"
+        )
+
+        persisted_local = persisted.astimezone(tz)
+        assert persisted_local.weekday() == stale_local.weekday(), (
+            f"the PERSISTED next-fire must keep the consumed weekday "
+            f"(Sunday local), got py weekday {persisted_local.weekday()} "
+            f"from {refreshed.config['run_at']} rendered in {tz}"
+        )
+        assert persisted_local.weekday() == 6, (
+            "the chain's weekday knob is 0 = Sunday — the persisted "
+            "slot must land on it in the knob timezone"
+        )
+        minute_of_day = persisted_local.hour * 60 + persisted_local.minute
+        assert 60 <= minute_of_day < 300, (
+            f"the persisted slot must land inside the knob window "
+            f"[01:00, 05:00) local, got {persisted_local.time()}"
+        )
+        assert refreshed.config["chain"]["weekday"] == 0, (
+            "the re-arm must echo the resolved weekday knob into the "
+            "chain block (audit keys)"
+        )
+        assert completions == [], (
+            "the chain re-arm must not fire the one-shot completion callback"
         )
 
     @pytest.mark.asyncio

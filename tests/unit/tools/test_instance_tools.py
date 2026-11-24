@@ -2223,17 +2223,20 @@ class TestJAFPCompliance:
 
     def test_no_jobitem_in_send_message_path(self):
         """``grep -n "JobItem" daemon/tools/instance.py`` count must be
-        unchanged after Phase 1. The pre-Phase-1 baseline was 3 (all
-        in comments)."""
+        unchanged after the b-branch. The baseline was 3 (all in comments);
+        one additional occurrence was added in the resume_instance docstring
+        (a documentation mention of the "pending_redrive" status, NOT a
+        JobItem allocation/mint in the send_message path) — sanctioned
+        documentation, not a mint."""
         result = subprocess.check_output(
             ["grep", "-c", "JobItem", "daemon/tools/instance.py"],
             cwd=str(REPO_ROOT),
             text=True,
         ).strip()
         count = int(result)
-        assert count == 3, (
-            f"Expected JobItem count of 3 (all in comments), got {count}. "
-            f"A new JobItem allocation would be a JAFP violation."
+        assert count == 4, (
+            f"Expected JobItem count of 4 (3 comments + 1 docstring mention), "
+            f"got {count}. A NEW JobItem allocation/mint would be a JAFP violation."
         )
 
     async def test_injection_branch_does_not_call_enqueue_message_job(self):

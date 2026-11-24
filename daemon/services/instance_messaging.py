@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -1044,6 +1045,232 @@ def _usage_messages_fingerprint(messages: list) -> tuple | None:
         return tuple(_usage_message_fingerprint(m) for m in messages)
     except Exception:
         return None
+
+
+#: The generation suffix every DEFERRED idempotency key carries
+#: (``scheduler:{sid}:deferred[:{run_at}]:v{gen}``).  It is the
+#: discriminator that separates the deferred twin from a direct slot
+#: key — the direct slot's trailing segment is the run_at instant, never
+#: a ``v{gen}`` token.  Used by ``is_scheduler_direct_slot_key`` so a
+#: source_id slug that itself carries a ``slot`` segment cannot make a
+#: deferred key look direct.
+_DEFERRED_GENERATION_SUFFIX_RE = re.compile(r"^v\d+$")
+
+
+def is_scheduler_direct_slot_key(key: str | None) -> bool:
+    """R1/R3 (fix/post-outage-recovery b2): is this a DIRECT slot key?
+
+    The direct fire's idempotency key is SLOT-STABLE and namespaced:
+    ``scheduler:{source_id}:slot:{run_at_iso}``.  The DEFERRED twin is
+    ``scheduler:{source_id}:deferred[:{run_at}]:v{gen}`` (DEC-18).
+
+    The classification is SEGMENT-WISE — the key is split on ``:`` and the
+    namespace markers are matched as whole SEGMENTS.  A substring test
+    (``":slot:" in key``) is NOT safe: the ``source_id`` slug is opaque,
+    so a slug that itself contains a ``slot`` segment would make a
+    DEFERRED key look direct — and compensating a deferred delivery
+    would break DEC-18's no-loss guarantee (the deferred path's
+    terminal-bypass re-delivery is a DELIBERATE feature).
+
+    The DEFERRED twin is therefore excluded FIRST: it is identified by
+    its ``deferred`` namespace segment TOGETHER WITH the generation
+    suffix (``v{gen}``) that every deferred key carries.  The exclusion
+    wins even when the slug itself carries a ``slot`` segment.
+
+    Returns ``False`` for anything that is not a scheduler direct-slot
+    key (including non-scheduler callers, which keep their intentional
+    terminal-fallback re-submit semantics).
+    """
+    if not isinstance(key, str):
+        return False
+    parts = key.split(":")
+    if len(parts) < 4 or parts[0] != "scheduler":
+        return False
+    # The deferred twin is excluded FIRST — the generation suffix is the
+    # discriminator (the direct slot's trailing segment is the run_at
+    # instant, never a ``v{gen}`` token).
+    if "deferred" in parts[1:] and _DEFERRED_GENERATION_SUFFIX_RE.match(parts[-1]):
+        return False
+    # A direct slot key carries a whole ``slot`` segment with the run_at
+    # instant AFTER it (``parts[1:-1]`` — the trailing segment is the
+    # instant itself).
+    return "slot" in parts[1:-1]
+
+
+def classify_dedup_outcome(
+    *,
+    supplied_key: str | None,
+    returned_job: Any,
+    local_job_id: str,
+) -> tuple[bool, bool]:
+    """F1(b) (fix/post-outage-recovery b2): classify the substrate's answer.
+
+    Returns ``(genuine_dedup, fallback_masquerade)``.
+
+    * ``genuine_dedup`` — the atomic claim returned the PRE-EXISTING
+      winner (its ``job_id`` differs from the locally-minted UUID). The
+      prelude pair (Task-B + MQ-B) is a phantom; the D4 compensation
+      reconciles it. This is the pre-existing arm, unchanged.
+    * ``fallback_masquerade`` — the caller supplied a key, the substrate
+      LOGGED a key match, but the returned row carries the caller's own
+      minted ``job_id`` with a REWRITTEN ``idempotency_key`` (the
+      terminal/TTL fallback re-inserted under a synthetic suffix). THE
+      ADJUDICATED ROOT CAUSE (wedge 6105e198): the pre-fix predicate
+      (``returned.job_id != mint``) evaluated False on exactly this
+      shape, so a logged dedup hit skipped the compensation and the
+      phantom prelude wedged. The masquerade means "the key was already
+      claimed by another row" — the caller must decide what that means
+      (for the scheduler: at-most-once ⇒ compensate; for other callers
+      the terminal-fallback re-submit is intentional and untouched).
+
+    No key supplied ⇒ ``(False, False)`` — there is no dedup to detect
+    (mocks with hardcoded job_ids must not trip the phantom branch).
+    """
+    if not supplied_key or returned_job is None:
+        return (False, False)
+    returned_job_id = getattr(returned_job, "job_id", None)
+    if returned_job_id is not None and returned_job_id != local_job_id:
+        return (True, False)
+    returned_key = getattr(returned_job, "idempotency_key", None)
+    if returned_key is not None and returned_key != supplied_key:
+        return (False, True)
+    return (False, False)
+
+
+async def compensate_dedup_hit(
+    *,
+    task_repo: Any,
+    queue_repository: Any,
+    phantom_task_id: int | None,
+    phantom_message_id: str | None,
+    real_job_id: str,
+    local_job_id: str,
+    cancel_job_fn: Any = None,
+    masquerade: bool = False,
+) -> dict[str, Any]:
+    """F1(b): reconcile the phantom prelude pair on a dedup-class hit.
+
+    Extracted verbatim from ``enqueue_message_job``'s inline D4 block so
+    BOTH arms (genuine dedup AND the terminal-fallback masquerade) route
+    through ONE reconcile path (F4: the compensation kills phantom rows —
+    it never claims, drives, or fabricates a turn).
+
+    Arms:
+      * ``masquerade=False`` (genuine): cancel the phantom Task-B via the
+        D8 wrapper and delete the phantom MQ-B row; rebind the caller's
+        ``job_id`` onto the REAL JobItem-A.
+      * ``masquerade=True``: the substrate re-inserted a fresh fallback
+        JobItem bound to the caller's mint. The phantom prelude is
+        reconciled the same way, AND the orphan fallback JobItem is
+        cancelled via ``cancel_job_fn`` (scheduler-scoped — see the call
+        site: non-scheduler callers keep their intentional
+        terminal-fallback re-submit semantics).
+
+    Returns ``{"task_cancelled", "mq_deleted", "job_cancelled", "job_id"}``
+    where ``job_id`` is the id the caller should treat as authoritative
+    downstream (JobItem-A on the genuine arm, the cancelled fallback row's
+    id on the masquerade arm — dead, loud, never silently re-used).
+    """
+    outcome: dict[str, Any] = {
+        "task_cancelled": False,
+        "mq_deleted": False,
+        "job_cancelled": False,
+        "job_id": real_job_id if not masquerade else local_job_id,
+    }
+    if masquerade:
+        logger.warning(
+            "enqueue_message_job: IDEMPOTENCY-KEY MASQUERADE — the substrate "
+            "logged a key match but its terminal/TTL fallback re-inserted a "
+            "fresh row carrying this call's mint (key rewritten). Treating "
+            "the hit as a dedup: the phantom prelude is reconciled below and "
+            "the orphan fallback JobItem is cancelled (scheduler-scoped "
+            "at-most-once). mint=%s fallback_job=%s",
+            str(local_job_id)[:8],
+            str(real_job_id)[:8],
+        )
+    else:
+        logger.info(
+            "enqueue_message_job: idempotency-key dedup hit — "
+            "phantom UUID-B=%s (Task-B=%s, MQ-B=%s) reconciled onto "
+            "real JobItem-A=%s; compensating via cancel_task + "
+            "MessageQueue.delete",
+            str(local_job_id)[:8],
+            phantom_task_id,
+            str(phantom_message_id)[:8] if phantom_message_id else None,
+            str(real_job_id)[:8],
+        )
+
+    # Cancel the phantom Task-B through the D8 wrapper — cancel_task is
+    # safe on PENDING (zero-cost atomic flip), RUNNING (AbortTurn +
+    # mirror reconciliation) and terminal rows (no-op).
+    if task_repo is not None and phantom_task_id is not None:
+        try:
+            await asyncio.to_thread(
+                task_repo.cancel_task,
+                phantom_task_id,
+                "dedup_compensation: enqueue_message_job "
+                "idempotency-key collision; the prior execution's JobItem "
+                "is the authoritative work.",
+            )
+            outcome["task_cancelled"] = True
+        except Exception as cancel_err:
+            logger.warning(
+                f"enqueue_message_job: cancel_task failed for "
+                f"phantom Task-B={phantom_task_id} on dedup hit "
+                f"(will continue — MQ-B cleanup still proceeds): "
+                f"{type(cancel_err).__name__}: {cancel_err}"
+            )
+    elif task_repo is None:
+        logger.warning(
+            "enqueue_message_job: manager._task_repo unavailable; "
+            "skipping phantom Task-B cancel on dedup hit "
+            f"(Task-B={phantom_task_id}). The prior JobItem remains "
+            "authoritative — but WITHOUT this cancel, Task-B "
+            "could still be claimed by the worker pool. Restoring "
+            "the cancel path is the fix for the unavailable repo."
+        )
+
+    # Delete the phantom MessageQueue-B audit row.
+    if queue_repository is not None and phantom_message_id:
+        try:
+            await asyncio.to_thread(
+                queue_repository.delete,
+                phantom_message_id,
+            )
+            outcome["mq_deleted"] = True
+        except Exception as mq_delete_err:
+            logger.warning(
+                f"enqueue_message_job: orphan MQ-B delete failed on "
+                f"dedup hit (continuing — stamping + return still "
+                f"proceeds): {type(mq_delete_err).__name__}: "
+                f"{mq_delete_err}"
+            )
+
+    # Masquerade arm only: dispose the orphan fallback JobItem (a fresh
+    # row the substrate re-inserted that now has no driving Task). The
+    # genuine arm has no phantom JobItem at all — its caller's INSERT
+    # lost the claim, so there is nothing to cancel.
+    if masquerade and cancel_job_fn is not None:
+        try:
+            cancelled = await cancel_job_fn(real_job_id)
+            outcome["job_cancelled"] = bool(cancelled)
+            if not cancelled:
+                logger.warning(
+                    "enqueue_message_job: masquerade fallback JobItem %s "
+                    "could not be cancelled (non-cancellable state?) — "
+                    "it remains QUEUED with no driving Task; the "
+                    "taskless-enqueue guard / reconciler owns it",
+                    str(real_job_id)[:8],
+                )
+        except Exception as job_cancel_err:
+            logger.warning(
+                "enqueue_message_job: masquerade fallback JobItem cancel "
+                "failed for %s (continuing): %s: %s",
+                str(real_job_id)[:8],
+                type(job_cancel_err).__name__,
+                job_cancel_err,
+            )
+    return outcome
 
 
 class InstanceMessagingService:
@@ -3547,121 +3774,89 @@ class InstanceMessagingService:
             dispatch_chain=dispatch_chain,
         )
 
-        # D4 compensation: detect a dedup hit. A dedup is meaningful when
-        # an ``idempotency_key`` was supplied (the substrate only routes
-        # through the atomic claim in that branch — see
-        # ``JobQueueService.enqueue``:1121-1194) AND the returned JobItem's
-        # ``job_id`` differs from the locally-minted UUID-B. Without the
-        # ``idempotency_key`` gate the substrate mints a new row whose
-        # ``job_id`` is the caller-supplied UUID by construction; tests
-        # that mock the substrate with a hardcoded ``job_id`` would
-        # otherwise trip a phantom-dedup branch (no idempotency_key was
-        # passed, so there is no real dedup to compensate).
-        dedup_hit: bool = (
-            idempotency_key is not None
-            and enqueue_returned_job is not None
-            and getattr(enqueue_returned_job, "job_id", None) != job_id
+        # D4 compensation — F1(b) (fix/post-outage-recovery b2): classify
+        # the substrate's answer on BOTH dedup arms. The pre-fix predicate
+        # (returned job_id != mint) was BLIND on the terminal-fallback
+        # MASQUERADE: the substrate logs a key match, re-inserts a fresh
+        # row under a synthetic-suffix key carrying the CALLER's minted
+        # job_id, and the compensation never ran — the phantom prelude
+        # (Task-B + MQ-B) wedged (adjudicated 6105e198, 11m19s).
+        # ``classify_dedup_outcome`` returns (genuine, masquerade); BOTH
+        # arms route through ``compensate_dedup_hit`` — one reconcile
+        # path, no bypass (F4). The masquerade arm is SCHEDULER-SCOPED:
+        # for every other caller the terminal-fallback re-submit is
+        # INTENTIONAL JobItem semantics (re-enqueue after done must keep
+        # working), so they get the truthful warning log only — their
+        # idempotency semantics are unchanged.
+        genuine_dedup, fallback_masquerade = classify_dedup_outcome(
+            supplied_key=idempotency_key,
+            returned_job=enqueue_returned_job,
+            local_job_id=job_id,
         )
+        # Masquerade compensation is scoped to DIRECT slot fires only:
+        # their SLOT-STABLE key (``scheduler:{sid}:slot:{run_at}``) must
+        # never re-deliver — the slot is already claimed (at-most-once
+        # per slot; the 6105e198 wedge).
+        # The DEFERRED path uses generation-scoped keys
+        # (``scheduler:{sid}:deferred:*``) and its terminal-bypass is a
+        # DELIBERATE feature (re-attempt a delivery whose JobItem went
+        # terminal — the deferred marker-miss fallback depends on the
+        # substrate returning a fresh row). Compensating the deferred
+        # path would break DEC-18's no-loss guarantee. Non-scheduler
+        # callers keep their intentional terminal-fallback re-submit.
+        # R3: the classification is SEGMENT-WISE (see
+        # ``is_scheduler_direct_slot_key``) — a source_id slug that
+        # itself carries a ``slot`` segment must not make a DEFERRED key
+        # look direct (that would compensate a deferred delivery).
+        _is_direct_slot_key = is_scheduler_direct_slot_key(idempotency_key)
+        if fallback_masquerade and not _is_direct_slot_key:
+            if source == "scheduler":
+                logger.info(
+                    "enqueue_message_job: deferred-path terminal fallback "
+                    "observed (key %r → %r) — at-most-once is NOT enforced "
+                    "here; the terminal-bypass re-delivers as designed "
+                    "(DEC-18 marker-miss latch). No compensation.",
+                    str(idempotency_key)[:24],
+                    str(getattr(enqueue_returned_job, "idempotency_key", None))[:24],
+                )
+            else:
+                logger.warning(
+                    "enqueue_message_job: idempotency-key masquerade observed "
+                    "for NON-scheduler source=%r (substrate terminal/TTL "
+                    "fallback rewrote key %r → %r). Intentional re-submit "
+                    "semantics preserved — NO compensation for this caller.",
+                    source,
+                    str(idempotency_key)[:16],
+                    str(getattr(enqueue_returned_job, "idempotency_key", None))[:16],
+                )
+            fallback_masquerade = False
+        dedup_hit: bool = genuine_dedup or fallback_masquerade
         if dedup_hit:
-            real_job_id: str = enqueue_returned_job.job_id
-            phantom_task_id: int | None = ctx.task_id
-            phantom_message_id: str = ctx.message_id
-
-            logger.info(
-                f"enqueue_message_job: idempotency-key dedup hit — "
-                f"phantom UUID-B={job_id[:8]}... (Task-B={phantom_task_id}, "
-                f"MQ-B={phantom_message_id[:8]}...) reconciled onto "
-                f"real JobItem-A={real_job_id[:8]}...; "
-                "compensating via cancel_task + MessageQueue.delete"
+            _comp = await compensate_dedup_hit(
+                task_repo=getattr(self._manager, "_task_repo", None),
+                queue_repository=self._queue_repository,
+                phantom_task_id=ctx.task_id,
+                phantom_message_id=ctx.message_id,
+                real_job_id=getattr(enqueue_returned_job, "job_id", None)
+                or job_id,
+                local_job_id=job_id,
+                cancel_job_fn=(
+                    getattr(
+                        getattr(self._manager, "_job_queue_service", None),
+                        "cancel_job",
+                        None,
+                    )
+                ),
+                masquerade=fallback_masquerade,
             )
-
-            # Cancel the phantom Task-B through the D8 wrapper
-            # (``TaskRepository.cancel_task``) — it routes via ``AbortTurn`` /
-            # ``reconcile_turn_mirror`` to update the 8 mirror tables in a
-            # post-commit transaction, the only mutation the
-            # ``turn_reconciler`` contract allows.
-            #
-            # Race reasoning (worker-pool claim between prelude and enqueue):
-            # the worker pool's ``claim_pending_task`` can flip Task-B
-            # PENDING → RUNNING between ``_prepare_enqueued_message`` and
-            # the dedup-detect above. ``cancel_task`` handles BOTH branches:
-            #
-            #   * prior_status PENDING → atomic UPDATE pending/paused/running
-            #     → CANCELLED, mirrors reconciled (zero-cost; no worker was
-            #     attached).
-            #   * prior_status RUNNING → ``AbortTurn._write`` transitions
-            #     RUNNING → CANCELLED, ``reconcile_turn_mirror`` updates the
-            #     8 mirror tables. Cancellation is at-least-once for the
-            #     LLM call: an in-flight LLM call is NOT actively aborted
-            #     mid-turn — the worker observes the CANCELLED status on
-            #     its next status check (pre-LLM or post-stream) and
-            #     discards any result it had already produced. The
-            #     downstream effect is at-most-once DISPATCH (Task-B is
-            #     dead) but the LLM call itself may complete and have
-            #     its result discarded by the worker.
-            #   * prior_status already terminal → wrapper returns None,
-            #     no-op (worker already finished).
-            #
-            # ``delete`` is deliberately rejected because it bypasses the
-            # mirror contract and would lose the bookkeeping on a Task that
-            # the worker may have already promoted to RUNNING.
-            task_repo = getattr(self._manager, "_task_repo", None)
-            if task_repo is not None and phantom_task_id is not None:
-                try:
-                    await asyncio.to_thread(
-                        task_repo.cancel_task,
-                        phantom_task_id,
-                        "dedup_compensation: enqueue_message_job "
-                        "idempotency-key collision; original Task-A is "
-                        "the authoritative work.",
-                    )
-                except Exception as cancel_err:
-                    logger.warning(
-                        f"enqueue_message_job: cancel_task failed for "
-                        f"phantom Task-B={phantom_task_id} on dedup hit "
-                        f"(will continue — MQ-B cleanup still proceeds): "
-                        f"{type(cancel_err).__name__}: {cancel_err}"
-                    )
-            elif task_repo is None:
-                logger.warning(
-                    "enqueue_message_job: manager._task_repo unavailable; "
-                    "skipping phantom Task-B cancel on dedup hit "
-                    f"(Task-B={phantom_task_id}). JobItem-A remains "
-                    "authoritative — but WITHOUT this cancel, Task-B "
-                    "could still be claimed by the worker pool (claim "
-                    "keys on task_id; work_id↔JobItem linkage is not "
-                    "a claim precondition). The subsequent MQ-B "
-                    "delete below still removes the audit row; the "
-                    "operational risk is one wasted dispatch if a "
-                    "worker claims Task-B before any operator "
-                    "intervenes. Restoring the cancel path is the "
-                    "fix for the unavailable repo."
-                )
-
-            # Delete the orphan MessageQueue-B audit row. ``MQ-A`` from
-            # the original call already records the user message; ``MQ-B``
-            # would be a duplicate audit row attached to no JobItem.
-            # ``SQLModelMessageQueueRepository.delete`` is the documented
-            # API; on systems where it is not available (file-backed SQLite
-            # fall-through) we log and continue.
-            try:
-                await asyncio.to_thread(
-                    self._queue_repository.delete,
-                    phantom_message_id,
-                )
-            except Exception as mq_delete_err:
-                logger.warning(
-                    f"enqueue_message_job: orphan MQ-B delete failed on "
-                    f"dedup hit (continuing — JobItem-A stamping + return "
-                    f"still proceeds): "
-                    f"{type(mq_delete_err).__name__}: {mq_delete_err}"
-                )
-
             # Rebind local ``job_id`` so the downstream snapshot /
-            # stamp_message_id / AsyncMessageResult operate on the REAL
-            # JobItem-A, NOT the phantom UUID-B. From here on, every
-            # stamp + return uses JobItem-A.
-            job_id = real_job_id
+            # stamp_message_id / AsyncMessageResult operate on the
+            # authoritative row: JobItem-A on the genuine arm; on the
+            # masquerade arm the fallback row (now cancelled — dead,
+            # loud, never silently re-used; the scheduler's
+            # durable-evidence / taskless guards observe the cancelled
+            # Task and fail the fire non-consumingly).
+            job_id = _comp["job_id"]
 
         # Snapshot queue capacity synchronously after the JobItem exists. The
         # newly-created item is still in the ``queued`` admission bucket, so it

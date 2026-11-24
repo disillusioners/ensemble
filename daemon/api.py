@@ -643,6 +643,122 @@ def _poignancy_llm_config(config: Any) -> dict[str, Any]:
     return _memoir_lane_llm_config(config)
 
 
+def _make_scheduled_fire_redrive(manager: Any):
+    """Build the scheduled-fire supervisor's re-drive callback.
+
+    Module-level (NOT nested in ``lifespan``) so the pin can drive the
+    REAL callback path: the lifespan wiring below passes THIS callable to
+    the supervisor, so a pin against it is a pin against production — not
+    against a test-side copy (the copy-goes-green failure mode).
+
+    Two legs, both TRUTHFUL:
+
+    * **instance-bearing** → the F2 entry ``manager.resume_processing_job``
+      (make-claimable + wake, then the single-consumer CAS). NOT
+      ``manager._schedule_explicit_handle_resume``: that method is
+      KEYWORD-ONLY with FOUR MORE required kwargs, so the old positional
+      call raised ``TypeError`` on EVERY attempt and the leg never
+      repaired anything (the supervisor logged a refusal and moved on).
+      The truthful outcomes are handled as they are:
+      ``pending_redrive`` (the durable task was found + made claimable),
+      the paused-resume legs (``resuming`` / ``already_resuming`` /
+      ``wake_enqueued``) and the no-work cases (``None`` →
+      ``no_task_found``; a refusal dict → surfaced as-is).
+
+    * **instance-less** → the adapter's GUARDED re-dispatch entrypoint
+      (``adapter.redrive_execution``): the same slot discipline as the
+      fire path (the execution semaphore is acquired — the concurrency
+      cap is never inflated by a re-drive) plus the age-cap and
+      deferrable-target coverage the direct call skipped.
+    """
+
+    async def _scheduled_fire_redrive(candidate: dict) -> dict:
+        """F2 make-claimable + wake, or adapter re-dispatch for no-instance.
+
+        NIT-3: ``asyncio.CancelledError`` is a ``BaseException`` and
+        escapes both legs' ``except Exception`` nets. The house
+        discriminator (``sup._caller_cancel_requested`` — mirrors
+        ``daemon/mcp/stdio_wrapper.py::_is_caller_cancelled``) splits the
+        two cases: an OUTER cancel (this sweep task is being cancelled —
+        shutdown) PROPAGATES; an INNER cancellation that escaped a nested
+        await is logged LOUD and returned as a truthful refusal so the
+        supervisor's per-candidate leg records it and the sweep continues.
+        """
+        import daemon.services.scheduled_fire_supervisor as _sup
+
+        instance_id = candidate.get("instance_id")
+        if instance_id:
+            try:
+                resumed = await manager.resume_processing_job(
+                    instance_id, message="", silent=True, images=None,
+                )
+            except asyncio.CancelledError:
+                if _sup._caller_cancel_requested():
+                    raise
+                logger.error(
+                    "[SCHEDULED_SUPERVISOR_REDRIVE_CANCELLED] execution=%s "
+                    "instance=%s leg=resume — an inner CancelledError "
+                    "escaped ``resume_processing_job`` while this sweep task "
+                    "is NOT being cancelled; returned as a refusal (the "
+                    "cancel is NOT swallowed silently)",
+                    str(candidate.get("execution_id"))[:8],
+                    str(instance_id)[:8],
+                )
+                return {
+                    "status": "refused",
+                    "error": "cancelled_in_redrive",
+                    "instance_id": instance_id,
+                }
+            except Exception as exc:  # noqa: BLE001 — fail-soft into supervisor
+                return {"status": "refused", "error": str(exc)}
+            if resumed is None:
+                # ``invalid_or_missing_handle`` — there is no durable work
+                # to re-drive. The row keeps its prior truthful status
+                # (never-started stays never-started, count+1, bounded by
+                # the cap) — a refusal, never a fake dispatch.
+                return {
+                    "status": "refused",
+                    "error": "no_task_found",
+                    "instance_id": instance_id,
+                }
+            if isinstance(resumed, dict):
+                return resumed
+            return {"status": "resuming", "instance_id": instance_id}
+        # No instance handle — re-dispatch the fire through the adapter. The
+        # source registry owns the adapters; find the one for this schedule.
+        try:
+            registry = manager.get_source_registry()
+            adapter = registry.get(candidate.get("schedule_id"))
+            if adapter is None or not hasattr(adapter, "redrive_execution"):
+                return {"status": "refused", "error": "no_adapter"}
+            outcome = await adapter.redrive_execution(
+                candidate["execution_id"]
+            )
+            if isinstance(outcome, dict):
+                return outcome
+            return {"status": "refused", "error": "bad_adapter_outcome"}
+        except asyncio.CancelledError:
+            if _sup._caller_cancel_requested():
+                raise
+            logger.error(
+                "[SCHEDULED_SUPERVISOR_REDRIVE_CANCELLED] execution=%s "
+                "leg=adapter — an inner CancelledError escaped "
+                "``redrive_execution`` while this sweep task is NOT being "
+                "cancelled; returned as a refusal (the cancel is NOT "
+                "swallowed silently)",
+                str(candidate.get("execution_id"))[:8],
+            )
+            return {
+                "status": "refused",
+                "error": "cancelled_in_redrive",
+                "execution_id": candidate.get("execution_id"),
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"status": "refused", "error": str(exc)}
+
+    return _scheduled_fire_redrive
+
+
 def _wire_skills_router_services(manager: Any) -> None:
     """Wire the skills router's collaborators at BOOT — the production seam.
 
@@ -2256,6 +2372,92 @@ async def lifespan(app: FastAPI):
     )
 
     # ─────────────────────────────────────────────────────────────
+    # StaleRunningSweepService (fix/post-outage-recovery SCOPE b4,
+    # Shape B) — the STEADY-STATE terminalizer for the status-stale
+    # defect class: an instance whose work is FINISHED (every task
+    # row terminal, every message row proven-terminal, nothing holds
+    # the posture) but whose row still reads ``running`` with a frozen
+    # last_activity. The existing seams are EVENT-DRIVEN (the
+    # child_reports drive + the observer finalize both need a
+    # completion event), the b2 boot reconciler is BOOT-ONLY, and the
+    # healer's running-zombie anchor requires a terminal-COMPLETED
+    # task row on a ROOT — the measured specimens (no task row /
+    # non-root) fall outside all three. This lane is the missing
+    # steady-state firing point: it drives the PRODUCTION completion
+    # chain (child_reports, reason finalize_gap_steady_state), never a
+    # raw status write, gated on the strand-healer's holding-conditions
+    # vocabulary (no non-terminal task, no unproven-terminal message —
+    # unknown statuses HOLD, no open injection, no bus-pending watcher,
+    # no live-tree member, no pending question) plus an age bound on
+    # the newest completion evidence. D14/D21 respected:
+    # ``waiting_children`` stays bus-owned; ``paused`` untouched.
+    # Kill-switch ``ENSEMBLE_STALE_RUNNING_SWEEP`` (default ON, ``=0``
+    # disables) — same precedent as ENSEMBLE_SCHEDULED_FIRE_SUPERVISOR.
+    from daemon.services.stale_running_sweep import (
+        DEFAULT_INTERVAL_SECONDS as _SRS_DEFAULT_INTERVAL,
+        StaleRunningSweepService,
+    )
+    # Defensive coercion (the ScheduledFireSupervisor knob discipline):
+    # a non-numeric interval env must never crash the boot.
+    try:
+        stale_running_sweep_interval = int(
+            os.environ.get("ENSEMBLE_STALE_RUNNING_SWEEP_INTERVAL_SECONDS",
+                           str(_SRS_DEFAULT_INTERVAL)),
+        )
+    except (TypeError, ValueError):
+        stale_running_sweep_interval = _SRS_DEFAULT_INTERVAL
+        logger.warning(
+            "StaleRunningSweepService: non-numeric "
+            "ENSEMBLE_STALE_RUNNING_SWEEP_INTERVAL_SECONDS=%r — using the "
+            "default %ss",
+            os.environ.get("ENSEMBLE_STALE_RUNNING_SWEEP_INTERVAL_SECONDS"),
+            _SRS_DEFAULT_INTERVAL,
+        )
+    stale_running_sweep = StaleRunningSweepService(
+        manager,
+        interval_seconds=stale_running_sweep_interval,
+    )
+    stale_running_sweep.start()
+    app.state.stale_running_sweep = stale_running_sweep
+    manager._stale_running_sweep = stale_running_sweep
+    logger.info(
+        "StaleRunningSweepService started: interval=%ss (default %ss) "
+        "kill_switch=%s",
+        stale_running_sweep_interval,
+        _SRS_DEFAULT_INTERVAL,
+        "on" if os.environ.get("ENSEMBLE_STALE_RUNNING_SWEEP", "1")
+        .strip().lower() not in ("0", "false", "no", "off") else "off",
+    )
+
+    # ─────────────────────────────────────────────────────────────
+    # ScheduledFireSupervisor (Addendum A.4, 2026-11-24) — consumes the
+    # execution receipt to re-drive fires that began no turn (never-started /
+    # failed-to-dispatch) or whose dispatched row is stale past a bounded
+    # deadline. Always-on, interval-driven, first tick IMMEDIATE; kill-switch
+    # ENSEMBLE_SCHEDULED_FIRE_SUPERVISOR (default ON, =0 disables). Wired after
+    # the infrastructure sweeps; the re-drive callback (the module-level
+    # ``_make_scheduled_fire_redrive`` — the REAL callback path the pin
+    # drives) uses the F2 make-claimable + wake path
+    # (manager.resume_processing_job) for instance-bearing rows and
+    # re-dispatches through the adapter's GUARDED entrypoint
+    # (adapter.redrive_execution) for instance-less rows. Never a direct
+    # claim (single consumer CAS).
+    from daemon.services.scheduled_fire_supervisor import (
+        ScheduledFireSupervisor,
+        kill_switch_enabled as _scheduled_supervisor_enabled,
+    )
+
+    scheduled_fire_supervisor = ScheduledFireSupervisor(
+        manager,
+        redrive_callback=_make_scheduled_fire_redrive(manager),
+    )
+    scheduled_fire_supervisor.start()
+    app.state.scheduled_fire_supervisor = scheduled_fire_supervisor
+    manager._scheduled_fire_supervisor = scheduled_fire_supervisor
+    logger.info("ScheduledFireSupervisor started: kill_switch=%s",
+                "on" if _scheduled_supervisor_enabled() else "off")
+
+    # ─────────────────────────────────────────────────────────────
     # clipboard-image-chat Phase 3 (Tasks 4-5) — tmp-image retention
     # sweep. ALWAYS-ON infrastructure (NO kill-switch env var — per
     # the project owner's HARD POLICY on Batch A, architect amendment
@@ -3162,6 +3364,14 @@ async def lifespan(app: FastAPI):
         project_repo=manager._project_repository,
         instance_manager=manager,
     )
+    # Addendum A (b3): wire the delivery-completed callback. When a spawned
+    # Task/JobItem reaches terminal, the observer closes the matching
+    # schedule_executions receipt (dispatched -> executed + outcome) via the
+    # durable job_item_id handle. Bounded + fail-soft (never wedges the job).
+    from daemon.services.execution_receipt import make_execution_receipt_callback
+    job_feedback_observer.set_execution_receipt_callback(
+        make_execution_receipt_callback(manager._source_repository)
+    )
     await job_feedback_observer.start()
     logger.info("JobFeedbackObserver started")
 
@@ -3865,6 +4075,32 @@ async def lifespan(app: FastAPI):
                 "AutoContinue boot pass failed (StaleTaskRecovery "
                 "backstop will catch orphans at boot+10min): %s",
                 cont_boot_exc,
+            )
+        # ── Boot-consistency reconciler (fix/post-outage-recovery SCOPE b) ──
+        # Runs IMMEDIATELY AFTER the orphan sweep above (sibling of the
+        # auto-continue / orphan-sweep passes in the lifespan BODY block —
+        # NOT nested in the upgrade-install-dir if). Reconciles RUNNING
+        # instances left with no durable work by the boot-window queue GC
+        # leg (the 2026-11-23 outage RCA). 100% PG-derived selection; the
+        # lane has its own three-layer never-wedge isolation and NEVER
+        # raises — this third (lifespan) envelope is belt-and-suspenders.
+        # The kill-switch is the shared
+        # ENSEMBLE_AUTO_CONTINUE_RUNNING_ON_RESTART (same logical action).
+        try:
+            from daemon.services.boot_consistency_reconciler import (
+                reconcile_boot_consistency,
+            )
+
+            reconcile_result = await reconcile_boot_consistency(
+                manager=manager, boot_epoch=get_boot_epoch(),
+            )
+            logger.info("BootConsistency reconciler: %s", reconcile_result)
+        except Exception as boot_reconcile_exc:  # noqa: BLE001 — never wedge
+            logger.error(
+                "[BOOT_RECOVERY_DB_ERROR] pass=lifespan: boot-consistency "
+                "reconciler raised (never-wedge holds; readyz leg may be "
+                "stale): %s: %s",
+                type(boot_reconcile_exc).__name__, boot_reconcile_exc,
             )
         # Stale-pause backstop boot pass (feature/fix/question-pause-
         # resume-asymmetry, R3). Placement: AFTER ``setup_worker_pool``
@@ -5046,6 +5282,17 @@ async def lifespan(app: FastAPI):
             )
         app.state.plane_sync_watchdog = None
 
+    # --- ScheduledFireSupervisor shutdown (Addendum A.4) ---
+    _sched_fire_supervisor = getattr(
+        app.state, "scheduled_fire_supervisor", None
+    )
+    if _sched_fire_supervisor is not None:
+        try:
+            await _sched_fire_supervisor.stop()
+        except Exception as e:
+            logger.warning(f"ScheduledFireSupervisor shutdown error: {e}")
+        app.state.scheduled_fire_supervisor = None
+
     # --- WatchReconcileSweepService shutdown (U1-SLICE) ---
     # Stop the held-watcher reconcile + zombie-GC sweep BEFORE
     # the JobLockSweepService shutdown — same shutdown contract
@@ -5084,6 +5331,19 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"MissionStrandHealer shutdown error: {e}")
         app.state.mission_strand_healer = None
+
+    # --- StaleRunningSweepService shutdown (b4 Shape B) ---
+    # Stop the steady-state stale-running terminalizer BEFORE the
+    # manager shuts down (same shutdown contract as the strand healer
+    # above: graceful stop with WARNING on failure, getattr-guarded so
+    # a partial startup failure is a silent no-op).
+    stale_running_sweep = getattr(app.state, "stale_running_sweep", None)
+    if stale_running_sweep is not None:
+        try:
+            await stale_running_sweep.stop()
+        except Exception as e:
+            logger.warning(f"StaleRunningSweepService shutdown error: {e}")
+        app.state.stale_running_sweep = None
 
     # --- JobLockSweepService shutdown (F3) ---
     # Stop the periodic reclaim sweep BEFORE the manager shuts down

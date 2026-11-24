@@ -308,6 +308,13 @@ class TestAutoCycleWiring:
         # grep-based starvation audit is a FALSE-NEGATIVE channel (the
         # Phase-2 audit's finding). The change is ADDITIVE — no key is
         # renamed or removed; the four frozen keys keep their shape.
+        #
+        # SCOPE (c) (2026-11-24): the shape gained a SECOND additive
+        # key — ``terminal_reap`` — the Op B2 (terminal-thread full
+        # reap) counters, and a THIRD — ``blob_bytes_guard`` — the
+        # checkpoint_blobs BYTES guard (ITEM 2). Same discipline:
+        # additive only, no key renamed or removed, the four frozen
+        # keys unchanged.
         summary = row.summary_json
         assert set(summary.keys()) == {
             "checkpoint_rows",
@@ -315,6 +322,8 @@ class TestAutoCycleWiring:
             "blobs",
             "duration_ms",
             "version_census",
+            "terminal_reap",
+            "blob_bytes_guard",
         }
         assert summary["checkpoint_rows"]["deleted"] == 0  # no excess staged
         assert summary["blobs"]["destructive"] is False
