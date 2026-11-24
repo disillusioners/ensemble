@@ -3162,6 +3162,14 @@ async def lifespan(app: FastAPI):
         project_repo=manager._project_repository,
         instance_manager=manager,
     )
+    # Addendum A (b3): wire the delivery-completed callback. When a spawned
+    # Task/JobItem reaches terminal, the observer closes the matching
+    # schedule_executions receipt (dispatched -> executed + outcome) via the
+    # durable job_item_id handle. Bounded + fail-soft (never wedges the job).
+    from daemon.services.execution_receipt import make_execution_receipt_callback
+    job_feedback_observer.set_execution_receipt_callback(
+        make_execution_receipt_callback(manager._source_repository)
+    )
     await job_feedback_observer.start()
     logger.info("JobFeedbackObserver started")
 
