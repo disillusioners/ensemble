@@ -260,11 +260,10 @@ def read_gate_switches(engine: Any) -> tuple[bool, bool]:
 #
 # The map is the guideline's per-class routing table (its §4 table)
 # expressed in the gate's own vocabulary: knowledge → RAG, operational
-# → POK, governance → the curated note surface, episode → the board
-# / the KV.
-REFUSAL_ROUTE_TABLE: dict[str, dict[str, Any]] = {
-    "boundary": {
-        "content_class": "knowledge",
+# → POK, governance → the curated note surface / the board, episode →
+# the board / the KV.
+CONTENT_CLASS_ROUTES: dict[str, dict[str, Any]] = {
+    "knowledge": {
         "route": "rag",
         "destination": "the knowledge base (RAG)",
         "categories": ("rag",),
@@ -274,18 +273,25 @@ REFUSAL_ROUTE_TABLE: dict[str, dict[str, Any]] = {
             "knowledge"
         ),
     },
-    "reason": {
-        "content_class": "operational",
+    "operational": {
         "route": "pok",
-        "destination": "POK (this project) with a sharper claim",
+        "destination": "POK (this project)",
         "categories": ("pok",),
         "instruction": (
-            "rewrite the reason so it names the operational invariant the "
-            "fact protects, then write it again"
+            "state the operational invariant the fact protects, then write "
+            "it again"
         ),
     },
-    "durability": {
-        "content_class": "episode",
+    "governance": {
+        "route": "critical_notes_or_board",
+        "destination": "the critical notes (a curated, pinned surface) or the board",
+        "categories": ("critical_notes", "board"),
+        "instruction": (
+            "a curated project contract belongs in the critical notes; a "
+            "human-facing project state belongs on the board"
+        ),
+    },
+    "episode": {
         "route": "board_or_kv",
         "destination": "the board (a human-facing ledger) or the shared KV",
         "categories": ("board", "shared_meta_kv"),
@@ -295,41 +301,52 @@ REFUSAL_ROUTE_TABLE: dict[str, dict[str, Any]] = {
             "invariant here"
         ),
     },
-    "redundancy": {
-        "content_class": "operational",
-        "route": "pok",
-        "destination": "POK (this project) — the ACTIVE row named by the verdict",
-        "categories": ("pok",),
-        "instruction": (
-            "supersede the named ACTIVE row with the better body instead of "
-            "adding a second row for one fact"
-        ),
-    },
-    "scope": {
-        "content_class": "operational",
-        "route": "pok",
-        "destination": "POK — the project it actually belongs to",
-        "categories": ("pok",),
-        "instruction": (
-            "write it to the project it belongs to, not to this one"
-        ),
-    },
 }
 
-#: The fallback route for a verdict with no family (the gate's closed
-#: family set always names one, but the envelope must never be empty).
-DEFAULT_ROUTE: dict[str, Any] = {
-    "content_class": "operational",
-    "route": "pok",
-    "destination": "POK (this project)",
-    "categories": ("pok",),
-    "instruction": "state the operational claim and write it again",
+#: The per-FAMILY map: which content class the family's rejection
+#: names. The route + the destination + the grant categories come from
+#: :data:`CONTENT_CLASS_ROUTES`.
+REFUSAL_FAMILY_CLASSES: dict[str, str] = {
+    "boundary": "knowledge",
+    "reason": "operational",
+    "durability": "episode",
+    "redundancy": "operational",
+    "scope": "operational",
+}
+
+#: The family-specific instruction (the route's own instruction is the
+#: class-level default).
+_REFUSAL_FAMILY_INSTRUCTIONS: dict[str, str] = {
+    "reason": (
+        "rewrite the reason so it names the operational invariant the fact "
+        "protects, then write it again"
+    ),
+    "redundancy": (
+        "supersede the named ACTIVE row with the better body instead of "
+        "adding a second row for one fact"
+    ),
+    "scope": "write it to the project it belongs to, not to this one",
 }
 
 
 def route_for_family(family: str | None) -> dict[str, Any]:
-    """The route a refusal family names (T9.2/T9.3)."""
-    return REFUSAL_ROUTE_TABLE.get(family or "", DEFAULT_ROUTE)
+    """The route a refusal family names (T9.2/T9.3).
+
+    The route is the CONTENT CLASS's route (the transition map) plus
+    the family's own instruction. A family outside the closed set
+    falls back to the operational route — the envelope is never empty.
+    """
+    content_class = REFUSAL_FAMILY_CLASSES.get(family or "", "operational")
+    base = CONTENT_CLASS_ROUTES[content_class]
+    return {
+        "content_class": content_class,
+        "route": base["route"],
+        "destination": base["destination"],
+        "categories": base["categories"],
+        "instruction": _REFUSAL_FAMILY_INSTRUCTIONS.get(
+            family or "", base["instruction"]
+        ),
+    }
 
 
 def _agent_tool_grants(agent_id: str) -> list[str] | None:
