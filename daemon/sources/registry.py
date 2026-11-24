@@ -580,7 +580,19 @@ class SourceRegistry:
                             instance_id=instance_id,
                             execution_id=execution_id,
                         )
-                    elif status in ("completed", "failed", "skipped", "queued"):
+                    # Addendum A closed vocabulary: all receipt statuses are
+                    # terminal writes over the existing TEXT column. The
+                    # adapter writes ``dispatched`` directly (with handles);
+                    # these callback statuses close the row.
+                    # ``suppressed`` is RESERVED (fix/post-outage-recovery
+                    # D3): accepted here, but no writer mints it today —
+                    # see the ExecutionStatus enum comment in
+                    # daemon/repositories/source/models.py.
+                    elif status in (
+                        "completed", "failed", "skipped", "queued",
+                        "executed", "dispatched", "never-started",
+                        "failed-to-dispatch", "suppressed",
+                    ):
                         repo.record_execution_complete(
                             execution_id=execution_id,
                             status=status,

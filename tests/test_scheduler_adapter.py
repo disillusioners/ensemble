@@ -2465,7 +2465,7 @@ def _stub_manager_with_job_repo(job_repo):
     return manager, mapper_repo, results
 
 
-async def _route_once(adapter, manager, mapper_repo) -> tuple[dict, object]:
+async def _route_once(adapter, manager, mapper_repo, execution_id: str = "exec-1") -> tuple[dict, object]:
     """Drive the adapter's real inline dispatch path once.
 
     Returns ``(enqueue_kwargs, result)`` — the result carries the
@@ -2473,7 +2473,9 @@ async def _route_once(adapter, manager, mapper_repo) -> tuple[dict, object]:
     """
     adapter._manager = manager
     adapter._source_repo = mapper_repo
-    result = await adapter._route_via_job_queue("exec-1", "scheduled message", {"agent": "./agents/developer"})
+    result = await adapter._route_via_job_queue(
+        execution_id, "scheduled message", {"agent": "./agents/developer"}
+    )
     return manager.enqueue_message_job.await_args.kwargs, result
 
 
@@ -2514,25 +2516,34 @@ class TestIdempotencyRestart:
         self, mock_on_message
     ):
         """Simulated restart: two adapters from the SAME config emit the SAME
-        key (byte-for-byte ``scheduler:{source_id}:{run_at.isoformat()}``),
+        key (byte-for-byte ``scheduler:{source_id}:slot:{run_at.isoformat()}``),
         and the substrate holds exactly ONE JobItem row.
         """
         job_repo = _make_job_repo()
         config = self._one_shot_config("idem-restart")
 
-        # Two adapter instantiations from the identical persisted config —
-        # exactly what a daemon restart does (config re-parsed in __init__).
+        # R1 (fix/post-outage-recovery b2): the key is SLOT-STABLE — it
+        # names the instant the fire is supposed to occupy, NOT the
+        # per-fire execution id.  Two adapters built from the SAME
+        # persisted config (exactly what a daemon restart produces) emit
+        # the SAME slot key, so the second submit collapses onto the
+        # prior JobItem → at-most-once survives the restart.  A
+        # PER-EXECUTION key would mint a fresh key here and the one-shot
+        # would be delivered TWICE (the crash window: the chain re-arm /
+        # source-disable write commits AFTER the delivery).
         manager1, mapper_repo1, results1 = _stub_manager_with_job_repo(job_repo)
         adapter1 = SchedulerAdapter(config, mock_on_message, manager=manager1, source_repo=mapper_repo1)
         manager2, mapper_repo2, results2 = _stub_manager_with_job_repo(job_repo)
         adapter2 = SchedulerAdapter(config, mock_on_message, manager=manager2, source_repo=mapper_repo2)
 
-        kwargs1, _r1 = await _route_once(adapter1, manager1, mapper_repo1)
-        kwargs2, _r2 = await _route_once(adapter2, manager2, mapper_repo2)
+        kwargs1, _r1 = await _route_once(adapter1, manager1, mapper_repo1, execution_id="exec-1")
+        kwargs2, _r2 = await _route_once(adapter2, manager2, mapper_repo2, execution_id="exec-2")
 
-        expected_key = f"scheduler:idem-restart:{self.RUN_AT_ISO}"
+        # The SAME slot → the SAME key, even across two executions.
+        expected_key = f"scheduler:idem-restart:slot:{self.RUN_AT_ISO}"
         assert kwargs1["idempotency_key"] == expected_key
         assert kwargs2["idempotency_key"] == expected_key
+        assert kwargs1["idempotency_key"] == kwargs2["idempotency_key"]
 
         # At-most-one JobItem landed for the key across the "restart".
         from sqlmodel import Session, select
@@ -2552,7 +2563,8 @@ class TestIdempotencyRestart:
 
         Emitting the key unconditionally on the shared ``_route_via_job_queue``
         path would collapse every future cron fire into one JobItem → silent
-        schedule death.
+        schedule death.  A recurring fire has no stable slot to key on
+        (its ``run_at`` is unset), so the direct path emits no key for it.
         """
         job_repo = _make_job_repo()
         manager, mapper_repo, _results = _stub_manager_with_job_repo(job_repo)
@@ -2565,11 +2577,11 @@ class TestIdempotencyRestart:
         adapter = SchedulerAdapter(config, mock_on_message, manager=manager, source_repo=mapper_repo)
         assert adapter._schedule_type == SchedulerAdapter.SCHEDULE_TYPE_CRON
 
-        kwargs1 = await _route_once(adapter, manager, mapper_repo)
+        kwargs1, _r1 = await _route_once(adapter, manager, mapper_repo, execution_id="exec-cron-1")
         # Two distinct cron cycles (distinct next_trigger values) — the second fire.
         adapter._manager = manager
         adapter._source_repo = mapper_repo
-        await adapter._route_via_job_queue("exec-2", "scheduled message", {"agent": "./agents/developer"})
+        await adapter._route_via_job_queue("exec-cron-2", "scheduled message", {"agent": "./agents/developer"})
         kwargs2 = manager.enqueue_message_job.await_args.kwargs
 
         # THE gate: the cron path must not emit the key at all.

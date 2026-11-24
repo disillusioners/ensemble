@@ -357,20 +357,20 @@ INSTANCE_STATUS_VOCABULARY: frozenset[str] = frozenset(
     }
 )
 
-#: Sweep lane (13) — frozen from TWO code sources (a count that took
+#: Sweep lane (15) — frozen from TWO code sources (a count that took
 #: only the RDRS lanes would drop the standalone sweeps' series):
 #:
-#: 1. the seven RDRS lanes of
+#: 1. the eight RDRS lanes of
 #:    ``daemon/services/report_delivery_recovery.py``, named by the
 #:    ``report_delivery_recovery_lane_*`` kill-switch fields of
 #:    ``daemon/config.py`` (``lane_<x>`` → ``rdrs_<x>``);
-#: 2. the six standalone sweep services that own a
+#: 2. the seven standalone sweep services that own a
 #:    ``DEFAULT_*_INTERVAL_SECONDS`` constant in ``daemon/services/``
 #:    (``<name>_sweep.py`` → ``<name>``): watch_reconcile,
 #:    eligible_pending, stale_pause, orphan_watcher, job_lock,
-#:    upgrade_journal.
+#:    upgrade_journal, stale_running.
 SWEEP_LANE_VOCABULARY: tuple[str, ...] = (
-    # RDRS lanes (7)
+    # RDRS lanes (8)
     "rdrs_deferred",
     "rdrs_no_row_backstop",
     "rdrs_pending_age",
@@ -378,13 +378,15 @@ SWEEP_LANE_VOCABULARY: tuple[str, ...] = (
     "rdrs_orphan",
     "rdrs_stuck_wake",
     "rdrs_mission_reconciliation",
-    # standalone sweeps (6)
+    "rdrs_wc_orphan_detector",
+    # standalone sweeps (7)
     "watch_reconcile",
     "eligible_pending",
     "stale_pause",
     "orphan_watcher",
     "job_lock",
     "upgrade_journal",
+    "stale_running",
 )
 SWEEP_LANES = frozenset(SWEEP_LANE_VOCABULARY)
 

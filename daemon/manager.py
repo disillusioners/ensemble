@@ -202,6 +202,8 @@ from .services.skill_clone_service import SkillCloneService
 from .services.maintenance import (
     CheckpointCleanupJob,
     MaintenanceService,
+    # checkpoint-retention-lane — the backstop registration seam
+    backstop_registration_params,
 )
 from .services.todo_manager import TodoManager
 from .services.question_manager import QuestionManager
@@ -4814,6 +4816,48 @@ class InstanceManager:
             checkpoint_cleanup.execute,
         )
 
+        # ── SCOPE (c) — the checkpoint BACKSTOP lane (2026-11-24) ────
+        # checkpoint-retention-lane — the backstop registration (UN_GATED)
+        # The anti-starvation path for the checkpoint growth itself.
+        # The daily ``checkpoint_cleanup`` cycle is IDLE_GATED (its work
+        # genuinely contends with live traffic for the write path), so
+        # on a continuously busy nest the per-thread keep-N cap — the
+        # ONLY bound on a thread's checkpoint/blob mass — can go
+        # unapplied for days (the measured third bloat-class recurrence:
+        # 13GB / 94k rows after 47h of missed cycles).
+        #
+        # The backstop runs on its OWN wall-clock cadence (default 60
+        # min) and is registered UN_GATED, so the idle gate cannot
+        # starve it. Each run is BOUNDED (a small pair budget), never
+        # touches an instance row (a prune, not a reap), is
+        # single-flight per section (its own ``maintenance_runs``
+        # section — the process-wide ``MaintenanceRunLock`` still
+        # serialises it against the daily cycle), and is kill-switched
+        # (``ENSEMBLE_CHECKPOINT_BACKSTOP=0`` ⇒ never registered).
+        #
+        # The interval is read from the env knob (minutes) and floored
+        # at 1 minute; the pair budget is read inside the job.
+        (
+            backstop_enabled,
+            backstop_interval_minutes,
+        ) = backstop_registration_params()
+        if backstop_enabled:
+            self._maintenance_service.register(
+                "checkpoint_backstop_prune",
+                backstop_interval_minutes / 60.0,
+                checkpoint_cleanup.run_backstop_prune,
+            )
+            logger.info(
+                "checkpoint_backstop_prune registered (interval=%d min, "
+                "un-gated — the anti-starvation path for checkpoint growth)",
+                backstop_interval_minutes,
+            )
+        else:
+            logger.info(
+                "checkpoint_backstop_prune NOT registered (kill switch "
+                "ENSEMBLE_CHECKPOINT_BACKSTOP=0)"
+            )
+
         # ── agent group chat P6 — the ROOM GC PURGE sweeper (R2) ──────
         # The §2.2 GC job: P-close (closed > 14d) and P-idle (active,
         # idle > 72h, zero living participant among {active members ∪
@@ -9313,6 +9357,27 @@ class InstanceManager:
             # is gated on ``status='running'`` (served by
             # ``idx_task_status_type_created``); stamp CAS is PK-scoped (D17).
             "ALTER TABLE task ADD COLUMN IF NOT EXISTS auto_continued_at TIMESTAMP",
+            # boot-recovery lane — the boot-consistency DDL + receipt handles
+            # instances.boot_re_drive_at (fix/post-outage-recovery SCOPE b):
+            # boot-consistency reconciler CAS marker. Stamped AFTER a
+            # successful dispatch/retire/finalize so "marked" ≡ "re-driven"
+            # (a′ semantics — mirrors task.auto_continued_at above). Advisory
+            # only; the ``(boot_re_drive_at IS NULL OR boot_re_drive_at <
+            # :boot_epoch)`` predicate re-arms per boot epoch. No new index —
+            # selection is gated on ``status='running'`` and the stamp CAS is
+            # PK-scoped. SQLite counterpart:
+            # 20261123_190000_add_instance_boot_re_drive_at.sql.
+            "ALTER TABLE instances ADD COLUMN IF NOT EXISTS boot_re_drive_at TIMESTAMP",
+            # schedule_executions receipt handles (fix/post-outage-recovery
+            # SCOPE b3, Addendum A): durable Task/JobItem linkage + terminal
+            # outcome + supervisor CAS bookkeeping. SQLite counterpart:
+            # 20261124_000001_add_schedule_execution_receipt.sql.
+            "ALTER TABLE schedule_executions ADD COLUMN IF NOT EXISTS task_id VARCHAR",
+            "ALTER TABLE schedule_executions ADD COLUMN IF NOT EXISTS job_item_id VARCHAR",
+            "ALTER TABLE schedule_executions ADD COLUMN IF NOT EXISTS outcome VARCHAR",
+            "ALTER TABLE schedule_executions ADD COLUMN IF NOT EXISTS redriven_at VARCHAR",
+            "ALTER TABLE schedule_executions ADD COLUMN IF NOT EXISTS redrive_count INTEGER DEFAULT 0",
+            "ALTER TABLE schedule_executions ADD COLUMN IF NOT EXISTS redrive_reason VARCHAR",
             # source_configs.autostart: whether a source auto-starts on boot
             "ALTER TABLE source_configs ADD COLUMN IF NOT EXISTS autostart BOOLEAN DEFAULT TRUE",
             # instance_ui_prefs.icon_tag: optional UI icon for existing prefs tables
@@ -15631,6 +15696,160 @@ class InstanceManager:
                 "status": "deferred_report_recovery",
                 "recovery_count": recovery_count,
             }
+
+        # boot-recovery lane — the pending re-drive repair leg
+        # 2.6. F2 (fix/post-outage-recovery b2) — PENDING re-drive leg.
+        #      The adjudicated 6105e198 shape: a LIVE instance holds a
+        #      PENDING task anchored to a non-terminal JobItem and nothing
+        #      claims it; the pause/resume repair path used to answer
+        #      ``no_active_job`` (find_paused_or_cancellable_turn selects
+        #      paused/running only) while the task sat unclaimed for
+        #      11m19s. This leg FINDS the shape and re-drives it the F4
+        #      way — make-claimable (clear claim-blocking backoff) + wake
+        #      the job pipeline and the worker pools — NEVER a direct
+        #      claim: the pending→running UPDATE in
+        #      ``claim_pending_task`` stays the single consumer CAS.
+        #      Applies to silent resumes too: the leg injects NO message,
+        #      so the §9.3 internal_child_noop no-new-message contract
+        #      holds; it only wakes existing durable work. The verdict for
+        #      this shape is a TRUTHFUL re-drive outcome, not
+        #      ``no_active_job``.
+        #
+        #      WC-INTERACTION (R5c, pinned in
+        #      test_resume_pending_redrive_pins.py): this leg runs BEFORE
+        #      the B2 WAITING_CHILDREN wake (leg 3), so a WC parent that
+        #      ALSO holds a PENDING+anchored task returns
+        #      ``pending_redrive`` and PRE-EMPTS ``wake_enqueued``. That
+        #      is deliberate: re-driving the anchored durable work is the
+        #      more precise repair — it never injects a synthetic
+        #      "continue" turn that would race the re-driven task for the
+        #      same instance's single turn slot. The caller sees the
+        #      truthful task_id/claimability, and the claim moves the
+        #      parent out of WAITING_CHILDREN.
+        try:
+            pending_redrive = await asyncio.to_thread(
+                self._task_repo.find_pending_redrive_turn,
+                instance_id,
+            )
+        except Exception as redrive_probe_err:
+            logger.warning(
+                f"[RESUME] instance={instance_id[:8]} "
+                f"find_pending_redrive_turn probe failed: "
+                f"{type(redrive_probe_err).__name__}: "
+                f"{redrive_probe_err}"
+            )
+            pending_redrive = None
+
+        # Production-honest type guard: a real durable Task row only.
+        # Test doubles / MagicMock repos return a truthy mock from an
+        # unconfigured selector — without this guard the F2 leg would
+        # fabricate a re-drive verdict in those harnesses (12 adjacent
+        # resume-test regressions, 2026-11-23). Mirrors the
+        # ``manager.__dict__`` probe convention used for pool wakes.
+        from daemon.repositories.task.models import Task as _RedriveTask
+
+        if not isinstance(pending_redrive, _RedriveTask):
+            pending_redrive = None
+
+        if pending_redrive is not None:
+            # Liveness gate: the shape is a LIVE instance (RUNNING, or
+            # PAUSED in the pre-cascade window of the operator resume —
+            # the cascade is about to flip it RUNNING). A TERMINAL
+            # instance's pending rows are reconciler/wipe domain.
+            live_status: str | None = None
+            try:
+                instance_info_f2 = await asyncio.to_thread(
+                    self._lifecycle_service.get_instance_info,
+                    instance_id,
+                )
+                if instance_info_f2:
+                    live_status = instance_info_f2.get("status")
+            except (KeyError, AttributeError, TypeError):
+                live_status = None
+            if live_status is not None and live_status in (
+                InstanceStatus.TERMINATED.value,
+                InstanceStatus.COMPLETED.value,
+                InstanceStatus.ERROR.value,
+                InstanceStatus.FAILED.value,
+            ):
+                logger.info(
+                    f"[RESUME] instance={instance_id[:8]} "
+                    f"pending task {pending_redrive.id} skipped — "
+                    f"instance is terminal ({live_status}); the "
+                    f"boot reconciler / wipe owns that shape"
+                )
+            else:
+                claimable = False
+                try:
+                    claimable = await asyncio.to_thread(
+                        self._task_repo.make_pending_task_claimable,
+                        pending_redrive.id,
+                    )
+                except Exception as claimable_err:
+                    logger.warning(
+                        f"[RESUME] instance={instance_id[:8]} "
+                        f"make_pending_task_claimable failed for task "
+                        f"{pending_redrive.id}: "
+                        f"{type(claimable_err).__name__}: "
+                        f"{claimable_err}"
+                    )
+                # Nudge the job pipeline when the anchor is still QUEUED
+                # (slot-denied): the JobProcessor must re-evaluate the
+                # admission before the claim's queue-awareness gate
+                # passes. None-guarded — the wake degrades to the pool
+                # notify when the bus / service is absent.
+                try:
+                    _jq_service = getattr(self, "_job_queue_service", None)
+                    _bus = getattr(_jq_service, "_dispatch_bus", None)
+                    if _bus is not None:
+                        _iid_row = None
+                        _instance_repo = getattr(
+                            self, "_instance_repository", None
+                        )
+                        if _instance_repo is not None:
+                            _iid_row = await asyncio.to_thread(
+                                _instance_repo.get, instance_id
+                            )
+                        _project_id = getattr(_iid_row, "project_id", None)
+                        _bus.notify_new_job(_project_id)
+                except Exception as nudge_err:
+                    logger.debug(
+                        f"[RESUME] instance={instance_id[:8]} "
+                        f"job-pipeline nudge skipped: "
+                        f"{type(nudge_err).__name__}: {nudge_err}"
+                    )
+                # Wake the worker pools (claimability + notify — the F4
+                # shape). Mock-compat probe form per PoolOrchestrator.
+                try:
+                    from daemon.services.pool_orchestrator import (
+                        safe_notify_all_pools,
+                    )
+
+                    safe_notify_all_pools(
+                        self, site_label="resume_pending_redrive"
+                    )
+                except Exception as wake_err:
+                    logger.debug(
+                        f"[RESUME] instance={instance_id[:8]} "
+                        f"pool wake skipped: "
+                        f"{type(wake_err).__name__}: {wake_err}"
+                    )
+                logger.info(
+                    f"[RESUME] instance={instance_id[:8]} "
+                    f"route_outcome=pending_redrive task_id="
+                    f"{pending_redrive.id} work_id="
+                    f"{str(pending_redrive.work_id)[:8]}... "
+                    f"claimable_cas={'ok' if claimable else 'lost'} "
+                    f"(make-claimable + wake; NO direct claim — F4)"
+                )
+                return {
+                    "instance_id": instance_id,
+                    "job_id": pending_redrive.work_id,
+                    "message_id": None,
+                    "status": "pending_redrive",
+                    "task_id": pending_redrive.id,
+                    "claimable": claimable,
+                }
 
         # 3. No suspension handle and no paused turn.
         # B2 RESOLVED 2026-09-11: a silent cascade resume on a parked

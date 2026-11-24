@@ -54,6 +54,22 @@ class ExecutionStatus(str, enum.Enum):
     # — the migration file set stays byte-for-byte identical).
     DEFERRED = "deferred"
 
+    # ── ADDENDUM A (execution receipt, fix/post-outage-recovery SCOPE b3) ──
+    # PURE PYTHON over the existing TEXT column (models.py:52's own
+    # comment): these members need NO schema change. Closed vocabulary —
+    # ``queued`` is a TRANSIENT dispatch-phase state, never a resting state.
+    EXECUTED = "executed"                    # turn ran to a terminal outcome
+    DISPATCHED = "dispatched"                # turn started, outcome pending (the ONLY open state)
+    NEVER_STARTED = "never-started"          # fired; zero checkpoints/task/message/children
+    FAILED_TO_DISPATCH = "failed-to-dispatch"  # enqueue/claim path failed
+    # RESERVED vocabulary (fix/post-outage-recovery D3, leader decision):
+    # accepted on the registry callback path and member of the closed
+    # Addendum-A vocabulary, but NO writer mints it today — the re-arm's
+    # ``skipped_operator`` outcome (scheduler.py) is consumed log-locally
+    # and never reaches the receipt write. Do NOT invent a writer to
+    # exercise it; a future suppression path ratifies the member first.
+    SUPPRESSED = "suppressed"                # operator intent won (mirrors re-arm skipped_operator)
+
     @classmethod
     def is_valid(cls, status: str) -> bool:
         return status in cls._value2member_map_
@@ -172,8 +188,26 @@ class ScheduleExecution(SQLModel, table=True):
     error_message: str | None = None
     completed_at: str | None = None
 
+    # ── ADDENDUM A execution receipt (fix/post-outage-recovery SCOPE b3) ──
+    # Durable handles to the spawned Task/JobItem. ``job_item_id`` is the
+    # JobItem PK (== Task.work_id, the cross-system linkage handle);
+    # ``task_id`` is the Task row PK. Both NULL on never-started /
+    # failed-to-dispatch fires. These make the repair path DECIDABLE — a
+    # supervisor can FIND a pending task on a live instance instead of
+    # answering ``no_active_job``.
+    task_id: str | None = Field(default=None, index=True)
+    job_item_id: str | None = Field(default=None, index=True)
+    #: Terminal outcome of the turn (``completed`` / ``error`` / …) carried
+    #: on the ``executed`` row. Pointer-or-value per A.1.
+    outcome: str | None = None
+    #: Supervisor CAS stamp + bounded re-drive bookkeeping (A.4).
+    redriven_at: str | None = None
+    redrive_count: int = Field(default=0)
+    #: Loud reason when a row terminalizes after exhausting its re-drive cap.
+    redrive_reason: str | None = None
+
     def to_dict(self) -> dict[str, Any]:
-        """Convert to dictionary for serialization."""
+        """Serialize the receipt (all A.1 fields; read side derives display)."""
         return {
             "execution_id": self.execution_id,
             "schedule_id": self.schedule_id,
@@ -182,6 +216,12 @@ class ScheduleExecution(SQLModel, table=True):
             "status": self.status,
             "error_message": self.error_message,
             "completed_at": self.completed_at,
+            "task_id": self.task_id,
+            "job_item_id": self.job_item_id,
+            "outcome": self.outcome,
+            "redriven_at": self.redriven_at,
+            "redrive_count": self.redrive_count,
+            "redrive_reason": self.redrive_reason,
         }
 
 

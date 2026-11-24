@@ -6818,6 +6818,11 @@ Returns:
     child cascade contract), "wake_enqueued" (a parked WAITING_CHILDREN
     parent got a durable wake turn), "wake_failed" (the WC-wake enqueue
     refused — inspect the error / refusal_kind fields for cause),
+    "pending_redrive" (a PENDING task anchored to a non-terminal JobItem
+    was found and made claimable, and the job pipeline + worker pools were
+    woken — the F2 no_active_job repair; task_id / claimable identify the
+    work; it PRE-EMPTS "wake_enqueued" for a WAITING_CHILDREN parent that
+    also holds anchored pending work),
     "already_resuming" (a resume was already in flight for this
     instance — the dedup guard at manager.py:10122 short-circuits rather
     than starting a second graph turn), "deferred_report_recovery"

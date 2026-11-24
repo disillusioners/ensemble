@@ -98,8 +98,16 @@ class TestIdlePolicyTiering:
     #: ledger's ASK_EXPIRED audit rows) is disjoint from the rows live
     #: traffic touches ⇒ UN_GATED (an IDLE_GATED job starves on a
     #: continuously busy nest).
+    #:
+    #: ``checkpoint_backstop_prune`` joined the set with the SCOPE (c)
+    #: retention lane (2026-11-24): the anti-starvation backstop for
+    #: the checkpoint growth — UN_GATED on purpose, because the idle
+    #: gate is exactly the condition it exists to survive (the measured
+    #: third bloat-class recurrence: 13GB / 94k rows after 47h of
+    #: missed cycles on a continuously busy nest).
     REGISTERED_JOBS = {
         "checkpoint_cleanup",
+        "checkpoint_backstop_prune",
         "room_gc_sweep",
         "vacuum_maintenance",
         "skill_metric_scan",
