@@ -92,6 +92,12 @@ def _busy_service(job_name="skill_orphan_sweep", interval=1.0):
 
 class TestIdlePolicyTiering:
     #: The twelve registered maintenance jobs (daemon/manager.py).
+    #: The twelfth is the POK LIBRARIAN pass (pok-write-gate Phase 10,
+    #: T10.4 — the H3 pick): a bounded, read-heavy, idempotent pass
+    #: whose write set (one project-metadata row per project + the
+    #: ledger's ASK_EXPIRED audit rows) is disjoint from the rows live
+    #: traffic touches ⇒ UN_GATED (an IDLE_GATED job starves on a
+    #: continuously busy nest).
     #:
     #: ``checkpoint_backstop_prune`` joined the set with the SCOPE (c)
     #: retention lane (2026-11-24): the anti-starvation backstop for
@@ -112,6 +118,7 @@ class TestIdlePolicyTiering:
         "malloc_trim",
         "dependency_bus_lock_reap",
         "anomaly_retention",
+        "pok_librarian",
     }
 
     #: The two jobs whose work genuinely contends with live traffic.
@@ -125,7 +132,7 @@ class TestIdlePolicyTiering:
 
         Derived from the POLICY TABLE, not from a name literal: every
         IDLE_GATED job must have a non-``None`` ``max_staleness_hours``.
-        A future 12th job registered WITHOUT a policy entry silently
+        A future 13th job registered WITHOUT a policy entry silently
         defaults to ``IDLE_GATED`` (the unknown-name default) and, with
         no ``JOB_MAX_STALENESS_HOURS`` entry, would starve forever on a
         busy nest — exactly the defect this composite fixes. This pin

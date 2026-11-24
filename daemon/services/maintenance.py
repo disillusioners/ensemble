@@ -304,6 +304,15 @@ JOB_IDLE_POLICIES: dict[str, str] = {
     "dependency_bus_lock_reap": IdlePolicy.UN_GATED,
     # Bounded batched age DELETEs over the anomaly tables.
     "anomaly_retention": IdlePolicy.UN_GATED,
+    # POK librarian (pok-write-gate Phase 10, T10.4 — the H3 pick):
+    # a bounded, idempotent, READ-HEAVY pass over the POK store's
+    # metrics (it reads the active rows + the ledger and writes ONE
+    # metadata row per project). Its write set (the project-metadata
+    # soft-max key + the ledger's ASK_EXPIRED audit rows) is disjoint
+    # from the rows live traffic touches, so it does NOT contend with
+    # the DB write path an in-flight turn needs ⇒ UN_GATED. An
+    # IDLE_GATED job would starve on a continuously busy nest.
+    "pok_librarian": IdlePolicy.UN_GATED,
     # SCOPE (c) — the checkpoint BACKSTOP. UN_GATED on purpose: this is
     # the anti-starvation path for the checkpoint growth itself, and it
     # runs on its OWN wall-clock cadence with a small pair budget. Its
@@ -352,6 +361,10 @@ BACKSTOP_SECTION = "checkpoint-backstop"
 JOB_MAINTENANCE_SECTIONS: dict[str, str] = {
     "checkpoint_cleanup": "checkpoint-cleanup",
     "vacuum_maintenance": "vacuum-maintenance",
+    # POK librarian (pok-write-gate Phase 10, T10.4): the pass writes
+    # its audit row under this section — the persisted last-success
+    # source for the librarian lane.
+    "pok_librarian": "pok-librarian",
     # The backstop (SCOPE (c)) — its OWN section. The mapping is what
     # gives the backstop the RESTART-CLOCK INVARIANT: its persisted
     # last-success hydrates at boot, so a daemon restart does not make

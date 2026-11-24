@@ -682,7 +682,14 @@ class TestManagedKeysConsistency:
         # advanced (base literal 17 + 2 decision-module entries = the old
         # 19; tree literal 20 + the same 2 = 22). ``len(MANAGED_KEYS)`` is
         # the authoritative census; this pin now tracks it.
-        assert len(MANAGED_KEYS) == 22
+        # RE-BASELINED 22 → 25 (the pok-write-gate functional-gate fix
+        # round, 2026-11-24): the lane's three ManagedKeySpecs ARE the
+        # feature — pok_gate.semantic_enforcement, pok_gate.softmax_
+        # tightening and pok_gate.merge_policy (the gate's DB-backed
+        # switch family, settings_service.py). The consistency pin is a
+        # registry tracker and follows the registry; this is a plain pin
+        # update in its own revertable commit.
+        assert len(MANAGED_KEYS) == 25
         config = Config()
         for key, spec in MANAGED_KEYS.items():
             if spec.config_path is None:

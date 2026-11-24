@@ -1951,6 +1951,16 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "pok_upsert",
     "pok_query",
     "pok_curate",
+    # POK write gate Wave 2 (Phase 8, T8.5 — the G1 answer path): the
+    # dedicated answer tool for a pending write-gate ASK. The plan
+    # pins 269 → 270 (design-amendments-v2 §13.2a: the architect
+    # doc's 271→272 is stale; the true value re-derived in-worktree is
+    # 269 → 270).
+    "pok_gate_answer",
+    # POK write gate Wave 2 (Phase 9, T9.1 — the census read surface):
+    # the curator-only census tool the librarian maintains the store
+    # from. The plan pins 270 → 271 (the T8.5 row's 270 + this one).
+    "pok_census",
     "project_update",
     "queue_create",
     "queue_list",

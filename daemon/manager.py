@@ -2445,6 +2445,11 @@ class InstanceManager:
         self._maintenance_run_lock: "MaintenanceRunLock | None" = None
         self._maintenance_runs_repo: "MaintenanceRunsRepository | None" = None
         self._maintenance_api_service: "MaintenanceApiService | None" = None
+        # The POK librarian job handle (pok-write-gate Phase 10, T10.4)
+        # — the H3 periodic pass. Assigned at the registration site
+        # below; the handle exists so the job is reachable (and
+        # pinnable) without re-deriving it.
+        self._pok_librarian_job: Any | None = None
 
         # Phase 1 / WS-2 — register the ``/compact`` slash command
         # into the dispatcher. Lazy import inside the helper to
@@ -4913,6 +4918,41 @@ class InstanceManager:
                 "vacuum_maintenance disabled by config "
                 "(PERSISTENCE_VACUUM_ENABLED=0); skipping registration"
             )
+
+        # ── the POK LIBRARIAN pass (pok-write-gate Wave 2, Phase 10,
+        # T10.4 — the H3 pick) ─────────────────────────────────────────
+        # ONE global MaintenanceService job that loops the project ids
+        # INTERNALLY (one try/except per project). It is registered
+        # UN_GATED (an IDLE_GATED job starves on a continuously busy
+        # nest) and its section is in ``JOB_MAINTENANCE_SECTIONS``
+        # (``pok-librarian``), so the persisted last-success clock and
+        # the free observability come with it.
+        #
+        # BOOT-SLO (the Emperor-set 120 s budget): this block is a
+        # DICT-APPEND — the job's ``execute`` is NEVER called from the
+        # boot path (the maintenance loop sleeps 60 s before its first
+        # tick). The pass itself is fail-soft: a project that raises
+        # is captured in its report and the pass moves on.
+        from .services.pok_librarian import (
+            POK_LIBRARIAN_INTERVAL_HOURS,
+            POKLibrarianJob,
+        )
+
+        pok_librarian_job = POKLibrarianJob(
+            engine=self._engine,
+            runs_repo=self._maintenance_runs_repo,
+            run_lock=self._maintenance_run_lock,
+        )
+        self._pok_librarian_job = pok_librarian_job
+        self._maintenance_service.register(
+            "pok_librarian",
+            POK_LIBRARIAN_INTERVAL_HOURS,
+            pok_librarian_job.execute,
+        )
+        logger.debug(
+            "pok_librarian registered: interval=%sh",
+            POK_LIBRARIAN_INTERVAL_HOURS,
+        )
 
         # Skill Evolution Phase 4: seed the default Tier 1 trigger
         # rules + register the periodic metric-scan maintenance job.
@@ -10399,6 +10439,29 @@ class InstanceManager:
                 "CREATE UNIQUE INDEX IF NOT EXISTS ux_mission_records_anchor_open "
                 "ON mission_records (anchor_instance_id) "
                 f"WHERE {OPEN_EPOCH_STATUS_SQL}"
+            ),
+            # ── POK write-gate ledger — the GATE-CHAIN partial unique
+            # index (Wave 2 Phase 8, T8.16). At most ONE ledger row
+            # per (project_id, gate_id, phase): the DB-level backstop
+            # for the gate-chain idempotency (the appender used to be
+            # app-level read-then-append only — a race).
+            #
+            # The statement is needed HERE because
+            # ``SQLModel.metadata.create_all(checkfirst=True)`` does
+            # NOT add an index to a table that already exists — a
+            # PostgreSQL database that already carries
+            # ``pok_write_gate_ledger`` (created by the Wave-1 boot)
+            # would otherwise never get the index.
+            #
+            # The index name + predicate MUST stay byte-identical with
+            # the SQLite counterpart
+            # (``daemon/migrations/versions/20261124_093000_add_pok_ledger_gate_chain_unique_index.sql``)
+            # and with the SQLModel ``__table_args__`` declaration in
+            # ``daemon/repositories/pok/models.py`` (3-site pin).
+            (
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_pok_ledger_gate_chain "
+                "ON pok_write_gate_ledger (project_id, gate_id, phase) "
+                "WHERE gate_id IS NOT NULL"
             ),
             # ── Critical-notes lifecycle columns (Phase 1, 2026-09-15) ──
             # Additive columns on ``critical_notes`` per

@@ -1,0 +1,11 @@
+slug	created_by_agent	pok_created_at	best_rag_file_source	rag_created_at	delta_s	jaccard	evidence_grade	same_run_i	same_run_ii	same_run_iii
+views-origin-parser-nonbrowser-spellings	kb-writer	2026-11-09T03:23:45.090378+00:00	views-origin-parser-non-browser-spellings.md	2026-11-09T03:23:08.601715+00:00	-36.489	0.7273	jaccard-only	1	1	0
+decision-kill-switch-liveness-triad	kb-writer	2026-11-09T06:12:52.053297+00:00	decision-kill-switch-liveness-triad.md	2026-11-09T06:12:52.155493+00:00	0.102	0.1087	slug-identity	1	1	1
+packs-01-conflict-keep-both-newest-first	kb-writer	2026-11-12T11:08:40.076842+00:00	packs-md-eof-conflict-resolution.md	2026-11-12T11:08:40.229335+00:00	0.152	0.8667	jaccard-only	1	1	1
+wake-path-01-emitter-accept-skip	kb-writer	2026-11-18T18:40:26.428484+00:00	wake-path-emitter-amendment-2026-11-18.md	2026-11-18T18:39:54.491734+00:00	-31.937	0.6250	jaccard-only	1	1	0
+upgrade-journal-writer-attribution	maintenancer	2026-11-19T14:16:09.367397+00:00	upgrade-journal-writer-attribution.md	2026-11-19T14:47:43.298523+00:00	1893.931	0.1538	slug-identity	1	0	0
+shared-worktree-amend-trap	developer	2026-11-22T11:45:04.561143+00:00	shared-worktree-amend-trap.md	2026-11-22T11:46:31.496138+00:00	86.935	0.4444	slug-identity	1	0	0
+engine-flipprep-pack-registration-gap	worker	2026-11-22T19:21:13.881648+00:00	engine-flipprep-pack-registration-gap.md	2026-11-22T18:44:29.586842+00:00	-2204.295	0.2439	slug-identity	0	0	0
+pending-task-redrive-repair	kb-writer	2026-11-24T03:02:09.502123+00:00	pending-task-redrive-repair.md	2026-11-24T03:01:42.454621+00:00	-27.048	0.1489	slug-identity	1	1	0
+pok-write-gate-01-plan-set-location	kb-writer	2026-11-24T03:45:33.790275+00:00	pok-write-gate-plan-set-location.md	2026-11-24T03:45:20.130301+00:00	-13.660	0.7143	jaccard-only	1	1	0
+plane-mcp-dead-cached-session	maintenancer	2026-11-24T04:48:56.381995+00:00	plane-mcp-dead-cached-session.md	2026-11-24T04:49:38.517676+00:00	42.136	0.1778	slug-identity	1	1	0
