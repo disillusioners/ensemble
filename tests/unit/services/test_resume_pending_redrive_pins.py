@@ -317,6 +317,68 @@ async def test_p2_terminal_jobitem_shape_not_redriven(
 
 
 # ---------------------------------------------------------------------------
+# NIT-5 / R5(c) — the WAITING_CHILDREN interaction, PINNED
+# ---------------------------------------------------------------------------
+
+
+class _FixedStatusLifecycle:
+    """Lifecycle stub that reports a fixed status (the WC-parent probe)."""
+
+    def __init__(self, status: str | None) -> None:
+        self._status = status
+
+    def get_instance_info(self, instance_id: str):
+        if self._status is None:
+            raise AttributeError("lifecycle service not wired")
+        return {"instance_id": instance_id, "status": self._status}
+
+
+@pytest.mark.asyncio
+async def test_p2c_waiting_children_parent_with_anchored_pending_task_redrives(
+    engine: Engine, task_repo: TaskRepository
+) -> None:
+    """NIT-5 (R5c) — the chosen WC-interaction outcome, PINNED and
+    DOCUMENTED.
+
+    Shape: a WAITING_CHILDREN parent ALSO holds a PENDING task anchored to
+    a non-terminal JobItem. Both repairs apply:
+      * the F2 pending-re-drive leg (leg 2.6) — durable work is claimable
+        but unclaimed;
+      * the B2 WC wake (leg 3) — the parent is parked and needs a wake
+        turn to resume from checkpoint.
+
+    CHOSEN OUTCOME (deliberate, documented at the F2 leg in manager.py):
+    ``pending_redrive`` PRE-EMPTS ``wake_enqueued``. The leg order is 2.6 →
+    3, so the resume returns the re-drive verdict and NEVER injects the
+    synthetic "continue" wake turn. WHY this is acceptable and preferred:
+    the re-drive is the MORE PRECISE repair — it re-arms exactly the
+    durable work the parent owes (anchored to a LIVE JobItem) without
+    injecting a new message turn on top of it; the B2 wake would enqueue a
+    SECOND turn whose only content is "continue", racing the re-driven
+    task for the same instance's single turn slot. The outcome is truthful
+    (the caller sees exactly which task was re-driven, with its task_id and
+    claimability), and the instance leaves WAITING_CHILDREN the moment the
+    re-driven work is claimed — the wake's purpose is served by the claim,
+    not by a new turn."""
+    task_id, _wid = _seed_wedge_shape(engine, "inst-wc")
+    # The parent is parked in WAITING_CHILDREN (a real lifecycle report).
+    harness = _RedriveHarness(engine)
+    harness.mgr._lifecycle_service = _FixedStatusLifecycle("waiting_children")
+
+    result = await harness.resume("inst-wc", silent=True)
+
+    assert result is not None and result.get("status") == "pending_redrive", (
+        f"the anchored PENDING work must pre-empt the WC wake; got {result!r}"
+    )
+    assert result.get("task_id") == task_id
+    # NO synthetic wake turn was enqueued (the B2 wake leg never ran).
+    assert "message_id" in result and result.get("message_id") is None
+    # The re-drive left the task claimable (the repair is real).
+    claimed = task_repo.claim_pending_task(worker_id="worker-wc", lane="default")
+    assert claimed is not None and claimed.id == task_id
+
+
+# ---------------------------------------------------------------------------
 # P5 — cross-fix idempotency: exactly ONE claim transition
 # ---------------------------------------------------------------------------
 
@@ -352,34 +414,84 @@ async def test_p5_redrive_never_claims_and_claim_cas_is_single(
     assert len(_running_tasks(engine, "inst-idem")) == 1
 
 
+def _stripped_source(module_or_callable) -> str:
+    """Imported-object source with DOCSTRINGS and comment lines stripped
+    (R5g).
+
+    Two brittleness fixes in one helper:
+      * the module is read from the IMPORTED object
+        (``inspect.getsource``) — never a CWD-relative filesystem path,
+        which silently reads the wrong file when pytest is launched from
+        anywhere but the repo root;
+      * ONLY docstrings (bare-string first statements) and comments are
+        removed — AST-targeted, not a blanket triple-quote strip — so
+        prose that merely MENTIONS an SQL verb can no longer false-RED the
+        pin while the REAL multi-line SQL strings under test survive.
+    """
+    import ast
+    import textwrap
+
+    src = inspect.getsource(module_or_callable)
+    # Methods come back indented; dedent so ast.parse accepts them. dedent
+    # removes only COMMON leading whitespace (no lines), so the line
+    # numbers still align with the original text.
+    tree = ast.parse(textwrap.dedent(src))
+    docstring_lines: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(
+            node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+        ):
+            continue
+        body = node.body
+        if (
+            body
+            and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)
+        ):
+            docstring_lines.update(
+                range(body[0].lineno, (body[0].end_lineno or body[0].lineno) + 1)
+            )
+    lines = [
+        ln
+        for i, ln in enumerate(src.splitlines(), start=1)
+        if i not in docstring_lines and not ln.lstrip().startswith("#")
+    ]
+    return "\n".join(lines)
+
+
 @pytest.mark.asyncio
 async def test_p5_structural_single_pending_running_cas() -> None:
     """F4 structural: the pending→running flip exists ONLY inside
     ``claim_pending_task`` — the reconciler, the F2 re-drive and the F1
-    compensation never direct-drive a task."""
-    import pathlib
+    compensation never direct-drive a task.
 
-    repo_src = (
-        pathlib.Path("daemon/repositories/task/repository.py")
-        .read_text(encoding="utf-8")
-    )
-    claim_fn_src = inspect.getsource(TaskRepository.claim_pending_task)
+    R5g: the modules are read from the IMPORTED objects (not CWD-relative
+    paths) and the literal-absence assertions run against stripped source,
+    so prose that merely mentions an SQL verb cannot false-RED the pin."""
+    import daemon.repositories.task.repository as task_repository_module
+    import daemon.services.boot_consistency_reconciler as reconciler_module
+    from daemon.services.instance_messaging import compensate_dedup_hit
+
+    module_src = _stripped_source(task_repository_module)
+    claim_fn_src = _stripped_source(TaskRepository.claim_pending_task)
     # The single CAS lives in the claim path.
     assert "SET status = :status_running" in claim_fn_src
-    # And nowhere else in the repository module.
-    outside = repo_src.replace(claim_fn_src, "")
-    assert "SET status = :status_running" not in outside, (
+    # And EXACTLY ONCE in the whole repository module (inside the claim
+    # function) — count, not mere absence, so a second write is loud.
+    assert module_src.count("SET status = :status_running") == 1, (
         "a second pending→running UPDATE appeared outside claim_pending_task"
     )
-    # The new F1/F2 seams carry no task-status writes at all.
-    comp_src = inspect.getsource(
-        __import__(
-            "daemon.services.instance_messaging", fromlist=["compensate_dedup_hit"]
-        ).compensate_dedup_hit
-    )
+
+    # The new F1/F2 seams carry no task-status writes at all (stripped
+    # source: a docstring mentioning 'SET status' no longer false-REDs).
+    comp_src = _stripped_source(compensate_dedup_hit)
     assert "SET status" not in comp_src, "compensation must not write task status"
-    reconciler_src = pathlib.Path(
-        "daemon/services/boot_consistency_reconciler.py"
-    ).read_text(encoding="utf-8")
-    assert "UPDATE task" not in reconciler_src
-    assert "SET status" not in reconciler_src
+    assert "UPDATE task" not in comp_src, "compensation must not write task status"
+    reconciler_src = _stripped_source(reconciler_module)
+    assert "UPDATE task" not in reconciler_src, (
+        "the reconciler must never UPDATE the task table"
+    )
+    assert "SET status" not in reconciler_src, (
+        "the reconciler must never flip a task status"
+    )

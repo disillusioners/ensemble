@@ -1160,7 +1160,11 @@ class TaskRepository:
                 select(Task)
                 .where(Task.instance_id == instance_id)
                 .where(Task.status == TaskStatus.PENDING.value)
-                .where(col(Task.cancel_requested).is_(False))
+                # COALESCE form, matching the docstring above AND the
+                # sibling ``make_pending_task_claimable`` SQL: a NULL
+                # cancel_requested is NOT a deliberate stop, so it must be
+                # included (a bare ``IS FALSE`` would exclude it).
+                .where(text("COALESCE(cancel_requested, FALSE) = FALSE"))
                 .where(
                     Task.task_type.in_([
                         TaskType.PROCESS_MESSAGE.value,

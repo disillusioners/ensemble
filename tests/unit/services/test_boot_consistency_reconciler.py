@@ -589,3 +589,106 @@ async def test_completed_task_cancel_requested_excluded(engine, repo) -> None:
     assert out.candidates == 0, "cancel_requested completed_task must not be selected"
     assert out.finalized == 0 and out.deferred_to_healer == 0
     assert mgr.resume_calls == [] and mgr.terminate_calls == []
+
+
+# ---------------------------------------------------------------------------
+# 16. N4 (R5d) — the distinct [BOOT_RECOVERY_*_REFUSED] markers ACTUALLY emitted
+# ---------------------------------------------------------------------------
+
+
+class _StampDecliningRepo:
+    """Delegates to the real repo but DECLINES every stamp (a CAS loss) —
+    the disposition-refusal path, which is NOT a DB error."""
+
+    def __init__(self, real: Any) -> None:
+        self._real = real
+        self.stamp_calls: list[tuple[Any, ...]] = []
+
+    def find_boot_consistency_candidates(self, boot_epoch):
+        return self._real.find_boot_consistency_candidates(boot_epoch)
+
+    def stamp_boot_re_drive(self, *a, **k):
+        self.stamp_calls.append((a, k))
+        return False
+
+    def remint_boot_consistency_work(self, *a, **k):
+        return self._real.remint_boot_consistency_work(*a, **k)
+
+    def finalize_boot_consistency_instance(self, *a, **k):
+        return self._real.finalize_boot_consistency_instance(*a, **k)
+
+
+@pytest.mark.asyncio
+async def test_n4_distinct_refusal_markers_actually_emitted(
+    engine, repo, caplog
+) -> None:
+    """N4 (R5d) — the non-DB failure classes carry DISTINCT, OBSERVABLE
+    markers, and none of them is the DB-error marker.
+
+    A single generic "[BOOT_RECOVERY] refused" (or a DB-error marker reused
+    for a CAS loss / a terminate refusal / a resume refusal) would hide the
+    failure class from the operator. This pin drives all THREE refusal
+    paths and asserts the exact marker each one EMITS — behaviorally, not
+    by grepping for a literal in the module.
+    """
+    import logging
+
+    markers: dict[str, str] = {}
+
+    # (1) RESUME_REFUSED — Tier-1 with durable content, but the resume
+    #     primitive refuses (a non-"resuming" status).
+    iid_resume = "n4-resume-refused"
+    _seed_instance(engine, iid_resume)
+    _seed_event(engine, iid_resume, _msg_data("resume will be refused"))
+    mgr_resume = _MockManager(
+        repo, checkpoints={iid_resume: True}, resume_status="wake_failed", engine=engine
+    )
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        out_resume = await reconcile_boot_consistency(mgr_resume, BOOT_EPOCH)
+    resume_marker = "[BOOT_RECOVERY_RESUME_REFUSED]"
+    assert any(resume_marker in r.message for r in caplog.records), (
+        "the resume-refusal path must EMIT [BOOT_RECOVERY_RESUME_REFUSED]"
+    )
+    assert out_resume.errors == 0, "a resume refusal is NOT a DB error"
+    assert not any("[BOOT_RECOVERY_DB_ERROR]" in r.message for r in caplog.records)
+    markers["resume"] = resume_marker
+
+    # (2) TERMINATE_REFUSED — Tier-2 retire whose terminate_instance
+    #     returned False.
+    iid_terminate = "n4-terminate-refused"
+    _seed_instance(engine, iid_terminate)  # no Event ⇒ Tier-2 retire
+    mgr_terminate = _MockManager(repo, terminate_ok=False, engine=engine)
+    caplog.clear()
+    with caplog.at_level(logging.ERROR):
+        out_terminate = await reconcile_boot_consistency(mgr_terminate, BOOT_EPOCH)
+    terminate_marker = "[BOOT_RECOVERY_TERMINATE_REFUSED]"
+    assert any(terminate_marker in r.message for r in caplog.records), (
+        "the terminate-refusal path must EMIT [BOOT_RECOVERY_TERMINATE_REFUSED]"
+    )
+    assert out_terminate.errors == 0, "a terminate refusal is NOT a DB error"
+    assert not any("[BOOT_RECOVERY_DB_ERROR]" in r.message for r in caplog.records)
+    markers["terminate"] = terminate_marker
+
+    # (3) DISPOSITION_REFUSED — Tier-2 retire succeeded but the stamp CAS
+    #     was declined.
+    iid_stamp = "n4-disposition-refused"
+    _seed_instance(engine, iid_stamp)  # no Event ⇒ Tier-2 retire
+    declining = _StampDecliningRepo(repo)
+    mgr_stamp = _MockManager(declining, engine=engine)
+    caplog.clear()
+    with caplog.at_level(logging.ERROR):
+        out_stamp = await reconcile_boot_consistency(mgr_stamp, BOOT_EPOCH)
+    disposition_marker = "[BOOT_RECOVERY_DISPOSITION_REFUSED]"
+    assert any(disposition_marker in r.message for r in caplog.records), (
+        "the stamp-CAS-loss path must EMIT [BOOT_RECOVERY_DISPOSITION_REFUSED]"
+    )
+    assert out_stamp.errors == 0, "a disposition CAS loss is NOT a DB error"
+    assert not any("[BOOT_RECOVERY_DB_ERROR]" in r.message for r in caplog.records)
+    assert declining.stamp_calls, "the stamp path must actually have been attempted"
+    markers["disposition"] = disposition_marker
+
+    # The classes are pairwise DISTINCT — no generic refusal marker.
+    assert len(set(markers.values())) == 3, (
+        f"the three refusal classes must carry distinct markers: {markers}"
+    )

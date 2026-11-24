@@ -15518,6 +15518,18 @@ class InstanceManager:
         #      holds; it only wakes existing durable work. The verdict for
         #      this shape is a TRUTHFUL re-drive outcome, not
         #      ``no_active_job``.
+        #
+        #      WC-INTERACTION (R5c, pinned in
+        #      test_resume_pending_redrive_pins.py): this leg runs BEFORE
+        #      the B2 WAITING_CHILDREN wake (leg 3), so a WC parent that
+        #      ALSO holds a PENDING+anchored task returns
+        #      ``pending_redrive`` and PRE-EMPTS ``wake_enqueued``. That
+        #      is deliberate: re-driving the anchored durable work is the
+        #      more precise repair — it never injects a synthetic
+        #      "continue" turn that would race the re-driven task for the
+        #      same instance's single turn slot. The caller sees the
+        #      truthful task_id/claimability, and the claim moves the
+        #      parent out of WAITING_CHILDREN.
         try:
             pending_redrive = await asyncio.to_thread(
                 self._task_repo.find_pending_redrive_turn,
