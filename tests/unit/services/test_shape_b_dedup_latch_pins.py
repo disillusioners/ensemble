@@ -1,4 +1,4 @@
-"""Shape-B dedup-latch pins (fix/post-outage-recovery SCOPE b2, F1).
+"""Shape-B dedup-latch pins (fix/post-outage-recovery SCOPE b2, R1/R2).
 
 Adjudicated wedge 6105e198: the scheduler's ONE-TIME idempotency key was
 CONSTANT for the schedule's lifetime
@@ -14,16 +14,32 @@ and returns a FRESH row carrying the CALLER's minted ``job_id`` — so the
 compensation predicate ``returned.job_id != minted`` evaluates False despite
 the logged hit (the "masquerade").
 
+R1 (verifier REJECTED F1(a)): the PER-EXECUTION key
+(``scheduler:{sid}:exec:{execution_id}``) removed the cross-restart
+at-most-once guard for one-shot/chain fires — the chain re-arm /
+source-disable write commits AFTER the delivery, so a crash in that window
+replays the SAME slot and a fresh ``execution_id`` minted a FRESH key, i.e. a
+SECOND delivery. The direct key is SLOT-STABLE and namespaced again:
+``scheduler:{source_id}:slot:{run_at.isoformat()}``.
+
 Pins (claim-asserting — every pin asserts a row-level outcome, never
 "no error appeared"):
 * P1  the masquerade is reproduced against the REAL ``INSERT .. ON CONFLICT``
-  claim path; the post-F1(a) per-execution keys mint DISTINCT keys per fire;
-  the post-fire row shape claims through the REAL ``claim_pending_task`` SQL
-  with no human intervention.
+  claim path; the post-fire row shape claims through the REAL
+  ``claim_pending_task`` SQL with no human intervention.
+* P1A (R5a) crash-window double-fire: slot-stable key + LIVE prior + two
+  fires ⇒ exactly ONE JobItem. Driven END-TO-END — the key is minted by the
+  REAL scheduler route (``_route_via_job_queue``), not hand-seeded (R5f).
+* P1B (R2/R5b) DONE-prior reconciliation: slot key + DONE prior + two fires
+  ⇒ exactly ONE DELIVERED chain (the orphan fallback JobItem cancelled by
+  the F1(b) compensation). This is BOTH the old-bug repro and the remedy
+  proof — under the per-execution key it was 2 rows (a second live chain).
 * P4  a forced dedup hit (genuine AND masquerade arms) runs the D4
   compensation: the phantom prelude Task is CANCELLED and the phantom
-  MessageQueue row is DELETED (reconciled), with the compensation marker
-  observed.
+  MessageQueue row is DELETED.
+* P4E (R5e) BEHAVIORAL replacement for the string-presence wiring pin: a
+  masquerade through the REAL ``enqueue_message_job`` fires the
+  compensation, and a DEFERRED key does NOT (DEC-18 pinned behaviorally).
 
 Hermetic SQLite (file-backed, NullPool, REAL SQLModel schema) — no live
 daemon, no live DB.
@@ -33,6 +49,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
@@ -57,7 +74,20 @@ from daemon.repositories.message_queue.repository import (
 from daemon.repositories.task.models import Task
 from daemon.repositories.task.repository import TaskRepository
 
-SCHED_KEY = "scheduler:sched-1:2026-11-23T19:00:00+00:00"
+RUN_AT_ISO = "2026-11-23T19:00:00+00:00"
+SCHED_KEY = "scheduler:sched-1:slot:" + RUN_AT_ISO
+#: DEC-18: the deferred twin for the same schedule/generation — namespaced
+#: away from the direct slot key, and NEVER compensated.
+DEFERRED_KEY = "scheduler:sched-1:deferred:" + RUN_AT_ISO + ":v1"
+
+
+def _slot_key(source_id: str) -> str:
+    """The direct fire's key — minted by the PRODUCTION helper."""
+    from daemon.sources.adapters.scheduler import (
+        _scheduler_direct_idempotency_key,
+    )
+
+    return _scheduler_direct_idempotency_key(source_id, RUN_AT_ISO)
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +208,88 @@ def _get_mq(engine: Engine, message_id: str) -> MessageQueue | None:
         ).first()
 
 
+def _all_jobs(engine: Engine) -> list[JobItem]:
+    with Session(engine) as s:
+        return list(s.exec(select(JobItem)).all())
+
+
+def _job_by_id(engine: Engine, job_id: str) -> JobItem | None:
+    with Session(engine) as s:
+        return s.exec(
+            select(JobItem).where(JobItem.job_id == job_id)
+        ).first()
+
+
+# The REAL InstanceMessagingService stack (used by BOTH the R2/R5b
+# DONE-prior demo and the R5e behavioral key-family pins).
+
+
+@pytest.fixture
+def messaging_stack(engine: Engine, task_repo: TaskRepository, mq_repo: MessageQueueRepository):
+    """The REAL ``InstanceMessagingService`` stack over the hermetic engine
+    (real repos, real JobQueueService, real write guard; the registry and
+    the title/streams are stubbed — everything the dedup path touches is
+    real)."""
+    import daemon.services.job_queue_service as jq_mod
+    from daemon.constants import SYSTEM_DEFAULT_PROJECT_ID
+    from daemon.repositories.instance.repository import (
+        SQLModelInstanceRepository,
+    )
+    from daemon.repositories.job_queue.lock_repository import LockRepository
+    from daemon.repositories.job_queue.models import JobQueue
+    from daemon.repositories.job_queue.queue_repository import (
+        JobQueueRepository,
+    )
+    from daemon.services.cancellation import CancellationService
+    from daemon.services.instance_messaging import InstanceMessagingService
+    from daemon.services.job_lock_manager import JobLockManager
+    from daemon.services.job_queue_service import JobQueueService
+    from daemon.write_pause_guard import WritePauseGuard
+
+    instance_repo = SQLModelInstanceRepository(engine)
+    lock_repo = LockRepository(engine)
+    queue_repo = JobQueueRepository(engine)
+    jq_service = JobQueueService(
+        repository=JobRepository(engine),
+        lock_manager=JobLockManager(lock_repo),
+        queue_repo=queue_repo,
+    )
+    jq_service._project_repo = None
+
+    with Session(engine) as s:
+        s.add(
+            JobQueue(
+                project_id=SYSTEM_DEFAULT_PROJECT_ID,
+                queue_name="system_parallel_queue",
+                queue_name_lower="system_parallel_queue",
+                queue_type="parallel",
+            )
+        )
+        s.commit()
+
+    manager = MagicMock()
+    manager.engine = engine
+    manager.write_guard = WritePauseGuard()
+    manager._instance_repository = instance_repo
+    manager._queue_repository = mq_repo
+    manager._project_repository = MagicMock()
+    manager._live_hub = MagicMock()
+    manager._live_hub.stream_status_change = AsyncMock()
+    manager._worker_pool = MagicMock()
+    manager._worker_pool.notify_work = MagicMock()
+    manager._job_queue_service = jq_service
+    manager._task_repo = task_repo
+    manager._generate_and_broadcast_title = MagicMock()
+
+    svc = InstanceMessagingService(
+        manager=manager,
+        cancellation_service=MagicMock(
+            spec=CancellationService, is_shutting_down=False
+        ),
+    )
+    return manager, svc
+
+
 # ---------------------------------------------------------------------------
 # P1 — the masquerade root cause, at the REAL service claim path
 # ---------------------------------------------------------------------------
@@ -193,6 +305,9 @@ class _FakeRegistry:
 
     def get_resolved(self, agent_id):
         return _FakeAgentMeta()
+
+    def resolve_to_id(self, agent_id):
+        return agent_id
 
 
 @pytest.fixture
@@ -238,13 +353,11 @@ async def test_p1_masquerade_root_cause_dedup_predicate_blind(
     engine: Engine, job_service
 ) -> None:
     """REPRO (adjudicated 6105e198): a pre-existing TERMINAL JobItem holds
-    the constant scheduler key. The service logs the dedup hit, takes the
-    terminal fallback, and returns a FRESH row carrying the CALLER's minted
-    job_id with a REWRITTEN key — so the compensation predicate
+    the SLOT key. The service logs the dedup hit, takes the terminal
+    fallback, and returns a FRESH row carrying the CALLER's minted job_id
+    with a REWRITTEN key — so the compensation predicate
     ``returned.job_id != minted`` evaluates False and the phantom prelude
     survives. Root cause pinned at the REAL service seam."""
-    import logging as _logging
-
     minted = str(uuid4())
     _seed_job(
         engine,
@@ -252,8 +365,6 @@ async def test_p1_masquerade_root_cause_dedup_predicate_blind(
         idempotency_key=SCHED_KEY,
         admission_state=AdmissionState.DONE.value,
     )
-
-    import daemon.services.job_queue_service as jq_mod
 
     job = await job_service.enqueue(
         agent_id="ari",
@@ -319,7 +430,7 @@ async def test_p1_dedup_outcome_classifier_catches_masquerade(
     # The genuine arm stays exactly as before: a non-terminal winner returns
     # its OWN job_id (≠ mint) — genuine dedup, masquerade False.
     minted2 = str(uuid4())
-    live_key = "scheduler:sched-1:exec:live-key"
+    live_key = _slot_key("sched-1") + "-live"
     _seed_job(
         engine,
         job_id=str(uuid4()),
@@ -348,79 +459,227 @@ async def test_p1_dedup_outcome_classifier_catches_masquerade(
     assert genuine2 is True and masquerade2 is False
 
 
-def test_p1_scheduler_key_is_per_execution() -> None:
-    """F1(a): each scheduler fire mints a DISTINCT idempotency key; the same
-    execution re-mints the SAME key (the within-execution re-entry latch);
-    the deferred twin is distinct per generation and stable within it, and
-    no longer collides with the direct key."""
+def test_p1_scheduler_key_is_slot_stable() -> None:
+    """R1 (fix/post-outage-recovery b2): the direct key is SLOT-STABLE and
+    namespaced.
+
+    * the SAME slot re-fired (post-outage restart, boot-guard auto-fire,
+      adapter reconstruction) mints the SAME key — the collapse latch;
+    * a DIFFERENT slot (a chain re-arm, an operator re-schedule) mints a
+      DIFFERENT key — the re-arm is a new delivery, not a duplicate;
+    * the key NEVER carries the per-fire execution_id (the crash window:
+      a fresh execution id must never mean a second delivery);
+    * the deferred twin is distinct per generation and stable within it,
+      and never collides with the direct key.
+    """
     from daemon.sources.adapters.scheduler import (
         _deferred_idempotency_key,
         _scheduler_direct_idempotency_key,
     )
 
     sid = "db-volume-weekly"
-    k1 = _scheduler_direct_idempotency_key(sid, "exec-1")
-    k2 = _scheduler_direct_idempotency_key(sid, "exec-2")
-    k1_again = _scheduler_direct_idempotency_key(sid, "exec-1")
-    assert k1 != k2, "two fires of the SAME schedule must mint distinct keys"
-    assert k1 == k1_again, "one execution must be a stable latch for its own re-entry"
-    assert k1.startswith(f"scheduler:{sid}:")
+    slot = "2030-01-15T09:00:00+00:00"
+    k1 = _scheduler_direct_idempotency_key(sid, slot)
+    k1_again = _scheduler_direct_idempotency_key(sid, slot)
+    k2 = _scheduler_direct_idempotency_key(sid, "2030-01-22T09:00:00+00:00")
+    assert k1 == k1_again, (
+        "a re-fire of the SAME slot must mint the SAME key — the "
+        "cross-restart at-most-once latch"
+    )
+    assert k1 != k2, "a different slot is a different delivery"
+    assert k1 == f"scheduler:{sid}:slot:{slot}", "the slot key shape"
+    # The execution_id is telemetry, never part of the key: two DIFFERENT
+    # executions of the SAME slot collapse onto one key.
+    assert "exec" not in k1
+    assert k1.startswith(f"scheduler:{sid}:slot:")
 
-    d_gen1_a = _deferred_idempotency_key(sid, "run-at", 1)
-    d_gen1_b = _deferred_idempotency_key(sid, "run-at", 1)
-    d_gen2 = _deferred_idempotency_key(sid, "run-at", 2)
+    d_gen1_a = _deferred_idempotency_key(sid, slot, 1)
+    d_gen1_b = _deferred_idempotency_key(sid, slot, 1)
+    d_gen2 = _deferred_idempotency_key(sid, slot, 2)
     assert d_gen1_a == d_gen1_b, "the deferred key is the per-generation coalesce latch"
     assert d_gen1_a != d_gen2, "a rollover must mint a fresh deferred key"
     assert d_gen1_a != k1, "the deferred twin must never collide with the direct key"
 
 
-def test_p1_scheduler_route_keys_all_fires() -> None:
-    """F1(a): the job-queue route mints the per-execution key for ALL
-    scheduled fires (the ONE_TIME-only gate is gone — the weekly chain and
-    every recurring fire are covered)."""
-    import inspect
+# ---------------------------------------------------------------------------
+# The scheduler key path, END-TO-END (R5f — no hand-seeded rows)
+# ---------------------------------------------------------------------------
 
-    from daemon.sources.adapters import scheduler as sched_mod
 
-    src = inspect.getsource(sched_mod.SchedulerAdapter._route_via_job_queue)
-    assert "_scheduler_direct_idempotency_key(" in src, (
-        "the route must mint the per-execution key"
+def _adapter_route_harness(engine: Engine, monkeypatch, source_id: str, config_dict: dict):
+    """A REAL ``SchedulerAdapter`` whose manager funnels the emitted key
+    into the REAL ``create_or_get_by_idempotency_key`` claim (the exact
+    atomic claim production ``JobQueueService.enqueue`` makes).
+
+    Returns ``(adapter, manager, results)``. ``results`` collects the
+    substrate-assigned ``job_id`` of every fire.
+    """
+    from daemon.sources.adapters.scheduler import SchedulerAdapter
+    from tests.conftest import make_config
+
+    monkeypatch.setattr(
+        "daemon.sources.adapters.scheduler.get_registry", lambda: _FakeRegistry()
     )
-    assert "SCHEDULE_TYPE_ONE_TIME and self._run_at is not None:\n                enqueue_kwargs" not in src, (
-        "the ONE_TIME-only constant-key gate must be retired"
+    job_repo = JobRepository(engine)
+    mapper_repo = MagicMock()
+    mapper_repo.get_instance_mapping = MagicMock(return_value=None)
+
+    manager = MagicMock()
+    manager.spawn_instance_with_mcp = AsyncMock(return_value="inst-route-1")
+    results: list = []
+
+    async def _enqueue(**kwargs):
+        key = kwargs.get("idempotency_key")
+        job, _created = job_repo.create_or_get_by_idempotency_key(
+            agent_id="ari",
+            agent_dir="/agents/ari",
+            message=kwargs.get("message", "x"),
+            source="scheduler",
+            project_id="p",
+            priority=5,
+            # An unkeyed enqueue mints a fresh unique key (mirrors
+            # production: unkeyed enqueues never collapse).
+            idempotency_key=key if key else f"unkeyed-{uuid4()}",
+        )
+        result = MagicMock(
+            job_id=job.job_id,
+            message_id="m-1",
+            instance_id="inst-route-1",
+            status="queued",
+        )
+        results.append(result)
+        return result
+
+    manager.enqueue_message_job = AsyncMock(side_effect=_enqueue)
+
+    config = make_config(source_id, config_dict)
+    adapter = SchedulerAdapter(
+        config, lambda *a, **k: None, manager=manager, source_repo=mapper_repo
     )
+    return adapter, manager, results
 
 
 @pytest.mark.asyncio
-async def test_p1_post_fire_row_claims_without_intervention(
-    engine: Engine,
-    task_repo: TaskRepository,
-    mq_repo: MessageQueueRepository,
+async def test_p1a_crash_window_slot_key_collapses_refire_with_live_prior(
+    engine: Engine, monkeypatch
 ) -> None:
-    """THE CLAIM (P1): after F1(a) the fire mints a fresh JobItem (no
-    collision, no phantom) — the row shape a normal fire leaves is
-    Task PENDING + JobItem ACTIVE + MQ ready, and it reaches
-    RUNNING/processing through the REAL claim SQL with no human
-    intervention (no pause/resume, no operator repair)."""
-    _seed_instance(engine, "inst-claim")
-    work_id = str(uuid4())
-    message_id = f"mq-{uuid4().hex[:12]}"
+    """R5a — THE VERIFIER'S SCENARIO, as a hermetic pin.
+
+    The crash window: the fire DELIVERS (a live JobItem exists), the chain
+    re-arm / source-disable write has NOT committed yet, the process dies,
+    the boot guard replays the SAME slot
+    (``past_run_at_left_for_auto_fire``). The PER-EXECUTION key minted a
+    fresh key for that replay ⇒ TWO JobItems ⇒ a SECOND delivery. Under
+    the SLOT-STABLE key (R1) the replay emits the SAME key, so the REAL
+    atomic claim returns the PRIOR live JobItem — exactly ONE JobItem, one
+    delivery.
+
+    End-to-end: the key is minted by the REAL scheduler route (two adapters
+    built from the SAME persisted config — what a daemon restart produces),
+    and the claim is the REAL substrate claim SQL. No hand-seeded rows."""
+    adapter1, manager1, results1 = _adapter_route_harness(
+        engine, monkeypatch, "idem-crashwin",
+        {"run_at": RUN_AT_ISO, "agent": "ari", "message": "weekly report",
+         "project_id": "p"},
+    )
+    adapter2, manager2, results2 = _adapter_route_harness(
+        engine, monkeypatch, "idem-crashwin",
+        {"run_at": RUN_AT_ISO, "agent": "ari", "message": "weekly report",
+         "project_id": "p"},
+    )
+
+    # Fire #1 — the crash-window FIRST leg (delivered, live).
+    await adapter1._route_via_job_queue(
+        "exec-crash-1", "weekly report", {"agent": "ari"}
+    )
+    # Fire #2 — the crash-window REPLAY (a NEW execution id, the SAME slot).
+    await adapter2._route_via_job_queue(
+        "exec-crash-2", "weekly report", {"agent": "ari"}
+    )
+
+    # The replay emitted the SAME SLOT key (this is the guard F1(a) lost).
+    kwargs1 = manager1.enqueue_message_job.await_args.kwargs
+    kwargs2 = manager2.enqueue_message_job.await_args.kwargs
+    assert kwargs1["idempotency_key"] == _slot_key("idem-crashwin"), (
+        "the key must be the SLOT key (scheduler:{sid}:slot:{run_at})"
+    )
+    assert kwargs2["idempotency_key"] == kwargs1["idempotency_key"], (
+        "a re-fire of the SAME slot must emit the SAME key even across two "
+        "execution ids"
+    )
+    assert results1[0].job_id != "exec-crash-2"
+
+    # The REAL atomic claim collapsed the replay: exactly ONE JobItem row,
+    # and both fires were handed the SAME (live) row.
+    rows = _all_jobs(engine)
+    assert len(rows) == 1, (
+        f"the crash-window re-fire must collapse onto ONE JobItem, got "
+        f"{len(rows)}: {[(r.job_id, r.idempotency_key) for r in rows]}"
+    )
+    assert rows[0].idempotency_key == _slot_key("idem-crashwin")
+    assert results2[0].job_id == results1[0].job_id, (
+        "the replay must be handed the PRIOR live JobItem (no second delivery)"
+    )
+    assert rows[0].admission_state in (
+        AdmissionState.QUEUED.value,
+        AdmissionState.ACTIVE.value,
+    ), "the surviving row is the LIVE prior (not a second, cancelled chain)"
+
+
+@pytest.mark.asyncio
+async def test_p1_slot_key_path_end_to_end_and_claimable(
+    engine: Engine, monkeypatch, task_repo: TaskRepository, mq_repo: MessageQueueRepository
+) -> None:
+    """THE CLAIM (P1, R5f): the scheduler key path is exercised END-TO-END —
+    the adapter's REAL route mints the slot key, the REAL substrate claim
+    inserts the JobItem, and the resulting row shape reaches
+    RUNNING/processing through the REAL ``claim_pending_task`` SQL with no
+    human intervention (no pause/resume, no operator repair)."""
+    adapter, _manager, results = _adapter_route_harness(
+        engine, monkeypatch, "sched-claim",
+        {"run_at": RUN_AT_ISO, "agent": "ari", "message": "weekly report",
+         "project_id": "p"},
+    )
+    # The scheduler's own prelude rows (Task PENDING bound to the minted
+    # work_id + MQ ready) — the production enqueue_message_job writes them;
+    # this harness stubs enqueue_message_job, so the pair is minted by the
+    # harness with the SAME work_id the substrate assigned.
+    await adapter._route_via_job_queue(
+        "exec-claim-1", "weekly report", {"agent": "ari"}
+    )
+    work_id = results[0].job_id
+    _seed_instance(engine, "inst-route-1")
     task_id, message_id = _seed_prelude_pair(
         engine,
         task_repo=task_repo,
         mq_repo=mq_repo,
         work_id=work_id,
-        message_id=message_id,
-        instance_id="inst-claim",
+        message_id=f"mq-{uuid4().hex[:12]}",
+        instance_id="inst-route-1",
     )
-    # The fresh fire's JobItem — post-F1(a) it exists, bound to work_id, and
-    # the job pipeline has ACTIVATED it (admission_state='active').
-    _seed_job(
-        engine,
-        job_id=work_id,
-        idempotency_key=_mk_exec_key("sched-claim", "exec-1"),
-        admission_state=AdmissionState.ACTIVE.value,
+
+    rows = _all_jobs(engine)
+    assert len(rows) == 1, "one fire ⇒ exactly ONE JobItem"
+    assert rows[0].idempotency_key == _slot_key("sched-claim"), (
+        f"the route must emit the SLOT key, got {rows[0].idempotency_key!r}"
     )
+    assert rows[0].job_id == work_id
+    assert rows[0].admission_state == AdmissionState.QUEUED.value, (
+        "the substrate claim leaves the row QUEUED (the job pipeline owns "
+        "the activation)"
+    )
+
+    # The JobProcessor's OWN activation step (the queue-aware claim gate
+    # requires it — a QUEUED anchor holds the task until the job pipeline
+    # activates). Flipping the admission state here models exactly that
+    # step; the task row itself is NEVER touched by hand.
+    with Session(engine) as s:
+        j = s.exec(
+            select(JobItem).where(JobItem.job_id == work_id)
+        ).first()
+        j.admission_state = AdmissionState.ACTIVE.value
+        s.add(j)
+        s.commit()
 
     claimed = task_repo.claim_pending_task(worker_id="worker-pin-1", lane="default")
     assert claimed is not None, "the post-fire row MUST be claimable without human repair"
@@ -428,18 +687,101 @@ async def test_p1_post_fire_row_claims_without_intervention(
     assert claimed.status == "running"
 
     # The message left 'ready': the REAL dequeue claims it into processing.
-    msg = mq_repo.dequeue(instance_id="inst-claim")
+    msg = mq_repo.dequeue(instance_id="inst-route-1")
     assert msg is not None and msg.message_id == message_id
     assert msg.status == "processing"
     assert msg.processing_started_at is not None
 
 
-def _mk_exec_key(source_id: str, execution_id: str) -> str:
-    from daemon.sources.adapters.scheduler import (
-        _scheduler_direct_idempotency_key,
+# ---------------------------------------------------------------------------
+# P1B — the DONE-prior reconciliation (R2): ONE net delivered chain
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_p1b_done_prior_reconciles_to_one_net_delivery(
+    engine: Engine, messaging_stack, caplog
+) -> None:
+    """R2/R5b — the verifier's substrate demo, under the remedy:
+
+        slot key + DONE prior + two fires  ⇒  exactly ONE DELIVERED chain.
+
+    The FIRST fire delivered (its JobItem is DONE — the normal end state of
+    a one-shot). The SECOND fire of the SAME slot (a crash-window replay)
+    goes through the REAL ``enqueue_message_job``: the prelude pair is
+    minted, the substrate takes the terminal fallback and re-inserts a
+    FRESH fallback JobItem bound to the caller's mint (the masquerade), and
+    the F1(b) scope predicate must route THAT masquerade into the
+    compensation — cancelling the phantom prelude AND the orphan fallback
+    JobItem.
+
+    FAIL-HONEST: under the rejected PER-EXECUTION key + its ':exec:' scope
+    substring the slot key was never classified direct, the compensation
+    never ran, and this scenario left TWO rows with a LIVE second chain —
+    exactly the guard the remedy restores. This is BOTH the old-bug repro
+    and the remedy proof."""
+    _manager, svc = messaging_stack
+    _seed_instance(engine, "inst-doneprior")
+    delivered_job_id = str(uuid4())
+    # Fire #1 delivered: the JobItem is DONE.
+    _seed_job(
+        engine,
+        job_id=delivered_job_id,
+        idempotency_key=SCHED_KEY,
+        admission_state=AdmissionState.DONE.value,
     )
 
-    return _scheduler_direct_idempotency_key(source_id, execution_id)
+    with caplog.at_level(logging.INFO, logger="daemon.services.instance_messaging"):
+        result2 = await svc.enqueue_message_job(
+            instance_id="inst-doneprior",
+            message="weekly report",
+            source="scheduler",
+            idempotency_key=SCHED_KEY,
+        )
+
+    # The masquerade was observed and ROUTED into the compensation.
+    assert any("masquerad" in r.message.lower() for r in caplog.records), (
+        "the masquerade arm must log its truthful marker"
+    )
+    assert any(
+        "compensat" in r.message.lower() or "cancel" in r.message.lower()
+        for r in caplog.records
+    ), "the compensation must actually run (observable marker)"
+
+    # The reconciliation: prelude cancelled/deleted, orphan fallback
+    # JobItem cancelled ⇒ net ONE DELIVERED chain.
+    fallback_id = result2.job_id
+    assert fallback_id != delivered_job_id
+    cancelled_fallback = _job_by_id(engine, fallback_id)
+    assert cancelled_fallback is not None
+    assert cancelled_fallback.admission_state == AdmissionState.DONE.value, (
+        "the orphan fallback JobItem must be terminal (cancelled) — "
+        "no second live chain"
+    )
+    rows = _all_jobs(engine)
+    assert delivered_job_id in {j.job_id for j in rows}
+    live_second = [
+        j for j in rows
+        if j.job_id != delivered_job_id
+        and j.admission_state in (AdmissionState.QUEUED.value, AdmissionState.ACTIVE.value)
+    ]
+    assert live_second == [], (
+        f"NO second live chain may survive: {[j.job_id for j in live_second]}"
+    )
+    # The phantom prelude is reconciled: NO orphaned PENDING Task or ready
+    # MessageQueue row survives.
+    with Session(engine) as s:
+        tasks = list(s.exec(select(Task)).all())
+        mqs = list(s.exec(select(MessageQueue)).all())
+    pending = [t for t in tasks if t.status == "pending"]
+    assert pending == [], (
+        f"the phantom prelude Task must be cancelled: "
+        f"{[(t.id, t.work_id, t.status) for t in tasks]}"
+    )
+    ready = [m for m in mqs if m.status == "ready"]
+    assert ready == [], (
+        f"the phantom prelude MQ row must be deleted: {[m.message_id for m in mqs]}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -483,7 +825,7 @@ async def test_p4_genuine_dedup_compensation_reconciles_phantom(
     _seed_job(
         engine,
         job_id=real_job_id,
-        idempotency_key="scheduler:sched-1:exec:exec-1",
+        idempotency_key=_slot_key("sched-1"),
         admission_state=AdmissionState.QUEUED.value,
     )
     cancel_stub = _RecordingJobCancel()
@@ -574,13 +916,143 @@ async def test_p4_masquerade_scheduler_compensation_reconciles(
 
 
 @pytest.mark.asyncio
-async def test_p4_wiring_routes_both_arms_through_compensation() -> None:
-    """Structural F1(b)/F4: ``enqueue_message_job`` classifies BOTH arms and
-    routes through ``compensate_dedup_hit`` — no bypass, no direct drive."""
-    import inspect
+async def test_p4e_masquerade_through_real_enqueue_message_job_compensates(
+    engine: Engine, messaging_stack
+) -> None:
+    """R5e — BEHAVIORAL (replaces the string-presence wiring pin): a
+    masquerade through the REAL ``enqueue_message_job`` fires the
+    compensation. A DONE prior holds the SLOT key; the second call writes
+    the prelude, hits the terminal fallback, and the F1(b) reconcile must
+    cancel the phantom prelude AND the orphan fallback JobItem — exactly
+    ONE delivered chain."""
+    _manager, svc = messaging_stack
+    _seed_instance(engine, "inst-real-masq")
+    delivered_job_id = str(uuid4())
+    _seed_job(
+        engine,
+        job_id=delivered_job_id,
+        idempotency_key=SCHED_KEY,
+        admission_state=AdmissionState.DONE.value,
+    )
 
-    import daemon.services.instance_messaging as im
+    result2 = await svc.enqueue_message_job(
+        instance_id="inst-real-masq",
+        message="weekly report",
+        source="scheduler",
+        idempotency_key=SCHED_KEY,
+    )
 
-    src = inspect.getsource(im.InstanceMessagingService.enqueue_message_job)
-    assert "classify_dedup_outcome(" in src
-    assert "compensate_dedup_hit(" in src
+    rows = _all_jobs(engine)
+    # The masquerade inserted a fresh fallback row bound to the caller's
+    # mint — and the compensation CANCELLED it.
+    fallback_id = result2.job_id
+    assert fallback_id != delivered_job_id
+    fallback = _job_by_id(engine, fallback_id)
+    assert fallback is not None
+    assert fallback.admission_state == AdmissionState.DONE.value, (
+        "the orphan fallback JobItem must be terminal after the "
+        "compensation (cancelled) — no second live chain"
+    )
+    live_rows = [
+        j for j in rows
+        if j.admission_state in (AdmissionState.QUEUED.value, AdmissionState.ACTIVE.value)
+    ]
+    assert live_rows == [], (
+        f"exactly ONE delivered chain — no live second chain may survive: "
+        f"{[(j.job_id, j.admission_state) for j in live_rows]}"
+    )
+    # The phantom prelude is reconciled: NO orphaned PENDING Task or
+    # ready MessageQueue row survives.
+    with Session(engine) as s:
+        tasks = list(s.exec(select(Task)).all())
+        mqs = list(s.exec(select(MessageQueue)).all())
+    pending = [t for t in tasks if t.status == "pending"]
+    assert pending == [], (
+        f"the phantom prelude Task must be cancelled: "
+        f"{[(t.id, t.work_id, t.status) for t in tasks]}"
+    )
+    ready = [m for m in mqs if m.status == "ready"]
+    assert ready == [], (
+        f"the phantom prelude MQ row must be deleted: "
+        f"{[m.message_id for m in mqs]}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_p4e_deferred_key_does_not_compensate(
+    engine: Engine, messaging_stack
+) -> None:
+    """R5e — DEC-18 pinned BEHAVIORALLY: a DEFERRED key on a DONE prior does
+    NOT compensate — the terminal-bypass re-delivery is the deliberate
+    deferred feature (the marker-miss fallback depends on the substrate
+    returning a fresh row). The fresh row STAYS QUEUED and the prelude pair
+    stays PENDING/ready (a live second delivery is CORRECT here)."""
+    _manager, svc = messaging_stack
+    _seed_instance(engine, "inst-real-deferred")
+    prior_job_id = str(uuid4())
+    _seed_job(
+        engine,
+        job_id=prior_job_id,
+        idempotency_key=DEFERRED_KEY,
+        admission_state=AdmissionState.DONE.value,
+    )
+
+    result2 = await svc.enqueue_message_job(
+        instance_id="inst-real-deferred",
+        message="deferred delivery",
+        source="scheduler",
+        idempotency_key=DEFERRED_KEY,
+    )
+
+    # NO compensation: the fallback row survives LIVE (the re-delivery).
+    assert result2.job_id != prior_job_id
+    fallback = _job_by_id(engine, result2.job_id)
+    assert fallback is not None
+    assert fallback.admission_state in (
+        AdmissionState.QUEUED.value,
+        AdmissionState.ACTIVE.value,
+    ), (
+        f"the DEFERRED re-delivery must NOT be compensated/cancelled, got "
+        f"{fallback.admission_state}"
+    )
+    # And the prelude pair survives (the delivery is going to be driven).
+    with Session(engine) as s:
+        tasks = list(s.exec(select(Task)).all())
+        mqs = list(s.exec(select(MessageQueue)).all())
+    assert len(tasks) == 1 and tasks[0].status == "pending", (
+        "the deferred prelude Task must stay PENDING (no compensation)"
+    )
+    assert len(mqs) == 1 and mqs[0].status == "ready", (
+        "the deferred prelude MQ row must stay ready (no compensation)"
+    )
+
+
+def test_p4e_scope_predicate_is_segment_wise() -> None:
+    """R3 — the compensation-scope predicate is SEGMENT-WISE, not a
+    substring test: a source_id slug that itself carries a ``slot`` segment
+    must NOT make a DEFERRED key look direct (compensating a deferred
+    delivery would break DEC-18's no-loss guarantee), and a deferred key is
+    never direct."""
+    from daemon.services.instance_messaging import is_scheduler_direct_slot_key
+
+    assert is_scheduler_direct_slot_key(SCHED_KEY) is True
+    assert is_scheduler_direct_slot_key("scheduler:sid:slot:2030-01-15T09:00:00+00:00")
+    # The DEFERRED twin is never direct — including when the slug carries a
+    # 'slot' segment (the exclusion wins).
+    assert is_scheduler_direct_slot_key(DEFERRED_KEY) is False
+    assert is_scheduler_direct_slot_key("scheduler:x:deferred:v1") is False
+    assert (
+        is_scheduler_direct_slot_key(
+            "scheduler:weird:slot:sid:deferred:2030-01-15T09:00:00+00:00:v1"
+        )
+        is False
+    ), "a ':slot:' source_id slug must not trip the direct classification"
+    assert (
+        is_scheduler_direct_slot_key("scheduler:weird:slot:sid:slot:2030-01-15T09:00:00+00:00")
+        is True
+    ), "a direct slot key of a slug carrying ':slot:' is still direct"
+    # Legacy per-execution keys (pre-R1) are NOT direct slot keys.
+    assert is_scheduler_direct_slot_key("scheduler:sid:exec:abc") is False
+    # Non-scheduler keys are never direct.
+    assert is_scheduler_direct_slot_key("chat:slot:whatever") is False
+    assert is_scheduler_direct_slot_key(None) is False
