@@ -52,6 +52,7 @@ fresh-PG artifact.
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -70,6 +71,8 @@ __all__ = [
     "POK_DEFAULT_STATUS",
     "POK_DOMAINS",
     "POK_FAMILY_SLUG_PATTERN",
+    "POK_FAMILY_RE",
+    "pok_family_key",
     "POK_PROVENANCE_VALUES",
     "POK_SOURCE_TIERS",
     "POK_STATUSES",
@@ -130,6 +133,22 @@ POK_DEFAULT_SOURCE_TIER = "agent"
 #: ``snapshot-l3``), two-digit ordinal, free tail. Single source for
 #: tools, injection, and tests.
 POK_FAMILY_SLUG_PATTERN = r"^([a-z][a-z0-9]*(?:-[a-z][a-z0-9]*)*)-(\d{2})-(.+)$"
+
+#: Compiled form of the canonical pattern — the SINGLE source every
+#: family-membership decision derives from.
+POK_FAMILY_RE = re.compile(POK_FAMILY_SLUG_PATTERN)
+
+
+def pok_family_key(slug: str) -> str | None:
+    """The canonical family key of a slug, else ``None``.
+
+    THE single derivation: the maximal run of letter-led tokens before
+    the leftmost ``-NN-`` ordinal (``prompt-assent-01-x`` -> ``prompt-assent``).
+    Family MEMBERSHIP is decided by comparing this key for EQUALITY —
+    never by a prefix match.
+    """
+    m = POK_FAMILY_RE.match(slug)
+    return m.group(1) if m else None
 
 
 class ProjectOperatingKnowledge(SQLModel, table=True):

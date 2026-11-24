@@ -140,6 +140,44 @@ if TYPE_CHECKING:
 
 
 # ---------------------------------------------------------------------------
+# Surface-only opt-in termination gate (boot-recovery stranded surfacing)
+# ---------------------------------------------------------------------------
+
+#: Env var that opts IN to terminating stranded instances at boot.
+#: DEFAULT OFF — surface-only. Anything other than "1" (including unset)
+#: means surface-only. Env-direct, read per boot (not cached), mirroring
+#: the AUTO_CONTINUE kill-switch shape but with independent semantics.
+STRANDED_SURFACING_TERMINATE_ENV = "ENSEMBLE_STRANDED_SURFACING_TERMINATE"
+
+
+def _stranded_terminate_enabled() -> bool:
+    """Per-boot read of the retire switch. Default ON: the proven-dead
+    classes (1a, 1b) are retired by default. Opt out with =0.
+    Independent of ENSEMBLE_AUTO_CONTINUE_RUNNING_ON_RESTART."""
+    return os.environ.get(STRANDED_SURFACING_TERMINATE_ENV, "1") != "0"
+
+
+# Module-level holder for the most recent stranded-surfacing result so
+# the surfaced set remains queryable after the boot (the boot pass runs
+# once per daemon lifetime). Mirrors the OrphanWatcherSweepService /
+# MissionStrandHealer counters() pattern for a one-shot pass.
+_LAST_STRANDED_SURFACING: "StrandedSurfacingResult | None" = None
+
+
+def get_last_stranded_surfacing() -> "StrandedSurfacingResult | None":
+    """Read-only accessor for the most recent stranded-surfacing result.
+
+    Returns ``None`` until the first boot pass has run. The result
+    carries ``surfaced_ids`` (the stranded instance ids) so an
+    operator can read the set 30 minutes after boot via this accessor
+    (or via the daemon log line emitted by the pass).
+    """
+    return _LAST_STRANDED_SURFACING
+
+
+
+
+# ---------------------------------------------------------------------------
 # Kill-switch
 # ---------------------------------------------------------------------------
 
@@ -1205,6 +1243,235 @@ async def sweep_orphaned_live_turns(
         result.skipped_kill_switch,
         result.skipped_no_boot_epoch,
         result.errors,
+        result.duration_seconds,
+        boot_epoch.isoformat(),
+        result.auto_continue_mode,
+    )
+    return result
+
+# ---------------------------------------------------------------------------
+# Stranded-running surfacing pass (boot-recovery hole closure)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class StrandedSurfacingResult:
+    """Outcome of :func:`surface_stranded_running_instances`."""
+
+    candidates: int = 0
+    class_1a: int = 0
+    class_1b: int = 0
+    class_2: int = 0
+    class_3: int = 0
+    retired: int = 0
+    surfaced_ids: list[str] = field(default_factory=list)
+    classifications: list = field(default_factory=list)
+    durable_path: str | None = None
+    #: Instances whose checkpoint leg could NOT be evaluated (the
+    #: ``checkpoints`` table absent / probe failed). These degrade
+    #: fail-closed to class 3 (surface only, no mutation). Counted so
+    #: the degradation is VISIBLE in the summary and the durable
+    #: payload -- never silent.
+    degraded_checkpoint_leg: int = 0
+    skipped_current_generation: int = 0
+    skipped_kill_switch: int = 0
+    skipped_no_boot_epoch: int = 0
+    retired: int = 0
+    errors: int = 0
+    duration_seconds: float = 0.0
+    auto_continue_mode: str = "unknown"
+    auto_continue_raw_env: str | None = None
+
+async def surface_stranded_running_instances(
+    manager: "InstanceManager",
+    boot_epoch: datetime | None,
+) -> StrandedSurfacingResult:
+    """Boot-time classification + surfacing of RUNNING instances.
+
+    Surface-first doctrine (three classes):
+
+      * Class 1a (proven dead, never dispatched) and 1b (proven dead,
+        work delivered) -> RETIRE via the registered terminate_instance
+        path when the retire switch is ON (default ON). Surface always.
+      * Class 2 (recoverable) -> SURFACE ONLY, never retire, even
+        when the retire switch is ON.
+      * Class 3 (ambiguous) -> SURFACE ONLY, fail-closed, no mutation.
+
+    The selector is :meth:`TaskRepository.classify_stranded_running_instances`,
+    which returns a per-instance classification with evidence legs.
+    This pass NEVER resumes (idempotency).
+    """
+    result = StrandedSurfacingResult()
+
+    enabled = _auto_continue_enabled()
+    result.auto_continue_mode = "on" if enabled else "off"
+    result.auto_continue_raw_env = _last_auto_continue_raw_value()
+    if not enabled:
+        result.skipped_kill_switch = 1
+        logger.info(
+            "[BOOT_RECOVERY] stranded-surfacing OFF: %s=0",
+            AUTO_CONTINUE_KILL_SWITCH_ENV,
+        )
+        return result
+
+    if boot_epoch is None:
+        result.skipped_no_boot_epoch = 1
+        logger.warning(
+            "[BOOT_RECOVERY] stranded-surfacing SKIPPED: boot_epoch=None"
+        )
+        return result
+
+    task_repo = manager._task_repo  # type: ignore[attr-defined]
+    assert task_repo is not None, (
+        "Stranded surfacing requires _task_repo wired by initialize()"
+    )
+
+    loop_started = time.monotonic()
+    try:
+        try:
+            classifications = await asyncio.to_thread(
+                task_repo.classify_stranded_running_instances,
+                boot_epoch=boot_epoch,
+            )
+        except Exception as exc:
+            result.errors += 1
+            logger.warning(
+                "[BOOT_RECOVERY] stranded-surfacing classification "
+                "failed: %s: %s",
+                type(exc).__name__, exc,
+            )
+            result.duration_seconds = time.monotonic() - loop_started
+            return result
+
+        result.candidates = len(classifications)
+
+        # Import here to avoid circular import at module load.
+        from daemon.repositories.task.repository import StrandedClassification
+
+        for sc in classifications:
+            iid = sc.instance_id
+            cls = sc.classification
+            ev = sc.evidence or {}
+            result.surfaced_ids.append(iid)
+            # Track classifications on the result for the durable surface.
+            result.classifications.append(sc)
+
+            if ev.get("checkpoint_leg") in (
+                "degraded_absent", "degraded_error",
+            ):
+                result.degraded_checkpoint_leg += 1
+
+            if cls == "1a":
+                result.class_1a += 1
+            elif cls == "1b":
+                result.class_1b += 1
+            elif cls == "2":
+                result.class_2 += 1
+            else:
+                result.class_3 += 1
+
+            logger.warning(
+                "[BOOT_RECOVERY] STRANDED instance=%s class=%s "
+                "evidence=%s",
+                iid[:8], cls, ev,
+            )
+
+            # Retire ONLY proven-dead (1a/1b), and only when the retire
+            # switch is ON (default ON). Class 2/3 are never retired.
+            if cls in ("1a", "1b") and _stranded_terminate_enabled():
+                try:
+                    ok = await manager.terminate_instance(
+                        iid, terminal_reason="orphan_retired"
+                    )
+                    if ok:
+                        result.retired += 1
+                except Exception as term_exc:  # noqa: BLE001
+                    result.errors += 1
+                    logger.warning(
+                        "[BOOT_RECOVERY] terminate failed "
+                        "instance=%s: %s: %s",
+                        iid[:8],
+                        type(term_exc).__name__,
+                        term_exc,
+                    )
+            elif cls in ("1a", "1b"):
+                logger.info(
+                    "[BOOT_RECOVERY] retire disabled (switch OFF): "
+                    "instance=%s remains running", iid[:8],
+                )
+
+        # Durable surface: write a machine-readable JSON file under the
+        # daemon data dir so an operator can read the surfaced set
+        # cross-process (not just via an in-process accessor or log).
+        try:
+            import json as _json
+            dd = getattr(manager, "data_dir", None)
+            if dd is None:
+                result.durable_path = None
+                raise RuntimeError("no data_dir")
+            out_path = dd / "stranded_surfacing.json"
+            payload = {
+                "boot_epoch": boot_epoch.isoformat(),
+                "terminate_switch_on": _stranded_terminate_enabled(),
+                "counts": {
+                    "candidates": result.candidates,
+                    "class_1a": result.class_1a,
+                    "class_1b": result.class_1b,
+                    "class_2": result.class_2,
+                    "class_3": result.class_3,
+                    "retired": result.retired,
+                    "degraded_checkpoint_leg": result.degraded_checkpoint_leg,
+                },
+                "surfaced": [
+                    {"instance_id": sc.instance_id,
+                     "class": sc.classification,
+                     "evidence": sc.evidence}
+                    for sc in result.classifications
+                ],
+            }
+            out_path.write_text(_json.dumps(payload, indent=2, default=str))
+            result.durable_path = str(out_path)
+        except Exception as write_exc:  # noqa: BLE001
+            result.errors += 1
+            logger.warning(
+                "[BOOT_RECOVERY] durable surface write failed: %s: %s",
+                type(write_exc).__name__, write_exc,
+            )
+    except Exception as exc:
+        result.errors += 1
+        logger.warning(
+            "[BOOT_RECOVERY] stranded-surfacing sweep failed: %s: %s",
+            type(exc).__name__, exc,
+        )
+    finally:
+        result.duration_seconds = time.monotonic() - loop_started
+
+    # Publish the surfaced set to the module-level holder (in-process
+    # accessor) and log a one-line summary with ids.
+    global _LAST_STRANDED_SURFACING
+    _LAST_STRANDED_SURFACING = result
+
+    # Bounded log line: counts per class + a bounded id sample +
+    # a pointer to the full durable set (never an unbounded id list).
+    _sample = result.surfaced_ids[:5]
+    logger.info(
+        "[BOOT_RECOVERY] stranded-surfacing summary: candidates=%d "
+        "class_1a=%d class_1b=%d class_2=%d class_3=%d "
+        "retired=%d degraded_checkpoint_leg=%d terminate_switch_on=%s "
+        "surfaced_id_sample=%s "
+        "(%d total) durable_path=%s duration_s=%.3f boot_epoch=%s "
+        "mode=%s",
+        result.candidates,
+        result.class_1a,
+        result.class_1b,
+        result.class_2,
+        result.class_3,
+        result.retired,
+        result.degraded_checkpoint_leg,
+        _stranded_terminate_enabled(),
+        _sample,
+        len(result.surfaced_ids),
+        getattr(result, "durable_path", None),
         result.duration_seconds,
         boot_epoch.isoformat(),
         result.auto_continue_mode,

@@ -8,6 +8,7 @@ import os
 import uuid
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from sqlalchemy import (
@@ -42,7 +43,7 @@ from daemon.services.turn_transitions import (
     RetryTurn,
 )
 
-from ..instance.models import Instance, InstanceStatus
+from ..instance.models import Instance, InstanceStatus, InstanceHierarchy
 from ..job_queue.models import (
     ACTIVE_ADMISSION_STATES,
     AdmissionState,
@@ -50,8 +51,84 @@ from ..job_queue.models import (
     active_admission_states_sql,
 )
 from .models import SuspensionReason, Task, TaskStatus, TaskType
+from ..message_queue.models import MessageQueue
+from ..job_queue.watcher_models import JobWatcher
+from ..dependency_bus.models import DependencyWatcher, DependencyWatcherState
+from ..report_injection.models import ReportInjection, ReportInjectionState
 
 logger = logging.getLogger(__name__)
+
+@dataclass
+class StrandedClassification:
+    """Classification of a stranded RUNNING instance.
+
+    ``classification`` is one of:
+      * ``"1a"`` — proven dead, never dispatched (zero task rows,
+        zero message rows, no active JobItem, no non-terminal
+        descendant, idle past the recency bound, no delivered work).
+        RETIRE is correct.
+      * ``"1b"`` — proven dead, work delivered (report_injections
+        with state TASK_DELIVERED). RETIRE is correct.
+      * ``"2"``  — recoverable (active JobItem / active task row /
+        pending watcher / live descendant / recent activity). NEVER
+        retire; surface only.
+      * ``"3"``  — ambiguous (fail-closed): unparseable/absent value,
+        clock skew, unexpected status, or unprovable. Surface only,
+        no mutation.
+    """
+    instance_id: str
+    classification: str
+    evidence: dict = field(default_factory=dict)
+
+
+# Proven-dead recency bound (seconds). An instance whose last activity
+# is younger than this is NEVER proven dead (in-flight-spawn hazard).
+# Named + documented + configurable via env
+# ENSEMBLE_STRANDED_PROVEN_DEAD_MIN_IDLE_SECONDS (default 86400 = 24h).
+# Aligned EXACTLY with the husk detector's DEFAULT_HUSK_MIN_AGE_SECONDS
+# (86400) so the report surface and the mutation surface agree on when
+# an instance is "dead": the boot pass's proven-dead set is the husk
+# set INTERSECT (no active JobItem, no non-terminal descendant, no
+# pending watcher). A 1h bound was REJECTED: measured spawn->task-start
+# latency reaches 20 min on a loaded lane, so any unclaimed spawn older
+# than 1h would be falsely labelled proven-dead in the durable report.
+# Consequence: 68f04ccd (idle 5.5d, 5 deliveries) still classifies 1b
+# and is surfaced retire-armed; 716908e7 (idle ~5.5h, zero evidence)
+# classifies 3 (ambiguous) TODAY and becomes 1a at ~2026-11-24T14:51:31Z
+# — exactly when the husk detector's 24h gate starts naming it. That
+# alignment is the point, not a side effect.
+DEFAULT_STRANDED_PROVEN_DEAD_MIN_IDLE_SECONDS = 86400
+
+#: Recent-activity window (seconds). An instance with activity inside
+#: this window has DEMONSTRABLE liveness -> class 2 (recoverable).
+#: Measured spawn->task-start latency is 5-7 min generally, 20 min on a
+#: loaded lane; 1h is ~3x the worst measured case.
+#: LABEL-ONLY boundary: class 2 and class 3 are BOTH non-mutating
+#: (surface only, never retired), so this constant only decides which
+#: label an operator sees — it is not a safety boundary. The safety
+#: boundary is DEFAULT_STRANDED_PROVEN_DEAD_MIN_IDLE_SECONDS (24h).
+DEFAULT_STRANDED_RECENT_ACTIVITY_SECONDS = 3600
+
+#: Checkpoint-leg evaluation states (visible in the durable payload).
+#: ``evaluated``  — the ``checkpoints`` table was present and probed.
+#: ``degraded_absent`` — the ``checkpoints`` table does not exist (SQLite
+#:     unit-test fixtures); the leg CANNOT be evaluated, so every
+#:     class-1a candidate degrades to class 3 (fail-closed, no mutation).
+#: ``degraded_error`` — the probe raised; same fail-closed degradation.
+CHECKPOINT_LEG_EVALUATED = "evaluated"
+CHECKPOINT_LEG_DEGRADED_ABSENT = "degraded_absent"
+CHECKPOINT_LEG_DEGRADED_ERROR = "degraded_error"
+
+
+def _stranded_min_idle_seconds() -> int:
+    raw = os.environ.get(
+        "ENSEMBLE_STRANDED_PROVEN_DEAD_MIN_IDLE_SECONDS", ""
+    )
+    try:
+        v = int(raw) if raw != "" else DEFAULT_STRANDED_PROVEN_DEAD_MIN_IDLE_SECONDS
+        return v if v > 0 else DEFAULT_STRANDED_PROVEN_DEAD_MIN_IDLE_SECONDS
+    except (ValueError, TypeError):
+        return DEFAULT_STRANDED_PROVEN_DEAD_MIN_IDLE_SECONDS
 
 
 # Bind-parameter chunk size for the bulk answer-handle lookup
@@ -1408,6 +1485,311 @@ class TaskRepository:
             # CHARACTER off the id; iterate directly instead.
             return list(db_session.exec(stmt).all())
 
+    def _probe_checkpoint_rows(self, instance_id: str) -> tuple[int | None, str]:
+        """Count the rows in the ``checkpoints`` table for one thread.
+
+        The ``checkpoints`` table is created by the LangGraph saver, NOT
+        by SQLModel metadata, so it is absent in the SQLite unit-test
+        fixtures (and absent on any engine where the saver never ran).
+
+        Returns ``(row_count, leg_state)``:
+          * ``(N, CHECKPOINT_LEG_EVALUATED)`` -- the table exists and
+            was probed; ``N`` is the row count for the thread.
+          * ``(None, CHECKPOINT_LEG_DEGRADED_ABSENT)`` -- the table does
+            not exist. The leg CANNOT be evaluated -> the caller MUST
+            degrade fail-closed (class 3, no mutation).
+          * ``(None, CHECKPOINT_LEG_DEGRADED_ERROR)`` -- the probe
+            raised. Same fail-closed degradation.
+
+        Detection of absence: SQLAlchemy's ``inspect(engine).has_table``
+        -- engine-agnostic (works on SQLite and PostgreSQL), and it does
+        NOT rely on an exception to signal "table missing" (a genuine
+        query failure is caught separately and also degrades).
+        """
+        try:
+            from sqlalchemy import inspect as _sa_inspect
+
+            if not _sa_inspect(self.engine).has_table("checkpoints"):
+                return None, CHECKPOINT_LEG_DEGRADED_ABSENT
+        except Exception as exc:  # noqa: BLE001 — read-only probe
+            logger.warning(
+                "stranded classifier: checkpoint-leg probe could not "
+                "inspect the schema — DEGRADED: %s", exc,
+            )
+            return None, CHECKPOINT_LEG_DEGRADED_ERROR
+        try:
+            from sqlalchemy import text as _sa_text
+
+            stmt = _sa_text(
+                "SELECT COUNT(*) FROM checkpoints WHERE thread_id = :tid"
+            )
+            with self.engine.connect() as conn:
+                count = conn.execute(stmt, {"tid": instance_id}).scalar()
+        except Exception as exc:  # noqa: BLE001 — read-only probe
+            logger.warning(
+                "stranded classifier: checkpoint-leg read failed for "
+                "instance=%s — DEGRADED: %s",
+                str(instance_id)[:8], exc,
+            )
+            return None, CHECKPOINT_LEG_DEGRADED_ERROR
+        return int(count or 0), CHECKPOINT_LEG_EVALUATED
+
+    def classify_stranded_running_instances(
+        self, *, boot_epoch: datetime
+    ) -> list["StrandedClassification"]:
+        """Classify RUNNING instances into proven-dead / recoverable /
+        ambiguous (surface-first doctrine).
+
+        See :class:`StrandedClassification` and the design requirements
+        in the commission. Returns one entry per RUNNING instance,
+        classified. Instances that are structurally class 2/3 are
+        included (surfaced) but never retired by the pass.
+        """
+        if boot_epoch is None:
+            return []
+        terminal_statuses = {
+            InstanceStatus.COMPLETED.value,
+            InstanceStatus.TERMINATED.value,
+            InstanceStatus.ERROR.value,
+            InstanceStatus.FAILED.value,
+            InstanceStatus.CANCELLED.value if hasattr(InstanceStatus, "CANCELLED") else "cancelled",
+        }
+        min_idle = _stranded_min_idle_seconds()
+        recent_window = DEFAULT_STRANDED_RECENT_ACTIVITY_SECONDS
+
+        out: list[StrandedClassification] = []
+        with SQLModelSession(self.engine) as db_session:
+            instances = list(
+                db_session.exec(
+                    select(Instance).where(
+                        Instance.status == InstanceStatus.RUNNING.value
+                    )
+                ).all()
+            )
+            for inst in instances:
+                iid = inst.instance_id
+                evidence: dict = {}
+                # Fail-closed inputs
+                try:
+                    # recency from last_activity_at or created_at
+                    activity_raw = getattr(inst, "last_activity_at", None)
+                    if activity_raw is None:
+                        activity_raw = getattr(inst, "created_at", None)
+                    if activity_raw is None:
+                        raise ValueError("no activity timestamp")
+                    if isinstance(activity_raw, datetime):
+                        activity_ts = activity_raw
+                    else:
+                        activity_ts = datetime.fromisoformat(
+                            str(activity_raw).replace("Z", "+00:00")
+                        )
+                    if activity_ts.tzinfo is not None:
+                        activity_ts = activity_ts.replace(tzinfo=None)
+                    # clock skew: activity after boot_epoch => ambiguous
+                    if activity_ts > boot_epoch:
+                        raise ValueError("clock skew: activity after boot_epoch")
+                    age_seconds = (boot_epoch - activity_ts).total_seconds()
+                except (ValueError, TypeError):
+                    out.append(StrandedClassification(
+                        instance_id=iid, classification="3",
+                        evidence={"reason": "unparseable/absent/skew timestamp"},
+                    ))
+                    continue
+
+                evidence["age_seconds"] = age_seconds
+                evidence["recency_bound_seconds"] = min_idle
+
+                # Task rows (ANY state)
+                task_count = db_session.exec(
+                    select(func.count()).select_from(Task).where(
+                        Task.instance_id == iid
+                    )
+                ).one()
+                evidence["task_count"] = int(task_count or 0)
+
+                # Message queue rows (ANY state)
+                try:
+                    mq_count = db_session.exec(
+                        select(func.count()).select_from(MessageQueue).where(
+                            MessageQueue.instance_id == iid
+                        )
+                    ).one()
+                except Exception:
+                    mq_count = 0
+                evidence["message_queue_count"] = int(mq_count or 0)
+
+                # Active JobItem
+                active_job = db_session.exec(
+                    select(func.count()).select_from(JobItem).where(
+                        col(JobItem.instance_id) == iid
+                    ).where(
+                        col(JobItem.admission_state).in_(
+                            list(ACTIVE_ADMISSION_STATES)
+                        )
+                    ).where(col(JobItem.deleted_at).is_(None))
+                ).one()
+                evidence["active_jobitem"] = bool(active_job)
+
+                # Non-terminal descendants
+                desc_rows = list(db_session.exec(
+                    select(InstanceHierarchy).where(
+                        InstanceHierarchy.parent_id == iid
+                    )
+                ).all())
+                nonterm_desc = 0
+                for hr in desc_rows:
+                    child = db_session.get(Instance, hr.child_id)
+                    if child is not None and child.status not in terminal_statuses:
+                        nonterm_desc += 1
+                evidence["nonterminal_descendants"] = nonterm_desc
+
+                # Pending watcher (job lifecycle watcher)
+                watcher_count = db_session.exec(
+                    select(func.count()).select_from(JobWatcher).where(
+                        JobWatcher.instance_id == iid
+                    )
+                ).one()
+                evidence["pending_watchers"] = int(watcher_count or 0)
+
+                # Pending DEPENDENCY watcher (dependency bus). A parent
+                # that is still awaited by the bus is LIVE work in
+                # flight -> class 2 (never retired).
+                try:
+                    dep_watcher_count = db_session.exec(
+                        select(func.count()).select_from(DependencyWatcher).where(
+                            DependencyWatcher.target_instance_id == iid
+                        ).where(
+                            DependencyWatcher.state
+                            == DependencyWatcherState.PENDING.value
+                        )
+                    ).one()
+                except Exception:
+                    dep_watcher_count = 0
+                evidence["pending_dependency_watchers"] = int(dep_watcher_count or 0)
+
+                # Delivered work
+                try:
+                    delivered = db_session.exec(
+                        select(func.count()).select_from(ReportInjection).where(
+                            ReportInjection.parent_instance_id == iid
+                        ).where(
+                            ReportInjection.state == ReportInjectionState.TASK_DELIVERED.value
+                        )
+                    ).one()
+                except Exception:
+                    delivered = 0
+                evidence["delivered_reports"] = int(delivered or 0)
+
+                # Class 2 (RECOVERABLE) — a LIVE signal exists: work
+                # evidence (task rows / message rows in ANY state), an
+                # active JobItem, a pending watcher, or a non-terminal
+                # descendant. NEVER retired.
+                recoverable = (
+                    int(task_count or 0) > 0
+                    or int(mq_count or 0) > 0
+                    or bool(active_job)
+                    or nonterm_desc > 0
+                    or int(watcher_count or 0) > 0
+                    or int(dep_watcher_count or 0) > 0
+                )
+                if recoverable:
+                    out.append(StrandedClassification(
+                        instance_id=iid, classification="2", evidence=evidence,
+                    ))
+                    continue
+
+                # No live signal at all (no rows, no job, no watcher, no
+                # live descendant). The recency legs now decide:
+                #   age < recent_window -> class 2 (recent activity =
+                #                    demonstrable liveness)
+                #   recent_window <= age < bound -> class 3 (AMBIGUOUS):
+                #                    the selectors CANNOT PROVE the
+                #                    instance is dead (e.g. a spawned-but-
+                #                    not-yet-claimed instance whose first
+                #                    turn has not created rows yet).
+                #                    Surface only, no mutation.
+                #   age >= bound -> class 1a / 1b (PROVEN DEAD).
+                if age_seconds < recent_window:
+                    out.append(StrandedClassification(
+                        instance_id=iid, classification="2", evidence=evidence,
+                    ))
+                    continue
+                if age_seconds < min_idle:
+                    out.append(StrandedClassification(
+                        instance_id=iid, classification="3", evidence=evidence,
+                    ))
+                    continue
+
+                # Delivered work -> class 1b. THE ZERO-CHECKPOINT LEG
+                # DOES NOT APPLY TO 1b (ASYMMETRY — DO NOT "HARMONISE"
+                # IT AWAY): exemplar 68f04ccd is class 1b and carries 3
+                # checkpoint rows + 1 blob. 1b's proof is the DELIVERED
+                # WORK itself, not the absence of execution evidence.
+                if int(delivered or 0) > 0:
+                    out.append(StrandedClassification(
+                        instance_id=iid, classification="1b", evidence=evidence,
+                    ))
+                    continue
+
+                # Class 1a (never dispatched) conjunct — ALL of:
+                #   * the proven-dead legs above (no task rows in ANY
+                #     state, no message_queue rows in ANY state, no
+                #     active JobItem, no pending watcher, no pending
+                #     dependency watcher, no non-terminal descendant)
+                #   * idle past the 24 h bound (husk-aligned)
+                #   * ZERO rows in the ``checkpoints`` table for the
+                #     thread (the instance NEVER executed a turn).
+                #
+                # CHECKPOINT-BLOBS: NOT required, deliberately. Reason:
+                #   (a) MEASURED (2026-11-23, ensemble_prod): 1 442
+                #       threads carry checkpoint_blobs rows and ALL 1 442
+                #       also carry a ``checkpoints`` row -- 0 threads
+                #       carry blobs WITHOUT a checkpoints row, so the
+                #       blobs are a strict subset of the checkpoints
+                #       threads and the checkpoints probe already
+                #       excludes every blob-carrying thread that still
+                #       holds its checkpoint row.
+                #   (b) SCHEMA / WRITE PATH: ``checkpoint_blobs`` exists
+                #       only for the PostgreSQL saver (the SQLite saver
+                #       has no blobs table), so a blobs leg would be
+                #       PERMANENTLY unevaluable on SQLite -- it would
+                #       force a permanent fail-closed degradation and
+                #       make class 1a unreachable on SQLite installs.
+                #   (c) RESIDUAL (documented, not acted upon): a thread
+                #       whose checkpoints rows were swept by the 168 h
+                #       retention while its blobs linger is exactly the
+                #       E7 admissible band the sibling lane is
+                #       cross-checking. The retire arm is HELD OFF, so
+                #       this residual is never acted upon.
+                ckpt_rows, ckpt_leg_state = self._probe_checkpoint_rows(iid)
+                evidence["checkpoint_leg"] = ckpt_leg_state
+                evidence["checkpoint_rows"] = ckpt_rows
+                if ckpt_leg_state != CHECKPOINT_LEG_EVALUATED:
+                    # FAIL CLOSED: the leg cannot be evaluated -> the
+                    # class-1a conjunct cannot be PROVEN -> class 3
+                    # (ambiguous, surface only, NO MUTATION). The
+                    # degradation is VISIBLE in the payload (evidence).
+                    out.append(StrandedClassification(
+                        instance_id=iid, classification="3",
+                        evidence=evidence,
+                    ))
+                    continue
+                if int(ckpt_rows or 0) > 0:
+                    # Executed-but-evidence-free (the E7 admissible band):
+                    # a turn RAN (checkpoint row), so the instance is NOT
+                    # proven dead and NOT never-dispatched -> class 3
+                    # (ambiguous, surface only, NO MUTATION).
+                    out.append(StrandedClassification(
+                        instance_id=iid, classification="3",
+                        evidence=evidence,
+                    ))
+                    continue
+
+                out.append(StrandedClassification(
+                    instance_id=iid, classification="1a", evidence=evidence,
+                ))
+
+        return out
     def mark_task_auto_continued(
         self, task_id: int, boot_epoch: datetime
     ) -> bool:
@@ -1998,52 +2380,6 @@ class TaskRepository:
                 .where(
                     Task.task_type == TaskType.PROCESS_REPORT.value
                 )
-                .where(
-                    Task.status.in_([
-                        TaskStatus.PENDING.value,
-                        TaskStatus.RUNNING.value,
-                    ])
-                )
-                .order_by(col(Task.created_at).desc())
-            )
-            return list(db_session.exec(stmt))
-
-    def list_live_delivery_tasks_for_instance(
-        self, instance_id: str
-    ) -> list[Task]:
-        """Return every live Task row for ``instance_id`` — ANY kind.
-
-        Wedge-fix backstop helper (waiting_children_watchdog): the
-        GENERIC "can anything still deliver to this instance?" probe.
-        It mirrors
-        :meth:`list_live_process_report_carriers_for_instance` MINUS
-        the ``task_type`` filter.
-
-        Why the widening matters: a parked ``WAITING_CHILDREN``
-        parent may be waiting on a delivery that is NOT a
-        ``PROCESS_REPORT`` carrier — a ``process_message`` turn, a
-        report-injection fallback task, a continuation row. Reading
-        "no PROCESS_REPORT carrier" as "nothing can deliver to me" is
-        the false-positive class behind anomaly ``a370b036`` (the
-        wedge-notice false positives on root ``77ddcb9f``,
-        2026-11-21→22): the wedge fired on a parent that still had a
-        live delivery row.
-
-        "Live" = ``status IN ('pending', 'running')`` — the SAME
-        vocabulary as the carrier helper (PAUSED is NOT live: a
-        paused task row cannot deliver on its own).
-
-        Args:
-            instance_id: The instance ID whose live task rows are
-                enumerated.
-
-        Returns:
-            List of live Task rows (possibly empty).
-        """
-        with SQLModelSession(self.engine) as db_session:
-            stmt = (
-                select(Task)
-                .where(Task.instance_id == instance_id)
                 .where(
                     Task.status.in_([
                         TaskStatus.PENDING.value,

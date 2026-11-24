@@ -1604,11 +1604,18 @@ assert_eq "8n pre-flip txn LEFT OPEN" "promote" "$(afield "$AD_OPT_DIR/t15" '_js
 section "retention mixed-key eviction order"
 RET_DIR="$FIXTURE/ret"
 rm -rf "$RET_DIR"; mkdir -p "$RET_DIR/releases"
-for v in vC vD vOld; do mkdir -p "$RET_DIR/releases/$v"; done
+# vZ: the PROMOTED SUCCESSOR of vOld (version-greater: sort -V puts Z after
+# Old). Under the evidence-affirmative contract (AMEND-1) a release dir may be
+# evicted ONLY with journal evidence of supersession — so vOld needs its OWN
+# `staged` row AND a LATER `commit` row for a version-greater release. vZ
+# supplies that evidence (and is itself a candidate: it has a commit row but
+# no later version-greater commit ⇒ HELD as promoted-not-superseded).
+for v in vC vD vOld vZ; do mkdir -p "$RET_DIR/releases/$v"; done
 printf '{"staged_at":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$RET_DIR/releases/vC/manifest.json"
 printf '{"staged_at":"%s"}\n' "$(date -ju -v-1000S +%Y-%m-%dT%H:%M:%SZ)" > "$RET_DIR/releases/vD/manifest.json"
 # vOld: manifest ISO from 2020 — the TRUE oldest by wall time
 printf '{"staged_at":"2020-01-01T00:00:00Z"}\n' > "$RET_DIR/releases/vOld/manifest.json"
+printf '{"staged_at":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$RET_DIR/releases/vZ/manifest.json"
 # vNew: NO manifest → epoch mtime fallback (now) — the NEWEST by wall time;
 # pre-normalization its epoch key sorted lexicographically BEFORE every ISO
 # key (digits '1…' < '2…') and it would be wrongly evicted first.
@@ -1618,11 +1625,26 @@ mkdir -p "$RET_DIR/releases/vNew"
 # release" once its epoch key sorted first)
 mkdir -p "$RET_DIR/releases/rollback.lock.d" "$RET_DIR/releases/.staging.vZ.$$"
 printf '%s\n' "$$" > "$RET_DIR/releases/rollback.lock.d/owner"
-printf '{"current":"vC","previous":"vD","in_flight":null,"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}' \
-    > "$RET_DIR/releases/state.json"
+# The JOURNAL is built through the REAL helpers (journal_init /
+# journal_update / journal_history_append) — never hand-written JSON — so the
+# history rows carry the exact shape the sweep anchors on (event `staged`,
+# event `commit`, detail `release <V> staged at `, `promote <W> committed (`).
+( export INSTALL_DIR="$RET_DIR"; . "$FAKE_REPO/scripts/upgrade/lib.sh"
+  journal_init
+  journal_update current '"vC"'
+  journal_update previous '"vD"'
+  journal_history_append staged "release vOld staged at 2020-01-01T00:00:00Z"
+  journal_history_append commit "promote vZ committed (reason=promote)"
+) > /dev/null 2>&1
 ( export INSTALL_DIR="$RET_DIR"; . "$FAKE_REPO/scripts/upgrade/lib.sh"; retention_evict ) > /dev/null 2>&1
 [ ! -d "$RET_DIR/releases/vOld" ] && _pass || _fail "9 evicts the true-oldest (2020 ISO, not pinned)"
 [ -d "$RET_DIR/releases/vNew" ] && _pass || _fail "9 keeps the manifest-less newest (epoch-fallback key)"
+# The eviction must be EVIDENCE-AFFIRMATIVE (AMEND-1): vOld was evicted
+# because the journal shows its own staged row + a later commit row for the
+# version-greater vZ — NOT because it sorted oldest.
+assert_contains "9 the vOld eviction is evidence-affirmative (superseded by vZ)" "reason=superseded-by-promoted-vZ" "$(cat "$RET_DIR/releases/state.json")"
+assert_contains "9 the evidence-less vNew is HELD, not evicted" "no-journal-evidence" "$(cat "$RET_DIR/releases/state.json")"
+assert_contains "9 the promoted-but-not-superseded vZ is HELD" "promoted-not-superseded" "$(cat "$RET_DIR/releases/state.json")"
 [ -d "$RET_DIR/releases/vC" ] && _pass || _fail "9 keeps current"
 [ -d "$RET_DIR/releases/vD" ] && _pass || _fail "9 keeps previous (pinned)"
 [ -d "$RET_DIR/releases/rollback.lock.d" ] && _pass || _fail "9 NEVER evicts the D5 lock dir (protocol artifact)"

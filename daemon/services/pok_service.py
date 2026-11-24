@@ -57,7 +57,7 @@ from daemon.repositories.pok.models import (
     POK_DEFAULT_SOURCE_TIER,
     POK_DOMAINS,
     POK_FAMILY_SLUG_PATTERN,
-    POK_PROVENANCE_VALUES,
+    POK_PROVENANCE_VALUES, pok_family_key,
     POK_SOURCE_TIERS,
     POK_STATUSES,
     ProjectOperatingKnowledge,
@@ -149,8 +149,8 @@ class POKError(Exception):
 
 def _slug_family(slug: str) -> str | None:
     """The family key for a family-ordered slug, else ``None``."""
-    m = POK_FAMILY_RE.match(slug)
-    return m.group(1) if m else None
+    # Delegates to models.pok_family_key — the single canonical derivation.
+    return pok_family_key(slug)
 
 
 def normalize_body(body: str) -> str:
@@ -473,14 +473,15 @@ class POKService:
         if family is not None:
             family_active = self._repo.count_active_in_family(project_id, family)
             if family_active >= POK_FAMILY_MAX:
-                # The count is a PREFIX superset (a ``startswith`` count)
-                # — the rows listed below are the PREFIX-SHARING rows,
-                # which may include rows of a LONGER family sharing the
-                # prefix (e.g. ``skill-e6-*`` under family ``skill``).
+                # STRICT MEMBERSHIP (was a prefix superset): the rows
+                # listed below are the family's OWN members — each row's
+                # canonical family key must EQUAL ``family``. A LONGER
+                # family (e.g. ``skill-e6-*``) never counts toward
+                # ``skill``; an UNNUMBERED slug has no family at all.
                 members = sorted(
                     r.slug
                     for r in self._repo.list_entries(project_id, statuses=("active",))
-                    if r.slug.startswith(f"{family}-")
+                    if _slug_family(r.slug) == family
                 )
                 # COUNT-AWARE CURE (fix iteration 2, CRITICAL 1): the
                 # archive count is DERIVED from the LIVE count, never
@@ -523,7 +524,7 @@ class POKService:
                     )
                 raise POKError(
                     "pok_family_full",
-                    f"{head}; prefix-sharing active rows: "
+                    f"{head}; active family members: "
                     f"{', '.join(members)}; {cure}",
                     family=family,
                     active_count=family_active,
