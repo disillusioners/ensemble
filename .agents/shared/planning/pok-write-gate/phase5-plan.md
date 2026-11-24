@@ -10,7 +10,7 @@ Lay the metrics substrate that the librarian (Phase 10) will read. Addendum-3 it
 | 2 | Vector leg retire-with-disclosure note (embeddings 0 + seam never passes query_embedding; no caller) | Phase 0 | Doc note in guideline measured-state |
 | 3 | Trusted-vs-ignored metric set documented (design-amendments §9): TRUST gate-stamped verify, curator tiers, strict family, verdict-derived counts; IGNORE access_count-alone, age, vector, pre-stamp verify, inert tiers | none | Doc note + diff review |
 | 4 | Docstring class boundary (operational how-to vs knowledge) in `pok_service.py` | none | Diff review |
-| 5 | Never-age/access note (112 zero-retrieval rows) | none | Doc note |
+| 5 | Never-age/access note (112 zero-retrieval rows — 499-era architect-prose figure, NO in-branch source; S-2 reconciliation in plan-overview Research Insights) | none | Doc note |
 | 6 | Standing-defect residual rows in ledger | Phase 1 | Unit test residual rows |
 
 ## Coupling

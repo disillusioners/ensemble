@@ -69,3 +69,85 @@ Iteration 001 REJECTED → iteration 002 opens on the revised plan (fix B1+B2; r
 
 ---
 *[Tracking: .agents/approver/pok-write-gate-tracking.md]*
+
+---
+
+# Iteration 002 — 2026-11-24 — VERDICT: REJECTED
+
+Pinned: HEAD `48abbce676dc76bd05bc560ea88583f78adb6205` · planning dir COMMITTED (29 files, unpushed) · porcelain clean. Dispatch: 3 fresh cold-context workers (same partition + new spine member `gate-rules-r6-r7-amendment.md` + new evidence home `evidence-rederiv-2026-11-23/`), one skill each (adversarial-plan-ledger-verification).
+
+**Delivery-label crossing disclosed:** the completion-report display names for the p8-13 and spine workers arrived swapped; content + instance IDs are unambiguous and attribution below is by instance ID.
+
+| Worker (instance) | Scope | Verdict | Blocking | Notes |
+|---|---|---|---|---|
+| approve-pwg2-p0-7 (59a5686d-b69c-4032-9aee-273a237543a7) | phase0–7 | APPROVED | 0 | 12 |
+| approve-pwg2-p8-13 (a92e62b6-d1e3-4075-a057-75245116c3a6) | phase8–13 + briefs + both evidence dirs + supersession sweep | APPROVED | 0 (one flagged judgment call — ruled admissible, below) | 4 |
+| approve-pwg2-spine (7c13bb91-7957-4e4b-adbc-971379400419) | spine 5 docs | REJECTED | 3 | 9 |
+
+## Blocking Issues
+
+1. **Drifted load-bearing anchors on the B1-fold retrieval-leg chain** — `plan-overview.md:158`, `:283` (T10.2), `:337` (fold-ledger row)
+   - Claimed: `repository.py:232` (access_count increment) ← `pok_service.py:677` (sole caller); `pok_injection.py:198` (rank key).
+   - Found: actual sites are `repository.py:378`, `pok_service.py:733`, `pok_injection.py:199`; the cited lines contain a docstring line, a signature, and an unrelated tuple element. Substance TRUE (one increment, one caller, rank-only read) — but the anchors were introduced by the fold AFTER Risk #13's verified-values list and T0.1's anchor list were written, so the plan's own re-grep preflight will not catch them; an implementer greping `:232` lands on a docstring.
+   - Required change: `:232→:378`, `:677→:733`, `:198→:199` at the three plan-overview sites; add the three anchors to Risk #13's list and T0.1's anchor list. (House doctrine: approver rejects string-level drift, not design.)
+
+2. **T3.3 refusal-precedence PIN contradicts the code it claims to preserve, and its cited evidence cannot support it** — `plan-overview.md:206` vs `daemon/tools/pok.py:240/247` and `technical-analysis.md:54-58`
+   - Found: three live orderings — code = store→scope (`:243` store check precedes `:247` scope); plan PIN = scope→store→reason (transposed, while claiming "preserving existing codes"); technical-analysis mermaid = reason→scope. The six cited tests each pin a SINGLE refusal code in isolation — no pairwise precedence is pinned by any of them.
+   - Why load-bearing: this order decides the enforcement point of mandatory-`reason` (requirement 1) and the T3.6 sweep footprint.
+   - Required change: pin ONE canonical string, state its layer (tool vs service), state which of the three orderings it is, add a pairwise-precedence test or stop citing the six as the pin's evidence. House pattern: §PREDICATE LEDGER + closing ATTESTATION (plan-predicate-ledger-01-attestation).
+
+3. **The authoritative rider mis-certifies a co-resident artifact** — `gate-rules-r6-r7-amendment.md:89` and `:165` (fold-ledger-designated authoritative, `plan-overview.md:334`)
+   - Found: rider §2.4 cites `technical-analysis.md:136` as the source of the 4-value verdict closed set — that line actually asserts the SUPERSEDED 2-value `accept|reject` contract (4-value set is owned by `design-amendments-v2.md §8` / T7.1). Rider §4's sweep table certifies that stale line "still accurate" — a false certification inside the artifact the fold ledger names authoritative.
+   - Required change: rider:89 → cite design-amendments §8 for the verdict set, technical-analysis:136 for the family set only; rider:165 → disposition "SUPERSEDED (2-value verdict contract)"; add the self-supersession banner to technical-analysis.md (also closes NOTE group D below).
+
+All three fixes are mechanical; none requires re-planning (spine worker's own assessment).
+
+## Aggregation adjudications (judgment band — reasons stated)
+
+- **p8-13 flagged judgment call — RULED ADMISSIBLE:** the 9 supersession-sweep occurrences inside `gate-rules-r6-r7-amendment.md` and `funnel-and-agreement.md` are visibly-marked DROP-DECLARATIONS ("DROPPED 2026-11-24", "Not reproducible", "UNBACKED-NO-SOURCE") — history-role content by design, not live relayed claims. The residue gate's intent is "zero live relayed-figure claims"; that holds. No downgrade required (worker verdict was APPROVED). Disclosed as a superset of the leader's expected admissibility list.
+- **B-2 cross-worker merge:** p0-7's "six tests match the pinned order" is class-coverage confirmation only (each test pins one code in isolation); the spine's code-opened pairwise analysis is the most specific variant and governs. Merged, not conflicting.
+- **No downgrades of worker blockings; no upgrades; no new blocking introduced.**
+
+## Iteration-001 blocker disposition (ledger comparison)
+
+- **iter-001 B1 (funnel mis-attribution): ADDRESSED.** Re-derived funnel verified in-branch (sha `b55101a3…` matches plan-recorded and on-disk; 18 figures confirmed incl. 568→573 drift, 431 query-only, 384 injected lower-bound, 518 cited, 156/1,412); T10.2 re-based with bounds. The fold INTRODUCED the smaller B-1 anchor-drift defect above.
+- **iter-001 B2 (32/64 unbacked): ADDRESSED.** Dropped plan-wide; supersession sweep = zero live occurrences; replacement bands B 13/16=81.2% and C 42/50=84.0% located with predicates. Residual: rider:169 sweep-row still lists phase11:6 as carrying 32/64 though the fold replaced it (rider's own §1.3 dated note supersedes) — note only.
+- **12-note disposition:** ADDRESSED — record_verification seam (W2 half verified landing in Phase 8 exit criteria), req-1 narrowing (verified disclosed), task-count integrity (two-sided, all 14 phases), phase0 stale-anchor self-documentation. PARTIALLY ADDRESSED / STILL OPEN — digest arithmetic (K=48: 126×48=6048 vs "≈7250"; assert the bound), technical-analysis self-supersession banner, spine wave-qualifier at plan-overview:11/:41. RECURRING — task-map↔phase-file drift (T0.5 unowned in phase0-plan.md; phase11 T4≠T11.4 and T11.10 absent from phase file). CARRIED — see Conditions.
+
+## Conditions tracked (binding on the next revision / build)
+
+1. **Phase-12 authoring is load-bearing:** the kb-writer trio (65-of-81 / 83.5% / 7–18%) has NO in-branch source — T12.2's "re-derived and stamped at authoring, BEFORE the diff is presented" must genuinely execute, or unbacked figures reach the Emperor's draft. (448/26/38 of 512 now present at funnel:130 — improved.)
+2. **112-vs-109 never-retrieved:** two zero-populations for one argument — reconcile or stamp both with snapshot times (bare-count fence at plan-overview:361).
+3. **Over-cap families live application home** (iter-001 note 8): not re-verified this round — carried.
+
+## Notes (non-blocking, consolidated)
+
+A. Digest arithmetic: assert bound ≤8000 or restate per-row cost (phase7:17, plan-overview:125, arch:105, design-amendments:163).
+B. Task-map↔phase-file reconciliation: T0.5 owner row; phase11 positions 4/10; T9.7 double-use residue.
+C. T3.6/T3.3 sweep breakdown: 18+13=31≠37 — actual 22 indexed-upsert + 3 query + 7 curate + 5 bare = 37, 23 upsert invocations (order-dependent on B-2's fix).
+D. technical-analysis.md unmarked superseded content + "Ready for Review" header — ONE banner closes: 2-outcome gate (:10,:52-71), project-history audit sink (:45,:80,:85,:153,:222), 12s/25s defaults (:220,:230), bare counts (:16).
+E. Spine Wave-1 rows :11/:41 lack the wave-split qualifier the phase files carry (phase5:24-25, phase1:26-27).
+F. proposed_body vs merged_body_proposal field-name alias (phase7:9 vs :14, arch:35) — pin `proposed_body`.
+G. Parser fallback wording: align plan-overview:245 ("garbage→ASK/unavailable") to the twice-supported "garbage→unavailable, never re-labelled pok_gate_reject" (phase7:11, tech-analysis:173, arch:99).
+H. SC#1 "missing/empty" reachability: with a no-default `reason: str`, omission raises ValidationError before the body runs — state the tool-level default explicitly or narrow SC#1 to "empty".
+I. Grant-pin docstring stale on TWO fields (V10→11, 65→66 categories) — widen T4.3.
+J. Bare `R6` fork-meaning (design-amendments:164, arch:106) vs rider §2.3's reserved provenance meaning — disambiguate inline.
+K. Ledger-migration apply-time blast radius: add one clause to T1.2 (no backfill, no lock on POK tables, one new table at promote).
+L. Phase-6 fixture arity: "two-table create_all" goes stale when the ledger adds a third.
+M. Phase-7 intra-phase nits: T2 should depend on T10 (timeout knobs); T14's "Phase 7 boundary" label → name T1.
+N. Guideline dual-touch (P5/P12) lacks a shared-seam risk row; "measured-state" section name does not exist in the guideline (§1–§10) — name the target once; vector-retire text has two claimants.
+O. pok_service.py (4 phases) + PACKS.md (2 waves) sequencing notes; feeder ≤53 bound ~50× loose vs TSV-derived 33 — restate.
+P. Soft shared-surface seams: risk 16 covers refusal-path adjacency only.
+
+## Skills Used
+adversarial-plan-ledger-verification (one per worker, cold-context; plan-review-*.md and the iteration-001 approver record excluded from worker evidence).
+
+## Session IDs
+- approve-pwg2-p0-7: 59a5686d-b69c-4032-9aee-273a237543a7
+- approve-pwg2-p8-13: a92e62b6-d1e3-4075-a057-75245116c3a6
+- approve-pwg2-spine: 7c13bb91-7957-4e4b-adbc-971379400419
+
+Iteration 002 REJECTED → iteration 003 (FINAL before escalation) on the revised plan. Fix B-1/B-2/B-3 (all mechanical); ride the note fixes in the same round. Everything else — completeness, feasibility, safety/fences, measured backing, supersession hygiene, single-ownership, task-count integrity — verified clean this round.
+
+---
+*[Tracking: .agents/approver/pok-write-gate-tracking.md]*

@@ -48,7 +48,7 @@ The gate is a **JUDGE / POK-LIBRARIAN MAINTENANCE AGENT, not a filter**. It emit
 ## 4. Admission ledger (Wave 1) — options + lean
 
 - Architect decision: dedicated additive table vs project-history `entry_type`. **Lean: dedicated additive table** (read-only-cheap decision substrate; project-history is human-ledger-shaped).
-- **DIVERGENCE C:** leader admission-only vs architect v2 §3 admission/retrieval. **Plan follows architect (wider)** — admission-only cannot distinguish "useless" from "needed-but-never-asked-for" (112 zero-retrieval rows). Flag leader.
+- **DIVERGENCE C:** leader admission-only vs architect v2 §3 admission/retrieval. **Plan follows architect (wider)** — admission-only cannot distinguish "useless" from "needed-but-never-asked-for" (112 zero-retrieval rows (499-era architect-prose figure, NO in-branch source — S-2 reconciliation in plan-overview Research Insights)). Flag leader.
 - **DIVERGENCE D:** D3 "audit sink = project-history `entry_type`" is **subsumed** by the ledger shape. If dedicated table lands, gate audit goes there. Flag architect.
 - Addendum-3 item 3: the audit records BOTH the verdict AND the tool's execution (one writer, auditable).
 
@@ -63,7 +63,7 @@ The gate is a **JUDGE / POK-LIBRARIAN MAINTENANCE AGENT, not a filter**. It emit
 
 - **`record_verification` — NOW GETS A CALLER (addendum-3 item 7 SUPERSEDES addendum-2 retire-with-disclosure).** Definition only at `repository.py:384` (addendum's `:253` stale), zero callers today → verify_count≡0. The gate/librarian's verification verdicts become the FIRST REAL WRITER: merges, refusals, admissions, verification verdicts stamp the metrics, which feed its next pass. **Wire `record_verification` into the gate path — do NOT retire.**
 - **Vector leg — still retire-with-disclosure (addendum-3 item 7).** Embeddings table 0 rows AND seam never passes `query_embedding`; no caller identified. Document, do not wire.
-- Never age / never access_count-alone as worthlessness signal (112 zero-retrieval rows prove it).
+- Never age / never access_count-alone as worthlessness signal (112 zero-retrieval rows (499-era architect-prose figure, NO in-branch source — S-2 reconciliation in plan-overview Research Insights) prove it).
 
 ## 7. Supersession notes
 
@@ -71,7 +71,7 @@ The gate is a **JUDGE / POK-LIBRARIAN MAINTENANCE AGENT, not a filter**. It emit
 - **Rider rails (corrected by tech verification):** pin that REDs = `tests/unit/test_pok_grant_pins.py` (`EXPECTED_EXPLICIT` 54→53 + completeness-walk exception for kb-writer + refresh stale docstring); `tool-categories.json` NOT touched (vocabulary, not grants — no regen, no version bump); `meta.json` UNSEALED (no baseline regen for the rider); NEW pin asserting kb-writer does NOT hold `pok` with mutation leg (re-adding must RED).
 - **Compensating measure (addendum-3 item 1):** capture duty migrates to operational agents (ari, project-manager, leader, devops); their guidance updated so operational lessons ARE captured in POK with a reason. The one-fact-one-store routing contract MIGRATES to these 4 (operational→POK with reason, knowledge→RAG); kb-writer keeps RAG-side routing only. Release notes DISCLOSE: kb-writer's verify family gets no NEW captures from that path; capture moves to operators.
 - **Addendum-1 Item 2 reconciled via R1-beats-R4** (no separate redundancy rule). **Addendum-1 Item 3 (scope) unchanged** — `pok_default_project` on the leader instance = scope classification, never a verdict (AC10).
-- **Numbers (addendum-3 supersedes earlier set):** 499 active @13:5xZ snapshot; composition OH 396 / RS 74 / EPISODE 21 / GK 4 / INCIDENT 2 / DUP 2; tiers fully inert — curated 0, pinned 0, verify_count 0 everywhere, 109 never-accessed. Cite snapshot times, NEVER bare counts. (The briefs' 12,968-doc RAG corpus and overlap classes BOTH-USEFUL 337/65.8%, RAG-DUPLICATE 81/15.8%, POK-ONLY 78/15.2%, NEITHER 16/3.1% remain for the guideline overlap section.)
+- **Numbers (addendum-3 supersedes earlier set):** 499 active @13:5xZ snapshot; composition OH 396 / RS 74 / EPISODE 21 / GK 4 / INCIDENT 2 / DUP 2; tiers fully inert — curated 0, pinned 0, verify_count 0 everywhere, 109 never-accessed (`access_count=0`, in-branch sourced: `census-mechanics:381` / `store-census:39`). Cite snapshot times, NEVER bare counts. (The briefs' 12,968-doc RAG corpus and overlap classes BOTH-USEFUL 337/65.8%, RAG-DUPLICATE 81/15.8%, POK-ONLY 78/15.2%, NEITHER 16/3.1% remain for the guideline overlap section.)
 
 ## 8. Gate = POK-librarian maintenance agent — outcomes, authority, tool contract (addendum-3 items 2–4)
 
@@ -99,7 +99,7 @@ Emperor verbatim: *"POK entry have metrics, so the POK librarian can access for 
 - **Close the loop:** the metrics are DEAD CODE today (§6). The gate/librarian's own activity is the FIRST REAL WRITER (verification verdicts, merges, refusals, admissions stamp them; they feed its next pass). Do NOT ship a metrics-driven librarian flying only on access_count.
 - **Trusted vs ignored metrics (plan states with reasons):**
   - TRUST: gate-stamped verify_count (once wired, §6); pinned/disputed/curated tier (curator signals, leader/PM); family (post strict-count fix, §5); verdict-derived merge/refusal/admission counts (librarian's own output); timestamps as provenance.
-  - IGNORE: access_count ALONE (retrieval-driven not use-driven; 112 zero-retrieval rows); age (never a consolidation basis); vector/embeddings (dead, retire-with-disclosure); verify_count BEFORE gate stamping (structurally 0 — absence is not evidence); tier=0 as a signal (all inert today).
+  - IGNORE: access_count ALONE (retrieval-driven not use-driven; 112 zero-retrieval rows (499-era architect-prose figure, NO in-branch source — S-2 reconciliation in plan-overview Research Insights)); age (never a consolidation basis); vector/embeddings (dead, retire-with-disclosure); verify_count BEFORE gate stamping (structurally 0 — absence is not evidence); tier=0 as a signal (all inert today).
 - **Periodic-pass design:** architect's call — house `MaintenanceService` precedent (`daemon/services/maintenance.py:259`, registered interval jobs) vs on-write-only recompute. Keep simple.
 
 ## 10. Assess-and-report — feeder agents (addendum-3 item 5, NO unilateral action)

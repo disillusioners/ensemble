@@ -86,7 +86,7 @@ Only R0, R3 and R5 align even loosely in spirit; R1/R2/R4 carry **different mean
 
 ### 2.4 Where "R0–R5" is the operative contract
 
-The label "R0–R5 parser" names the **rule set the judge applies**, not the parser's token closed set. The parser's closed set is `verdict ∈ {ACCEPT,MERGE,ASK,REJECT}` × `family ∈ {boundary,reason,durability,redundancy,scope}` (technical-analysis `:136`) and is **UNCHANGED** by this rider (§3.2 design choice: no new verdict token, no new family, no digest-budget change). Therefore the operative wording becomes **"gate-rule parser (R0–R5 + R-RET/R-PROV; closed-set verdict+family unchanged)"** — the rule set grows by two, the token closed set does not.
+The label "R0–R5 parser" names the **rule set the judge applies**, not the parser's token closed set. The parser's closed set is `verdict ∈ {ACCEPT,MERGE,ASK,REJECT}` (authoritative source: `design-amendments-v2.md` §8 "Outcome set", `:78-82`) × `family ∈ {boundary,reason,durability,redundancy,scope}` (`technical-analysis.md:136`, family set only — that line's verdict token is the SUPERSEDED 2-value `accept|reject` contract; see the dated self-supersession banner there) and is **UNCHANGED** by this rider (§3.2 design choice: no new verdict token, no new family, no digest-budget change). Therefore the operative wording becomes **"gate-rule parser (R0–R5 + R-RET/R-PROV; closed-set verdict+family unchanged)"** — the rule set grows by two, the token closed set does not.
 
 ---
 
@@ -162,7 +162,7 @@ Whole-dir grep for `R0[–-]R5`, `closed.set`, `R[0-7]` and gate-contract phrase
 | phase7-plan.md:34 | Exit Criterion "parser closed-set" | **EDIT** → add R-RET/R-PROV presence |
 | phase8-plan.md (task/exit) | — | **EDIT** → add T15 (R-RET ASK/re-slug) |
 | phase10-plan.md (task/exit) | — | **EDIT** → add T12 (R-RET detection) |
-| technical-analysis.md:31,:136,:173 | "closed-set" | **EXAMINED, NO EDIT** — describes the attestation-judge parser's verdict+family token closed set, NOT the R0–R5 rule ladder; still accurate. Explicitly NOT an "R0–R5 closed set" claim. |
+| technical-analysis.md:31,:136,:173 | "closed-set" | **CERTIFICATION WITHDRAWN / SUPERSEDED (2-value verdict contract)** — this rider previously certified these lines "still accurate" for the verdict+family token closed set; that certification is FALSE for `:136`, which asserts the SUPERSEDED 2-value `accept|reject` verdict contract. The authoritative 4-value set (ACCEPT/MERGE/ASK/REJECT) is `design-amendments-v2.md` §8 "Outcome set" (`:78-82`); the §2.4 cite is repointed accordingly. The `family` set at `:136` stands; a dated self-supersession banner now marks that line. Explicitly NOT an "R0–R5 closed set" claim. |
 | technical-analysis.md:230-235 / architecture-recommendation.md:104-107 / design-amendments-v2.md:6,:137,:160,:161 | architect-fork R1–R6 | **EXAMINED, NO EDIT** — third ladder (architect forks, R6=stub-mode); unrelated to gate rules; the mnemonic labels avoid collision. |
 | design-amendments-v2.md:41 | "MECHANICAL — enforce NOW: reason REQUIRED + R0 named fence" | **EXAMINED, NO EDIT** — mechanical-now set is unchanged and must stay exactly this. |
 | phase3-plan.md:4/:12/:20/:28, phase6-plan.md:9, plan-review-1.md:61/:92, plan-overview.md:38/:72/:104/:203 | "R0 named fence" (mechanical) | **EXAMINED, NO EDIT** — mechanical R0 fence, unchanged by this rider. |
