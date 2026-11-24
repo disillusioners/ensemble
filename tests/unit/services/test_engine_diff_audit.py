@@ -201,7 +201,7 @@ EXPECTED_DAEMON_PATHS: frozenset[str] = frozenset({
     "daemon/__main__.py",  # relcur-M2 release-pointer boot check 98044a57d (stage-3 foreign-lane absorb 2026-11-23)
     "daemon/services/release_pointer_check.py",  # relcur-M2 ceremony-window tolerance 00e751f53/98044a57d (stage-3 foreign-lane absorb 2026-11-23)
     "daemon/services/blueprint_lease_reaper.py",  # blueprint pending-lease reaper registration 5c06fc23c (stage-3 foreign-lane absorb 2026-11-23)
-    "daemon/services/auto_continue_boot_pass.py",  # auto-continue surface-first doctrine 5f28bd29b..edc9670e9 (stage-3 foreign-lane absorb 2026-11-23)
+    "daemon/services/auto_continue_boot_pass.py",  # auto-continue surface-first doctrine 5f28bd29b..edc9670e9/f52530ecf (stage-3 foreign-lane absorb 2026-11-23)
     "daemon/tools/instance_read.py",  # instance-read husk detector legs 59cc2d65f..9a7ac3244 (stage-3 foreign-lane absorb 2026-11-23)
 })
 
