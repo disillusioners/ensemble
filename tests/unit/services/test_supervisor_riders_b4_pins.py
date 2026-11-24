@@ -527,10 +527,18 @@ class TestNit1RealSubstrate:
         assert re_read is not None
         assert re_read.status == ExecutionStatus.TRIGGERED.value
 
-    def test_heal_succeeds_when_the_row_carries_the_handle(self, src_engine, repo):
-        """The F1 counterpart: a handle ALREADY on the open row
-        satisfies A.1 — the heal closes it without needing the
-        argument, and never rewrites the existing handle."""
+    def test_heal_preserves_existing_handle_when_row_carries_it(self, src_engine, repo):
+        """HANDLE-PRESERVATION regression guard (reviewer F1-N relabel).
+
+        This node guards the handle-CARRYING path: when the open row already
+        has an ``instance_id``, the heal closes it and never rewrites that
+        handle. It is NOT an independent F1-refusal proof — this test GREENs
+        at the pre-fix base too (the base heal wrote ``executed`` with a NULL
+        handle only when NO handle was present). The A.1 NULL-handle REFUSAL
+        is proven by the dedicated pin ``test_heal_refuses_without_an_instance_handle``
+        above (FAIL-HONEST: RED at base, GREEN after the fix). Kept as a
+        regression guard so a future edit cannot clobber an existing handle.
+        """
         from sqlmodel import Session
 
         from daemon.repositories.source.models import ScheduleExecution

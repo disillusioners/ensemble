@@ -68,6 +68,22 @@ def test_receipt_completed_fire_executed_with_handles(receipt_repo):
     assert row.completed_at is not None
 
 
+def test_terminal_write_refuses_handleless_row(receipt_repo):
+    """NULL-G (ratification): ``record_execution_terminal_by_job`` refuses a
+    handle-less row — uniformity with the heal seam's A.1 guard. A row with
+    no ``instance_id`` is structurally impossible in normal flow (dispatch
+    requires a handle), so this pins the DEFENSIVE seam invariant: no
+    ``executed`` write with a NULL handle; the prior truthful OPEN state is
+    kept."""
+    receipt_repo.upsert_execution_dispatched("sched-g", "exec-g", None, "task-g", "job-g")
+    receipt_repo.record_execution_terminal_by_job("job-g", "completed")
+    row = receipt_repo.get_latest_execution("sched-g")
+    assert row.status == ExecutionStatus.DISPATCHED.value   # prior truthful state kept
+    assert row.instance_id is None
+    assert row.outcome is None
+    assert row.completed_at is None
+
+
 def test_receipt_never_started_distinction_visible_in_raw_fields(receipt_repo):
     """A never-started fire leaves NULL instance + explicit truthful status.
 

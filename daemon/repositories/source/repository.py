@@ -1502,6 +1502,10 @@ class SQLModelSourceRepository:
         JobItem.job_id). Bounded to the OPEN states — a receipt already
         terminalized by another path is never rewritten. Returns the updated
         row (or ``None`` when no receipt carries that handle).
+
+        A.1 HANDLE RULE: like the ``heal_execution_receipt_executed`` seam,
+        this write REFUSES a row with no ``instance_id`` — a completed fire
+        never carries a NULL handle. The row keeps its prior truthful state.
         """
         with Session(self.engine) as session:
             stmt = select(ScheduleExecution).where(
@@ -1511,6 +1515,9 @@ class SQLModelSourceRepository:
             if execution is None:
                 return None
             if execution.status in self._RECEIPT_OPEN_STATES:
+                if not execution.instance_id:
+                    # Uniformity with the heal seam (A.1): never close a receipt with a NULL instance handle.
+                    return execution
                 execution.status = ExecutionStatus.EXECUTED.value
                 execution.outcome = outcome
                 execution.error_message = error_message
