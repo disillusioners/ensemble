@@ -152,8 +152,10 @@ mismatches: 0`. The 21 families reported over-cap under the prefix rule split as
 
 ## How to verify
 
-On the MERGED tree (tip `cb25cd536` + the version-bump commit that follows; branch
-`feature/pok-family-strict-int`):
+On the MERGED tree — release tip `d55f2875898b1e94ad13bbc06c9844520a9b190f` (the `v0.31.50` tag's
+peeled commit, == `origin/latest` at stage time), branch `feature/pok-family-strict-int`
+(the commission surface is fully contained in `cb25cd536`; `d55f28758` = `cb25cd536` + the
+`! New version 0.31.50` bump commit + the `origin/latest` re-merge):
 
 ```
 cd <worktree> && env -u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_HOST -u POSTGRES_PORT ENSEMBLE_SELF_ENV=dev timeout 300 .venv/bin/pytest -p no:randomly --tb=short -q -rfE \
@@ -197,11 +199,46 @@ git diff --stat 52c9bfc83 HEAD -- daemon/services/pok_injection.py   # must be E
 MEASURED: all eight anchors byte-identical to base; `pok_injection.py` untouched; no guideline
 anchor points into `models.py` or `repository.py`.
 
-RELEASE RECEIPTS: tag `v0.31.50` (annotated) on the version-bump commit; `origin/latest` pushed
-FIRST with the explicit refspec `git push origin feature/pok-family-strict-int:latest`, then
-`git push origin v0.31.50` (never `git push --tags`); `git ls-remote --tags origin refs/tags/v0.31.50`
-shows BOTH the annotated object and its `^{}` peeled ref; staged from an isolated clean worktree
-detached at the tag. NO PROMOTE.
+RELEASE RECEIPTS (all MEASURED):
+- Tag `v0.31.50` (annotated) — annotated object `e2995b460156ccd75c8402ae338328bf00825b67`, peeled
+  commit `d55f2875898b1e94ad13bbc06c9844520a9b190f`. `git ls-remote --tags origin 'refs/tags/v0.31.50*'`
+  shows BOTH lines (the exact-name pattern `refs/tags/v0.31.50` alone does NOT match the `^{}` peeled
+  ref — use the wildcard, or ask for `refs/tags/v0.31.50^{}` explicitly).
+- Push order as mandated: `git push origin feature/pok-family-strict-int:latest` FIRST
+  (`ca806cfe2..d55f28758`), THEN `git push origin v0.31.50`. Never `git push --tags`.
+- `origin/latest` == `d55f28758` == the tag's peeled commit == local HEAD (tip-identity satisfied).
+- Staged from an isolated clean worktree detached at the tag
+  (`/home/nea/ensemble-src-wt-stage-v03150-pokfamily`; `git describe --tags --exact-match` = v0.31.50;
+  working tree clean; `dist/` + `frontend/dist/` absent before the build).
+- Staged release: `/home/nea/agents-ensemble/releases/v0.31.50` — manifest `source_commit` and
+  `scripts_pin_commit` = `d55f28758`, `binary_version` 0.31.50, `staged_at` 2026-11-24T03:53:09Z,
+  `rollback_safe=true` (`source=explicit=true` — see below), `known_schema_gen`
+  `20261121_120001_create_engine_runs.sql`, `contains_contract_phase=true`,
+  `pipeline_scripts_floor_commit`/`_rev` = `46d55b002d35092c29c391fc76e6b897c0819e11`.
+- 4-WAY SHA MATCH: release-dir `ensemble-prod` == `dist/` build == manifest `binary_sha256` ==
+  provenance sidecar `artifact_sha256` = `72717e1efc5725d395bccd797e813e517f0145beb0e593b31630d1c396d8e905`.
+- FE provenance sidecar binds to the pushed tip: `git_head=d55f2875898b`, `git_dirty=false`.
+- Prompt-artifact baseline clean: `PROMPT-BASELINE: OK — 217 versioned artifact(s) match`.
+- **NO PROMOTE**: `current` still -> `releases/v0.31.49`; the stage log records "NO flip performed
+  (promote.sh owns current)". The live daemon is untouched.
+- STAGE OPERATOR CHOICE (disclosed): the stage refused to DERIVE `rollback_safe` silently because
+  destructive DDL (`DROP TABLE|DROP COLUMN`) exists somewhere under `daemon/migrations/versions`. The
+  guard's own criterion selects `ENSEMBLE_ROLLBACK_SAFE=1` — "ONLY if the migration delta between the
+  previous release tag and v0.31.50 is EMPTY". MEASURED: `git diff --name-status v0.31.49 v0.31.50 --
+  daemon/migrations/` is EMPTY (no migration added, removed or changed by this release), and the
+  destructive DDL is PRE-EXISTING (present in the v0.31.49 tree, already applied before v0.31.50).
+  The stage was re-run with `ENSEMBLE_ROLLBACK_SAFE=1` and recorded `source=explicit=true`.
+
+FROZEN-BINARY PROOF (the fix IS in the staged payload). METHOD DISCLOSURE: literal `strings` on the
+frozen binary is USELESS here — PyInstaller's PYZ compression blocks even symbol greps (the house's
+known S3 caveat). The proof therefore EXTRACTS the module from the PYZ and inspects its code object
+(`PyInstaller.archive.readers` -> `ZlibArchiveReader.extract`), which is the house's disclosed
+method adjustment (module symbols + constants instead of literals):
+- `daemon.services.pok_service` — contains the NEW constant `'; active family members: '` and does
+  NOT contain `prefix-sharing active rows`; names `pok_family_key` and `POK_FAMILY_RE` present.
+- `daemon.repositories.pok.models` — names `pok_family_key` and `POK_FAMILY_RE` present.
+- `daemon.repositories.pok.repository` — name `pok_family_key` present (the strict count calls it).
+NON-VACUOUS and bidirectional: the NEW wording is present AND the OLD wording is absent.
 
 ## Bash-raises used
 
