@@ -212,3 +212,14 @@ Census measures DUPLICATE = 2/499 and exact-body duplicate groups = 0. If the hi
 2. **`merge_policy` default at P1** — stay `ASK_WITH_PROPOSAL` vs promote to `AUTO`, decided by shadow evidence (merge rate + proposal fidelity), which the ledger records by design.
 3. **Feeder grants (experiencer/kb-importer)** — assess-and-report only; unchanged by this fold.
 4. **Re-measure the quick-latency distribution before P1** — the 2.6–13.6s / 4-of-8->15s probe is from 2026-09-07; it is the single assumption that most weakens this set.
+
+### 13.10 Ledger-row transactionality — BINDING decision (advisory-10 fold 2026-11-24)
+
+Source: Wave-1 code review `wave1-code-review-1.md:79-95` (commission-2a addendum); leader ruling folded verbatim-intent. Resolves the same-txn-vs-post-commit question deferred from Wave 1 (W1 was schema-only — no ledger append on the gated write path; the addendum's verdict was CONFORMS).
+
+| Decision | BINDING Ruling | Rationale (one line) |
+|---|---|---|
+| Ledger-row commit boundary — EXECUTION rows | **EXECUTION rows are written SAME-TRANSACTION as the write they record.** | Audit-truth: an execution row that can silently vanish (post-commit crash window) breaks SC#30 ledger-alone answerability — the ledger must not be able to claim an execution that the store did not commit. |
+| Ledger-row commit boundary — VERDICT rows | **VERDICT rows are post-commit best-effort never-raise** (the §4.9 posture preserved). | A verdict is advisory telemetry; coupling it into the gated write's transaction would make an advisory-append failure fail an otherwise-valid write — the opposite extreme the addendum warns against. |
+
+The split is deliberate: the row that ATTESTS a store mutation shares that mutation's transaction; the row that RECORDS a judge opinion stays best-effort. Both land in Wave 2 Phase 7/8 (the first real ledger-row writers).
