@@ -1,0 +1,361 @@
+# Plan Overview: POK Write Gate + POK Librarian (Wave 1 + Wave 2)
+
+Date: 2026-11-23 (late revision)
+Author: planner[v2] via plan-creation worker
+Status: Draft — Ready for Review (folded: addendum-2 + addendum-3 / Consolidated Emperor Ruling Set)
+Worktree: /home/nea/ensemble-src-wt-pok-write-gate (branch feature/pok-write-gate, base a1130e257)
+Authority: `design-amendments-v2.md` (this directory) is the delta doc of record; consumes both addenda. technical-analysis.md supplies verified component design where not contradicted.
+
+## Objective
+
+Land the POK write gate and librarian in two waves. **Wave 1** (cheap, independent, reversible — land together): admission ledger, family-count **coordination** with the parallel lane that owns the count fix + the 2-family split/re-key/archive (this lane executes none of it) **plus the counter carry-over**, mechanical enforcement of `reason` REQUIRED + R0 named fence, kb-writer `pok` grant removal (rider RESTORED by Emperor ruling) with compensating capture-duty guidance for the 4 operational agents, and metrics foundation (record_verification wired to the gate path). **Wave 2**: the semantic judge as a POK-librarian maintenance agent (ACCEPT / MERGE / ASK / REJECT) in SHADOW (default OFF), the authority split + ASK tool contract, census surface, the per-project soft/smart max subsystem, and a staged release. Enforcement is PARKED (P1) — before the next curation sweep, owned by the Emperor's ceremony.
+
+## Scope
+
+### In Scope
+- **Wave 1:** admission/retrieval ledger (dedicated additive table); **family-count COORDINATION — the strict per-key fix and the 2-family SPLIT/RE-KEY + ARCHIVE are owned by a PARALLEL LANE (de-scoped 2026-11-24, leader de-scope dispatch); this lane coordinates, consumes the corrected count in the family-full refusal path, re-verifies read-only, and keeps the counter carry-over** (provenance, for the parallel lane's execution: 21 is the PRE-FIX prefix-counting figure, POST-FIX strict membership yields 2 true over-cap families — SPLIT/RE-KEY + ARCHIVE, never content-merge); `reason` REQUIRED + R0 fence mechanical enforcement; kb-writer `pok` grant removal (54→53) + pin updates + NEW absence pin; compensating capture-duty guidance for ari/project-manager/leader/devops + routing-contract migration; `record_verification` wired to gate path (metrics foundation).
+- **Wave 2:** `daemon/services/pok_gate.py` — 4-outcome judge (ACCEPT/MERGE/ASK/REJECT), gate-rule parser (R0–R5 + R-RET/R-PROV; closed-set verdict+family unchanged — see gate-rules-r6-r7-amendment.md), merge detection, confidence→ASK, templates, cache, digest, stub, Pattern-C knobs; authority split (gate returns verdict, TOOL executes, audit records both); ASK tool contract (`pok_gate_answer` / answer-field re-invocation, in-process TTL pending state, fail-closed on missing answer); gate SHADOW (default OFF, daemon-settings switch); census read surface; per-project soft/smart max librarian (metrics-derived, consolidation under ruled bases); guideline amendment; staged release (NO promote).
+- **Assess-and-report (item 5):** experiencer/kb-importer grant + volume assessment — report recommends, Emperor decides. No unilateral grant change.
+- Tests/scratch fixtures only; no live-store writes.
+
+### Out of Scope
+- No gate enforcement in this build (parked P1); no curation sweep (parked P4); no promote.
+- No `pok_curate` gating (D6 — curator-authority retained).
+- No POK-schema migration preference (additive ledger table only; argue if `.sql` required).
+- No `tool-categories.json` change (vocabulary, not grants — no regen, no version bump).
+- No `meta.json` baseline regen for the rider (meta.json unsealed) — but baseline regen IS needed for the 4 operational agents' sealed prompt edits.
+- No vector-leg wiring (retire-with-disclosure); no RAG-side changes; no store-exclusivity change.
+- **No family-count fix and no 2-family split/re-key + archive EXECUTION in this lane** — de-scoped 2026-11-24 to a parallel lane (leader de-scope dispatch). This lane's residual = coordination + refusal-path consumption + read-only re-verify + the counter carry-over.
+
+## Phases
+
+### Wave 1 — cheap, independent, reversible (land together)
+
+| Phase | Name | Objective | Tasks | Coupling | Status |
+|-------|------|-----------|-------|----------|--------|
+| 0 | Preflight + anchor re-verification + grant census | Verify anchors; confirm kb-writer grant present (54→53 target); confirm meta.json unsealed | 5 | independent | pending |
+| 1 | Admission ledger | Additive dedicated table: admission + retrieval + verdict + execution + basis + **gate_id/phase/merge-proposal fields UP FRONT** | 7 | tight with Phase 2 | pending |
+| 2 | Family-count coordination + carry-over | **Coordination only** — the family-count fix (strict per-key at repository.py:221/:250) + the 2-family SPLIT/RE-KEY + ARCHIVE are owned by a **PARALLEL LANE** (de-scoped 2026-11-24, leader dispatch); this lane executes none of it. Residual = coordination + the family-full refusal consuming the corrected count + read-only re-verify + **counter carry-over** (`supersede_and_insert`, repository.py:286-311) | 5 | coordination w/ parallel lane + tight with Phase 1 | pending |
+| 3 | Mechanical gate enforcement | `reason` REQUIRED + R0 named fence in tool/service; typed refusals; **service-signature defaults (97 sites)**; **reason-check precedence pinned** | 9 | tight with Phase 1 | pending |
+| 4 | kb-writer grant removal + compensating capture duty | Remove `pok` from kb-writer (54→53) + pins; migrate routing contract + capture duty to 4 operational agents | 10 | independent of Phase 3 | pending |
+| 5 | Metrics foundation + standing defects | Wire record_verification to gate path; vector leg retire-with-disclosure; trusted/ignored metric set | 6 | loose with Phase 1 | pending |
+| 6 | Wave 1 tests + packs | Units, mutation legs, tool sweep, pack registration | 9 | tight with Phases 1–5 | pending |
+
+### Wave 2 — judge + librarian + release
+
+| Phase | Name | Objective | Tasks | Coupling | Status |
+|-------|------|-----------|-------|----------|--------|
+| 7 | Gate service (4 outcomes) | `pok_gate.py`: ACCEPT/MERGE/ASK/REJECT, R0–R5 + R-RET/R-PROV (rider), **F2 merge-policy**, **20s/45s** knobs, **K=48 digest**, **POK_GATE_MODEL alias seam**, **UpsertOutcome ASK variant** | 15 | tight with Phase 8 | pending |
+| 8 | Authority split + G1 answer tool + shadow | Gate returns verdict / TOOL executes / audit both; **G1 `pok_gate_answer` + TTL 1200s + 6 refusals**; **tier pre-check → ASK/CURATOR**; SHADOW default OFF; **R-RET rename-remedy execution (T8.15)** | 15 | tight with Phase 7 + Phase 1 | pending |
+| 9 | Census surface + feeder assessment | Curator census tool; feeder (experiencer/kb-importer) assess-and-report | 9 | loose with Phase 8 | pending |
+| 10 | Metrics + soft/smart max librarian | **I1 `pok.soft_max.v1`** metadata key (zero migration); **H3 hybrid pass**; **J metric set + 3 amendments**; cold-start floor; **R-RET detection→ruled-bases consolidation (T10.12)** | 12 | tight with Phase 1 + Phase 5 | pending |
+| 11 | Wave 2 tests + packs | **Fork pins (F/G/TTL/cache/soft-max/pass/counter + alias/stub/switch)** + shadow-mix gate + mechanical-stage burden-of-proof (SC#29) + marked LLM path | 17 | tight with Phases 7–10 | pending |
+| 12 | Guideline amendment | Rewrite §2/§4; fold measured numbers (499 @13:5xZ + composition; admissibility + retrieval legs); POK written by operational agents; diff for Emperor | 6 | tight with Phase 7 shape | pending |
+| 13 | Staged release | Bump (live slot), stage with rollback-safe, tags latest-first, NO promote, honest disclosure | 5 | depends on ALL | pending |
+
+### Parked follow-ups (NOT in this plan's build)
+
+| ID | Follow-up | Trigger / owner |
+|----|-----------|-----------------|
+| P1 | **Enforcement wave** — flip switch to ENFORCE with parking table, zero silent drops; shadow mix ≈ census mix first | Before next curation sweep; Emperor's ceremony |
+| P2 | **Vector-leg wiring** (only if a caller is identified) | Operator decision |
+| P3 | **Feeder grant changes** (experiencer/kb-importer) | Emperor decides on assessment (Phase 9) |
+| P4 | **Curation sweep** — against gate admissibility list. ⚠️ **PRE-P4 RECONCILIATION GATE:** the dup-slug count cited in earlier drafts is untraceable vs census DUPLICATE=2 / exact-body dup groups=0 — the sweep lane MUST reconcile the figure before any Phase-4-era consolidation work acts on it (not a pre-build blocker). 92 rolling→receipts | After P1 enforcement |
+| P5 | **Steady-state alarms + quarterly census** — 80% wall + growth-rate | After P4 |
+| P6 | **`merge_policy` default at P1** — stay `ASK_WITH_PROPOSAL` vs promote to `AUTO`, decided by shadow evidence (merge rate + proposal fidelity), which the ledger records by design | P1 ceremony |
+
+## Coupling Map
+
+| | W1:P1 ledger | W1:P2 coord | W1:P3 mech | W1:P4 rider | W1:P5 metrics | W2:P7 gate | W2:P8 authority | W2:P9 census | W2:P10 softmax |
+|---|---|---|---|---|---|---|---|---|---|
+| W1:P1 ledger | — | tight (basis — recorded on the parallel lane's split/archive) | tight (verdict sink) | independent | tight (metrics sink) | loose | tight | loose | tight |
+| W1:P2 coord | tight (basis via the coordination row) | — | tight (family-full) | independent | loose (family metric) | independent | loose | independent | loose |
+| W1:P3 mech | tight | tight | — | independent | loose | tight (R0 seam) | tight | loose | loose |
+| W1:P4 rider | independent | independent | independent | — | independent | loose | loose | tight (guidance) | independent |
+| W1:P5 metrics | tight | loose | loose | independent | — | tight (stamps) | tight (audit) | loose | tight (feeds ceiling) |
+| W2:P7 gate | loose | independent | tight | loose | tight | — | tight | loose | tight |
+| W2:P8 authority | tight | loose | tight | loose | tight | tight | — | tight | tight |
+| W2:P9 census | loose | independent | loose | tight | loose | loose | tight | — | loose |
+| W2:P10 softmax | tight | loose | loose | independent | tight | tight | tight | loose | — |
+
+## Risks (deduped, highest severity first)
+
+| # | Risk | Impact | Likelihood | Owner / decision forum | Mitigation |
+|---|------|--------|------------|------------------------|------------|
+| 1 | 🔴 BLOCKER RESOLVED — merging 4 distinct `guard-inv`/`prompt-assent` rules into one ≤240-char paragraph violates the content fence + standing split-never-merge-with-drop rule (`pok-sweep-01-merge-cap-split`) | High | Certain | architect (closed — fold applied) | **RESOLVED** — Phase 2 T2.3/T2.4 rewritten to SPLIT/RE-KEY + ARCHIVE under a ruled basis; never a content-merging supersede |
+| 2 | 🔴 BLOCKER RESOLVED — supersede resets counters (`models.py:251-260`), breaking the J trusted-metric chain on every merge | High | Certain | architect (closed — fold applied) | **RESOLVED** — counter carry-over at `supersede_and_insert` (`repository.py:286-311`) in Phase 2's touchpoint + pin (mutation: dropping carry-over → RED) |
+| 3 | ASK answer missing → silent accept (Emperor's catch) | High | Medium | leader/Emperor (D2 fail-closed ruling) | G1 dedicated tool; TTL 1200s; 6 typed refusals incl. `pok_gate_answer_unrecognized`; ASK cached AS-ASK; answered NEVER cached as ACCEPT; expiry → `pok_gate_expired`, no write |
+| 4 | Metrics-driven librarian flying only on access_count (retrieval≠use) | High | High | architect (J metric set) | J amendments — ledger retrieval supersedes access_count; timestamps corroborate-only; record_verification wired (gate path); cold-start floor ≥ current-active band; "no tightening when active_count < floor" unit |
+| 5 | Shadow judge rejects 65.8% BOTH-USEFUL class (R4 over-firing) | High | Medium | architect (R1-beats-R4 clause) | R1-beats-R4 clause verbatim; shadow mix ≈ census mix before P1 enforcement |
+| 6 | D1 tail at enforce — 20s/attempt × 45s wall inside a 180s-heartbeat turn | Medium | Medium | architect (D1 defaults; re-measure before P1) | 20s/45s defaults (12s sat below an observed 13.6s success); Pattern-C knobs `ENSEMBLE_POK_GATE_TIMEOUT_S`; measure fail-closed rate in shadow before P1; re-measure the latency tail (probe is 2026-09-07) |
+| 7 | Shadow answer-path ships dark — the ASK path is unexercised until P1 | Medium | Certain | leader (shadow-first policy) | Shadow-ASK is advisory-only (no pending mint, no "confirmation required" payload); T8.4–T8.10 acceptance exercised in ENFORCE mode in unit tests + one dev-lane exercise |
+| 8 | Cold-start tightening criminalizes the 499 existing rows as spurious ASK-tightening | Medium | High | architect (cold-start floor) | Soft-max derived = `max(floor, f(utilization))` with floor ≥ current active band; first weeks observe-and-stamp only; unit "no tightening when active_count < floor" |
+| 9 | Rubber-stamped merge proposals (judge-authored body accepted without scrutiny) | Medium | Medium | leader (rubber-stamp mitigation) | F2 — ASK payload carries the FULL target body + candidate body; ledger records proposal AND final body for edit-distance measurement; caller confirms/edits |
+| 10 | Pinned/curated merge target is a dead end (judge cannot see tier from the digest) | Medium | Low (0 pinned/curated today) | architect (tier pre-check) | TOOL pre-checks target tier; untouchable target → ASK routed to leader/PM (CURATOR), never auto-merge |
+| 11 | Merge-family split/archive drops durable content | Medium | Medium | leader (split/archive rule) | Split/re-key + ARCHIVE under a ruled basis only; never merge-with-drop; content-fence respected (each split body ≤240 chars escaped) |
+| 12 | DIVERGENCE B/C/D/E resolved — architect sign-off recorded (arch §3) | — | — | architect (sign-off §3) | Closed; remaining pending decisions are P6 merge_policy-at-P1, P4 reconciliation, feeder grants, latency re-measure |
+| 13 | Anchor drift (`:114-122` / `:253` stale; `KNOWN_TOOL_NAMES` 269 not 271) | Medium | Certain | Phase 0 preflight (anchors-are-leads) | Re-grep at build; verified values: `:221`/`:250`, `:384`, `models.py:251-260`, `repository.py:286-311`, `pok_service.py:237-242`, `project/models.py:358-373`, `config.py:573-584` |
+| 14 | TTL expiry storm at P1 — mass fail-closed (`pok_gate_expired`) on non-returning callers, silent lesson loss, retry ping-pong | High | Medium | architect (librarian pass) | mitigation = `pok_gate_expired` surfacing via the librarian periodic pass + an expiry-rate metric; TTL 1200s default; missing/unclassifiable answer never defaults to accept |
+| 15 | **Rider R-RET/R-PROV** — R-RET lexical over-rejection (a mechanical slug-similarity gate condemns retrievable-but-unusually-slugged rows; 6× over-inclusive regex precedent) + R-PROV re-litigation (judge re-applies rolling rejection to dated-provenance C1 rows) | Medium | Medium | leader/Emperor (rider amendment, 2026-11-24) | R-RET lexical leg ADVISORY-only (SC#29 figure flagged unbacked by approver B2); R-PROV protective clause verbatim (R1-beats-R4 shape); both SEMANTIC, Wave 2, shadow default OFF; shadow mix ≈ census mix before P1; see `gate-rules-r6-r7-amendment.md` |
+| 16 | 🟡 **SHARED SEAM — `daemon/repositories/pok/repository.py` is edited by the PARALLEL LANE and by THIS LANE** (parallel lane: the family-count fix at `:221`/`:250` + the 2-family split/re-key + archive; this lane: the counter carry-over at `supersede_and_insert` `:286-311`, and the later waves touch adjacent code — the refusal path in `pok_service.py` + the ledger/re-slug adjacency) | High | Medium | leader / parallel-lane coordination | **Sequence** — the parallel lane lands FIRST; this lane re-verifies the anchors AFTER their landing (re-grep `:221`/`:250`/`:286-311` at build time — anchors are leads, not citations). **Drift is reported, never silently absorbed:** a merge-order/drift finding on this seam BLOCKS the Phase-2 carry-over pin (T2.8) until re-verified. Recorded by the leader de-scope fold (2026-11-24). |
+
+## Success Criteria
+
+| # | Criterion | How to Measure | Threshold |
+|---|-----------|----------------|-----------|
+| 1 | `reason` required | Tool schema + unit test | `pok_reason_required` on missing/empty |
+| 2 | R0 named on failure | Unit test | refusal names R0 / content fence |
+| 3 | Family count — **the parallel lane owns the fix**; this lane consumes + re-verifies | Coordination + unit test vs census | The **parallel lane** owns the strict per-key fix and the 2-family split/re-key + archive (de-scoped 2026-11-24, leader dispatch). This lane's residual = (a) the family-full refusal path consuming the corrected count, (b) a read-only re-verify — both DEPENDENT on their landing. (Their figure, for reference: POST-FIX strict membership ⇒ 2 true over-cap families — guard-inv, prompt-assent — split/re-key + archive, no content-merge; 21 = the PRE-FIX prefix-counting figure, kept only as the sprawl-engine evidence) |
+| 4 | Ledger records admission+retrieval+verdict+execution+basis | Schema + query test | All fields present on gate event |
+| 5 | kb-writer loses `pok` grant | Grant-pin + absence pin | 53 explicit / 55 meta; kb-writer absent; mutation RED |
+| 6 | tool-categories.json untouched | git diff | No regen / no version bump |
+| 7 | 4 operational agents carry capture duty | grep + baseline | Guidance present; baseline rc=0 |
+| 8 | Gate has 4 outcomes | Unit tests | ACCEPT/MERGE/ASK/REJECT all reachable |
+| 9 | MERGE is count-preserving: delta MERGE executes supersede; no-delta MERGE = NO write + `record_verification` stamp only | Unit test | F2 fork (no-delta = verification-stamp only, no body authored) |
+| 10 | ASK never defaults to accept | TTL unit test | Missing answer → no write; audit records ask+answer |
+| 11 | Authority split | Unit test | Gate writes nothing; tool executes; audit both |
+| 12 | Gate SHADOW default OFF | Config test | judge refuses NO write while switch OFF (shadow logs only) |
+| 13 | verify_count stamps from gate path | Unit test | record_verification called on verdicts; count > 0 |
+| 14 | Soft-max metrics-derived, below 1024 | Test | Derived from utilization + floor; drift reported; floor ≥ current-active band |
+| 15 | Consolidation only under ruled bases | Test | No age / access-alone archive |
+| 16 | Shadow verdict mix ≈ census mix | Comparison | Disagreement ⇒ rubric wrong, do NOT enforce |
+| 17 | Guideline numbers cite snapshot times | Diff review | 499 @13:5xZ, composition, no bare counts |
+| 18 | Ledger migration only | git diff | EXACTLY ONE new `.sql` (the ledger's); none touching POK/embeddings tables |
+| 19 | Service-signature defaults present | Test | 97 direct `svc.upsert` sites stay green; mutation: remove a default → RED |
+| 20 | Judge digest K=48 within the 8000-char cap | Unit test | K=48 ⇒ ~7250 chars ≤ 8000 |
+| 21 | Stub unreachable in production | Config test | mode=stub in prod ⇒ one-shot WARN + forced llm |
+| 22 | Alias seam purpose-bound | Unit test | `POK_GATE_MODEL` default literal `"quick"`; never reads `config.llm.model`/`model_quick` fallback |
+| 23 | Two sibling enforcement switches, both OFF at build | Config test | `pok_gate.semantic_enforcement`=OFF, `pok_gate.softmax_tightening`=OFF |
+| 24 | Merge split/archive preserves content | Unit test | No body authored that drops a distinct rule; each ≤240 chars escaped — **execution owner = the parallel lane** (the family-count split/re-key); this lane verifies the surviving re-slug / carry-over path preserves content |
+| 25 | Counter carry-over on supersede | Pin + mutation | verify_count lineage preserved; dropping carry-over → RED |
+| 26 | `pok_gate_answer` in `KNOWN_TOOL_NAMES` | Pin | 269 → 270 names; answer-field branch in `pok_upsert` → RED |
+| 27 | Maintenance pass UN_GATED + registered | Pin | In `JOB_MAINTENANCE_SECTIONS`; boot path executes no pass |
+| 28 | Cached ASK never returns accept | Mutation | ASK-cache-hit → accept → RED |
+| 29 | **Mechanical pre-filter stages are justified by a MEASURED agreement rate, not assumption** (test phases) | Acceptance-set measurement over the PERSISTED hand-labelled bands (evidence-rederiv-2026-11-23/funnel-and-agreement.md Figure 2, 2026-11-24): **Band B 13/16 = 81.2%** (18 named hand-judged borderline rows; R/G axis n=16, C5 near-dup pair excluded at 0/2) and **Band C 42/50 = 84.0%** (50-row hand-classified tail; 5/25 hand-R lexical misses, 3/25 hand-G lexical false-positives); predicate for both bands: `ROLLING:` present ⟺ hand-R, absent ⟺ hand-G. The relayed agreement figure for the 64-row semantic borderline band is UNBACKED (per-row labels for that band were never persisted) and is DROPPED (its digits are not reproduced here by design — see the fold ledger). Honest residual: 81–84% lexical-vs-label agreement on the borderline bands leaves 16–19% error on exactly the contested rows — below the bar for an admission decision | Every mechanical pre-filter stage cites a measured agreement rate; the semantic R1/R2 core is empirically mandated, mechanical stages carry the burden of proof (SC#29 METHOD UNCHANGED — mechanical stages still justify themselves by measured agreement computed at verification time; it now carries real numbers) |
+| 30 | **The ledger alone answers "why was this row accepted?"** (ledger phase) | Operator query against the ledger alone (gate_id, verdict, reason excerpt, judge explanation, phase, execution) | An operator can reconstruct the admission decision from the ledger ALONE, with no cross-store join |
+| 31 | **R-RET (census R6) outcome + advisory-only lexical leg** | Unit test + mutation | NEW-write retrievability failure → ASK-with-rename-proposal, never auto-reject; lexical slug↔body overlap advisory-only (no mechanical pre-filter); librarian use = detection-into-ruled-bases only (no age/access-alone archive) |
+| 32 | **R-PROV (census R7) admit-side protective clause** | CONTRACT test + ledger trace | A dated-provenance row that R2 would flag is admitted when R-PROV fires (R1-beats-R4 shape); `rule_applied=R-PROV` traceable in the ledger; no new rejection ground |
+
+## Provenance — load-bearing evidence artifacts (branch-verifiable)
+
+The three load-bearing pok-sweep artifacts are COPIED into this worktree's planning directory under `evidence-pok-sweep/`, so every citation to them is branch-verifiable (re-derive with `sha256sum`):
+
+| Artifact (in `evidence-pok-sweep/`) | sha256 |
+|---|---|
+| `census-rows-active-2026-11-23.tsv` | `b1f5842d60031cc165a5045bf3817101cb745c840b8d5ad2247ea287673c9b59` |
+| `census-rows-active-2026-11-23.mech-labels.tsv` | `6737281cfc7eddfb2f82a1af3317c1560ca465225162b503292a2ddd5d075ab1` |
+| `census-mechanics-2026-11-23.md` | `b819401e4b5a0017423d0144143ba6c3effeef3761eea4013820b82c0d4eaf52` |
+
+The remaining canonical-only artifacts (`cutlist*`, census-active json/md) stay **cite-with-provenance-only** (they are not copied into the branch).
+
+## Research Insights
+
+- Re-verified anchors: family count `repository.py:221`/`:250` (addendum's `:114-122` stale); `record_verification` at `:384` (`:253` stale), zero callers (now wired per addendum-3).
+- Grant census 54→53 target; kb-writer currently holds `pok` (grant removal restored by the Emperor ruling — SETTLED, not an open Emperor's call); `meta.json` unsealed; tool-categories.json = vocabulary not grants.
+- Feeder assessment (read-only): experiencer + kb-importer BOTH hold `pok` grant, ZERO `pok` prompt mentions, both in long tail (not top-12 creators) — recommend assess volume before any change; Emperor decides.
+- MaintenanceService precedent for periodic pass: `daemon/services/maintenance.py:259`.
+- Measured (cite snapshot times): 499 active @13:5xZ; OH 396 / RS 74 / EPISODE 21 / GK 4 / INCIDENT 2 / DUP 2; 12,968-doc RAG corpus; overlap BOTH-USEFUL 337/65.8%, RAG-DUPLICATE 81/15.8%, POK-ONLY 78/15.2%, NEITHER 16/3.1%; tiers inert (0 pinned/curated/verify; 109 never-accessed); ~87% boundary-PASS.
+- Measured retrieval legs (independent re-derivation, 2026-11-24T01:53Z–03:25Z; source `evidence-rederiv-2026-11-23/funnel-and-agreement.md`, sha256 `b55101a3…8ada`, 276 lines) — **NOT a nested funnel** (the legs measure different surfaces and are NOT monotone; no cross-leg percentages are derived): 568 active @2026-11-24T01:53–02:05Z, drifting to 573 during re-measurement (the store is ACTIVELY GROWING, which strengthens the soft-max rationale); 431 ever retrieved **BY QUERIES** (access_count is query-only — sole increment `daemon/repositories/pok/repository.py:232`, sole caller `daemon/services/pok_service.py:677`; the injection path only READS it as a rank key, `daemon/services/pok_injection.py:198` — this leg is NEVER labelled "injected"); 384 distinct active slugs ever injected — **retention-bounded lower bound** (checkpoint_blobs msgpack channel, window ≥2026-10-26, latest-block-per-thread), never a total; 518 active slugs cited by exact kebab-token — **definition-laden** (a slug-token mention ≠ knowledge-informed use; enumeration-style reports inflate it; report-level corroboration 156 of 1,412 project-scoped reports); cross-check 2,402 `instances.metadata` rows carry `pok_injected=true`. **Census tension — surfaced, not harmonized:** 499 active @2026-11-23 13:5xZ (addendum-3 census) vs 568→573 @2026-11-24 (re-derivation) — both cited with their own times.
+- Measured hand-label agreement (same artifact, Figure 2): **Band B 13/16 = 81.2%** (18 named hand-judged borderline rows; R/G axis n=16; C5 near-dup pair excluded at 0/2) and **Band C 42/50 = 84.0%** (50-row hand-classified tail; 5/25 hand-R lexical misses, 3/25 hand-G lexical false-positives); predicate for both bands: `ROLLING:` present ⟺ hand-R, absent ⟺ hand-G. Honest residual: 81–84% lexical-vs-label agreement on the borderline bands still leaves 16–19% error on exactly the contested rows — below the bar for an admission decision; the judge mandate stands on the Emperor's ruling PLUS this measured residual.
+- Family breach reconciliation: 21 operative (code prefix count) → 2 true (strict per-key).
+
+## Open Questions — architect FOLDS RESOLVED (F–J, D1/R1); remaining pending decisions
+
+**RESOLVED by this fold (no longer open):**
+- **R1 / D1 — OVERTURNED.** Latency defaults are now **20s/attempt, ≤1 retry, 45s wall**, env `ENSEMBLE_POK_GATE_TIMEOUT_S` (min 10 / max 180, Pattern-C). The 12s figure sat BELOW an observed 13.6s judge success. Knobs approved; defaults adjusted on evidence.
+- **F (merge-body authorship) — RESOLVED = F2.** Caller-confirmed merge; `merge_policy` switchable enum default `ASK_WITH_PROPOSAL`; no-delta/delta split (no-delta = verification-stamp only, no write).
+- **G (ASK answer path) — RESOLVED = G1.** Dedicated `pok_gate_answer(gate_id, answer)` tool; TTL 1200s (min 120 / max 3600), owner-scoped; 6 typed refusals; ASK cached AS-ASK; answered NEVER cached as ACCEPT; shadow-ASK advisory-only ⇒ answer path unit-tested in ENFORCE mode.
+- **H (periodic pass) — RESOLVED = H3.** MaintenanceService job (UN_GATED, in `JOB_MAINTENANCE_SECTIONS`) + on-write bound-check.
+- **I (soft-max placement) — RESOLVED = I1.** `project_metadata_records` key `pok.soft_max.v1` — ZERO migration; the curated-POK-row variant is DOCTRINE-WRONG (rolling state in a durable store).
+- **J (metric set) — RESOLVED = CONFIRMED §9 set + 3 amendments** (ledger retrieval supersedes access_count; timestamps corroborate-only; per-row vs per-store labels) + counter carry-over fix.
+- **B/C/D/E — RESOLVED** (architect sign-off recorded in the ON-DISK binding doc `architecture-recommendation.md` §3, this directory — the shape recommendation is NOT awaited from any external source).
+
+**REMAINING pending (none block the build):**
+1. **P4 dup-slug reconciliation** — PRE-P4 RECONCILIATION GATE (census says DUPLICATE=2, exact-body dup groups=0). Not a pre-build blocker.
+2. **`merge_policy` default at P1** — stay `ASK_WITH_PROPOSAL` vs promote to `AUTO`, decided by shadow evidence (merge rate + proposal fidelity) — tracked as parked P6.
+3. **Feeder grants (experiencer/kb-importer)** — assess-and-report only; Emperor decides (Phase 9).
+4. **Re-measure the quick-latency distribution before P1** — the 2.6–13.6s / 4-of-8->15s probe dates from 2026-09-07; it is the single assumption that most weakens the D1 defaults.
+
+## Task Map (ownership chain — centerpiece)
+
+One row per task: task → artifact → File cell (target, re-verified) → leg row (proving test/mutation) → PACKS.md row. Tasks without a proving leg are marked UNPINNED and justified.
+
+### Wave 1 task map
+
+| Phase | Task | Artifact | File cell | Leg row | PACKS.md row |
+|-------|------|----------|-----------|---------|--------------|
+| 0 | T0.1 Re-verify anchors | Verified anchor list | repository.py:221/:250/:384; pok_service.py:296-561; pok.py:117-120,196-206 | grep verification | n/a (preflight) |
+| 0 | T0.2 Confirm kb-writer grant present (54→53 target) | Grep output | agents/kb-writer/meta.json | grant-pin 54/55 green pre-edit | n/a (preflight) |
+| 0 | T0.3 Confirm meta.json unsealed | Baseline scan | agents/.prompt-artifacts.sha256 | grep meta.json = 0 | n/a (preflight) |
+| 0 | T0.4 Confirm tool-categories = vocabulary | Doc note | daemon/tools/_tool_registry.py | inspection | n/a (preflight) |
+| 0 | T0.5 Confirm ledger additive-table feasibility | Import note | daemon/repositories/pok/models.py | import smoke | n/a (preflight) |
+| 1 | T1.1 Define ledger table (admission+retrieval+verdict+execution+basis) + **gate_id + phase + merge-proposal fields UP FRONT** | New SQLModel table; fields per design-amendments §13.5 | daemon/repositories/pok/models.py | schema test (all 3 audit phases + proposal fields present) | n/a (schema) |
+| 1 | T1.2 Add additive migration `.sql` for the ledger table (house rule: every new table gets its own file) | New migration file | daemon/migrations/versions/<new>.sql | migration present; applies cleanly; touches no POK/embeddings table | n/a (schema) |
+| 1 | T1.3 Ledger repository (append-only, read-only-cheap) | Repo methods | daemon/repositories/pok/repository.py | unit test append/query | pok_write_gate_w1_unit_test |
+| 1 | T1.4 Gate→ledger verdict write + tool→ledger execution write | Call sites | pok_gate.py (W2) / pok_service.py (W1 mechanical) | unit test both rows | pok_write_gate_w1_unit_test |
+| 1 | T1.5 Retrieval event capture | Hook | daemon/services/pok_injection.py | unit test retrieval logged | pok_write_gate_w1_unit_test |
+| 1 | T1.6 Basis enum on archive (mandatory) | Enum + validation | daemon/tools/pok.py (pok_curate) | unit test basis required | pok_write_gate_w1_unit_test |
+| 1 | T1.7 Ledger read surface (internal) | Query helper | daemon/repositories/pok/repository.py | unit test | pok_write_gate_w1_unit_test |
+| 2 | T2.COORD COORDINATION — the **parallel lane** owns the family-count fix (strict per-key at `repository.py:221`/`:250`) + the 2-family SPLIT/RE-KEY + ARCHIVE (`guard-inv`, `prompt-assent`); the design constraints TRANSFER to that lane (split-never-merge per the standing `pok-sweep-01-merge-cap-split`; ≤240-char escaped-body fence; archive only under a ruled basis). This lane consumes/verifies and EXECUTES NOTHING | Coordination note (no code) | plan-overview.md + phase2-plan.md | read-only re-verify after their landing (anchors re-grepped at use time) | n/a (coordination) |
+| 2 | T2.5 Family-full refusal uses the corrected count — **depends on the parallel lane's fix landing** | Refusal path | daemon/services/pok_service.py | unit test (refusal against the corrected count) | pok_write_gate_w1_unit_test |
+| 2 | T2.6 Re-verify the corrected count against the census — **read-only, against the parallel lane's fix** | Census note | scratch fixture | count re-derived + reported | n/a (verify) |
+| 2 | T2.7 Counter carry-over at supersede (verify_count + adopted metrics) — successor inherits prior counters instead of defaulting to 0 | Repo touchpoint | daemon/repositories/pok/repository.py:286-311 (`supersede_and_insert`); counters at daemon/repositories/pok/models.py:251-260 | unit test: verify_count lineage preserved across supersede | pok_write_gate_w1_unit_test |
+| 2 | T2.8 PIN: counter carry-over present — mutation leg: dropping carry-over must RED | Mutation evidence | throwaway git archive | RED confirmed | pok_write_gate_w1_unit_test |
+| 3 | T3.1 `reason` (str, default None) + `gate_fn=None` DEFAULTS on `POKService.upsert` (signature defaults are mandatory — 97 direct `svc.upsert` test sites otherwise break) | Service signature | daemon/services/pok_service.py:296; sites verified in tests/unit/services/test_pok_service_unit.py (97 `.upsert(` sites) | existing 97 sites green; mutation: remove a default → RED | pok_write_gate_w1_unit_test |
+| 3 | T3.2 `reason` on `pok_upsert` typed signature + docstring; preserve `_substitute_active_cap` | Tool signature | daemon/tools/pok.py:196-239 | tool schema test | pok_write_gate_w1_unit_test |
+| 3 | T3.3 Reason validation → `pok_reason_required` + PIN: refusal-precedence order (scope→store→reason→fence/budget/family, preserving existing codes) vs the 6 precedence-sensitive tests (`test_pok_tools_unit.py:180,:197,:281,:291,:299,:315`) | Tool validation + pin | daemon/tools/pok.py:117-120; tests/unit/tools/test_pok_tools_unit.py:180,:197,:281,:291,:299,:315 | unit test + mutation leg | pok_write_gate_w1_unit_test |
+| 3 | T3.4 R0 named fence enforcement (mechanical) | Fence name in refusal | daemon/services/pok_service.py:395 (`fence_check(body)`) | unit test R0 named | pok_write_gate_w1_unit_test |
+| 3 | T3.5 Typed refusals via `_err` | Envelope | daemon/tools/pok.py:117-120 | unit test envelope | pok_write_gate_w1_unit_test |
+| 3 | T3.6 Tool sweep — **37** `.invoke(` in `tests/unit/tools/test_pok_tools_unit.py` (18 upsert-index + 13 bare-tool) + **9** in `tests/unit/services/test_pok_trust_tier_unit.py` (6 upsert); unswept upserts will RED once `reason` is REQUIRED | Test edits | tests/unit/tools/test_pok_tools_unit.py, tests/unit/services/test_pok_trust_tier_unit.py | existing tests green | pok_write_gate_w1_unit_test |
+| 3 | T3.7 Mutation: remove reason validation → RED | Mutation evidence | throwaway git archive | RED confirmed | pok_write_gate_w1_unit_test |
+| 3 | T3.8 Scope note: `pok_default_project` = scope, not verdict | Ops note | plan-overview.md | n/a (doc) | n/a (doc) |
+| 3 | T3.9 PIN: service-signature defaults present — mutation leg: removing `reason`/`gate_fn` defaults must RED (97 sites) | PIN (service signature) | daemon/services/pok_service.py:296 | RED (throwaway archive) | pok_write_gate_w1_unit_test |
+| 4 | T4.1 Remove `"pok"` from kb-writer meta.json tools.allow (54→53) | meta.json edit | agents/kb-writer/meta.json | grant-pin 53 green | n/a (grant) |
+| 4 | T4.2 Update `test_pok_grant_pins.py`: EXPECTED_EXPLICIT 54→53 + completeness-walk exception for kb-writer | Test edits | tests/unit/test_pok_grant_pins.py | pin green | pok_write_gate_w1_unit_test |
+| 4 | T4.3 Refresh stale docstring in grant-pin file | Doc edit | tests/unit/test_pok_grant_pins.py (docstring) | docstring matches | n/a (doc) |
+| 4 | T4.4 NEW pin: kb-writer does NOT hold `pok` + mutation leg (re-add → RED) | New pin | tests/unit/test_pok_grant_pins.py | new pin green + mutation RED | pok_write_gate_w1_unit_test |
+| 4 | T4.5 Verify tool-categories.json UNTOUCHED | git diff | daemon/tools/_tool_registry.py + artifact | no regen / no version bump | n/a (verify) |
+| 4 | T4.6 Compensating capture-duty guidance for 4 operational agents (ari, PM, leader, devops) — edits land in each agent's `tools_note.md` (natural home for capture-duty guidance) | 4 sealed .md edits | `agents/ari/tools_note.md`, `agents/project-manager/tools_note.md`, `agents/leader/tools_note.md`, `agents/devops/tools_note.md` | baseline --check rc=0 | n/a (sealed) |
+| 4 | T4.7 Routing contract migration to 4 agents (operational→POK with reason, knowledge→RAG) | Prompt text (same 4 files) | `agents/ari/tools_note.md`, `agents/project-manager/tools_note.md`, `agents/leader/tools_note.md`, `agents/devops/tools_note.md` | pin + mutation | n/a (sealed) |
+| 4 | T4.8 Baseline regen for the 4 edited sealed entries (`agents/ari/tools_note.md`, `agents/project-manager/tools_note.md`, `agents/leader/tools_note.md`, `agents/devops/tools_note.md`) | Baseline file | agents/.prompt-artifacts.sha256 | --check rc=0 | n/a (sealed) |
+| 4 | T4.9 Pin-tests for touched sealed files | Test edits | test_prompt_artifacts* | green | n/a (sealed) |
+| 4 | T4.10 kb-writer keeps RAG-side routing only (no POK guidance added) | Doc note | agents/kb-writer/ (no edit) | grep confirms | n/a (doc) |
+| 5 | T5.1 Wire `record_verification` into gate path (metrics foundation) | Caller in gate | daemon/services/pok_gate.py (W2) + repository.py:384 | unit test verify_count stamps | pok_write_gate_w1_unit_test |
+| 5 | T5.2 Vector leg retire-with-disclosure note | Doc note | guideline measured-state (Phase 12) | diff review | n/a (docs) |
+| 5 | T5.3 Trusted-vs-ignored metric set note | Doc note | design-amendments §9 / guideline | diff review | n/a (docs) |
+| 5 | T5.4 Docstring class boundary (operational how-to vs knowledge) | Doc edit | daemon/services/pok_service.py docstring | diff review | n/a (docs) |
+| 5 | T5.5 Never-age/access note (112 zero-retrieval rows) | Doc note | guideline | diff review | n/a (docs) |
+| 5 | T5.6 Standing-defect residual rows in ledger | Ledger rows | ledger repo | unit test | pok_write_gate_w1_unit_test |
+| 6 | T6.1 Wave 1 unit tests (surviving Phase-2 work only: refusal-path consumption + carry-over) | Test files | tests/unit/... | self | pok_write_gate_w1_unit_test |
+| 6 | T6.2 Mutation: reason validation removed → RED | Mutation | throwaway archive | RED | pok_write_gate_w1_unit_test |
+| 6 | T6.3 Mutation: grant re-added to kb-writer → RED | Mutation | throwaway archive | RED | pok_write_gate_w1_unit_test |
+| 6 | T6.4 Mutation: counter carry-over dropped from supersede → RED | Mutation evidence | throwaway git archive | RED confirmed | pok_write_gate_w1_unit_test |
+| 6 | T6.5 Pack registration `pok_write_gate_w1_unit_test` | PACKS.md | .agents/tester/PACKS.md | pack clean | pok_write_gate_w1_unit_test |
+| 6 | T6.6 Ledger schema test | Test | tests/unit/... | self | pok_write_gate_w1_unit_test |
+| 6 | T6.7 Tool sweep green | Test edits | tool unit tests | green | pok_write_gate_w1_unit_test |
+| 6 | T6.8 Baseline --check | Gate | generator | rc=0 | n/a (sealed) |
+| 6 | T6.9 Scratch-store fence | Test fixture | in-memory sqlite two-table | no live write | pok_write_gate_w1_unit_test |
+
+### Wave 2 task map
+
+| Phase | Task | Artifact | File cell | Leg row | PACKS.md row |
+|-------|------|----------|-----------|---------|--------------|
+| 7 | T7.1 `pok_gate.py` skeleton + typed outcome (verdict ∈ ACCEPT/MERGE/ASK/REJECT) | New module | daemon/services/pok_gate.py | import smoke | n/a (service) |
+| 7 | T7.2 Judge client (quick alias, per-attempt timeout + wall cap) | Client fn | pok_gate.py | mocked LLM unit | pok_write_gate_w2_unit_test |
+| 7 | T7.3 R0–R5 + R-RET/R-PROV gate-rule parser (closed-set verdict+family UNCHANGED, one fence, garbage→ASK/unavailable) | Parser | pok_gate.py | unit tests | pok_write_gate_w2_unit_test |
+| 7 | T7.4 Family→template map (5, each names home + Emperor trace) | Templates | pok_gate.py | 5 CONTRACT tests | pok_write_gate_w2_unit_test |
+| 7 | T7.5 MERGE detection: active row carries fact → MERGE + target slug | Detector | pok_gate.py | unit test (no second row) | pok_write_gate_w2_unit_test |
+| 7 | T7.6 MERGE-body authorship = **F2**: judge outcome carries `target_slug` + `merged_body_proposal`; ASK payload carries FULL target body + candidate body; caller confirms/edits; TOOL executes the caller-final body. `merge_policy` enum {ASK_WITH_PROPOSAL (default), AUTO, ASK_NO_PROPOSAL}. **No-delta merge = NO write** (verdict row + `record_verification` stamp on target) | Seam | pok_gate.py | PIN default=ASK_WITH_PROPOSAL; mutation: auto-execute without confirmation → RED; no-delta merge writing a row → RED | pok_write_gate_w2_unit_test |
+| 7 | T7.7 Confidence ≤2/3 → ASK (never auto-reject) | ASK branch | pok_gate.py | unit test | pok_write_gate_w2_unit_test |
+| 7 | T7.8 Verdict cache (LRU, key=project+slug+sha body+sha reason) | Cache | pok_gate.py | key-exactness unit | pok_write_gate_w2_unit_test |
+| 7 | T7.9 Digest (**K=48**, 80-char bodies, 8000-char cap, boundary clause; zero-overlap fallback = same-family-first / most-recently-verified) | Digest builder | pok_gate.py | budget unit: K=48 ≈ 7250 ≤ 8000 | pok_write_gate_w2_unit_test |
+| 7 | T7.10 Pattern-C timeout knobs (**20s/attempt, ≤1 retry, 45s wall**; env `ENSEMBLE_POK_GATE_TIMEOUT_S`, min 10 / max 180) | Resolver | daemon/services/pok_gate_timeout_resolver.py | unit tests (12s figure OVERTURNED — it sat below an observed 13.6s success) | pok_write_gate_w2_unit_test |
+| 7 | T7.11 Stub mode (rule-based, never pass-through) — **PROD-FORCED to llm**: mode=stub in prod ⇒ loud one-shot WARN + forced llm; stamp `model_alias="stub"`; segregate stub cache entries | Stub | pok_gate.py | rejects known-bad; prod-force unit | pok_write_gate_w2_unit_test |
+| 7 | T7.12 R1-beats-R4 clause verbatim + **R-PROV protective clause** (date-as-evidence admits; R1-beats-R4 shape) + judge question "what breaks in THIS repo if we drop this?" | Prompt string | pok_gate.py | boundary CONTRACT (incl. R-PROV dated-provenance admits) | pok_write_gate_w2_unit_test |
+| 7 | T7.13 Alias seam: purpose-bound `POK_GATE_MODEL` env, default literal `"quick"` — NEVER reads `config.llm.model_quick` (rewritten to GLOBAL model by `set_title_model_fallback`) nor `config.llm.model`; stamp the resolved alias on every verdict row | Resolver | daemon/services/pok_gate.py + daemon/config.py:573-584 | unit test: alias is the literal purpose-id, not the global model | pok_write_gate_w2_unit_test |
+| 7 | T7.14 `UpsertOutcome` gains an ASK variant (entry is non-optional in the current shape) | Outcome dataclass | daemon/services/pok_service.py:237-242 | unit test: ASK outcome constructible | pok_write_gate_w2_unit_test |
+| 7 | T7.15 **R-RET (census R6)** judge question + advisory-only lexical leg; optional `proposed_slug` field on the typed outcome (T7.1 retains base fields); no new verdict/family token | Prompt string + outcome field | pok_gate.py | unit test: R-RET advisory flag; mutation: lexical-only auto-reject → RED | pok_write_gate_w2_unit_test |
+| 8 | T8.1 Authority split: gate writes NOTHING, returns typed verdict | Pure function | pok_gate.py | unit test (no writes) | pok_write_gate_w2_unit_test |
+| 8 | T8.2 TOOL executes: write (ACCEPT); supersede (MERGE delta, count-preserving); NO write (MERGE no-delta); archive residue under a ruled basis | Executor | daemon/tools/pok.py | unit test | pok_write_gate_w2_unit_test |
+| 8 | T8.3 Audit records BOTH verdict and execution | Audit rows | ledger repo | unit test both rows | pok_write_gate_w2_unit_test |
+| 8 | T8.4 ASK payload: structured "confirmation required" from pok_upsert | Envelope | daemon/tools/pok.py | tool test | pok_write_gate_w2_unit_test |
+| 8 | T8.5 ASK answer path = **G1**: dedicated `pok_gate_answer(gate_id, answer)` tool; answer carries NO body (pending entry stores adjudicated stripped body + all upsert inputs); execution re-runs `POKService.upsert` with `gate_fn=None` so scope/fence/budget/no-op/caps re-check at answer time | New tool | daemon/tools/pok.py; daemon/tools/_tool_registry.py KNOWN_TOOL_NAMES (269 → 270) | PIN: tool registered; mutation: answer-field branch inside `pok_upsert` → RED | pok_write_gate_w2_unit_test |
+| 8 | T8.6 Pending-gate state IN-PROCESS, **TTL 1200s** (env `ENSEMBLE_POK_GATE_ASK_TTL_S`, min 120 / max 3600), owner-scoped; NO live-store writes for pending state | Pending store | daemon/services/pok_gate.py; resolver shape per daemon/services/attestation_judge_timeout_resolver.py:84-180 | TTL unit test | pok_write_gate_w2_unit_test |
+| 8 | T8.7 Missing answer → NO write (fail-closed, never default accept) + audit ask+answer; **6 typed refusals**: `pok_gate_unknown`, `pok_gate_expired`, `pok_gate_already_answered` (audited no-op), `pok_gate_not_owner` (audited), `pok_gate_answer_required`, `pok_gate_answer_unrecognized` (unclassifiable ⇒ no write) | Fail-closed path | pok_gate.py / pok.py | unit test per refusal | pok_write_gate_w2_unit_test |
+| 8 | T8.8 SHADOW default OFF (no write refused by judge); **shadow-ASK advisory-only** — verdict logged (`phase=ASK_SHADOW`), `gate.advisory=true`, NO pending mint, NO "confirmation required" payload | Switch | daemon-settings surface | config test | n/a (config) |
+| 8 | T8.9 `gate_fn` injected strictly BETWEEN the no-op echo (:432) and supersede (:433); bypass = None | `gate_fn` | pok_service.py (after :432) | unit test gate called only on non-no-op | pok_write_gate_w2_unit_test |
+| 8 | T8.10 No circular import (gate → ledger via engine) | Import smoke | pok_gate.py | import test | n/a (build) |
+| 8 | T8.11 Enforcement switch = **TWO SIBLING settings keys**, both default OFF at build: `pok_gate.semantic_enforcement` + `pok_gate.softmax_tightening` (DB-backed, `settings:write`, NOT env) | Settings keys | daemon settings surface | config test: both OFF | n/a (config) |
+| 8 | T8.12 Tier pre-check: a pinned/curated merge target is curator-only (`pok_service.py:592-611`) and invisible in the digest — TOOL pre-checks target tier; untouchable target → ASK routed to leader/PM (CURATOR), never auto-merge | Tier guard | daemon/tools/pok.py | unit test: pinned target → ASK-to-curator | pok_write_gate_w2_unit_test |
+| 8 | T8.13 Cache × ASK: ASK cached AS-ASK under the D5 key; replay re-asks with the SAME question but re-mints a fresh `gate_id` + TTL; the ANSWERED outcome is NEVER cached as ACCEPT; stub/llm cache entries segregated | Cache rule | pok_gate.py | PIN + mutation: ASK-cache-hit → accept → RED | pok_write_gate_w2_unit_test |
+| 8 | T8.14 3-row ASK audit chain keyed by `gate_id` + `phase`: `ASK_MINTED` → `ASK_ANSWERED` → `ASK_EXECUTED`; plain ACCEPT/MERGE/REJECT keep 2 rows; expired/never-answered gates surfaced by the librarian pass (`phase=ASK_EXPIRED`) | Audit rows | ledger repo | unit test 3 rows | pok_write_gate_w2_unit_test |
+| 8 | T8.15 **R-RET outcome mapping**: NEW-write retrievability failure → ASK-with-rename-proposal (never auto-reject; shadow = advisory-only); TOOL executes re-slug via the supersede_and_insert machinery (`repository.py:286-311`); Phase-2 coordination (T2.COORD) + carry-over (T2.7) — body preserved, count-neutral | ASK branch + executor | pok_gate.py / daemon/tools/pok.py | unit test: rename→ASK, TOOL re-slug preserves body; mutation: R-RET hard-reject → RED | pok_write_gate_w2_unit_test |
+| 9 | T9.1 Census read surface (curator-only product tool) | New tool | daemon/tools/pok.py | tool test | pok_write_gate_w2_unit_test |
+| 9 | T9.2 Per-lane refusal transition map | Doc | guideline / planning dir | diff review | n/a (docs) |
+| 9 | T9.3 Route table + `destination_available` grant-check | Tool | pok.py (rejection envelope) | unit test | pok_write_gate_w2_unit_test |
+| 9 | T9.4 Zero silent drops — parking table seam (P1-ready) | Seam | ledger repo | unit test | pok_write_gate_w2_unit_test |
+| 9 | T9.5 ASSESS: experiencer/kb-importer grant + POK write volume | Assessment note | plan report (this doc §10) | grep + census read | n/a (assess) |
+| 9 | T9.6 REPORT recommendation (Emperor decides; no unilateral change) | Report | plan-overview.md | human review | n/a (report) |
+| 9 | T9.7 Verify no other grant pin asserts grant set | grep | tests/unit/ | grep confirms one | n/a (verify) |
+| 9 | T9.8 Scratch/synthetic fixture fence for gate exercises | Test fixture | in-memory sqlite | no live write | pok_write_gate_w2_unit_test |
+| 9 | T9.9 Baseline consistency check after all prompt edits | Gate | generator --check | rc=0 | n/a (sealed) |
+| 10 | T10.1 Librarian reads per-entry metrics (access, verify, tier, family, author, timestamps) | Reader | daemon/services/pok_gate.py (librarian leg) | unit test | pok_write_gate_w2_unit_test |
+| 10 | T10.2 Soft/smart max: metrics-derived ceiling + floor, below 1024 — derived = `max(floor, f(utilization))`; **floor ≥ current active-count band** so tightening stays DORMANT until real gate activity lifts the value (else the first pass criminalizes the census-era rows — 499 active @2026-11-23 13:5xZ, re-measured 568→573 active on 2026-11-24: the store is ACTIVELY GROWING, which strengthens the soft-max rationale). **Utilization basis = the 2026-11-24 measured retrieval legs (evidence-rederiv-2026-11-23/funnel-and-agreement.md Figure 1 — NOT a nested funnel; the legs measure different surfaces and are NOT monotone): 568 active @2026-11-24T01:53–02:05Z, drifting to 573 during re-measurement — the store is ACTIVELY GROWING, which strengthens the soft-max rationale; 431 ever retrieved BY QUERIES (access_count is query-only: sole increment daemon/repositories/pok/repository.py:232 ← sole caller daemon/services/pok_service.py:677; injection only READS it as a rank key, daemon/services/pok_injection.py:198 — NEVER label this leg "injected"); 384 distinct active slugs ever injected — RETENTION-BOUNDED LOWER BOUND (checkpoint_blobs msgpack channel, window ≥2026-10-26, latest-block-per-thread), never a total; 518 active slugs cited by exact kebab-token — DEFINITION-LADEN (a slug-token mention ≠ knowledge-informed use; enumeration reports inflate it; report-level corroboration 156 of 1,412 project-scoped reports). Cross-check: 2,402 instances.metadata rows carry pok_injected=true** | Derivation | librarian module | unit: "no tightening when active_count < floor" (highest-value test) | pok_write_gate_w2_unit_test |
+| 10 | T10.3 Soft-max placement = **I1**: `project_metadata_records` key `pok.soft_max.v1` = JSON `{value, inputs, computed_at, drift}` — ZERO migration; read at write time by one unique-index SELECT, NO in-process memo | Storage | daemon/repositories/project/models.py:358-373 (table + `uq_project_metadata_project_key`) | PIN: value lives in project metadata; mutation: a soft-max/meta row inside the POK store → RED (doctrine pin) | pok_write_gate_w2_unit_test |
+| 10 | T10.4 Periodic pass = **H3 hybrid**: ONE global MaintenanceService job (registered at manager initialize) looping project_ids + the on-write bound-check (subsumed — upsert already loads `active_count` for the 1024 cap at `pok_service.py:458-465`); `idle_policy=UN_GATED`; in `JOB_MAINTENANCE_SECTIONS`; **writes a `maintenance_runs` row (`section='pok-librarian'`, table exists, zero migration)**; per-project try/except; boot path executes no pass | Pass | daemon/services/maintenance.py:218 (sections) + :259 (MaintenanceService) | PIN: UN_GATED + registered + maintenance_runs row written; mutation: boot path contains pass execution → RED (SLO guard) | pok_write_gate_w2_unit_test |
+| 10 | T10.5 Recompute + drift report | Report | librarian module | unit test | pok_write_gate_w2_unit_test |
+| 10 | T10.6 Near-soft-max tightening (more ASK rounds, prefer MERGE over new rows) | Admission logic | pok_gate.py | unit test | pok_write_gate_w2_unit_test |
+| 10 | T10.7 Consolidation under ruled bases only (covered-by-surviving-row / relocated-to-routed-home / NOW-FALSE) — NEVER age, NEVER access_count alone | Consolidator | librarian module | unit test (no age/access-alone archive) | pok_write_gate_w2_unit_test |
+| 10 | T10.8 Trusted-vs-ignored metric enforcement = **J CONFIRMED + 3 amendments**: (1) ledger retrieval counts supersede access_count once Phase 1 lands (access_count becomes legacy corroboration); (2) timestamps corroborate, never trigger; (3) label per-row vs per-store metrics separately | Filter | librarian module | unit test; mutation: access_count-alone triggers archive → RED | pok_write_gate_w2_unit_test |
+| 10 | T10.9 Proactive consolidation pass trigger | Trigger | librarian module | unit test | pok_write_gate_w2_unit_test |
+| 10 | T10.10 Surface expired / never-answered gates from the ASK chain (librarian periodic pass is the safety net for non-returning callers) | Pass leg | daemon/services/pok_gate.py (librarian) + ledger repo (`phase=ASK_EXPIRED`) | unit test; audit `phase=ASK_EXPIRED` | pok_write_gate_w2_unit_test |
+| 10 | T10.11 J partition wiring: MERGE-TARGET selection ← verify_count + tier + family-match + recency + high-access corroboration; redundancy evidence ← family + content_sha256 + prior MERGE verdicts (a RAG twin is NEVER redundancy); staleness ← corroborator only; access_count only in COMBINATION | Filter | librarian module | unit test per partition rule | pok_write_gate_w2_unit_test |
+| 10 | T10.12 **R-RET librarian detection**: per-entry metrics (never-retrieved / NOFAM∧ZA) feed R-RET as a DETECTION signal into the T10.7 ruled-bases consolidator (MERGE if a well-slugged active row carries the fact; re-slug proposal if unique content) — NEVER a standalone archive basis, never age/access-alone | Detection leg | librarian module | unit test: R-RET proposes under ruled basis only; mutation: R-RET alone archives → RED | pok_write_gate_w2_unit_test |
+| 11 | T11.1 Shadow mix ≈ census mix gate | Test | tests/unit/... | comparison | pok_write_gate_w2_unit_test |
+| 11 | T11.2 5 family CONTRACT tests | Test | tests/unit/... | self | pok_write_gate_w2_unit_test |
+| 11 | T11.3 MERGE/ASK/authority/verify-stamp tests | Test | tests/unit/... | self | pok_write_gate_w2_unit_test |
+| 11 | T11.4 Mutation: remove gate call → RED | Mutation | throwaway archive | RED | pok_write_gate_w2_unit_test |
+| 11 | T11.5 Mutation: fail-open flip → RED | Mutation | throwaway archive | RED | pok_write_gate_w2_unit_test |
+| 11 | T11.6 Mutation: RAG-twin rejection → RED | Mutation | throwaway archive | RED | pok_write_gate_w2_unit_test |
+| 11 | T11.7 Fork pin TTL — expiry ⇒ `pok_gate_expired`, no write; TTL default 1200s; mutation: missing ASK answer defaults to accept → RED | Pin + mutation | daemon/services/pok_gate.py (pending state) | pin green + mutation RED | pok_write_gate_w2_unit_test |
+| 11 | T11.8 Marked LLM integration test | Marked test | tests/integration/ | excluded default | n/a (marked) |
+| 11 | T11.9 Pack registration `pok_write_gate_w2_unit_test` | PACKS.md | .agents/tester/PACKS.md | pack clean | pok_write_gate_w2_unit_test |
+| 11 | T11.10 Scratch-store fence | Fixture | in-memory sqlite | no live write | pok_write_gate_w2_unit_test |
+| 11 | T11.11 Fork pin G: `pok_gate_answer` in KNOWN_TOOL_NAMES (269→270); mutation: answer-field branch inside `pok_upsert` → RED | Pin | daemon/tools/_tool_registry.py | pin green + mutation RED | pok_write_gate_w2_unit_test |
+| 11 | T11.12 Fork pin F: MERGE delta-execution requires a completed ASK answer under `merge_policy=ASK_WITH_PROPOSAL`; mutations: auto-execute without confirmation → RED; no-delta merge writing a row → RED | Pin | pok_gate.py | pin green + 2 mutations RED | pok_write_gate_w2_unit_test |
+| 11 | T11.13 Fork pin CACHE: cached ASK replay re-mints `gate_id` and NEVER returns accept; mutation: ASK-cache-hit → accept → RED | Pin | pok_gate.py | pin green + mutation RED | pok_write_gate_w2_unit_test |
+| 11 | T11.14 Fork pin SOFT-MAX: value at `pok.soft_max.v1` in project metadata; mutation: a soft-max/meta row inside the POK store → RED (doctrine) | Pin | daemon/repositories/project/models.py | pin green + mutation RED | pok_write_gate_w2_unit_test |
+| 11 | T11.15 Fork pin PASS: job registered UN_GATED + in `JOB_MAINTENANCE_SECTIONS`; mutation: boot path contains pass execution → RED (SLO guard) | Pin | daemon/services/maintenance.py | pin green + mutation RED | pok_write_gate_w2_unit_test |
+| 11 | T11.16 Fork pin COUNTER: merge/supersede preserves verify_count lineage; mutation: counter reset on supersede → RED | Pin | daemon/repositories/pok/repository.py:286-311 | pin green + mutation RED | pok_write_gate_w2_unit_test |
+| 11 | T11.17 Alias + stub + switch pins: `POK_GATE_MODEL` literal `"quick"` (never the global model); mode=stub in prod → forced llm; both sibling settings keys OFF | Pin | pok_gate.py + daemon settings | pin green | pok_write_gate_w2_unit_test |
+| 12 | T12.1 Rewrite §2 and §4(i) — gate enforces the bar; reason = OPERATIONAL CLAIM; gate maintains library; remove the "no durability test at write time" claim | Doc edit | guideline:11-14,88-94 | diff review | n/a (docs) |
+| 12 | T12.2 Fold measured numbers (census 499 @13:5xZ + composition; admissibility 87.5% machine-parse 448 operational / 26 general-knowledge / 38 rolling of 512 — UNVERIFIED in-branch, standing flag unchanged; hand-label agreement = the MEASURED bands from the 2026-11-24 re-derivation — Band B 13/16 = 81.2%, Band C 42/50 = 84.0%, each with its `ROLLING:` ⟺ hand-R/hand-G predicate; the relayed hand-label agreement figure (no denominator; per-row labels never persisted) is DROPPED as unbacked; retrieval legs per evidence-rederiv-2026-11-23/funnel-and-agreement.md Figure 1 — 568 active @2026-11-24T01:53–02:05Z (drifting to 573), 431 ever retrieved by queries, 384 ever injected (retention-bounded lower bound), 518 cited by exact kebab-token + report-level 156 of 1,412 project reports — NOT a nested funnel; the relayed nested retrieval chain (four legs with per-stage percentages) is DROPPED as unbacked, its figures not reproduced here by design (see the fold ledger)) | Doc edit | guideline measured-state | diff review | n/a (docs) |
+| 12 | T12.3 State POK written by OPERATIONAL agents (not bulk knowledge writers); gate MAINTAINS the library (soft max, merge targets, consolidation) — not a write filter; MERGE/ASK/soft-max semantics | Doc edit | guideline §2 (measured-state) | diff review | n/a (docs) |
+| 12 | T12.4 Trust tiers inert + record_verification wired + vector retire | Doc edit | guideline §4 | diff review | n/a (docs) |
+| 12 | T12.5 Reference gate + reason + 3 write-time tests (integrate, do not duplicate) | Doc edit | guideline | diff review | n/a (docs) |
+| 12 | T12.6 Diff for Emperor (status draft — he has NOT ratified) | Diff | git diff | review | n/a (docs) |
+| 13 | T13.1 Bump version (live slot) | Bump | scripts/bump_version.py | version check | n/a (release) |
+| 13 | T13.2 Stage with ENSEMBLE_ROLLBACK_SAFE=1 | Staged release | scripts/upgrade/stage.sh | stage success | n/a (release) |
+| 13 | T13.3 Tag-to-tag delta, push latest-first | Tags | git tags | tag verify | n/a (release) |
+| 13 | T13.4 Honest disclosure: kb-writer verify family gets no new captures; capture moves to operators | Release notes | CHANGELOG / release notes | diff review | n/a (release) |
+| 13 | T13.5 NO promote — disclose | Disclosure | plan notes | human review | n/a (release) |
+
+## Fold ledger (plan-review-1 → plan-review-2 → pre-approver fold)
+
+| Fold | Items | Disposition | Landed in |
+|---|---|---|---|
+| plan-review-1 | **A1** (CRITICAL) | CLOSED — SC#3 rewritten to split/re-key + archive; whole-set both-variant sweep run | `plan-overview.md` SC#3 + scope bullet + phase table; `phase2-plan.md` T2.3/T2.4 |
+| plan-review-1 | **W1**–**W13** (13 WARNING rows) | CLOSED — W1 scratch fence; W2 T12.7 row; W3 counts recounted + phase 6 renumbered; W4 SC#9 F2 restated; W5 SC#12 restated; W6 SC#18 restated; W7 exit criteria split; W8 precedence order pinned; W9 sweep figure 37/9; W10 `maintenance_runs` row; W11 Owner column; W12 TTL-expiry-storm risk row; W13 `tools_note.md` per agent | phase files + `plan-overview.md` (SC/risk/task-map surfaces) |
+| plan-review-1 | **Q1** ("71" dup-slug) | ADOPTED — bare number deleted (0 hits in normative text); reconciliation gate retained | `plan-overview.md` P4 + open questions; `design-amendments-v2.md` §13.8 |
+| plan-review-1 | **Q2** (Phase-13 tag push) | ADOPTED — fence carve-out naming the push as sanctioned staging; PROMOTE stays the Emperor's ceremony | `plan-overview.md` + `design-amendments-v2.md` fence texts; `phase13-plan.md` Risks |
+| plan-review-2 | **C1** (CRITICAL) | CLOSED — scope bullet rewritten; final BOTH-VARIANT sweep run (command + hit count reported in the fold report) | `plan-overview.md` In-Scope bullet |
+| plan-review-2 | **C2**–**C5** | CLOSED — C2 sweep figure mirrored to `phase3-plan.md`; C3 three unchained tasks chained + Phase-12 IDs reconciled; C4 exit criterion 4 legs; C5 three sites aligned to the F2 fork wording | phase files + task map |
+| plan-review-2 | **C6** (9 advisory-bundle items) | FOLDED — fold ledger (this section) + phase-13 carve-out + pin-set reconcile + arch-doc correction note (the binding doc is NOT edited) + dangling x-ref resolved + `maintenance_runs` mirrored + W7 acceptance cells split + baseline-regen entries named + anchor off-by-one fixed | this file + `design-amendments-v2.md` §13.2a/§13.6 + phase files |
+| rider 2026-11-24 | **R-RET / R-PROV** (census R6/R7 fold) — relay `pok-disposition-exec-r1`, board `wi-f0a9418c`, history `0a188127` | FOLDED — two census gate rules folded as SEMANTIC / Wave 2 / shadow-default-OFF; plan-lane-native mnemonic labels (census numbers kept in provenance only; a THIRD architect-fork R-ladder where R6=stub-mode was found in-sweep); T7.3 rule-set label updated (token closed set unchanged); 3 SOLE-owned task rows (T7.15/T8.15/T10.12); risk #15 + SC#31/#32 | `gate-rules-r6-r7-amendment.md` (authoritative rider) + this file + `design-amendments-v2.md` §1/§3 + phase7/8/10 |
+| **leader de-scope 2026-11-24** | **Family-count fix + 2-family split/re-key + archive DE-SCOPED to a parallel lane** (leader de-scope dispatch). ⚠️ **PROVENANCE: the ORIGINAL DISPATCH WAS NEVER RECEIVED by the planner lane — this fold was executed 2026-11-24 from the leader's verification-message spec; anomaly filed (report 8f8a40e9).** | FOLDED — (a) the Phase-2 family-count repository task REMOVED (old T2.1 + its mutation leg T2.2; the prefix-superset mutation leg moved with the fix it mutates); (b) old T2.3 + T2.4 (the 2-family split/re-key + archive) REPLACED by ONE coordination-note row — design constraints TRANSFER to the parallel lane (split-never-merge per standing `pok-sweep-01-merge-cap-split`; ≤240-char fence; ruled-basis archive); this lane consumes/verifies, executes nothing; (c) Wave-1 scope statements (:11 objective, :16 in-scope bullet, out-of-scope line) + SC#3 reworded to name the parallel lane as owner; (d) orphaned-reference sweep run (phase6 unit-test row + prefix-superset mutation row + exit criterion, phase6 objective, plan-overview T6.2 + Phase-6 count, phase1/phase4 coupling, phase6-plan task count); (e) NEW risk row 16 — `repository.py` is a SHARED SEAM with the parallel lane (merge-order/drift hazard, owner = leader / parallel-lane coordination); (f) three-way recount — phase-table row 2 = **5**, `phase2-plan.md` rows = **5**, task-map Phase-2 rows = **5**, IDs agree ID-for-ID (the phase file carries the same ID column). **FINAL ID MAPPING (zero-collision re-lettering, leader adjudication 2026-11-24): old T2.1 (strict per-key count) + old T2.2 (its mutation leg) REMOVED; old T2.3/T2.4 (the 2-family split/re-key + archive) REMOVED → parallel lane. LIVE Phase-2 IDs = `T2.COORD` (the new coordination row) + T2.5 (family-full refusal consumption) + T2.6 (read-only re-verify) + T2.7 (counter carry-over) + T2.8 (carry-over PIN). The 3–4 gap in the ID sequence is a DOCUMENTED DE-SCOPE ARTIFACT — no live Phase-2 row bears 3 or 4 — NOT a missing task.** **counter carry-over (T2.7) + PIN (T2.8) RETAINED — not named in the de-scope spec, and no contrary dispatch evidence was available to this lane (the original dispatch was never received); flagged for leader adjudication.** T2.5/T2.6 annotated as dependent on the parallel lane's landing; operative re-slug cross-refs (T8.15, phase8 row 15) repointed at the `supersede_and_insert` machinery + Phase-2 coordination (T2.COORD) / carry-over (T2.7); dated annotations added to `gate-rules-r6-r7-amendment.md` (:128/:208) + `design-amendments-v2.md` §5 | `plan-overview.md` (objective, scope, phase table, coupling map, risk table, SC#3/#24, task map, fold ledger) + `phase2-plan.md` + `phase6-plan.md` + `phase1-plan.md` + `phase4-plan.md` + `phase8-plan.md` + `gate-rules-r6-r7-amendment.md` + `design-amendments-v2.md` |
+
+| **B1/B2 evidence fold 2026-11-24** | **B1** (retrieval-leg figures) + **B2** (hand-label agreement figures) — leader fold dispatch; approver iteration-001 B1 + B2. Measured re-base from `evidence-rederiv-2026-11-23/funnel-and-agreement.md` (sha256 `b55101a3…8ada`, 276 lines, BINDING) | FOLDED — **B1:** the relayed funnel chain 499→387→160→59 @175 reports is REPLACED everywhere it appeared in operative text by the measured legs, each with bounds + semantics attached: 568 active @2026-11-24T01:53–02:05Z drifting to 573 during re-measurement (store ACTIVELY GROWING — strengthens the soft-max rationale); 431 ever-retrieved-BY-QUERIES (access_count is QUERY-ONLY — sole increment `pok/repository.py:232` ← sole caller `pok_service.py:677`; injection reads it only as a rank key, `pok_injection.py:198`; NEVER labelled "injected"); 384 distinct active slugs ever injected — RETENTION-BOUNDED LOWER BOUND (checkpoint_blobs msgpack channel, window ≥2026-10-26), never a total; 518 cited by exact kebab-token — DEFINITION-LADEN (slug-mention ≠ knowledge-informed use; enumeration reports inflate it; report-level corroboration 156 of 1,412 project reports); cross-check 2,402 `instances.metadata` rows carry `pok_injected` — **discrepancy recorded: the dispatch figure 1,976 never existed in the branch (0 hits in the artifact or the plan set); the artifact measures 2,402 and the artifact wins (the dispatch relayed an unsourced number — the same defect class this fold removes)**. T10.2's utilization seed re-based on these numbers; the 499 @13:5xZ census is KEPT where it is a dated census figure and the tension is SURFACED (census 499 @2026-11-23 13:5xZ vs re-derivation 568→573 @2026-11-24), not harmonized. `phase12-plan.md:12`'s attribution of the funnel to "the pok-sweep mechanics measurement" is CORRECTED — that attribution was WRONG; the source is the re-derivation artifact. **B2:** the 32/64 figure (SC#29 + phase11:6) and the 82.8% hand-label agreement are DROPPED (unbacked: per-row labels for the 64-row semantic band were never persisted — history `2bf04468` + `cutlist-gap-2026-11-23.md:50`), replaced by the MEASURED bands — **Band B 13/16 = 81.2%** (18 named borderline rows, R/G axis n=16, C5 excluded 0/2) and **Band C 42/50 = 84.0%** (50-row hand tail; 5/25 R lexical misses, 3/25 G false-positives) — each cited WITH its predicate (`ROLLING:` present ⟺ hand-R, absent ⟺ hand-G); honest residual framing added (81–84% leaves 16–19% error on exactly the contested rows — below the bar for an admission decision; the judge mandate stands on the Emperor's ruling PLUS this measured residual); SC#29's METHOD is unchanged. The four legs are NOT a nested funnel (518 > 384; non-monotone) — no cross-leg percentages introduced. Final sweep: zero relayed figures survive in operative text (the dropped digits survive only in this fold record); `plan-review-3.md` + `approver-pok-write-gate.md` retain the old figures as the REJECTION RECORD (sanctioned history, for the leader to rule); scope-fold artifacts untouched. | this file (SC#29, T10.2, T12.2, Research Insights, this ledger row) + `phase11-plan.md:6` + `phase12-plan.md:12/13/14/16/24` |
+
+### Open advisories (NOT folded — tracked here, fold-at-convenience, NOT build blockers)
+
+Per plan-review-1 §ADVISORIES + plan-review-2 §Fold-discipline (11 remain open; items 7/8/14 were found already satisfied by pre-existing content):
+
+| # | Advisory | Status |
+|---|---|---|
+| 3 | Shadow-mix gate must invoke the REAL judge; stub-only evidence unacceptable | OPEN |
+| 4 | Pytest mark registered in config (not just "marked" in doc text) | OPEN |
+| 6 | Kill-switch OFF ⇒ pre-gate parity as an explicit testable pin | OPEN |
+| 9 | T9.7 grep recorded as evidence artifact | OPEN |
+| 15 | Gate-bottleneck/throughput risk row missing (mitigations exist, no owned row) | OPEN |
+| 17 | PACKS rows lack invocation + marker block | OPEN |
+| 18 | Scratch venue convention uncited — name the `/tmp` worktree + FAKE_HOME/mktemp fence | OPEN |
+| 1 | Phase-1 sole-migration note (partial: folded at C6.6/W10 — the `maintenance_runs` half; the "sole .sql" phrasing remains at SC#18) | PARTIAL |
+| 8 | Absence-pin exact assertion + mutation spelled out (partial: the mutation leg is carried at T4.4) | PARTIAL |
+| 16 | Quick-latency tail re-measurement before P1 — the probe dates from 2026-09-07; owner/date split across risk #6, parked follow-ups, and phase7-plan.md (not consolidated) | PARTIAL |
+| 2 | Phase-13 staging-env-only + Emperor-ceremony promote gate (satisfied: carve-out sentence folded at C6.2 + phase13-plan.md Risks row) | CLOSED |
+
+**Sweep criteria added to the plan's own consistency checks (plan-review-2 structural-blindness recommendation):** (1) BOTH-VARIANT grep for folded wording across summary/scope rows — both the pre-fold phrase and the post-fold phrase, anchored on CONCEPT tokens; (2) two-sided task counts — task-map rows vs phase-file tasks must agree.
+
+## Fences (baked into every phase)
+
+No live-store writes during build (scratch/synthetic/project-scoped child only); no promote; no live config change; branch+worktree only (carve-out: the Phase-13 staged-release tag push is sanctioned staging under ruling (7) — push = sanctioned staging, PROMOTE stays the Emperor's ceremony); cd into worktree for every command; env scrubs PER-VARIABLE; pytest scoped and run from worktree; commit planning docs in-branch (`docs(<scope>):`). Anchors are leads — re-grep at use time. Cite snapshot times, never bare counts.
