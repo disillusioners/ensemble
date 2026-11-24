@@ -423,7 +423,7 @@ class TestAc19TerminalityCured:
         assert "does not free a slot" in msg.lower()
         # the members are relabelled as PREFIX-SHARING rows (W2 — the
         # count is a ``startswith`` superset, not family membership).
-        assert "prefix-sharing active rows" in msg
+        assert "active family members" in msg
         # the archive count is DERIVED from the live count (CRITICAL 1).
         assert ei.value.details["archive_needed"] == 1
 
@@ -478,7 +478,7 @@ class TestAc19TerminalityCured:
         assert ei.value.details["active_count"] == POK_FAMILY_MAX + 1
         assert ei.value.details["family"] == "over-cap"
         # the seeded members are listed as prefix-sharing rows
-        assert "prefix-sharing active rows" in msg
+        assert "active family members" in msg
         for i in range(POK_FAMILY_MAX + 1):
             assert f"over-cap-{i + 1:02d}-m" in msg
         # the supersede stays offered, qualified as slot-neutral
@@ -730,28 +730,21 @@ class TestAc3Ac23UniversalRead:
 class TestCountActiveInFamilyBoundary:
     """Item 7 (council micro-fold): count_active_in_family regex verdict.
 
-    VERDICT (CORRECTED for the multi-token family-key semantics — fix
-    iteration 2 restored the DELETED half of the collision claim).
-    Family keys now come from ``_slug_family`` = regex group 1 = a
+    VERDICT (STRICT family-key membership — the prefix-superset is GONE).
+    Family keys come from ``_slug_family`` = regex group 1 = a
     (possibly hyphenated) run of letter-led tokens
     (``[a-z][a-z0-9]*(?:-[a-z][a-z0-9]*)*``), and
-    ``count_active_in_family`` still matches
-    ``slug.startswith(f"{family}-")``. A hyphenated family head (e.g.
-    ``prompt-assent``) is now a real family key, not collapsed to its
-    first token. Non-matching slugs (no NN ordinal) are excluded
-    upstream (``_slug_family`` returns None).
+    ``count_active_in_family`` now counts EXACT family-key equality:
+    ``pok_family_key(slug) == family``. A hyphenated family head (e.g.
+    ``prompt-assent``) is a real family key, not collapsed to its first
+    token. Non-matching slugs (no NN ordinal) are excluded upstream
+    (``_slug_family`` returns None).
 
-    COLLISION VERDICT — two DIFFERENT things, both pinned below:
-
-    * ``dep`` vs ``deploy`` CANNOT collide. The prefix is
-      hyphen-TERMINATED (``"dep-"``), so a ``deploy-…`` slug does not
-      match it. Two single-token families never share a prefix.
-    * ``skill`` vs ``skill-e6`` DOES collide — in ONE direction only.
-      The count is a ``startswith`` superset, not a family-membership
-      query: the SHORT family ``skill`` prefix-counts the LONG family
-      ``skill-e6``'s rows (a longer family inflates a shorter prefix),
-      while the LONG family ``skill-e6`` NEVER counts the short
-      family's ``skill-*`` rows. The leak is long → short, one way.
+    Family membership is EXACT family-key equality: a longer family
+    never inflates a shorter one. The old one-directional leak
+    (long family -> short family via ``startswith``) is GONE: ``skill``
+    counts only ``skill`` rows and ``skill-e6`` counts only
+    ``skill-e6`` rows.
     """
 
     def test_hyphenated_tails_counted_in_same_family(self, svc: POKService) -> None:
@@ -767,19 +760,16 @@ class TestCountActiveInFamilyBoundary:
         assert svc._repo.count_active_in_family("p1", "dep") == 1
         assert svc._repo.count_active_in_family("p1", "deploy") == 1
 
-    def test_prefix_sharing_leaks_one_direction_only(self, svc: POKService) -> None:
-        """W2 (fix iteration 2): the prefix-superset leak is REAL, and
-        it is ONE-DIRECTIONAL (long family → short family).
-
-        The SHORT family ``skill`` prefix-counts the LONG family
-        ``skill-e6``'s rows; the inverse never holds (the long prefix
-        is hyphen-terminated).
+    def test_prefix_sharing_no_longer_leaks_across_families(self, svc: POKService) -> None:
+        """Under strict semantics there is NO leak: ``skill-01-a`` is
+        family ``skill``, ``skill-e6-01-x`` is family ``skill-e6``.
+        The OLD one-directional leak (long family -> short family) is
+        FIXED.
         """
         svc.upsert(project_id="p1", slug="skill-01-a", body="a", agent_id="d")
         svc.upsert(project_id="p1", slug="skill-e6-01-x", body="b", agent_id="d")
-        # long -> short: the SHORT family counts the long family's row
-        assert svc._repo.count_active_in_family("p1", "skill") == 2
-        # short -> long: NEVER
+        # strict: each family counts only its own true members
+        assert svc._repo.count_active_in_family("p1", "skill") == 1
         assert svc._repo.count_active_in_family("p1", "skill-e6") == 1
 
     def test_non_matching_slug_excluded(self, svc: POKService) -> None:
@@ -824,8 +814,8 @@ class TestMultiTokenFamilyKey:
 
     Pinned here: the family-key helper (direct), the LITERAL pattern
     constant (the single source in ``daemon/repositories/pok/models.py``),
-    the at-cap refusal, the PREFIX-SUPERSET leak in BOTH directions
-    (W2), and the supersede exemption.
+    the at-cap refusal, STRICT membership (no prefix-superset leak),
+    and the supersede exemption.
     """
 
     def test_family_key_pattern_literal_pin(self) -> None:
@@ -891,22 +881,29 @@ class TestMultiTokenFamilyKey:
         assert _slug_family("daoduc-helm-release-v28-kubectl-patch") is None
         assert _slug_family("artifact-is-container-image") is None
 
-    def test_unnumbered_prefix_counting(self, svc: POKService) -> None:
+    def test_unnumbered_slug_excluded_from_strict_count(self, svc: POKService) -> None:
+        """Strict count: ``verify-03-a`` is family ``verify``;
+        ``verify-something-unnumbered`` has NO family (no ``-NN-``
+        ordinal). The unnumbered row is EXCLUDED, so the strict count
+        is 1.
+        """
         svc.upsert(project_id="pu", slug="verify-03-a", body="a", agent_id="d")
         svc.upsert(
             project_id="pu", slug="verify-something-unnumbered", body="b", agent_id="d"
         )
-        assert svc._repo.count_active_in_family("pu", "verify") == 2
+        assert svc._repo.count_active_in_family("pu", "verify") == 1
 
-    def test_unnumbered_prefix_pushes_over_cap(self, svc: POKService) -> None:
+    def test_unnumbered_row_no_longer_pushes_over_cap(self, svc: POKService) -> None:
+        """The unnumbered row no longer occupies a slot, so
+        ``verify-03-d`` is ADMITTED, not refused.
+        """
         svc.upsert(project_id="pu2", slug="verify-01-a", body="a", agent_id="d")
         svc.upsert(project_id="pu2", slug="verify-02-b", body="b", agent_id="d")
         svc.upsert(
             project_id="pu2", slug="verify-something-unnumbered", body="c", agent_id="d"
         )
-        with pytest.raises(POKError) as ei:
-            svc.upsert(project_id="pu2", slug="verify-03-d", body="d", agent_id="d")
-        assert ei.value.code == "pok_family_full"
+        out = svc.upsert(project_id="pu2", slug="verify-03-d", body="d", agent_id="d")
+        assert out.action == "created"
 
     def test_supersede_exemption_multi_token(self, svc: POKService) -> None:
         for i in range(3):
@@ -945,30 +942,18 @@ class TestMultiTokenFamilyKey:
         )
         assert out.action == "created"
 
-    def test_prefix_leak_refuses_the_short_family_and_surfaces_it(
+    def test_no_prefix_leak_admits_third_member(
         self, svc: POKService
     ) -> None:
-        """W2 (fix iteration 2, pin b): the inverse DOES refuse — and the
-        refusal SURFACES the leak (the long family's row is listed as a
-        PREFIX-SHARING row of the short family).
+        """Under strict semantics ``skill-01-a`` + ``skill-02-b`` are the
+        only true members of ``skill``, so ``skill-03-z`` is ADMITTED
+        (the prefix leak no longer refuses the short family).
         """
-        from daemon.services.pok_service import POK_FAMILY_MAX
-
         svc.upsert(project_id="px", slug="skill-01-a", body="a", agent_id="d")
         svc.upsert(project_id="px", slug="skill-02-b", body="b", agent_id="d")
         svc.upsert(project_id="px", slug="skill-e6-01-x", body="c", agent_id="d")
-        with pytest.raises(POKError) as ei:
-            svc.upsert(project_id="px", slug="skill-03-z", body="d", agent_id="d")
-        assert ei.value.code == "pok_family_full"
-        msg = ei.value.message
-        assert "'skill'" in msg
-        assert f"holds {POK_FAMILY_MAX} active entries" in msg
-        assert "prefix-sharing active rows" in msg
-        # the leaked row is SURFACED, labelled as prefix-sharing
-        assert "skill-e6-01-x" in msg
-        assert ei.value.details["family"] == "skill"
-        assert ei.value.details["active_count"] == POK_FAMILY_MAX
-        assert "skill-e6-01-x" in ei.value.details["members"]
+        out = svc.upsert(project_id="px", slug="skill-03-z", body="d", agent_id="d")
+        assert out.action == "created"
 
 
 # ── TASK-2: the slug→row resolver — curation must reach the OWNER ───────
