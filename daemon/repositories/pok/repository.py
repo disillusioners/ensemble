@@ -194,10 +194,13 @@ POK_STANDING_DEFECTS: tuple[tuple[str, str, str], ...] = (
     (
         "record_verification",
         "wired-via-gate-path",
-        "verify_count has no writer today (zero callers); the gate path "
-        "(Wave 2 Phase 7/8) becomes the first real writer — verdicts, "
-        "merges, refusals and admissions stamp the metric. Not retired "
-        "(addendum-3 item 7 reversed the retire-with-disclosure ruling).",
+        "verify_count IS wired: the gate path stamps it — the tool's "
+        "no-delta MERGE verdict calls _stamp_target_verification → "
+        "POKRepository.record_verification(row.id) (daemon/tools/pok.py), "
+        "so a re-verified row carries the stamp the librarian's next "
+        "pass reads. A row the gate has never judged still reads 0 — "
+        "absence of a stamp is NOT evidence. Not retired (addendum-3 "
+        "item 7 reversed the retire-with-disclosure ruling).",
     ),
     (
         "vector-leg",
@@ -933,27 +936,30 @@ class POKRepository:
         """verify_count += 1 + last_verified stamp (pok_verify phase-2
         path; the 30-day decay reads ``last_verified``).
 
-        ── THE GATE-PATH CALLER IS DESIGNED, NOT WIRED ─────────────────
-        (pok-write-gate Phase 5, T5.1 — the W1 half).
+        ── THE GATE-PATH CALLER IS WIRED ─────────────────────────────
+        (pok-write-gate Phase 5 T5.1 designed the seam; Wave 2 Phase 7/8
+        wired the caller).
 
-        This method still has ZERO callers: the write gate's judge
-        service lands in WAVE 2 (Phase 7/8), and THAT service is the
-        FIRST REAL WRITER. Its verdicts (ACCEPT / MERGE / ASK / REJECT),
-        its merges, its refusals and its admissions stamp the verify
-        metric HERE, so the librarian's next pass reads the stamps its
-        own activity produced — the metrics are dead code until the
-        gate exists, and the gate is what makes them live
-        (design-amendments-v2 §6, §9 "close the loop").
+        THE CALLER: the TOOL layer's no-delta MERGE path — a merge whose
+        fact is fully carried by the target writes NO row and STAMPS the
+        target instead (``daemon/tools/pok.py``::
 
-        Until Wave 2 lands, ``verify_count`` is structurally 0 on every
-        row. That ZERO IS NOT EVIDENCE — it is the absence of a
-        writer, never a quality signal (see the IGNORED list below).
+            _handle_merge_verdict → merge_kind == "no_delta"
+              → _stamp_target_verification(engine, project_id, target_slug)
+                → POKRepository(engine).record_verification(row.id)
 
-        WAVE 2 OWNS THE ACTUAL CALLS. This note owns the DESIGN: the
-        seam, the stamp set, and what a stamp may and may not be used
-        for — so the librarian's metric contract is settled before the
-        caller exists, and the librarian is not re-litigated when it
-        arrives. No call is wired here.
+        So ``verify_count`` is no longer a dead counter: the gate's own
+        activity stamps the metric the librarian's next pass reads — the
+        loop is CLOSED (design-amendments-v2 §6, §9 "close the loop").
+
+        A row that was never stamped still carries ``verify_count == 0``:
+        the gate has judged only a fraction of the store's writes so
+        far. That ZERO IS NOT EVIDENCE — it is the absence of a stamp,
+        never a quality signal (see the IGNORED list below).
+
+        THE SEAL IS SETTLED: the seam, the stamp set, and what a stamp
+        may and may not be used for are fixed, so the librarian's metric
+        contract does not move under it.
 
         ── THE TRUSTED METRIC SET (design-amendments-v2 §9 / §13.2 J) ──
 

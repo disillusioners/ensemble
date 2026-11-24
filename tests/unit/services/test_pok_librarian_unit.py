@@ -61,6 +61,7 @@ from daemon.services.pok_librarian import (
     derive_soft_max,
     detect_r_ret_candidates,
     metric_triggers_consolidation,
+    propose_consolidations,
     read_soft_max,
     read_store_metrics,
     run_librarian_pass,
@@ -753,6 +754,54 @@ class TestLibrarianPass:
         report = run_librarian_pass(env.engine, "a-project-without-rows")
         assert report.error is None
         assert report.active_count == 0
+
+    def test_the_pass_stays_dormant_below_the_floor(self, env):
+        """F3 — the PASS-LEVEL dormancy proof (the two-legged gap).
+
+        The derive leg and the decision leg are pinned on their own
+        (``test_no_tightening_when_the_active_count_is_below_the_floor``
+        + ``test_tightening_engages_at_or_above_the_soft_max``). This
+        is the END-TO-END leg: the store carries rows that WOULD
+        qualify for a consolidation (a covered-by-surviving-row
+        duplicate), yet the pass proposes NOTHING and writes NO
+        consolidation — because the store is BELOW its floor
+        (499 active < the 512 band floor).
+
+        The CONTROL leg proves the rows really qualify, so a vacuous
+        pass (one that never proposes anything) cannot pass this test.
+        """
+        rows = [
+            _row(f"fam-{i:03d}-row") for i in range(497)
+        ]
+        # The duplicated pair: the same content under two slugs, both
+        # gate-verified (a trusted signal) ⇒ a covered-by-surviving-row
+        # consolidation CANDIDATE.
+        rows.append(
+            _row("fam-497-row", content_sha256="sha-duplicate", verify_count=1)
+        )
+        rows.append(
+            _row("fam-498-row", content_sha256="sha-duplicate", verify_count=1)
+        )
+        _seed(env, rows)
+
+        store = read_store_metrics(POKRepository(env.engine), PROJECT_ID)
+        assert store.active_count == 499
+        # THE CONTROL: the consolidator WOULD propose (the rows qualify).
+        assert propose_consolidations(store), (
+            "the control leg: the duplicated pair must qualify — else "
+            "this test would pass vacuously"
+        )
+
+        report = run_librarian_pass(env.engine, PROJECT_ID)
+        assert report.error is None
+        assert report.active_count == 499
+        assert report.soft_max == 512  # the cold-start band floor
+        assert report.tightening["tight"] is False
+        # THE PASS-LEVEL GATE: nothing is proposed below the floor.
+        assert report.proposals == ()
+        # And nothing was consolidated: no ledger row carries a basis.
+        ledger = POKRepository(env.engine).query_ledger(PROJECT_ID, limit=None)
+        assert [row for row in ledger if row.basis] == []
 
     def test_the_pass_does_not_write_pass_summaries_into_the_ledger(self, env):
         """I1's prohibition: the pass summary NEVER lives in the ledger."""

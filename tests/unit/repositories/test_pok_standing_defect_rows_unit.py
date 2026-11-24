@@ -4,10 +4,11 @@ Covers pok-write-gate Phase 5 T5.6 — "standing-defect residual rows in
 ledger". The two standing defects of the POK write-gate subsystem and
 their DISPOSITIONS (design-amendments-v2 §6, §9):
 
-* ``record_verification`` → ``wired-via-gate-path`` — the metric has no
-  writer today; addendum-3 item 7 REVERSED the retire-with-disclosure
-  ruling, so the gate path (Wave 2 Phase 7/8) becomes the first real
-  writer. NOT retired.
+* ``record_verification`` → ``wired-via-gate-path`` — the metric IS
+  wired: the gate path stamps it (the tool's no-delta MERGE verdict →
+  ``_stamp_target_verification`` → ``POKRepository.record_verification``).
+  addendum-3 item 7 REVERSED the retire-with-disclosure ruling. NOT
+  retired.
 * ``vector-leg`` → ``retired-with-disclosure`` — the embeddings
   companion is dead (0 embedding rows at the 2026-11-23 census, the
   mint hook has zero callers, the query seam never passes a
