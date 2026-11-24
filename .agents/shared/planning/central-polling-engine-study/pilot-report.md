@@ -361,3 +361,13 @@ concurrent release-retention lane. This lane's registration block was
 inserted at the **top** of the file (the house newest-first convention) —
 far from the retention lane's end-of-file append — so the two regions do not
 overlap textually.
+
+---
+
+## POST-STAGE EVENTS — 2026-11-24
+
+* **(a) Promoted LIVE.** 2026-11-24T02:56:25Z — v0.31.49 promoted live by **operator ceremony** (run_id `r-20261124-024726-0080`; NOT this lane). The promote does **not** flip the kill-switch: live runs **DORMANT** (flags unset; the legacy path owns the sweep; the engine observes).
+* **(b) Remaining ceremony step = the FLAG FLIP.** Set `SERVICES_ORPHAN_WATCHER_SWEEP_USE_ENGINE=1` AND `ENSEMBLE_ENGINE_SHADOW_MODE=0` (engine enabled) + daemon restart. **Rollback is BOOT-SCOPED** — restart with the flag off.
+* **(c) Soak clock.** The 48h soak clock **starts at the FLIP, not at promote**.
+* **(d) Harness shipment.** The soak/boot tools are **not** in the release payload — run them from a checkout at tag `v0.31.49`. The stage worktree `/home/nea/ensemble-src-wt-stage-v03149-enginep2` **is** that checkout and is **KEPT** for the ceremony.
+* **(e) Staged-binary proof.** The fenced proof (SUCCEEDED rows, truth table, SLO numbers) lives at `.agents/tester/RESULTS/2026-11-24-engine-p2-ow-staged-binary-verification.md` (18,616 B; merged to latest by the leader sweep, commit `d58f5ace1`).
