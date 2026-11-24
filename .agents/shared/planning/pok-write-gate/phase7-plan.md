@@ -1,7 +1,7 @@
 # Wave 2 · Phase 7: Gate Service — 4-Outcome POK Librarian (SHADOW)
 
 ## Objective
-Build `daemon/services/pok_gate.py` — the semantic judge as a POK-librarian maintenance agent with FOUR outcomes: ACCEPT / MERGE / ASK / REJECT. In SHADOW by default: logs verdicts to the ledger, refuses no write. Judge input = caller's `reason` as OPERATIONAL CLAIM; judge question *"what breaks in THIS repo if we drop this?"* Binding picks: F2 (merge authorship), 20s/45s timeouts, K=48 digest, purpose-bound alias seam, ASK outcome variant.
+Build `daemon/services/pok_gate.py` — the semantic judge as a POK-librarian maintenance agent with FOUR outcomes: ACCEPT / MERGE / ASK / REJECT. In SHADOW by default: logs verdicts to the ledger, refuses no write. Judge input = caller's `reason` as OPERATIONAL CLAIM; judge question *"what breaks in THIS repo if we drop this?"* Binding picks: F2 (merge authorship), 20s/45s timeouts, K=48 digest (observed sizing; ≤8000-char bound governs), purpose-bound alias seam, ASK outcome variant.
 
 ## Tasks
 | # | Task | Depends On | Acceptance |
@@ -14,7 +14,7 @@ Build `daemon/services/pok_gate.py` — the semantic judge as a POK-librarian ma
 | 6 | MERGE-body authorship = **F2**: judge outcome carries `target_slug` + `merged_body_proposal`; ASK payload carries the FULL target body (not the 80-char digest slice) + candidate body; caller confirms/edits; TOOL executes the caller-final body. `merge_policy` enum ∈ {`ASK_WITH_PROPOSAL` (default), `AUTO`, `ASK_NO_PROPOSAL`}. **No-delta merge = NO write** (verdict row + `record_verification` stamp on the target); **delta merge** = the only case a merged body is authored | T5 | PIN: default = ASK_WITH_PROPOSAL; mutations: auto-execute without confirmation → RED; no-delta merge writing a row → RED |
 | 7 | Confidence ≤2/3 → ASK (never auto-reject) | T3 | Unit test |
 | 8 | Verdict cache (bounded LRU, key = project+slug+sha256 body+sha256 normalized reason; ASK cached AS-ASK, answered NEVER cached as ACCEPT; stub/llm entries segregated) | T1 | Key-exactness unit |
-| 9 | Digest (**K=48**, 80-char one-line bodies, 8000-char cap ≈7250 used, boundary clause never dropped; zero-overlap fallback = same-family-first / most-recently-verified) | T1 | Budget unit: K=48 ≤ 8000 |
+| 9 | Digest (**≤ 8000-char bound total**; K=48 = observed sizing within the bound, not a pinned constant; 80-char one-line bodies, boundary clause never dropped; zero-overlap fallback = same-family-first / most-recently-verified) | T1 | Budget unit: assembled digest ≤ 8000 chars (K=48 ≈ 7250 observed, not a target) |
 | 10 | Pattern-C timeout knobs — **20s/attempt, ≤1 retry, 45s wall**, env `ENSEMBLE_POK_GATE_TIMEOUT_S`, min 10 / max 180 (12s OVERTURNED: it sat below an observed 13.6s judge success) | T1 | Unit tests |
 | 11 | Stub mode (rule-based, never silent pass-through; **prod-forced to llm** — mode=stub in prod ⇒ loud one-shot WARN + forced llm; stamp `model_alias="stub"`; segregate stub cache entries) | T1 | Rejects known-bad; prod-force unit |
 | 12 | R1-beats-R4 clause verbatim + **R-PROV protective clause** (date-as-evidence admits; R1-beats-R4 shape) + judge question in prompt | T1 | Boundary CONTRACT test (incl. R-PROV dated-provenance admits) |
@@ -32,4 +32,4 @@ Build `daemon/services/pok_gate.py` — the semantic judge as a POK-librarian ma
 - Merge proposal rubber-stamping — mitigated by the FULL target body in the ASK payload plus proposal-vs-executed sha256 in the ledger.
 
 ## Exit Criterion
-`pok_gate.py` importable; 4 outcomes reachable; ASK outcome variant exists; parser closed-set (verdict+family unchanged) over the R0–R5 + R-RET/R-PROV rule set; R-RET advisory-only lexical leg present; R-PROV protective clause present; MERGE names slug under F2; confidence→ASK; 5 templates name homes; R1 beats R4; K=48 digest within cap; 20s/45s knobs; stub prod-forced; alias purpose-bound.
+`pok_gate.py` importable; 4 outcomes reachable; ASK outcome variant exists; parser closed-set (verdict+family unchanged) over the R0–R5 + R-RET/R-PROV rule set; R-RET advisory-only lexical leg present; R-PROV protective clause present; MERGE names slug under F2; confidence→ASK; 5 templates name homes; R1 beats R4; digest within the ≤ 8000-char bound (K=48 observed sizing within it, not a pinned constant); 20s/45s knobs; stub prod-forced; alias purpose-bound.

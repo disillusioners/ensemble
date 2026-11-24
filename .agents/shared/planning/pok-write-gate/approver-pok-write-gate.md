@@ -151,3 +151,64 @@ Iteration 002 REJECTED → iteration 003 (FINAL before escalation) on the revise
 
 ---
 *[Tracking: .agents/approver/pok-write-gate-tracking.md]*
+
+---
+
+# Iteration 003 — 2026-11-24 — VERDICT: REJECTED (FINAL — max iterations reached (3), escalated to Leader)
+
+Pinned: HEAD `6db44aa3c23211c36d96b288c415fed60ec7c2a9` (fold commit landed mid-dispatch; tree clean at all three workers' pins; file hashes stable). Dispatch: 3 fresh cold-context workers, same partition + predicate-ledger char-for-char check + hard-gate disclosed class.
+
+| Worker (instance) | Scope | Verdict | Blocking | Notes |
+|---|---|---|---|---|
+| approve-pwg3-spine (b25db6d9-5cce-42a2-b51a-cc19d9ac0fac) | spine 5 docs | APPROVED | 0 | 3 |
+| approve-pwg3-p0-7 (113012cc-cb96-43ef-b3ec-16f189435d68) | phase0–7 | REJECTED | 3 | 7 |
+| approve-pwg3-p8-13 (d373e998-1b91-4350-b3b1-0e74cd6c0218) | phase8–13 + briefs + evidence + sweep | APPROVED | 0 | 4 |
+
+## Blocking Issues (all from the p0-7 worker; all kept — no downgrades)
+
+1. **Withdrawn refusal-precedence predicate alive in the phase file** — `phase3-plan.md:11`
+   - Found: carries `scope → store → reason → fence/budget/family` — the WITHDRAWN transposed form — with spaces, not byte-identical to the canonical `store→scope→reason→fence/budget/family` (byte-identical at all 4 plan-overview sites :39/:207/:366/:381, verified by the spine worker). Code confirms canonical (`pok.py:240-246` store precedes `:247-249` scope). The ATTESTATION at `plan-overview.md:381` over-claims: it names the Phase-3 table row and T3.3 task-map row but not the phase FILE row, which still asserts an order the shipped code does not have. An implementer building T3.3 from `phase3-plan.md` writes the wrong pairwise test.
+   - Required change: `phase3-plan.md:11` → canonical string char-for-char; extend the attestation's named rows to cover the phase file (or add it to the ledger's covered-set).
+2. **Withdrawn, self-inconsistent sweep breakdown alive in the phase file** — `phase3-plan.md:14`
+   - Found: `18 upsert-index + 13 bare-tool` (= 31 ≠ 37) — explicitly WITHDRAWN by the plan's own task map (`plan-overview.md:210`: "content-verified breakdown 22 indexed-upsert + 3 query + 7 curate + 5 bare-loop = 37, 23 upsert"). Worker independently re-measured: 22+3+7+5=37 exact. The sweep task is scoped 4 upsert sites short.
+   - Required change: `phase3-plan.md:14` → the content-verified breakdown; make the acceptance name the count (22 upsert sites swept), not just "existing tests green".
+3. **Live same-task contradiction on the parser fail-closed path** — `phase7-plan.md:11` vs `plan-overview.md:246` (T7.3)
+   - Found: phase file `garbage→unavailable — fail-closed, never re-labelled pok_gate_reject` vs task-map row `garbage→ASK/unavailable`. D2 ruling (architecture-recommendation.md:99, technical-analysis.md:223) makes the phase file correct; the task-map row drifted and carries no marker. Materially different contracts (ASK mints a pending-confirmation token on garbage; unavailable is a typed fail-closed refusal). This is iteration-002 note G, disclosed by the leader as deliberately not edited — it is now a same-task-ID live contradiction in the two artifacts an implementer reads together.
+   - Required change: `plan-overview.md:246` → `garbage→unavailable` (align to the phase file + D2), or add a visible supersession marker naming :246.
+
+**Root cause (systematic, from the p0-7 worker):** fold commit `6db44aa3c` touched 9 files — `plan-overview.md`, phase0, phase5, phase12 + 5 non-phase files — and NOT phase1–phase7. All three blockings live in exactly the files the fold did not touch. Same propagation-cousin class as the previous escalation on this repo (cures landing at the primary site only). Fix shape: 2 line-edits in `phase3-plan.md` + 1 line-edit in `plan-overview.md` + attestation scope extension — all mechanical, no re-planning.
+
+## Iteration-002 blocker / condition disposition (ledger comparison)
+
+- **iter-002 B-1 (anchor drift): ADDRESSED** — all three workers content-verified `repository.py:378` / `pok_service.py:733` / `pok_injection.py:199`; disclosed re-pin at fold row `plan-overview.md:339`; evidence artifact's measurement-time anchors retained as flagged historical record (verified sanctioned, not drift).
+- **iter-002 B-2 (precedence pin): ADDRESSED AT PRIMARY SITES ONLY** — canonical derived from code, byte-identical at 4 plan-overview sites, attestation + DELETION RECORD + new pairwise-test leg in the task map (all verified by the spine worker) — but the withdrawn form survives at `phase3-plan.md:11` (blocking issue 1 above).
+- **iter-002 B-3 (rider mis-certification): ADDRESSED** — rider repointed to design-amendments §8; certification WITHDRAWN; dated self-supersession banner verified present at `technical-analysis.md:136`.
+- **S-1 hard gate: VERIFIED** — T12.2 gate text exists, is checkable, names the kb-writer trio figures and the presentation point (`phase12-plan.md:13,17,24` + `plan-overview.md:313`).
+- **S-2 reconciliation: VERIFIED** — 109 (never-ACCESSED, in-branch) vs 112 (zero-retrieval, unsourced) stamped and reconciled as two different passes over the 499-era store; 568-era value noted distinct; 499-vs-568 tension surfaced, never harmonized.
+- **Standing flags (mermaid reason→scope retained banner-only; evidence anchors historical; no pairwise test exists today):** honored as disclosed; defensive note from the spine worker — the mermaid site itself carries no inline marker (only the ledger withdrawal), a misread vector for a developer opening that file first.
+
+## Notes (non-blocking, consolidated — for the Leader's disposition)
+
+A. T0.5 task-map row ("Confirm ledger additive-table feasibility") still has no phase-0 counterpart row (subject owned by T1.1; counts agree 5/5/5; ID↔content mapping does not).
+B. phase3 T3.3's acceptance does not name the NEW pairwise-precedence test the task map requires (the six existing tests each pin one code in isolation — verified twice, independently).
+C. T4.6/T4.7 both claim the same 4 sealed tools_note.md files without a drawn boundary (within-phase; merge or state the split).
+D. phase0:9 cites "content-matched at worktree HEAD 48abbce67" — HEAD is now 6db44aa3c; verified harmless (fold touched only planning files, zero repo-code changes) but the reference is stale.
+E. K=48 digest arithmetic ("≈7250" vs 126×48=6048) — carried from iteration 002, not re-flagged this round; T7.9's exit criterion is the bound (≤8000) which holds either way. Still worth asserting the bound, not the constant.
+F. Rider §2.2/§4 line-cites into design-amendments drifted (:137/:160/:161 now blank/heading; actual tokens at :6/:140/:164) — substance true; anchors-are-leads doctrine applies.
+G. UNVERIFIED cluster (448/26/38 of 512, 87.5%) is bound to a stamping step at authoring — deliberately weaker than S-1's re-derive-or-drop; figures enter the Emperor's draft flagged (leader awareness).
+H. T5.5 File-cell lacks the "(Phase 12)" cross-ref its sibling T5.2 carries; guideline dual-touch (P5/P12) still has no shared-seam risk row; "measured-state" section name still does not exist in the guideline.
+I. Over-cap families live-application home — carried from iteration 001, never re-verified.
+J. skill_feedback "No usage record found" for injected skills — all three cycles; anomaly 0606eccf already filed.
+
+## Skills Used
+adversarial-plan-ledger-verification (one per worker, cold-context; loop/approver history excluded from worker evidence — one incidental grep observation disclosed and non-authoritative).
+
+## Session IDs
+- approve-pwg3-spine: b25db6d9-5cce-42a2-b51a-cc19d9ac0fac
+- approve-pwg3-p0-7: 113012cc-cb96-43ef-b3ec-16f189435d68
+- approve-pwg3-p8-13: d373e998-1b91-4350-b3b1-0e74cd6c0218
+
+**Cycle outcome: 3 rejections → ESCALATED to Leader for disposition.** The remaining defect surface is small and fully characterized: 3 one-line edits + 1 attestation scope extension (blocking), plus the note list. The spine and phases 8–13 verified clean; the plan is one disciplined propagation pass away from approvable.
+
+---
+*[Tracking: .agents/approver/pok-write-gate-tracking.md — Status: ESCALATED]*
