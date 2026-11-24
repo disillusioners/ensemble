@@ -171,10 +171,21 @@ class TestCensusSurface:
 
 class TestTransitionMap:
     def test_every_content_class_names_a_destination(self):
+        # THREE classes (the functional-gate I1 fix, 2026-11-24): the
+        # gate's closed five-family vocabulary produces knowledge /
+        # operational / episode ONLY — the doctrine's fourth routing
+        # class (governance → the critical notes / the board) is a
+        # ROUTING home in the guideline's doctrine, not a
+        # gate-rejection class, and was DEAD CODE in the product route
+        # table (route_for_family() could never return it — measured
+        # family map: boundary→knowledge, reason/redundancy/scope→
+        # operational, durability→episode). This pin previously
+        # asserted the commissioned-but-inexpressible fourth class;
+        # per the leader's FIX-3 ruling the dead class is dropped and
+        # the pin follows the code (a TEST CHANGE, disclosed).
         assert set(CONTENT_CLASS_ROUTES) == {
             "knowledge",
             "operational",
-            "governance",
             "episode",
         }
         for content_class, route in CONTENT_CLASS_ROUTES.items():
@@ -186,8 +197,6 @@ class TestTransitionMap:
     def test_the_class_destinations_are_the_documented_ones(self):
         assert CONTENT_CLASS_ROUTES["knowledge"]["categories"] == ("rag",)
         assert CONTENT_CLASS_ROUTES["operational"]["categories"] == ("pok",)
-        assert "critical_notes" in CONTENT_CLASS_ROUTES["governance"]["categories"]
-        assert "board" in CONTENT_CLASS_ROUTES["governance"]["categories"]
         assert "board" in CONTENT_CLASS_ROUTES["episode"]["categories"]
         assert "shared_meta_kv" in CONTENT_CLASS_ROUTES["episode"]["categories"]
 
@@ -204,6 +213,21 @@ class TestTransitionMap:
             "redundancy",
             "scope",
         }
+        # The REACHABILITY pin (the functional-gate I1 fix): every
+        # CONTENT_CLASS_ROUTES class is REACHABLE from the family map
+        # via route_for_family() — a dead class (defined but never
+        # produced) MUST fail here. This is the leg that would have
+        # caught the unreachable governance class before it shipped.
+        reachable_classes = {
+            route_for_family(family)["content_class"]
+            for family in REFUSAL_FAMILY_CLASSES
+        }
+        dead = set(CONTENT_CLASS_ROUTES) - reachable_classes
+        assert not dead, (
+            f"content classes no gate family can reach (dead route rows): "
+            f"{sorted(dead)} — drop them or wire a family that genuinely "
+            "indicates that content"
+        )
 
     def test_an_unknown_family_still_routes(self):
         route = route_for_family("not-a-family")

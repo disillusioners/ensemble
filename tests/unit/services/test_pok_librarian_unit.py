@@ -848,11 +848,21 @@ class TestRetrievalRecorderWiring:
     def test_the_context_seam_passes_the_recorder(self):
         import inspect
 
-        from daemon.services import context_messages
+        # The POK context seam lives in pok_context.py since the
+        # functional-gate FIX-1 module split (a PURE MOVE from
+        # context_messages.py — re-exported from the old home).
+        from daemon.services import pok_context
 
-        source = inspect.getsource(context_messages)
+        source = inspect.getsource(pok_context)
         assert "make_retrieval_recorder(" in source
         assert 'source="injection"' in source
+        # And the MOVE is a move: the seam resolves from the old home
+        # as the very same object.
+        from daemon.services import context_messages
+
+        assert context_messages._maybe_pok_context_message is (
+            pok_context._maybe_pok_context_message
+        )
 
     def test_the_ari_seam_passes_the_recorder(self):
         import inspect
@@ -960,11 +970,19 @@ class TestLibrarianBoardSink:
         assert _board_items(env.engine) == []
 
     def test_proposals_emit_exactly_one_bounded_item(self, env):
-        """The sink's core leg: ONE item, counts only, no per-proposal
-        spam. The pass is the emitter — the emission is pass-internal."""
+        """The sink's core leg (the I2 shape, functional-gate fix
+        round): ONE item carrying the summary counts PLUS one bounded
+        per-proposal line (slug → target + basis). The pass is the
+        emitter — the emission is pass-internal."""
         self._seed_band(env, duplicate=True)
         report = run_librarian_pass(env.engine, PROJECT_ID)
-        assert len(report.proposals) == 2
+        # ONE proposal, not a mutual pair (the functional-gate I3 fix:
+        # the J selector picks fam-01-survivor as the group's target —
+        # fam-01-dup merges INTO it; the survivor itself is not
+        # proposed away under the same basis).
+        assert len(report.proposals) == 1
+        assert report.proposals[0]["slug"] == "fam-01-dup"
+        assert report.proposals[0]["target_slug"] == "fam-01-survivor"
 
         items = _board_items(env.engine)
         assert len(items) == 1
@@ -972,11 +990,21 @@ class TestLibrarianBoardSink:
         assert item.title == librarian.POK_LIBRARIAN_BOARD_TITLE
         assert item.project_id == PROJECT_ID
         assert item.created_by_instance == librarian.POK_LIBRARIAN_BOARD_AUTHOR
-        # Summary counts — and NO per-proposal dump.
-        assert "Consolidation proposals: 2" in item.body_md
-        assert "covered-by-surviving-row=2" in item.body_md
-        assert "fam-01-dup" not in item.body_md
-        assert "fam-01-survivor" not in item.body_md
+        # The summary counts.
+        assert "Consolidation proposals: 1" in item.body_md
+        assert "covered-by-surviving-row=1" in item.body_md
+        # The BOUNDED per-proposal detail — slugs PRESENT (one line
+        # each: slug → target + basis — the only persisted artifact a
+        # curator can act on, per the I2 finding)...
+        assert "- fam-01-dup → fam-01-survivor (basis: covered-by-surviving-row)" in item.body_md
+        # ...and the full bodies ABSENT (the no-spam bound holds: the
+        # per-proposal lines are slug+target+basis ONLY).
+        assert "the OLD body" not in item.body_md
+        assert "the body of the row" not in item.body_md
+        # The pointer text names the artifacts that ACTUALLY carry the
+        # detail (the board item itself + the maintenance-run summary).
+        assert "Per-proposal detail: the lines above" in item.body_md
+        assert "maintenance-run" in item.body_md
         # The tag is the curator's filter key.
         from sqlmodel import Session
 
@@ -995,5 +1023,5 @@ class TestLibrarianBoardSink:
         self._seed_band(env, duplicate=True)
         report = run_librarian_pass(env.engine, PROJECT_ID)
         assert report.error is None
-        assert len(report.proposals) == 2
+        assert len(report.proposals) == 1  # the I3 fix: no mutual pair
         assert _board_items(env.engine) == []

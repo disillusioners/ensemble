@@ -261,8 +261,21 @@ def read_gate_switches(engine: Any) -> tuple[bool, bool]:
 #
 # The map is the guideline's per-class routing table (its §4 table)
 # expressed in the gate's own vocabulary: knowledge → RAG, operational
-# → POK, governance → the curated note surface / the board, episode →
-# the board / the KV.
+# → POK, episode → the board / the KV.
+#
+# THREE classes, not four (the functional-gate I1 fix, 2026-11-24):
+# the doctrine's fourth routing class — governance (a curated project
+# contract → the critical notes / the board) — is a ROUTING home in
+# the guideline's doctrine, NOT a gate-rejection class. The gate's
+# CLOSED five-family vocabulary (boundary / reason / durability /
+# redundancy / scope) produces knowledge / operational / episode only
+# (the measured family map), and every reassignment of an existing
+# family onto governance would break that family's own proven route
+# (boundary → knowledge IS the Emperor's canonical RAG trace). A class
+# the gate can never emit was dead code in the product route table —
+# dropped, and the reachability pin (every CONTENT_CLASS_ROUTES class
+# is produced by ≥1 family via route_for_family()) now guards the
+# invariant.
 CONTENT_CLASS_ROUTES: dict[str, dict[str, Any]] = {
     "knowledge": {
         "route": "rag",
@@ -281,15 +294,6 @@ CONTENT_CLASS_ROUTES: dict[str, dict[str, Any]] = {
         "instruction": (
             "state the operational invariant the fact protects, then write "
             "it again"
-        ),
-    },
-    "governance": {
-        "route": "critical_notes_or_board",
-        "destination": "the critical notes (a curated, pinned surface) or the board",
-        "categories": ("critical_notes", "board"),
-        "instruction": (
-            "a curated project contract belongs in the critical notes; a "
-            "human-facing project state belongs on the board"
         ),
     },
     "episode": {

@@ -114,14 +114,15 @@ Not config-armed — this is doctrine plus standing knobs; there are no env keys
   | Human-facing project state — milestones, lane progress, episode narratives | the board / PM ledger | the human-facing ledger; updated in place, never rots silently |
   | Lane working state — a pending fix, episode detail, dated counts | the lane's planning directory (`.agents/shared/planning/<lane>/`) | full documents, versioned with the lane, unlimited length |
 
-- **The refusal transition map (the boundary, in the product surface).** The gate's refusal envelope names, for the content class it judged, the route and the destination — and whether that destination is **reachable** by the caller (`destination_available`); a refused write whose destination is unreachable is **parked**, never dropped. The four classes:
+- **The refusal transition map (the boundary, in the product surface).** The gate's refusal envelope names, for the content class it judged, the route and the destination — and whether that destination is **reachable** by the caller (`destination_available`); a refused write whose destination is unreachable is **parked**, never dropped. The three classes the gate's closed five-family vocabulary can produce:
 
   | Content class | Destination | Tool category (the grant-check) |
   |---|---|---|
   | **knowledge** (what something IS) | the knowledge base (RAG) | `rag` |
   | **operational** (this project's how-to / rule / trap) | **POK** | `pok` |
-  | **governance** (a curated project contract agents must read) | the critical notes (a curated, pinned surface) or the board | `critical_notes`, `board` |
   | **episode** (lane state, a dated count, a fingerprint) | the board (a human-facing ledger) or the shared KV | `board`, `shared_meta_kv` |
+
+  The doctrine's FOURTH routing class — **governance** (a curated project contract agents must read → the critical notes or the board) — is a ROUTING home in this §4 doctrine, NOT a gate-rejection class: the gate's closed five-family vocabulary (boundary / reason / durability / redundancy / scope) produces knowledge / operational / episode only (boundary → knowledge, reason / redundancy / scope → operational, durability → episode — the measured family map), so no gate refusal can carry it. The functional gate's I1 finding dropped the unreachable class from the product route table (it was dead code there — `route_for_family()` could never return it), and a reachability pin now guards the invariant: every route-table class is produced by ≥1 family.
 
   The map lives in the product surface (`daemon/tools/pok.py` — `CONTENT_CLASS_ROUTES` + `REFUSAL_FAMILY_CLASSES`); this guideline states the doctrine it encodes.
 - **(e) The ONE sanctioned POK exception (unchanged):** IF an inventory must live in POK, it lives as ONE active row per inventory, refreshed by giter via SUPERSEDE (a supersede chain) — never a growing set of dated rows.

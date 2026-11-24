@@ -67,7 +67,9 @@ metadata table and WRITES ONLY the soft-max metadata key (the
 daemon-internal writer the I1 pick sanctions — the authority split
 governs AGENT-FACING tool calls, not this) plus, when a pass HAS
 consolidation proposals, ONE bounded board NOTICE (the Phase 12 board
-sink — fail-soft; the ledger rows stay the durable record).
+sink — fail-soft; the board item's per-proposal lines and the
+maintenance-run summary carry the pass detail — the functional gate's
+I2 fix).
 """
 
 from __future__ import annotations
@@ -875,11 +877,21 @@ def propose_consolidations(
     proposals: list[ConsolidationProposal] = []
     for entry in store.entries:
         signals = classify_metrics(entry)
-        survivors = [
-            s
-            for s in by_sha.get(entry.content_sha256, [])
-            if s.slug != entry.slug
-        ]
+        group = by_sha.get(entry.content_sha256, [])
+        survivors = [s for s in group if s.slug != entry.slug]
+        # The J-PARTITION TARGET (the functional-gate I3 fix): ONE
+        # deterministic merge target per duplicate group — the J
+        # selector's pick over the WHOLE group (verify_count, the
+        # curator tier, the family match, recency; ``access_count``
+        # corroborates only) — never the arbitrary ``survivors[0]``
+        # and never a MUTUAL pair (two rows each naming the other as
+        # the merge target, the contradiction that corrupts the store
+        # the moment consolidation is armed).
+        j_target = (
+            select_merge_target(group, family=entry.family)
+            if len(group) > 1
+            else None
+        )
         basis = consolidation_basis_for(
             entry,
             signals,
@@ -888,12 +900,28 @@ def propose_consolidations(
         )
         if basis is None:
             continue
+        if (
+            basis == "covered-by-surviving-row"
+            and j_target is not None
+            and j_target.slug == entry.slug
+        ):
+            # THIS row is the group's J-selected survivor — the others
+            # merge into IT. Proposing it away under the same basis
+            # would contradict them (the mutual-pair defect shape).
+            continue
+        if j_target is not None and j_target.slug != entry.slug:
+            target_slug = j_target.slug
+        elif survivors:
+            picked = select_merge_target(survivors, family=entry.family)
+            target_slug = picked.slug if picked is not None else None
+        else:
+            target_slug = None
         proposals.append(
             ConsolidationProposal(
                 slug=entry.slug,
                 basis=basis,
                 evidence=tuple(s.detail for s in signals if s.trusted),
-                target_slug=survivors[0].slug if survivors else None,
+                target_slug=target_slug,
             )
         )
     return proposals
@@ -1130,8 +1158,8 @@ class LibrarianPassReport:
 #: maintenance_seed.py:146).
 POK_LIBRARIAN_BOARD_AUTHOR = "daemon:pok-librarian"
 
-#: The board item's title — bounded, counts-only, NEVER a
-#: per-proposal subject line.
+#: The board item's title — bounded, NEVER a per-proposal subject
+#: line (the per-proposal detail rides the BODY, one line each).
 POK_LIBRARIAN_BOARD_TITLE = "POK librarian: consolidation proposals to review"
 
 #: The board item's tag — the key a curator filters on.
@@ -1139,13 +1167,15 @@ POK_LIBRARIAN_BOARD_TAG = "pok-librarian"
 
 
 def librarian_board_body(report: LibrarianPassReport) -> str:
-    """The bounded, COUNTS-ONLY body of the librarian's board notice.
+    """The bounded body of the librarian's board notice.
 
-    The board item is a NOTICE, not the record: the detail lives in
-    the write-gate ledger rows and the ``pok-librarian``
-    ``maintenance_runs`` audit row. So the body carries SUMMARY
-    COUNTS ONLY — never a per-proposal dump, never a slug list (one
-    item per pass, no per-proposal spam).
+    The board item is a NOTICE, and — since the functional gate's I2
+    fix (2026-11-24) — the ONLY PERSISTED artifact that carries the
+    PER-PROPOSAL detail: the pass writes no ledger row for a proposal
+    and the ``maintenance_runs`` summary is counts-only, so the board
+    item itself carries one bounded line per proposal (slug → target
+    + basis — NO full bodies), plus the summary counts. One item per
+    pass; the per-proposal lines are the detail, not spam.
     """
     by_basis: dict[str, int] = {}
     for proposal in report.proposals:
@@ -1163,11 +1193,20 @@ def librarian_board_body(report: LibrarianPassReport) -> str:
                 f"{basis}={count}" for basis, count in sorted(by_basis.items())
             )
         )
+    # ONE bounded line per proposal (the I2 fix): slug → target + the
+    # ruled basis — the curator's actionable detail. NO full bodies
+    # (the one-item-per-pass bound and the no-spam rule both hold).
+    for proposal in report.proposals:
+        slug = str(proposal.get("slug") or "?")
+        target = proposal.get("target_slug") or "(no target)"
+        basis = str(proposal.get("basis") or "unspecified")
+        lines.append(f"- {slug} → {target} (basis: {basis})")
     lines.append(f"R-RET candidates: {len(report.r_ret)}")
     lines.append(f"Expired / never-answered ASK gates: {report.expired_asks}")
     lines.append(
-        "Summary counts only — the write-gate ledger rows and the "
-        "pok-librarian maintenance-run row carry the detail."
+        "Per-proposal detail: the lines above (slug → target + basis). "
+        "Counts and the pass summary: the pok-librarian maintenance-run "
+        "row. A curator archives via pok_curate with the named basis."
     )
     return "\n".join(lines)
 
@@ -1179,8 +1218,12 @@ def emit_librarian_board_notice(
 
     The board sink (pok-write-gate Phase 12): the librarian's pass
     surfaces its consolidation proposals to the human-facing board —
-    ONE item per pass, summary counts only. The ledger rows stay the
-    durable record; the board is a notice, never a per-proposal feed.
+    ONE item per pass: the summary counts PLUS one bounded
+    per-proposal line (slug → target + basis, NO full bodies — the
+    functional gate's I2 fix: the pass writes no ledger row for a
+    proposal and the maintenance-run summary is counts-only, so this
+    item is the only PERSISTED artifact carrying the per-proposal
+    detail a curator can act on).
 
     The call is the SYNCHRONOUS ``BoardService.create_item`` (never
     the async offload path — the ``daemon/repositories/source/
