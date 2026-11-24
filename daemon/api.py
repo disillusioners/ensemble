@@ -2372,6 +2372,64 @@ async def lifespan(app: FastAPI):
     )
 
     # ─────────────────────────────────────────────────────────────
+    # StaleRunningSweepService (fix/post-outage-recovery SCOPE b4,
+    # Shape B) — the STEADY-STATE terminalizer for the status-stale
+    # defect class: an instance whose work is FINISHED (every task
+    # row terminal, every message row proven-terminal, nothing holds
+    # the posture) but whose row still reads ``running`` with a frozen
+    # last_activity. The existing seams are EVENT-DRIVEN (the
+    # child_reports drive + the observer finalize both need a
+    # completion event), the b2 boot reconciler is BOOT-ONLY, and the
+    # healer's running-zombie anchor requires a terminal-COMPLETED
+    # task row on a ROOT — the measured specimens (no task row /
+    # non-root) fall outside all three. This lane is the missing
+    # steady-state firing point: it drives the PRODUCTION completion
+    # chain (child_reports, reason finalize_gap_steady_state), never a
+    # raw status write, gated on the strand-healer's holding-conditions
+    # vocabulary (no non-terminal task, no unproven-terminal message —
+    # unknown statuses HOLD, no open injection, no bus-pending watcher,
+    # no live-tree member, no pending question) plus an age bound on
+    # the newest completion evidence. D14/D21 respected:
+    # ``waiting_children`` stays bus-owned; ``paused`` untouched.
+    # Kill-switch ``ENSEMBLE_STALE_RUNNING_SWEEP`` (default ON, ``=0``
+    # disables) — same precedent as ENSEMBLE_SCHEDULED_FIRE_SUPERVISOR.
+    from daemon.services.stale_running_sweep import (
+        DEFAULT_INTERVAL_SECONDS as _SRS_DEFAULT_INTERVAL,
+        StaleRunningSweepService,
+    )
+    # Defensive coercion (the ScheduledFireSupervisor knob discipline):
+    # a non-numeric interval env must never crash the boot.
+    try:
+        stale_running_sweep_interval = int(
+            os.environ.get("ENSEMBLE_STALE_RUNNING_SWEEP_INTERVAL_SECONDS",
+                           str(_SRS_DEFAULT_INTERVAL)),
+        )
+    except (TypeError, ValueError):
+        stale_running_sweep_interval = _SRS_DEFAULT_INTERVAL
+        logger.warning(
+            "StaleRunningSweepService: non-numeric "
+            "ENSEMBLE_STALE_RUNNING_SWEEP_INTERVAL_SECONDS=%r — using the "
+            "default %ss",
+            os.environ.get("ENSEMBLE_STALE_RUNNING_SWEEP_INTERVAL_SECONDS"),
+            _SRS_DEFAULT_INTERVAL,
+        )
+    stale_running_sweep = StaleRunningSweepService(
+        manager,
+        interval_seconds=stale_running_sweep_interval,
+    )
+    stale_running_sweep.start()
+    app.state.stale_running_sweep = stale_running_sweep
+    manager._stale_running_sweep = stale_running_sweep
+    logger.info(
+        "StaleRunningSweepService started: interval=%ss (default %ss) "
+        "kill_switch=%s",
+        stale_running_sweep_interval,
+        _SRS_DEFAULT_INTERVAL,
+        "on" if os.environ.get("ENSEMBLE_STALE_RUNNING_SWEEP", "1")
+        .strip().lower() not in ("0", "false", "no", "off") else "off",
+    )
+
+    # ─────────────────────────────────────────────────────────────
     # ScheduledFireSupervisor (Addendum A.4, 2026-11-24) — consumes the
     # execution receipt to re-drive fires that began no turn (never-started /
     # failed-to-dispatch) or whose dispatched row is stale past a bounded
@@ -5239,6 +5297,19 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"MissionStrandHealer shutdown error: {e}")
         app.state.mission_strand_healer = None
+
+    # --- StaleRunningSweepService shutdown (b4 Shape B) ---
+    # Stop the steady-state stale-running terminalizer BEFORE the
+    # manager shuts down (same shutdown contract as the strand healer
+    # above: graceful stop with WARNING on failure, getattr-guarded so
+    # a partial startup failure is a silent no-op).
+    stale_running_sweep = getattr(app.state, "stale_running_sweep", None)
+    if stale_running_sweep is not None:
+        try:
+            await stale_running_sweep.stop()
+        except Exception as e:
+            logger.warning(f"StaleRunningSweepService shutdown error: {e}")
+        app.state.stale_running_sweep = None
 
     # --- JobLockSweepService shutdown (F3) ---
     # Stop the periodic reclaim sweep BEFORE the manager shuts down
