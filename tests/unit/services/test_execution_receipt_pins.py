@@ -11,13 +11,30 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import create_engine
-from sqlmodel import SQLModel
+from sqlalchemy.engine import Engine
+from sqlalchemy.pool import NullPool
+from sqlmodel import Session, SQLModel, select
 
+import daemon.repositories.event.models  # noqa: F401
+import daemon.repositories.instance.models  # noqa: F401
+import daemon.repositories.job_queue.models  # noqa: F401
+import daemon.repositories.message_queue.models  # noqa: F401
+import daemon.repositories.task.models  # noqa: F401
+from daemon.repositories.instance.models import Instance
+from daemon.repositories.job_queue.models import AdmissionState, JobItem
+from daemon.repositories.job_queue.repository import JobRepository
+from daemon.repositories.message_queue.models import MessageQueue
+from daemon.repositories.message_queue.repository import (
+    SQLModelMessageQueueRepository as MessageQueueRepository,
+)
 from daemon.repositories.source.models import ExecutionStatus, ScheduleExecution
 from daemon.repositories.source.repository import SQLModelSourceRepository
+from daemon.repositories.task.models import Task
+from daemon.repositories.task.repository import TaskRepository
 from daemon.services.execution_receipt import make_execution_receipt_callback
 from daemon.sources.adapters.scheduler import SchedulerAdapter
 from tests.conftest import make_config
@@ -198,14 +215,134 @@ async def test_project_hole_no_manager_falls_back_immediate():
 
 
 # ---------------------------------------------------------------------------
-# 5. Re-arm claim pin (mandated) — next-fire + turn + truthful receipt
 # ---------------------------------------------------------------------------
+# 5. Re-arm claim pin (mandated) — next-fire + A REAL TURN + truthful receipt
+# ---------------------------------------------------------------------------
+#
+# The pre-remediation leg (b) was FAKE: it asserted
+# ``enqueue_message_job.assert_called_once()`` on an AsyncMock — an ENQUEUE
+# is not a TURN. The mandated leg is "the spawned instance TOOK A TURN (the
+# task reached processing — not just enqueued)".
+#
+# The pin below drives the REAL substrate (the same hermetic shape as the b2
+# matrix pins): the REAL scheduler route → the REAL substrate claim
+# (``JobRepository.create_or_get_by_idempotency_key``) → the D13 prelude
+# pair (Task PENDING bound to the minted work_id + MessageQueue ready) →
+# the REAL ``claim_pending_task`` SQL → the REAL ``dequeue``. The task row
+# reaches ``running`` and the message row reaches ``processing`` WITH
+# ``processing_started_at`` — a state a mock can never manufacture.
+
+
+@pytest.fixture
+def rearm_engine(tmp_path) -> Engine:
+    """A file-backed SQLite engine with the REAL SQLModel schema."""
+    eng = create_engine(
+        f"sqlite:///{tmp_path}/rearm.db",
+        connect_args={"check_same_thread": False},
+        poolclass=NullPool,
+    )
+    SQLModel.metadata.create_all(eng)
+    yield eng
+    eng.dispose()
+
+
+class _ReArmManager:
+    """A manager whose enqueue lands on the REAL substrate.
+
+    The enqueue performs the substrate's ATOMIC claim (the exact claim
+    production ``JobQueueService.enqueue`` makes) and writes the D13
+    prelude pair (Task PENDING bound to the minted work_id + MessageQueue
+    ready) — the two rows the production ``enqueue_message_job`` writes.
+    """
+
+    def __init__(self, engine: Engine) -> None:
+        self._engine = engine
+        self.job_repo = JobRepository(engine)
+        self.task_repo = TaskRepository(engine)
+        self.mq_repo = MessageQueueRepository(engine)
+        self.results: list = []
+        self.spawn_instance_with_mcp = AsyncMock(return_value="inst-rearm")
+
+    async def enqueue_message_job(self, **kwargs):
+        key = kwargs.get("idempotency_key")
+        job, _created = self.job_repo.create_or_get_by_idempotency_key(
+            agent_id="ari",
+            agent_dir="/agents/ari",
+            message=kwargs.get("message", "x"),
+            source="scheduler",
+            project_id="p",
+            priority=5,
+            # An unkeyed enqueue mints a fresh unique key (production:
+            # unkeyed enqueues never collapse).
+            idempotency_key=key if key else f"unkeyed-{uuid4()}",
+        )
+        instance_id = kwargs.get("instance_id") or "inst-rearm"
+        message_id = f"mq-{uuid4().hex[:12]}"
+        with Session(self._engine) as s:
+            s.add(
+                Task(
+                    work_id=job.job_id,
+                    task_type="process_message",
+                    instance_id=instance_id,
+                    message_id=message_id,
+                    status="pending",
+                )
+            )
+            s.add(
+                MessageQueue(
+                    message_id=message_id,
+                    instance_id=instance_id,
+                    content=kwargs.get("message", "x"),
+                    source="scheduler",
+                    status="ready",
+                )
+            )
+            s.commit()
+        result = MagicMock(
+            job_id=job.job_id,
+            message_id=message_id,
+            instance_id=instance_id,
+            status="queued",
+        )
+        self.results.append(result)
+        return result
+
+
+def _seed_rearm_instance(engine: Engine, instance_id: str = "inst-rearm") -> None:
+    with Session(engine) as s:
+        s.add(
+            Instance(
+                instance_id=instance_id,
+                agent_id="ari",
+                agent_dir="/agents/ari",
+                status="running",
+            )
+        )
+        s.commit()
+
+
+def _activate_job(engine: Engine, job_id: str) -> None:
+    """The JobProcessor's OWN activation step (the queue-aware claim gate
+    requires it — a QUEUED anchor holds the task until the pipeline
+    activates it). The task row itself is NEVER touched by hand."""
+    with Session(engine) as s:
+        job = s.exec(select(JobItem).where(JobItem.job_id == job_id)).first()
+        job.admission_state = AdmissionState.ACTIVE.value
+        s.add(job)
+        s.commit()
 
 
 @pytest.mark.asyncio
-async def test_rearm_claim_pin_next_fire_turn_and_receipt(receipt_repo):
-    """A fired cycle persists a same-weekday next-fire, takes a turn, and the
-    receipt says so truthfully (three legs, one coherent harness)."""
+async def test_rearm_claim_pin_next_fire_turn_and_receipt(
+    receipt_repo, rearm_engine
+):
+    """A fired cycle computes the next fire, TAKES A REAL TURN, and the
+    receipt says so truthfully (three legs, one coherent hermetic harness).
+
+    Leg (b) is the REAL substrate: the task row reaches ``running`` and the
+    message row reaches ``processing`` with ``processing_started_at`` set —
+    a mock can never manufacture that.
+    """
     # A WEEKLY cron (weekday 1 = Monday). The re-arm math must preserve it.
     config = make_config("sched-weekly", {
         "schedule": "0 9 * * 1",   # Mondays 09:00
@@ -214,33 +351,108 @@ async def test_rearm_claim_pin_next_fire_turn_and_receipt(receipt_repo):
         "timezone": "UTC",
     })
 
-    manager = AsyncMock()
-    # The enqueue creates a Task and marks it PROCESSING (the turn was taken).
-    task_row = MagicMock()
-    task_row.id = "task-weekly"
-    manager._task_repo = MagicMock()
-    manager._task_repo.get_by_work_id = MagicMock(return_value=task_row)
-    manager.spawn_instance_with_mcp = AsyncMock(return_value="inst-weekly")
-    result = MagicMock(job_id="job-weekly", message_id="msg-weekly", instance_id="inst-weekly", status="queued")
-    manager.enqueue_message_job = AsyncMock(return_value=result)
+    manager = _ReArmManager(rearm_engine)
+    _seed_rearm_instance(rearm_engine, "inst-rearm")
 
-    adapter = SchedulerAdapter(config, AsyncMock(), MagicMock(), manager=manager, source_repo=receipt_repo)
+    adapter = SchedulerAdapter(
+        config, AsyncMock(), None, source_repo=receipt_repo, manager=manager,
+    )
     await adapter.start()
     await adapter._emit_scheduled_message()
     await adapter.stop()
 
-    # (a) a NEW next-fire with the SAME weekday is persisted/computable.
+    # (a) the next fire is COMPUTABLE for cron — the SAME weekday. (The
+    #     claim is about the computable next fire; the re-arm PERSISTS it
+    #     through the chain re-arm write, which is not this pin's subject.)
     nxt = adapter._get_next_trigger_time()
     assert nxt is not None
     assert nxt.weekday() == 0, f"re-arm must preserve Monday weekday, got {nxt.weekday()}"
 
-    # (b) the spawned instance TOOK A TURN (durable enqueue + task processed).
-    manager.enqueue_message_job.assert_called_once()
-    assert task_row.id == "task-weekly"
+    # (b) the spawned instance TOOK A TURN — on the REAL substrate.
+    assert len(manager.results) == 1, "the fire must enqueue exactly one delivery"
+    job_id = manager.results[0].job_id
+    _activate_job(rearm_engine, job_id)
 
-    # (c) the receipt says so truthfully (dispatched with handles).
+    task_repo = TaskRepository(rearm_engine)
+    mq_repo = MessageQueueRepository(rearm_engine)
+    claimed = task_repo.claim_pending_task(worker_id="worker-rearm-1", lane="default")
+    assert claimed is not None, (
+        "the enqueued delivery MUST be claimable — an enqueue that never "
+        "reaches processing is not a turn"
+    )
+    assert claimed.status == "running", (
+        f"the task must reach the processing state, got {claimed.status!r}"
+    )
+    msg = mq_repo.dequeue(instance_id="inst-rearm")
+    assert msg is not None and msg.status == "processing", (
+        "the message must leave 'ready' into 'processing' — the turn was "
+        "taken"
+    )
+    assert msg.processing_started_at is not None, (
+        "the processing start must be stamped — the turn really ran"
+    )
+
+    # (c) the receipt says so truthfully (dispatched with the handles).
     receipt = receipt_repo.get_latest_execution("sched-weekly")
     assert receipt is not None
     assert receipt.status in (ExecutionStatus.DISPATCHED.value, ExecutionStatus.EXECUTED.value)
-    assert receipt.instance_id == "inst-weekly"
-    assert receipt.task_id == "task-weekly"
+    assert receipt.instance_id == "inst-rearm"
+    assert receipt.job_item_id == job_id
+
+
+@pytest.mark.asyncio
+async def test_rearm_semaphore_timeout_rearm_leaves_a_truthful_receipt(
+    receipt_repo, monkeypatch
+):
+    """The semaphore-timeout re-arm (the branch the pin's name promises).
+
+    The saturated-slot branch must NEVER consume the one-shot silently: the
+    REAL fire leaves a ``never-started`` receipt (NULL instance handle — the
+    only permitted NULL states) and the re-arm writes its own ``deferred``
+    audit row.
+    """
+    import daemon.sources.adapters.scheduler as sched_mod
+
+    # The MANDATORY 5s re-arm cadence sleep — shortened for the pin.
+    monkeypatch.setattr(sched_mod, "SCHEDULER_ERROR_RETRY_S", 0)
+
+    config = make_config("sched-rearm-st", {
+        "interval_seconds": 3600,
+        "agent": "./agents/developer",
+        "message": "Re-arm probe",
+        "timezone": "UTC",
+    })
+    manager = AsyncMock()
+    manager.spawn_instance_with_mcp = AsyncMock(return_value="inst-rearm-st")
+
+    adapter = SchedulerAdapter(
+        config, AsyncMock(), None, source_repo=receipt_repo, manager=manager,
+    )
+    await adapter.start()
+    await adapter._rearm_after_semaphore_timeout("exec-rearm-st")
+    await adapter.stop()
+
+    rows = {
+        r.execution_id: r
+        for r in receipt_repo.list_schedule_executions("sched-rearm-st")
+    }
+    fired = rows.get("exec-rearm-st")
+    assert fired is not None, (
+        f"the real fire must leave a receipt — got {sorted(rows)!r}"
+    )
+    assert fired.status == ExecutionStatus.NEVER_STARTED.value, (
+        "the saturated fire began NO turn — the receipt must say so "
+        f"(got {fired.status!r})"
+    )
+    assert fired.instance_id is None, (
+        "a never-started receipt carries no instance handle"
+    )
+    assert fired.completed_at is not None
+
+    # The re-arm's own audit row is separate and deferred.
+    rearm_rows = [r for eid, r in rows.items() if eid != "exec-rearm-st"]
+    assert len(rearm_rows) == 1, (
+        f"the re-arm writes exactly one audit row — got {rearm_rows!r}"
+    )
+    assert rearm_rows[0].status == ExecutionStatus.DEFERRED.value
+    assert adapter._fire_outcome == adapter.FIRE_OUTCOME_REARMED
