@@ -337,6 +337,14 @@ JOB_MAX_STALENESS_HOURS: dict[str, float] = {
     "vacuum_maintenance": 24.0,
 }
 
+#: The maintenance_runs SECTION for the backstop job. It is a
+#: SEPARATE section from ``checkpoint-cleanup`` on purpose: the audit
+#: table's partial unique index claims one RUNNING row per section, so
+#: a distinct section lets the backstop claim its own lane (the
+#: process-wide ``MaintenanceRunLock`` still serialises the two lanes
+#: against each other).
+BACKSTOP_SECTION = "checkpoint-backstop"
+
 #: ``maintenance_runs.section`` per job name — the persisted
 #: last-success source. Only the jobs that write Section-1 audit rows
 #: have an entry; every other job falls back to the process-start
@@ -344,6 +352,11 @@ JOB_MAX_STALENESS_HOURS: dict[str, float] = {
 JOB_MAINTENANCE_SECTIONS: dict[str, str] = {
     "checkpoint_cleanup": "checkpoint-cleanup",
     "vacuum_maintenance": "vacuum-maintenance",
+    # The backstop (SCOPE (c)) — its OWN section. The mapping is what
+    # gives the backstop the RESTART-CLOCK INVARIANT: its persisted
+    # last-success hydrates at boot, so a daemon restart does not make
+    # the job due immediately (the in-memory clock alone would).
+    "checkpoint_backstop_prune": BACKSTOP_SECTION,
 }
 
 #: The system-default project id — the bookkeeping home of the
@@ -421,13 +434,6 @@ def backstop_registration_params() -> tuple[bool, int]:
 #: The default backstop pair budget (pairs per run).
 DEFAULT_BACKSTOP_PAIR_BUDGET = 25
 
-#: The maintenance_runs SECTION for the backstop job. It is a SEPARATE
-#: section from ``checkpoint-cleanup`` on purpose: the audit table's
-#: partial unique index claims one RUNNING row per section, so a
-#: distinct section lets the backstop claim its own lane (the
-#: process-wide ``MaintenanceRunLock`` still serialises the two lanes
-#: against each other).
-BACKSTOP_SECTION = "checkpoint-backstop"
 
 # ── The checkpoint_blobs BYTES guard (ITEM 2, SCOPE (c)) ───────────────────
 #

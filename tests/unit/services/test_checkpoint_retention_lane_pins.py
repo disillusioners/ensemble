@@ -982,3 +982,16 @@ class TestBackstopRegistrationSeam:
         assert "backstop_registration_params()" in source
         assert '"checkpoint_backstop_prune"' in source
         assert "checkpoint_cleanup.run_backstop_prune" in source
+
+    def test_the_backstop_gets_the_restart_clock_invariant(self):
+        """The backstop's persisted last-success must hydrate at boot
+        (the job→section mapping) — without it, every daemon restart
+        made the job due immediately."""
+        assert (
+            mt.JOB_MAINTENANCE_SECTIONS.get("checkpoint_backstop_prune")
+            == mt.BACKSTOP_SECTION
+        )
+        assert mt.BACKSTOP_SECTION != "checkpoint-cleanup", (
+            "the backstop needs its OWN section (the audit table's "
+            "partial unique index claims one RUNNING row per section)"
+        )
