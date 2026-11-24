@@ -421,8 +421,8 @@ class TestAc19TerminalityCured:
         # that silently dropped the supersede stayed green.
         assert "supersede" in msg
         assert "does not free a slot" in msg.lower()
-        # the members are relabelled as PREFIX-SHARING rows (W2 — the
-        # count is a ``startswith`` superset, not family membership).
+        # the members are the family's OWN rows (strict family-key
+        # equality — the old ``startswith`` superset is GONE).
         assert "active family members" in msg
         # the archive count is DERIVED from the live count (CRITICAL 1).
         assert ei.value.details["archive_needed"] == 1
@@ -477,7 +477,7 @@ class TestAc19TerminalityCured:
         assert ei.value.details["archive_needed"] == need
         assert ei.value.details["active_count"] == POK_FAMILY_MAX + 1
         assert ei.value.details["family"] == "over-cap"
-        # the seeded members are listed as prefix-sharing rows
+        # the seeded members are listed as the family's OWN rows
         assert "active family members" in msg
         for i in range(POK_FAMILY_MAX + 1):
             assert f"over-cap-{i + 1:02d}-m" in msg
