@@ -9,7 +9,7 @@ Stage the release: bump version (slot derived LIVE at bump time), stage with `EN
 | 1 | Bump version (`scripts/bump_version.py`, slot derived LIVE) | All phases | Version bumped |
 | 2 | Stage (`scripts/upgrade/stage.sh` with `ENSEMBLE_ROLLBACK_SAFE=1`, tag-to-tag delta) | T1 | stage.sh success |
 | 3 | Push tags latest-first (f13a4f59e convention) | T2 | Tags pushed |
-| 4 | HONEST DISCLOSURE in release notes: kb-writer's verify family gets no NEW captures from that path; capture moves to the 4 operational agents | T2 | Release-note text present |
+| 4 | HONEST DISCLOSURE in release notes: (a) kb-writer's verify family gets no NEW captures from that path; capture moves to the 4 operational agents; (b) **NEW (T12.2 fold): the `pok` dual-grant removal (`fd7dc6480`) is BRANCH-LOCAL / UNPUSHED — the LIVE install still grants kb-writer BOTH `rag_insert_text` + `pok` until the Emperor's promote, so the dual-write mechanism is STILL LIVE in production (anomaly `7c9763ca`); cite `evidence-rederiv-2026-11-24/kb-writer-trio.md`** | T2 | Release-note text present |
 | 5 | NO promote — disclose staged state; Emperor's 3-factor ceremony owns the flip | T2 | Disclosure note |
 
 ## Coupling
