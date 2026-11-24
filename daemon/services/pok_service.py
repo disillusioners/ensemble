@@ -348,10 +348,13 @@ class POKService:
         cycle-neutral with ``context_messages``).
 
         ``reason`` (the caller's OPERATIONAL CLAIM) and ``gate_fn``
-        (the injected gate callable) are accepted here as the gate
-        seam; Phase 3 enforces ``reason`` presence at the TOOL layer
-        and this service stays LLM-free. Both default to ``None`` so
-        every direct ``svc.upsert(...)`` call site is byte-unchanged.
+        (the injected gate callable) are accepted here as the
+        Wave-2 gate seam and are NOT consulted in Wave 1
+        (AST-verified: zero body references; the tool layer
+        validates ``reason`` but does not forward it). Phase 3
+        enforces ``reason`` presence at the TOOL layer and this
+        service stays LLM-free. Both default to ``None`` so every
+        direct ``svc.upsert(...)`` call site is byte-unchanged.
 
         ``source_tier`` (Phase 2 — trust-tier addendum T-1) is the
         OPTIONAL trust-tier statement at capture: omit (``None``) →
