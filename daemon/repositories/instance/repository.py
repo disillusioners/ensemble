@@ -653,6 +653,38 @@ class SQLModelInstanceRepository:
             instance = db_session.get(Instance, instance_id)
             return self._enrich_instance(db_session, instance)
 
+    def list_by_ids(self, instance_ids: list[str]) -> list[Instance]:
+        """Batched read of instances by ID.
+
+        Single SELECT ... WHERE instance_id IN (...) (chunked for very
+        large id lists to stay inside bind-parameter limits). Returns
+        Instance rows enriched via ``_enrich_instances``. Deterministic
+        ORDER BY instance_id ASC across chunks.
+        """
+        if not instance_ids:
+            return []
+        unique = list(dict.fromkeys(instance_ids))
+        result: list[Instance] = []
+        with SQLModelSession(self.engine) as db_session:
+            for chunk in chunked(list(unique), _METADATA_LOOKUP_CHUNK):
+                rows = db_session.exec(
+                    select(Instance)
+                    .where(Instance.instance_id.in_(chunk))
+                    .order_by(Instance.instance_id.asc())
+                ).all()
+                result.extend(rows)
+            # Enrich in the same session scope; re-run over the collected
+            # set is harmless because _enrich_instances is a no-op default.
+            try:
+                enriched = self._enrich_instances(db_session, result)
+                if enriched is not None:
+                    result = enriched
+            except Exception:
+                pass
+        # Final deterministic order across chunks.
+        result.sort(key=lambda inst: getattr(inst, "instance_id", ""))
+        return result
+
     def find_by_instance_id_prefix(self, prefix: str, limit: int = 2) -> list[str]:
         """Find instance ids that START with ``prefix`` (D3 prefix lane).
 

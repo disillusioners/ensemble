@@ -16954,6 +16954,22 @@ class InstanceManager:
             status=status,
         )
 
+    def get_instance_anchor_family(self, anchor_id: str) -> list[dict]:
+        """Return the anchor instance plus all its descendants (BFS) as
+        shaped instance dicts (``to_dict()`` + ``children``).
+
+        Thin delegate to
+        :meth:`InstanceLifecycleService.get_instance_anchor_family`.
+        Added for the instances-list-anchor feature so the list route can
+        guarantee presence of the selected instance and its subtree without
+        touching ``list_instances`` (whose signature is frozen for
+        stand-in compatibility).
+
+        Returns an empty list when the anchor is unknown / malformed so
+        callers can degrade honestly.
+        """
+        return self._lifecycle_service.get_instance_anchor_family(anchor_id)
+
     def get_instance_info(self, instance_id: str) -> dict:
         """Get information about a specific instance.
 
