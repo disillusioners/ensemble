@@ -112,6 +112,33 @@ same instance. That is safe BY CONSTRUCTION — the chain's
 status-level idempotency guard makes the second drive an
 ``idempotency_skip`` no-op (the same N3 rationale: the guarded
 status flip is the exactly-once authority, not the selection).
+
+THE CHAIN IS THE NET FOR THE OLD-LIVE-DESCENDANT CLASS — NOT THIS
+LANE'S LEGS
+----------------------------------------------------------
+A descendant whose ANCESTOR is still live is held by leg 6 (the
+mission-live guard says the tree IS live) and by the bus-pending /
+live-children legs. This lane therefore does NOT, and MUST NOT,
+claim to cover that class: its legs are deliberately all-must-hold,
+and a live ancestor is a legitimate holder of the posture.
+
+The NET for that class is the PRODUCTION COMPLETION CHAIN itself —
+the same chain this lane drives. When the ancestor's turn reaches its
+own terminal state, the chain's parent/child cascade re-evaluates the
+subtree and terminalizes the descendant under the chain's own
+authoritative gates (bus-pending in-transaction, pending-task,
+live-children cross-check, pending messages, emission-time
+root-completion gate). A descendant that is old but still under a
+live ancestor is therefore terminalized BY THE CHAIN, at the moment
+the ancestor completes — not by this sweep's legs, which correctly
+refuse to touch it while the ancestor holds.
+
+WHY THE DISTINCTION MATTERS: a reader who believes this lane covers
+the old-live-descendant class will read a still-running descendant as
+a MISSED heal. It is not — it is a held posture with an owning chain.
+The sweep's value is the class the chain's EVENT-DRIVEN seams cannot
+reach at all (no completion event ever arrives — the daemon-death
+window), NOT a second implementation of the chain's cascade.
 """
 
 from __future__ import annotations
@@ -170,6 +197,47 @@ _TERMINAL_MESSAGE_STATUSES = frozenset({"completed", "failed"})
 #: posture filter): ``waiting_children`` is bus-owned (D14/D21) and
 #: ``paused`` is operator domain.
 _NEVER_TOUCHED_STATUSES = frozenset({"waiting_children", "paused"})
+
+
+class _NoHoldingMessage:
+    """The sentinel for "this instance has NO holding message row".
+
+    NIT-2 (fix/post-outage-recovery SCOPE (c) rider): the probe
+    returned ``str | None`` and used ``None`` for BOTH "no message row
+    at all" AND "a message row whose status column is NULL". A NULL
+    status is NOT proven-terminal (``is_proven_terminal_message_status``
+    returns False for it — the conservative unknown-status rule), so it
+    MUST hold the posture. Under the old shape the NULL-status row read
+    as "nothing holding" and the candidate was driven to a terminal
+    stamp on the strength of a row the sweep itself classifies as
+    holding. Unreachable today (the column is NOT NULL in the shipped
+    schema) — but the leg's fail-closed posture must not depend on a
+    schema invariant it does not own, so the distinction is explicit.
+
+    The sentinel is FALSY and has a stable ``repr`` so a log line can
+    never confuse it with a status string.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover — repr only
+        return "<no-holding-message>"
+
+    def __bool__(self) -> bool:  # pragma: no cover — bool only
+        return False
+
+
+#: The "no holding message" sentinel (see :class:`_NoHoldingMessage`).
+NO_HOLDING_MESSAGE = _NoHoldingMessage()
+
+#: The ``instance_metadata`` key carrying the typed terminal-transition
+#: reason (NIT-6). Content-free: a short vocabulary token, never free
+#: text and never a transcript excerpt.
+TERMINAL_REASON_METADATA_KEY = "terminal_transition_reason"
+
+#: The typed reason this lane stamps when it drives a row to terminal.
+TERMINAL_REASON_VALUE = "finalize_gap_steady_state"
+
 
 
 def _env_int(name: str, default: int) -> int:
@@ -381,7 +449,37 @@ class StaleRunningSweepService:
                         AND m3.status = 'completed'
                   )
               )
-            ORDER BY COALESCE(task_completed_at, message_completed_at) ASC
+            ORDER BY
+                -- NIT-4 (fix/post-outage-recovery SCOPE (c) rider):
+                -- the ORDER BY must rank by the SAME evidence the
+                -- PYTHON age leg uses — the NEWEST completion stamp
+                -- (max of the completed-task stamp and the completed
+                -- message stamp). The old shape ranked by
+                -- COALESCE(task_completed_at, message_completed_at):
+                -- that is the OLDEST of the two when the task stamp
+                -- exists. A row whose task evidence is OLD but whose
+                -- message evidence is NEW therefore sorted to the FRONT
+                -- of the candidate window, consumed a cap slot, and
+                -- was then skipped by the age leg ("young") — starving
+                -- a genuinely eligible row behind it (the cap
+                -- starvation). Ranking by the NEWEST evidence puts the
+                -- eligible rows first.
+                --
+                -- PORTABLE MAX over two TEXT columns: both stamps are
+                -- naive-UTC SQLAlchemy DateTime columns with the SAME
+                -- storage format ("YYYY-MM-DD HH:MM:SS.ffffff"), so the
+                -- lexicographic comparison IS chronological (the
+                -- healer's dialect-soundness lesson — no datetime
+                -- function, so SQLite and PostgreSQL agree). The CASE
+                -- expression is the two-argument max that both engines
+                -- implement (``MAX(a, b)`` is an aggregate in PG).
+                CASE
+                    WHEN task_completed_at IS NULL THEN message_completed_at
+                    WHEN message_completed_at IS NULL THEN task_completed_at
+                    WHEN task_completed_at >= message_completed_at
+                        THEN task_completed_at
+                    ELSE message_completed_at
+                END ASC
             LIMIT :cap
             """
         )
@@ -400,12 +498,22 @@ class StaleRunningSweepService:
                 ) or 0
             )
 
-    def _holding_message(self, instance_id: str) -> str | None:
-        """The FIRST message status that holds the posture (None = none).
+    def _holding_message(self, instance_id: str) -> str | None | _NoHoldingMessage:
+        """The FIRST message status that holds the posture.
 
         Conservative: any status that is not PROVEN-terminal holds —
         the leg returns the offending status so the skip log can name
         it (including an off-shape value verbatim).
+
+        NIT-2 (fix/post-outage-recovery SCOPE (c) rider): the return
+        value is now THREE-valued. ``NO_HOLDING_MESSAGE`` means "no
+        message row holds the posture"; a ``str`` means "this status
+        holds"; ``None`` means "a message row's status column is NULL"
+        — which is NOT proven-terminal and therefore HOLDS. The old
+        two-valued shape (``str | None``) could not express the third
+        case, so a NULL status silently read as "nothing holding" and
+        the leg failed OPEN. The caller MUST compare against
+        :data:`NO_HOLDING_MESSAGE` (never against ``None``).
         """
         with Session(self._manager.engine) as session:
             rows = session.exec(
@@ -415,8 +523,10 @@ class StaleRunningSweepService:
         for row in rows:
             status = row[0] if isinstance(row, tuple) else row
             if not is_proven_terminal_message_status(status):
+                # ``status`` may be None (a NULL column) — that is a
+                # HOLDING row, distinct from "no row at all".
                 return status
-        return None
+        return NO_HOLDING_MESSAGE
 
     def _count_open_report_injections(self, instance_id: str) -> int:
         from daemon.repositories.report_injection.models import (
@@ -747,12 +857,12 @@ class StaleRunningSweepService:
                 str(instance_id)[:8], type(exc).__name__, exc,
             )
             return
-        if holding is not None:
+        if holding is not NO_HOLDING_MESSAGE:
             result.skipped_holding_message += 1
             logger.info(
                 "[STALE_RUNNING_SWEEP] SKIP instance=%s class=holding-message "
                 "detail=status=%r is not proven-terminal (conservative: an "
-                "unknown status never satisfies 'nothing holding')",
+                "unknown or NULL status never satisfies 'nothing holding')",
                 str(instance_id)[:8], holding,
             )
             return
@@ -963,6 +1073,54 @@ class StaleRunningSweepService:
             dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
         return (now_naive - dt).total_seconds()
 
+    async def _persist_terminal_reason(
+        self, instance_id: str, reason: str
+    ) -> bool:
+        """Persist the TYPED transition reason onto the instance row.
+
+        NIT-6 (fix/post-outage-recovery SCOPE (c) rider): the reason
+        (``finalize_gap_steady_state``) existed ONLY in a log line, so
+        the provenance of a terminal stamp this lane produced was not
+        recoverable from the data — an operator reading the row could
+        not tell a sweep-driven terminalization from a natural one.
+
+        The write goes through the repository's dialect-aware atomic
+        metadata path (``set_metadata`` → ``jsonb_set`` on PostgreSQL /
+        ``json_set`` on SQLite), so it composes with concurrent
+        metadata writes instead of clobbering the whole JSON blob (the
+        ORM setattr path is a read-modify-write and is rejected by
+        ``InstanceRepository.update`` for exactly this reason).
+
+        BEST-EFFORT: a failure here is logged and never fails the
+        drive — the stamp already landed, and the reason is
+        provenance, not state. Returns ``True`` only when the write
+        actually landed.
+        """
+        repo = getattr(self._manager, "_instance_repository", None)
+        if repo is None:
+            logger.warning(
+                "[STALE_RUNNING_SWEEP_REASON_PERSIST_ERROR] instance=%s "
+                "detail=instance repository unwired — reason not persisted",
+                str(instance_id)[:8],
+            )
+            return False
+        try:
+            await asyncio.to_thread(
+                repo.set_metadata,
+                instance_id,
+                TERMINAL_REASON_METADATA_KEY,
+                reason,
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001 — provenance is best-effort
+            logger.warning(
+                "[STALE_RUNNING_SWEEP_REASON_PERSIST_ERROR] instance=%s "
+                "detail=%s: %s — reason not persisted (the stamp itself "
+                "already landed)",
+                str(instance_id)[:8], type(exc).__name__, exc,
+            )
+            return False
+
     async def _drive(
         self,
         instance_id: str,
@@ -1022,11 +1180,19 @@ class StaleRunningSweepService:
         status = getattr(drove, "status", None)
         if status in ("completed", "error", "terminated", "failed"):
             result.healed += 1
+            # NIT-6 — persist the typed reason onto the ROW (the log
+            # line below is the human channel; the row is the durable
+            # provenance channel). Best-effort: a persist failure never
+            # unwinds the stamp.
+            await self._persist_terminal_reason(
+                instance_id, TERMINAL_REASON_VALUE,
+            )
             logger.warning(
                 "stale_running_sweep|shape-b: instance=%s task=%s "
-                "message=%s transitioned=%s reason=finalize_gap_steady_state",
+                "message=%s transitioned=%s reason=%s",
                 instance_id, str(candidate.get("task_completed_at")),
                 str(candidate.get("message_completed_at")), status,
+                TERMINAL_REASON_VALUE,
             )
             return
         if status == "waiting_children":
@@ -1062,12 +1228,35 @@ class StaleRunningSweepService:
     # ── Census (read-only) ─────────────────────────────────────────────────
 
     def census_stale_running(self) -> int:
-        """Count RUNNING instances that match the discriminator's anchored
-        selection (no holding condition, positive completion evidence).
+        """Count the CAPPED candidate set the sweep would drive this tick.
 
-        Read-only. The census-style pin drives this before/after a sweep:
-        a stale-running instance must LEAVE the count once the lane
-        terminalized it.
+        NIT-3 (fix/post-outage-recovery SCOPE (c) rider): the NAME
+        promises a census; the implementation has always been a
+        CAPPED SAMPLE. The underlying selection is the same anchored
+        query the sweep drives, but it carries ``LIMIT :cap`` — so the
+        returned number is a LOWER BOUND on the stale-running
+        population, never the population itself. Two consequences an
+        operator must know:
+
+        * a non-zero count means "at least this many" — the population
+          may be larger;
+        * a ZERO count means "no candidate in the FIRST ``cap`` rows
+          of the anchored selection" — it is NOT proof that no
+          stale-running instance exists (the cap is applied to the
+          ORDER BY window, and the ordering is the newest-evidence
+          ranking).
+
+        The method name is KEPT (it is the b4 public surface and the
+        census pin calls it by name); the docstring is corrected so the
+        number is never read as a population. A TRUE population count
+        needs an uncapped variant — deliberately NOT added here: the
+        cap is what keeps the census cheap enough to call on every
+        pin, and an uncapped scan of the anchored selection on a busy
+        nest is exactly the cost this lane exists to avoid.
+
+        Read-only. The census-style pin drives this before/after a
+        sweep: a stale-running instance must LEAVE the count once the
+        lane terminalized it.
         """
         try:
             return len(
@@ -1090,6 +1279,9 @@ __all__ = [
     "INTERVAL_ENV",
     "AGE_BOUND_ENV",
     "BATCH_CAP_ENV",
+    "NO_HOLDING_MESSAGE",
+    "TERMINAL_REASON_METADATA_KEY",
+    "TERMINAL_REASON_VALUE",
     "kill_switch_enabled",
     "is_proven_terminal_message_status",
 ]
