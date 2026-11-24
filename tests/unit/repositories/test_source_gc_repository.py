@@ -940,15 +940,35 @@ class TestP11BootNoBehaviorChange:
         # comment added in the same change). The token is disjoint from
         # the other markers over the span.
         "self-service-promote",
-        # ── RETENTION lane (post-outage-recovery SCOPE (c), 2026-11-24) ──
+        # ── CHECKPOINT-RETENTION lane (post-outage-recovery SCOPE (c), 2026-11-24;
+        #    token renamed leader-approved 2026-11-24) ──
         # The lane's sanctioned daemon/manager.py drift: the backstop job
         # registration (UN_GATED, its own maintenance_runs section) and
         # the `backstop_registration_params()` seam. Mirrors the decision /
         # memoir / group-chat / self-service-promote / tool-usage blocks
-        # above. Every hunk of the drift carries the "retention" marker
-        # (the registration block natively — the lane's own name; the
-        # seam import via a minimal non-behavioral marker comment).
-        "retention",
+        # above. Every hunk of the drift carries the
+        # "checkpoint-retention-lane" marker (the registration block and
+        # the seam import each via a minimal non-behavioral marker comment
+        # added in the same change). RENAMED from the old "retention" token:
+        # "retention" was too generic — it collided with unrelated prose
+        # and could sanction a foreign hunk; the hyphenated lane name is
+        # disjoint from every other marker over the span (verified
+        # counterfactually: it sanctions exactly this lane's own 2 hunks).
+        "checkpoint-retention-lane",
+        # ── BOOT-RECOVERY lane (post-outage-recovery commission, LEADER
+        #    DECISION, 2026-11-24) — SANCTION VERBATIM ─────────────────
+        # The b/b3 lane's sanctioned daemon/manager.py drift: the
+        # boot-consistency reconciler DDL (instances.boot_re_drive_at,
+        # SCOPE b) and the Addendum A schedule_executions receipt handles
+        # (SCOPE b3) in the migration hunk, plus the F2 PENDING re-drive
+        # repair leg in the resume path. Mirrors the decision / memoir /
+        # group-chat / checkpoint-retention-lane blocks above. Every hunk
+        # of the drift carries the "boot-recovery" marker via a minimal
+        # non-behavioral marker comment added in the same change (the
+        # house precedent: the checkpoint-retention-lane comments). The
+        # token is disjoint from the other markers over the span — it
+        # sanctions exactly this lane's own 2 hunks and no other lane's.
+        "boot-recovery",
         # ── TOOL-USAGE-METRICS-P1 lane (2026-11-21) — the single marker ──
         # The lane's sanctioned daemon/manager.py drift: the aggregated
         # ledger model registration before create_all + the off-loop
@@ -1029,33 +1049,28 @@ class TestP11BootNoBehaviorChange:
             ["git", *args], capture_output=True, text=True, check=False
         ).stdout
 
-    def _manager_hunks_missing_sanctioned_marker(self, span, path=None):
-        """Hunks of the daemon/manager.py drift in ``span`` that carry
+    def _manager_hunks_missing_sanctioned_marker_from_diff(self, diff_text):
+        """Pure marker check over diff TEXT - the SHARED body of the span
+        pins and the two-way simulation pins. Returns the hunks carrying
         NO sanctioned-lane marker. ``SANCTIONED_LANE_MARKERS`` is the
-        single source (the cross-lane carve-out lives there — never
-        here). This is the SHARED body of the three lane pins below:
-        the diff, the hunk parse and the marker check are identical
-        across them (all three lane path constants alias the same
-        file — daemon/manager.py); only each pin's docstring narrates
-        its own lane's claim. A span with no manager.py diff is
-        vacuously clean ([]). A degenerate diff (content lines but no
-        hunk headers) yields a pseudo-hunk so the caller's ``== []``
-        assert still fails — the old explicit "no content lines"
-        assert, preserved.
+        single source (the cross-lane carve-out lives there - never
+        here). Taking text (not a git span) is load-bearing: it lets the
+        two-way pins feed a synthetic diff and prove BOTH legs - an
+        unmarked hunk is flagged (pin A), a ``boot-recovery``-marked hunk
+        is accepted (pin B) - without needing a TEMP COMMIT + soft reset.
+        An empty diff is vacuously clean ([]); a degenerate diff (content
+        lines but no hunk headers) yields a pseudo-hunk so the caller's
+        ``== []`` assert still fails.
         """
-        diff = self._git(
-            "diff", "--unified=0", span, "--",
-            path or self.DECISION_LANE_SANCTIONED_PATH,
-        )
-        if not diff.strip():
-            return []  # nothing sanctioned in this span — vacuously clean
+        if not diff_text.strip():
+            return []  # nothing sanctioned - vacuously clean
         hunks: list[list[str]] = []
         current: list[str] = []
-        for line in diff.splitlines():
+        for line in diff_text.splitlines():
             if line.startswith("@@"):
                 if current:
                     hunks.append(current)
-                current = []
+                    current = []
                 continue
             if line.startswith(("+", "-")) and not line.startswith(("+++", "---")):
                 current.append(line)
@@ -1074,6 +1089,22 @@ class TestP11BootNoBehaviorChange:
                 for marker in self.SANCTIONED_LANE_MARKERS
             )
         ]
+
+    def _manager_hunks_missing_sanctioned_marker(self, span, path=None):
+        """Hunks of the daemon/manager.py drift in ``span`` that carry
+        NO sanctioned-lane marker. This is the git-span wrapper over the
+        pure ``_manager_hunks_missing_sanctioned_marker_from_diff`` body:
+        the diff, the hunk parse and the marker check are identical
+        across all the lane pins (all their path constants alias the same
+        file - daemon/manager.py); only each pin's docstring narrates its
+        own lane's claim. A span with no manager.py diff is vacuously
+        clean ([]).
+        """
+        diff = self._git(
+            "diff", "--unified=0", span, "--",
+            path or self.DECISION_LANE_SANCTIONED_PATH,
+        )
+        return self._manager_hunks_missing_sanctioned_marker_from_diff(diff)
 
     def _frontend_ui_offending_hunks(self, diff_text):
         """Offending frontend/ hunks in ``diff_text`` — the SHARED body
@@ -1203,6 +1234,49 @@ class TestP11BootNoBehaviorChange:
         assert added == self.SANCTIONED_HUNK_LINES, (
             "daemon/routers/sources.py diff is not EXACTLY the sanctioned "
             f"None-guard hunk.\nadded={added!r}"
+        )
+
+    # ── TWO-WAY PINS (post-outage-recovery commission, leader decision,
+    #    2026-11-24) ────────────────────────────────────────────────────
+    # Each pin feeds a SYNTHETIC diff/stat to the pure checker and proves
+    # BOTH legs: the guard still REDs an unsanctioned hunk (A / C) and it
+    # ACCEPTS the newly-sanctioned surface (B / D). The mutation legs are
+    # fail-honest: drop the token / path and the matching pin REDs. Because
+    # these use diff TEXT they need no TEMP COMMIT + soft reset (unlike the
+    # history pins, which read committed spans).
+
+    def test_pin_a_unmarked_manager_hunk_is_flagged(self):
+        """Two-way pin A: a manager.py hunk with NO sanctioned token is an
+        offender — the guard still REDs unmarked drift. Synthetic diff, so
+        no history mutation is needed. MUTATION LEG: make the checker accept
+        unmarked hunks (e.g. always return []) and this pin REDs.
+        """
+        sim = (
+            "diff --git a/daemon/manager.py b/daemon/manager.py\n"
+            "@@ -100,0 +101,2 @@ class InstanceManager:\n"
+            "+        # an unrelated lane's wiring, no sanctioned marker\n"
+            "+        self._unrelated_wiring()\n"
+        )
+        flagged = self._manager_hunks_missing_sanctioned_marker_from_diff(sim)
+        assert len(flagged) == 1, (
+            "an unmarked manager.py hunk was NOT flagged - the guard lost "
+            "its teeth; an unsanctioned lane could now drift manager.py"
+        )
+
+    def test_pin_b_boot_recovery_marked_manager_hunk_is_accepted(self):
+        """Two-way pin B: a manager.py hunk carrying ``boot-recovery`` is
+        sanctioned — the guard ACCEPTS it. MUTATION LEG: drop
+        ``boot-recovery`` from SANCTIONED_LANE_MARKERS and this pin REDs.
+        """
+        sim = (
+            "diff --git a/daemon/manager.py b/daemon/manager.py\n"
+            "@@ -100,0 +101,2 @@ class InstanceManager:\n"
+            "+        # boot-recovery lane — the boot-consistency DDL\n"
+            "+        self._boot_re_drive()\n"
+        )
+        assert self._manager_hunks_missing_sanctioned_marker_from_diff(sim) == [], (
+            "a boot-recovery-marked manager.py hunk was flagged - the "
+            "post-outage-recovery commission's sanction is not in force"
         )
 
     def test_the_compact_note_lane_constants_drift_is_confined_to_sanctioned_hunks(

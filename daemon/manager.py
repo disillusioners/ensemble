@@ -202,7 +202,7 @@ from .services.skill_clone_service import SkillCloneService
 from .services.maintenance import (
     CheckpointCleanupJob,
     MaintenanceService,
-    # retention lane — the backstop registration seam
+    # checkpoint-retention-lane — the backstop registration seam
     backstop_registration_params,
 )
 from .services.todo_manager import TodoManager
@@ -4812,7 +4812,7 @@ class InstanceManager:
         )
 
         # ── SCOPE (c) — the checkpoint BACKSTOP lane (2026-11-24) ────
-        # retention lane — the backstop registration (UN_GATED)
+        # checkpoint-retention-lane — the backstop registration (UN_GATED)
         # The anti-starvation path for the checkpoint growth itself.
         # The daily ``checkpoint_cleanup`` cycle is IDLE_GATED (its work
         # genuinely contends with live traffic for the write path), so
@@ -9240,6 +9240,7 @@ class InstanceManager:
             # is gated on ``status='running'`` (served by
             # ``idx_task_status_type_created``); stamp CAS is PK-scoped (D17).
             "ALTER TABLE task ADD COLUMN IF NOT EXISTS auto_continued_at TIMESTAMP",
+            # boot-recovery lane — the boot-consistency DDL + receipt handles
             # instances.boot_re_drive_at (fix/post-outage-recovery SCOPE b):
             # boot-consistency reconciler CAS marker. Stamped AFTER a
             # successful dispatch/retire/finalize so "marked" ≡ "re-driven"
@@ -15556,6 +15557,7 @@ class InstanceManager:
                 "recovery_count": recovery_count,
             }
 
+        # boot-recovery lane — the pending re-drive repair leg
         # 2.6. F2 (fix/post-outage-recovery b2) — PENDING re-drive leg.
         #      The adjudicated 6105e198 shape: a LIVE instance holds a
         #      PENDING task anchored to a non-terminal JobItem and nothing
