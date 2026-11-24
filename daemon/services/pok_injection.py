@@ -218,6 +218,11 @@ def effective_audience_agents(row: ProjectOperatingKnowledge) -> set[str] | None
             parsed = json.loads(row.audience_agents)
             if isinstance(parsed, list):
                 return {str(a) for a in parsed if str(a).strip()}
+            logger.warning(
+                "[POK:Degraded] non-list audience_agents on %s — "
+                "falling back to the default set",
+                row.slug,
+            )
         except (ValueError, TypeError):
             logger.warning(
                 "[POK:Degraded] malformed audience_agents on %s — "
@@ -342,6 +347,13 @@ def admit_view(
     is OPTIONAL and NEVER raises into the admission path: a failed
     capture degrades to a WARNING, never to a missing POK block
     (§4.9 never-raise discipline).
+
+    ── RETRIEVAL EVENTS: DESIGNED, NOT WIRED (Wave 1) ─────────────
+    No production caller records ``source="query"`` in Wave 1: the
+    ``pok_query`` read path does not append a ledger RETRIEVAL row
+    yet. The hook lands up front so the read path can populate it in
+    Wave 2 without a migration. Until then, retrieval rows that exist
+    carry ``source="injection"`` only.
 
     NEVER RAISES (§4.9): any failure degrades to an empty result
     with ``degraded=True`` (no block this turn; the once-flag stays
@@ -650,6 +662,13 @@ def make_retrieval_recorder(
     logs a WARNING and costs a metric, never a POK block. The
     ``admit_view`` hook site also guards the call, so a raising
     recorder is contained twice over.
+
+    ── RETRIEVAL EVENTS: DESIGNED, NOT WIRED (Wave 1) ─────────────
+    No production caller records ``source="query"`` in Wave 1: the
+    ``pok_query`` read path does not append a ledger RETRIEVAL row
+    yet. The recorder lands up front so the read path can populate
+    it in Wave 2 without a migration. Until then, retrieval rows
+    that exist carry ``source="injection"`` only.
     """
     from daemon.repositories.pok.models import (  # noqa: PLC0415 — cycle-neutral
         POKWriteGateLedger,
