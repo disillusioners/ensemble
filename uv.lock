@@ -479,7 +479,7 @@ wheels = [
 
 [[package]]
 name = "ensemble"
-version = "0.31.50"
+version = "0.31.51"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
