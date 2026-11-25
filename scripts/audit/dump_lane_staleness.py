@@ -43,11 +43,15 @@ EXIT CODES (the contract — documented in the design doc AND the runbook)
 -------------------------------------------------------------------------
     0   FRESH          — the last success is within the threshold.
     75  NO_MARKER      — the health gate could NOT be established: the marker
-                         is absent, unreadable, the row is missing, or the
-                         database was unreachable. (Absence of evidence.)
+                         is absent, unreadable, the row is missing, the
+                         database was unreachable, OR the DB DRIVER is not
+                         importable (``reason=driver_unavailable`` — a missing
+                         psycopg/sqlmodel is an OBSERVABILITY gap, not a lane
+                         verdict). (Absence of evidence.)
     76  STALE          — the last success is OLDER than the threshold.
     78  CONFIG         — a configuration refusal (missing ``--db-url``,
-                         missing ``--marker-file``, a bad ``--max-age-hours``).
+                         missing ``--marker-file``, a bad ``--max-age-hours``
+                         — non-positive OR non-finite).
                          This is the house exit-78 idiom, NOT a lane verdict.
 
 FAIL-CLOSED
@@ -82,6 +86,7 @@ receipt. The receipt here is the ONE-LINE ``RESULT:`` line on stdout.
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import re
 import stat as stat_mod
@@ -327,6 +332,17 @@ def read_pg_marker(dsn: str, lane: str) -> MarkerObservation:
     """Provider "pg": a READ-ONLY ``SELECT`` of the heartbeat row."""
     try:
         engine = _open_pg_engine(dsn)
+    except ImportError as exc:
+        # The DRIVER is not importable — the lazy ``from sqlmodel import
+        # create_engine`` (sqlmodel absent) or the dialect load INSIDE
+        # ``create_engine`` (``No module named 'psycopg'``). Both raise
+        # ImportError/ModuleNotFoundError. This is an OBSERVABILITY gap, NOT
+        # an unreachable database, so it gets its OWN reason slug: the
+        # operator's fix is "run the repo venv's python", not "check the LB".
+        return MarkerObservation(
+            error_reason=REASON_DRIVER_UNAVAILABLE,
+            detail=scrub_secrets(f"{type(exc).__name__}: {exc}", dsn),
+        )
     except Exception as exc:  # noqa: BLE001 - any failure is "unobservable"
         return MarkerObservation(
             error_reason=REASON_DB_UNREACHABLE,
@@ -674,10 +690,20 @@ def main(argv: list[str] | None = None) -> int:
 
     # The threshold.
     max_age_seconds = DEFAULT_MAX_AGE_SECONDS
-    if args.max_age_hours is None or args.max_age_hours <= 0:
+    if (
+        args.max_age_hours is None
+        or not math.isfinite(args.max_age_hours)
+        or args.max_age_hours <= 0
+    ):
+        # ``argparse``'s ``type=float`` accepts the non-finite spellings
+        # ("nan", "inf", "+inf", "infinity"). A NaN threshold never trips the
+        # ``<= 0`` comparison and an infinite one OVERFLOWS the conversion to
+        # seconds — both would escape as a bare traceback (exit 1), OUTSIDE
+        # the 78 family. Refuse them HERE, on the house exit-78 path.
         return _refuse(
             REASON_BAD_MAX_AGE,
-            f"--max-age-hours must be > 0 (got {args.max_age_hours!r})",
+            f"--max-age-hours must be a finite number > 0 "
+            f"(got {args.max_age_hours!r})",
             lane=lane,
             provider=provider,
             max_age_seconds=max_age_seconds,
