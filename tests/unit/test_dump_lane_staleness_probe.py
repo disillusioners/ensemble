@@ -480,12 +480,14 @@ class TestConfigRefusals:
 
         A NaN threshold never trips the ``<= 0`` comparison and an infinite
         one OVERFLOWS the conversion to seconds — at base both escaped as a
-        bare traceback (exit 1), OUTSIDE the 78 family. Every spelling must
+        bare traceback (exit 1), OUTSIDE the 78 family. A FINITE-but-huge
+        value ("1e305") passes ``math.isfinite`` but its x3600 multiply
+        OVERFLOWS to inf, hitting the same OverflowError. Every spelling must
         land on the house exit-78 refusal path instead.
         """
         marker = tmp_path / "dump-marker"
         marker.write_text("dump ok\n", encoding="utf-8")
-        for spelling in ("nan", "inf", "+inf", "infinity"):
+        for spelling in ("nan", "inf", "+inf", "infinity", "1e305"):
             rc = probe.main(
                 [
                     "--provider",
