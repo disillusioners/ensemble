@@ -51,10 +51,14 @@ from daemon.services.pok_gate import (
 )
 from daemon.services.pok_gate_timeout_resolver import (
     DEFAULT_GATE_TIMEOUT_S,
+    DEFAULT_GATE_WALL_CLOCK_S,
     GATE_MAX_RETRIES,
     GATE_WALL_CLOCK_CAP_S,
     MAX_GATE_TIMEOUT_S,
+    MAX_GATE_WALL_CLOCK_S,
     MIN_GATE_TIMEOUT_S,
+    MIN_GATE_WALL_CLOCK_S,
+    POK_GATE_WALL_CLOCK_S_ENV,
     get_gate_timeout_s,
     get_gate_wall_clock_cap_s,
     reset_gate_timeout_resolver_for_tests,
@@ -335,45 +339,523 @@ class TestStubMode:
 
 class TestTimeoutResolver:
     def setup_method(self) -> None:
+        import os
+
+        os.environ.pop("ENSEMBLE_POK_GATE_TIMEOUT_S", None)
+        os.environ.pop("ENSEMBLE_POK_GATE_WALL_CLOCK_S", None)
         reset_gate_timeout_resolver_for_tests()
 
     def teardown_method(self) -> None:
+        import os
+
+        os.environ.pop("ENSEMBLE_POK_GATE_TIMEOUT_S", None)
+        os.environ.pop("ENSEMBLE_POK_GATE_WALL_CLOCK_S", None)
         reset_gate_timeout_resolver_for_tests()
 
-    def test_the_defaults_are_the_overturned_ones(self) -> None:
-        assert DEFAULT_GATE_TIMEOUT_S == 20.0
-        assert GATE_WALL_CLOCK_CAP_S == 45.0
+    def test_the_defaults_are_the_five_minute_budget(self) -> None:
+        """Pin (a): the defaults ARE the five-minute budget.
+
+        The Emperor's 2026-11-25 ruling: the TOTAL judge budget is
+        300s; the per-attempt cap EQUALS the total so a single judge
+        call may use the WHOLE budget (the gate spends
+        ``min(attempt, remaining)`` and the per-attempt value never
+        silently truncates a ruling); the retry budget is untouched
+        (a budget change, not a retry change). Replaces the
+        pre-ruling ``test_the_defaults_are_the_overturned_ones``
+        (20.0 / 45.0 / 1).
+        """
+        assert DEFAULT_GATE_TIMEOUT_S == 300.0
+        assert GATE_WALL_CLOCK_CAP_S == DEFAULT_GATE_WALL_CLOCK_S == 300.0
         assert GATE_MAX_RETRIES == 1
+        reset_gate_timeout_resolver_for_tests()
+        assert get_gate_timeout_s() == 300.0
+        assert get_gate_wall_clock_cap_s() == 300.0
 
     def test_the_min_clamp_is_ten_seconds(self) -> None:
         import os
 
         os.environ["ENSEMBLE_POK_GATE_TIMEOUT_S"] = "3"
         reset_gate_timeout_resolver_for_tests()
-        assert get_gate_timeout_s() == MIN_GATE_TIMEOUT_S
-        del os.environ["ENSEMBLE_POK_GATE_TIMEOUT_S"]
-        reset_gate_timeout_resolver_for_tests()
+        try:
+            assert get_gate_timeout_s() == MIN_GATE_TIMEOUT_S
+        finally:
+            del os.environ["ENSEMBLE_POK_GATE_TIMEOUT_S"]
+            reset_gate_timeout_resolver_for_tests()
 
-    def test_the_max_clamp_is_one_hundred_eighty(self) -> None:
+    def test_the_max_clamp_is_three_hundred_sixty(self) -> None:
+        """Raised 180 → 360 with the ruling: the OLD 180 clamp would
+        have SILENTLY cut the new 300s per-attempt default down to 180
+        and defeated the ruling. A far-above-bounds value (9999)
+        resolves to the clamp, never through it."""
         import os
 
         os.environ["ENSEMBLE_POK_GATE_TIMEOUT_S"] = "9999"
         reset_gate_timeout_resolver_for_tests()
-        assert get_gate_timeout_s() == MAX_GATE_TIMEOUT_S
-        del os.environ["ENSEMBLE_POK_GATE_TIMEOUT_S"]
-        reset_gate_timeout_resolver_for_tests()
+        try:
+            assert MAX_GATE_TIMEOUT_S == 360.0
+            assert get_gate_timeout_s() == MAX_GATE_TIMEOUT_S
+        finally:
+            del os.environ["ENSEMBLE_POK_GATE_TIMEOUT_S"]
+            reset_gate_timeout_resolver_for_tests()
 
     def test_an_invalid_value_fails_open_to_the_default(self) -> None:
         import os
 
         os.environ["ENSEMBLE_POK_GATE_TIMEOUT_S"] = "abc"
         reset_gate_timeout_resolver_for_tests()
-        assert get_gate_timeout_s() == DEFAULT_GATE_TIMEOUT_S
-        del os.environ["ENSEMBLE_POK_GATE_TIMEOUT_S"]
+        try:
+            assert get_gate_timeout_s() == DEFAULT_GATE_TIMEOUT_S == 300.0
+        finally:
+            del os.environ["ENSEMBLE_POK_GATE_TIMEOUT_S"]
+            reset_gate_timeout_resolver_for_tests()
+
+    def test_the_wall_clock_is_env_tunable_and_the_override_is_honoured(self) -> None:
+        """Pin (b): the TOTAL is env-tunable — REWRITES the pre-ruling
+        ``test_the_wall_clock_is_a_constant`` (that pin is now FALSE:
+        before 2026-11-25 the TOTAL was the constant 45.0). The seam's
+        env name is ``ENSEMBLE_POK_GATE_WALL_CLOCK_S``; the Pattern C
+        cached global is restart-read (set env + reset + resolve), so
+        the override is honoured on the next resolve."""
+        import os
+
+        assert POK_GATE_WALL_CLOCK_S_ENV == "ENSEMBLE_POK_GATE_WALL_CLOCK_S"
+        os.environ["ENSEMBLE_POK_GATE_WALL_CLOCK_S"] = "600"
+        reset_gate_timeout_resolver_for_tests()
+        try:
+            assert get_gate_wall_clock_cap_s() == 600.0
+        finally:
+            del os.environ["ENSEMBLE_POK_GATE_WALL_CLOCK_S"]
+            reset_gate_timeout_resolver_for_tests()
+
+
+class TestGateWallClockKnob:
+    """The NEW TOTAL knob (``ENSEMBLE_POK_GATE_WALL_CLOCK_S``): the
+    same fail-open + clamp posture as the per-attempt knob, with its
+    own independent WARN buckets."""
+
+    def setup_method(self) -> None:
+        import os
+
+        os.environ.pop("ENSEMBLE_POK_GATE_TIMEOUT_S", None)
+        os.environ.pop("ENSEMBLE_POK_GATE_WALL_CLOCK_S", None)
         reset_gate_timeout_resolver_for_tests()
 
-    def test_the_wall_clock_is_a_constant(self) -> None:
-        assert get_gate_wall_clock_cap_s() == 45.0
+    def teardown_method(self) -> None:
+        import os
+
+        os.environ.pop("ENSEMBLE_POK_GATE_TIMEOUT_S", None)
+        os.environ.pop("ENSEMBLE_POK_GATE_WALL_CLOCK_S", None)
+        reset_gate_timeout_resolver_for_tests()
+
+    def test_an_invalid_wall_clock_value_fails_open_to_the_default(self) -> None:
+        """Pin (c): a non-numeric / non-positive TOTAL fails OPEN to
+        the 300s default (the Pattern C numeric posture — a mis-typed
+        knob must never fail the gate CLOSED)."""
+        import os
+
+        for bad in ("abc", "0", "-5"):
+            os.environ["ENSEMBLE_POK_GATE_WALL_CLOCK_S"] = bad
+            reset_gate_timeout_resolver_for_tests()
+            try:
+                assert (
+                    get_gate_wall_clock_cap_s() == DEFAULT_GATE_WALL_CLOCK_S
+                )
+            finally:
+                del os.environ["ENSEMBLE_POK_GATE_WALL_CLOCK_S"]
+                reset_gate_timeout_resolver_for_tests()
+
+    def test_the_wall_clock_clamps_below_and_above_its_bounds(self) -> None:
+        """Pin (d): BOTH clamp directions in one node — "1" clamps UP
+        to the 30.0 floor, "99999" clamps DOWN to the 1800.0 ceiling;
+        the ruling value 300 is strictly inside the bounds so it is
+        always reachable."""
+        import os
+
+        assert MIN_GATE_WALL_CLOCK_S == 30.0
+        assert MAX_GATE_WALL_CLOCK_S == 1800.0
+        assert MIN_GATE_WALL_CLOCK_S < 300.0 < MAX_GATE_WALL_CLOCK_S
+        os.environ["ENSEMBLE_POK_GATE_WALL_CLOCK_S"] = "1"
+        reset_gate_timeout_resolver_for_tests()
+        try:
+            assert get_gate_wall_clock_cap_s() == MIN_GATE_WALL_CLOCK_S
+        finally:
+            del os.environ["ENSEMBLE_POK_GATE_WALL_CLOCK_S"]
+            reset_gate_timeout_resolver_for_tests()
+        os.environ["ENSEMBLE_POK_GATE_WALL_CLOCK_S"] = "99999"
+        reset_gate_timeout_resolver_for_tests()
+        try:
+            assert get_gate_wall_clock_cap_s() == MAX_GATE_WALL_CLOCK_S
+        finally:
+            del os.environ["ENSEMBLE_POK_GATE_WALL_CLOCK_S"]
+            reset_gate_timeout_resolver_for_tests()
+
+
+class _FakeMonotonicClock:
+    """Fake ``time.monotonic()`` source — the ONLY clock the judge
+    path sees once :func:`_install_fake_judge` is installed."""
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self.now = start
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class _FakeTimeModule:
+    """Stands in for the ``time`` module inside ``pok_gate`` (only
+    ``monotonic`` is on the judge path)."""
+
+    def __init__(self, clock: _FakeMonotonicClock) -> None:
+        self._clock = clock
+
+    def monotonic(self) -> float:
+        return self._clock.monotonic()
+
+
+def _install_fake_judge(
+    monkeypatch: pytest.MonkeyPatch,
+    clock: _FakeMonotonicClock,
+    *,
+    consumed: float,
+    calls: list,
+    mid_call_guard=None,
+) -> list:
+    """Patch ``daemon.services.pok_gate.time`` (fake clock) and
+    ``daemon.services.pok_gate._house_llm_call`` (fake house client).
+
+    The fake models the REAL overrun semantics faithfully: the gate
+    hands the client ``timeout_s=budget`` and the failover facade
+    ``wall_clock_cap_s``; a call that outlives its handed budget
+    raises ``TimeoutError`` — the type the gate's timeout leg catches
+    (a REAL raw-SDK mid-call timeout surfaces as
+    ``openai.APITimeoutError``, which does NOT subclass
+    ``TimeoutError`` and lands on the ``llm_error`` leg — still D2
+    fail-closed; the ``TimeoutError`` leg is the canonical
+    timeout-classification surface). The gate's OWN enforcement is
+    the top-of-loop ``remaining <= 0`` deadline check, which kills
+    any retry beyond the wall.
+    """
+
+    def _fake_house_call(
+        llm_config, prompt, *, model, timeout_s, wall_clock_cap_s
+    ):
+        calls.append(
+            {"timeout_s": timeout_s, "wall_clock_cap_s": wall_clock_cap_s}
+        )
+        if mid_call_guard is not None:
+            mid_call_guard()
+        if consumed > timeout_s:
+            clock.advance(consumed)
+            raise TimeoutError(
+                f"fake judge outlasted its {timeout_s:.1f}s budget"
+            )
+        clock.advance(consumed)
+        return _judge_payload()
+
+    monkeypatch.setattr(pok_gate, "time", _FakeTimeModule(clock))
+    monkeypatch.setattr(pok_gate, "_house_llm_call", _fake_house_call)
+    return calls
+
+
+class TestGateBudgetEnforcement:
+    """ENFORCEMENT (not declaration): a FAKE CLOCK
+    (``daemon.services.pok_gate.time``) + a FAKE HOUSE CLIENT
+    (``daemon.services.pok_gate._house_llm_call``) drive the real
+    ``judge_pok_write`` → ``_call_judge_with_retry`` path, so the
+    resolved seam values are proven to reach the client and to bind."""
+
+    _FAKE_LLM_CONFIG = {"api_key": "k", "base_url": "http://127.0.0.1:9"}
+
+    def setup_method(self) -> None:
+        import os
+
+        os.environ.pop("ENSEMBLE_POK_GATE_TIMEOUT_S", None)
+        os.environ.pop("ENSEMBLE_POK_GATE_WALL_CLOCK_S", None)
+        reset_gate_timeout_resolver_for_tests()
+
+    def teardown_method(self) -> None:
+        import os
+
+        os.environ.pop("ENSEMBLE_POK_GATE_TIMEOUT_S", None)
+        os.environ.pop("ENSEMBLE_POK_GATE_WALL_CLOCK_S", None)
+        reset_gate_timeout_resolver_for_tests()
+
+    @staticmethod
+    def _judge_once(**overrides):
+        kwargs = dict(
+            project_id=PROJECT,
+            project_name="proj",
+            slug="s",
+            body="a well formed operating fact",
+            reason="the operational invariant",
+            rows=[],
+            mode="llm",
+            llm_config=TestGateBudgetEnforcement._FAKE_LLM_CONFIG,
+            is_production=False,
+        )
+        kwargs.update(overrides)
+        return judge_pok_write(**kwargs)
+
+    def test_a_judge_consuming_250_fake_seconds_succeeds_under_the_budget(
+        self, monkeypatch
+    ) -> None:
+        """Pin (e): ENFORCEMENT — the ruling is NOT truncated.
+
+        A judge call consuming 250 fake-seconds MUST succeed: the
+        per-attempt budget is 300s and the wall 300s, so the gate
+        hands ``min(300, 300) = 300s`` and the call fits. Under the
+        OLD knobs (20s attempt / 45s wall) this SAME call was
+        fail-closed — leg B proves it LIVE: with the knobs pinned to
+        the old values through the SAME env seam, the 250s call
+        raises ``POKGateUnavailable("timeout")`` (the mutation leg
+        that makes the pre-ruling behaviour RED)."""
+        clock = _FakeMonotonicClock()
+        calls: list = []
+        _install_fake_judge(monkeypatch, clock, consumed=250.0, calls=calls)
+
+        verdict = self._judge_once()
+        assert verdict.verdict == "ACCEPT"
+        assert calls[0]["timeout_s"] == 300.0
+
+        # Leg B — the old knobs, LIVE through the same seam: RED.
+        import os
+
+        os.environ["ENSEMBLE_POK_GATE_TIMEOUT_S"] = "20"
+        os.environ["ENSEMBLE_POK_GATE_WALL_CLOCK_S"] = "45"
+        reset_gate_timeout_resolver_for_tests()
+        try:
+            calls.clear()
+            clock2 = _FakeMonotonicClock()
+            _install_fake_judge(
+                monkeypatch, clock2, consumed=250.0, calls=calls
+            )
+            with pytest.raises(POKGateUnavailable) as excinfo:
+                self._judge_once()
+            assert excinfo.value.reason == "timeout"
+        finally:
+            del os.environ["ENSEMBLE_POK_GATE_TIMEOUT_S"]
+            del os.environ["ENSEMBLE_POK_GATE_WALL_CLOCK_S"]
+            reset_gate_timeout_resolver_for_tests()
+
+    def test_a_judge_that_outlasts_the_wall_raises_pok_gate_unavailable_timeout(
+        self, monkeypatch
+    ) -> None:
+        """Pin (f): ENFORCEMENT — D2 fail-closed preserved.
+
+        A judge consuming 400 fake-seconds outlasts the 300s wall: the
+        fake client raises ``TimeoutError`` on its overrun (the
+        facade's wall-clock semantics), the retry leg fires, and the
+        gate's own top-of-loop deadline check finds ``remaining <= 0``
+        and raises ``POKGateUnavailable("timeout")`` — NEVER
+        re-labelled ``pok_gate_reject``. Only ONE house call fires:
+        the wall kills the RETRY, not just the first attempt."""
+        clock = _FakeMonotonicClock()
+        calls: list = []
+        _install_fake_judge(monkeypatch, clock, consumed=400.0, calls=calls)
+
+        with pytest.raises(POKGateUnavailable) as excinfo:
+            self._judge_once()
+        assert excinfo.value.code == "pok_gate_unavailable"
+        assert excinfo.value.reason == "timeout"
+        assert len(calls) == 1  # the wall fired BEFORE the second attempt
+
+    def test_the_wall_cap_and_the_per_attempt_budget_come_from_the_same_seam(
+        self, monkeypatch
+    ) -> None:
+        """Pin (g): the gate hands the house client BUDGETS resolved
+        from THIS seam — no buried constant anywhere.
+
+        The fake house client RECORDS ``timeout_s`` / ``wall_clock_cap_s``.
+        Leg A (defaults): handed ``(300.0, 300.0)`` == the resolved
+        seam values. Leg B (env move + reset): TOTAL=1800 and
+        per-attempt=360 → handed ``(360.0, 1800.0)`` — moving the
+        env knobs moves BOTH handed budgets, and the per-attempt leg
+        also proves the gate spends ``min(attempt, remaining)``
+        (360 < 1800), not a copy of the wall."""
+        import os
+
+        clock = _FakeMonotonicClock()
+        calls: list = []
+        _install_fake_judge(monkeypatch, clock, consumed=5.0, calls=calls)
+
+        self._judge_once()
+        assert calls[0]["timeout_s"] == get_gate_timeout_s() == 300.0
+        assert (
+            calls[0]["wall_clock_cap_s"]
+            == get_gate_wall_clock_cap_s()
+            == 300.0
+        )
+
+        os.environ["ENSEMBLE_POK_GATE_WALL_CLOCK_S"] = "1800"
+        os.environ["ENSEMBLE_POK_GATE_TIMEOUT_S"] = "360"
+        reset_gate_timeout_resolver_for_tests()
+        try:
+            calls.clear()
+            self._judge_once()
+            assert get_gate_timeout_s() == 360.0
+            assert get_gate_wall_clock_cap_s() == 1800.0
+            assert calls[0]["timeout_s"] == 360.0
+            assert calls[0]["wall_clock_cap_s"] == 1800.0
+        finally:
+            del os.environ["ENSEMBLE_POK_GATE_WALL_CLOCK_S"]
+            del os.environ["ENSEMBLE_POK_GATE_TIMEOUT_S"]
+            reset_gate_timeout_resolver_for_tests()
+
+    def test_no_lock_and_no_db_session_is_held_across_the_judge_call(
+        self, monkeypatch
+    ) -> None:
+        """Pin (i): NO LOCK and NO DB session/transaction across the
+        judge call.
+
+        Instrumentation 1 (sessions): ``sqlmodel.Session.__init__``
+        is wrapped with a recorder for the WHOLE node; the fake house
+        client asserts ZERO open sessions MID-CALL (the brief's
+        window — inside the LLM call) and the node asserts zero
+        across the whole ``judge_pok_write`` run. A transaction
+        requires a Session first, so zero sessions ⇒ zero open
+        transactions on the calling thread.
+        Instrumentation 2 (locks): the judge-path module namespaces
+        (the gate, its timeout resolver, the service facade, the pok
+        repositories — the repository is session-per-call) are
+        scanned for lock-shaped objects (``_thread.lock`` /
+        ``threading.Semaphore`` / ``threading.Event`` /
+        ``threading.Condition`` / ``asyncio.Lock`` /
+        ``asyncio.Semaphore`` / ``asyncio.Event`` /
+        ``asyncio.Condition``). The TOOL module (``daemon/tools/pok``)
+        is NOT on the judge call path (it executes AFTER the verdict)
+        and is therefore not scanned.
+        TEETH — the deliberate violations that make this pin RED are
+        demonstrated in-node, then cleaned: (1) injecting a live
+        ``threading.Lock`` into ``pok_gate``'s namespace makes the
+        scan name it (a lock held across the call would do the
+        same); (2) constructing a ``sqlmodel.Session`` under the
+        recorder records it (a repository read/write added inside
+        the judge path would do the same)."""
+        import asyncio
+        import importlib
+        import sys
+        import threading
+
+        import sqlmodel
+
+        judge_path_modules = (
+            "daemon.services.pok_gate",
+            "daemon.services.pok_gate_timeout_resolver",
+            "daemon.services.pok_service",
+            "daemon.repositories.pok.repository",
+            "daemon.repositories.pok.models",
+        )
+
+        def _lock_holders() -> list:
+            shapes = (
+                type(threading.Lock()),
+                threading.Semaphore,
+                threading.Event,
+                threading.Condition,
+                asyncio.Lock,
+                asyncio.Semaphore,
+                asyncio.Event,
+                asyncio.Condition,
+            )
+            hits = []
+            for name in judge_path_modules:
+                module = (
+                    sys.modules[name]
+                    if name in sys.modules
+                    else importlib.import_module(name)
+                )
+                for attr, value in vars(module).items():
+                    if isinstance(value, shapes):
+                        hits.append(f"{name}.{attr}")
+            return hits
+
+        opened_sessions: list = []
+        original_session_init = sqlmodel.Session.__init__
+
+        def _spy_session_init(session, *args, **kwargs):
+            opened_sessions.append(session)
+            return original_session_init(session, *args, **kwargs)
+
+        monkeypatch.setattr(sqlmodel.Session, "__init__", _spy_session_init)
+
+        # ── TEETH leg 1: a live lock in the judge path is CAUGHT ────
+        monkeypatch.setattr(
+            pok_gate,
+            "_pin_i_mutation_sentinel",
+            threading.Lock(),
+            raising=False,
+        )
+        assert "daemon.services.pok_gate._pin_i_mutation_sentinel" in (
+            _lock_holders()
+        )
+        monkeypatch.setattr(
+            pok_gate, "_pin_i_mutation_sentinel", None, raising=True
+        )
+        assert _lock_holders() == []
+
+        # ── TEETH leg 2: a Session opened under the spy is CAUGHT ───
+        session_tooth = sqlmodel.Session()
+        assert opened_sessions == [session_tooth]
+        opened_sessions.clear()
+
+        # ── The clean run: the judge path holds NOTHING ─────────────
+        def _mid_call_guard() -> None:
+            assert opened_sessions == [], (
+                "a DB session was opened on the calling thread DURING "
+                "the judge call — the gate must not hold a session or "
+                "transaction across the house LLM call"
+            )
+
+        clock = _FakeMonotonicClock()
+        calls: list = []
+        _install_fake_judge(
+            monkeypatch,
+            clock,
+            consumed=5.0,
+            calls=calls,
+            mid_call_guard=_mid_call_guard,
+        )
+        verdict = self._judge_once()
+        assert verdict.verdict == "ACCEPT"
+        assert opened_sessions == []
+        assert _lock_holders() == []
+
+
+class TestGateCeilingCoherence:
+    def test_the_resolved_wall_cap_fits_inside_the_turn_budget(self) -> None:
+        """Pin (h): COHERENCE WITH THE HOUSE CEILING — the resolved
+        wall cap must fit inside the daemon turn budget with room for
+        a retry.
+
+        Reads the REAL config seam —
+        ``ServicesConfig.model_fields["graph_timeout_minutes"].default``
+        (the DECLARED pydantic default, 120.0 min = 7200s). The field
+        DEFAULT is read instead of instantiating ``ServicesConfig()``
+        because a Settings instantiation is env-sensitive in a unit
+        test; the declared default is the invariant's reference value
+        (stated here per the brief). Legs: (1) the default-resolved
+        wall (300s) is far inside the 7200s turn budget; (2) even the
+        1800s CLAMP ceiling stays inside it; (3) clamp ceiling + a
+        full per-attempt attempt (1800 + 360) still fits — room for a
+        retry is structural, not incidental."""
+        import os
+
+        from daemon.config import ServicesConfig
+
+        turn_budget_s = float(
+            ServicesConfig.model_fields["graph_timeout_minutes"].default
+        ) * 60.0
+        assert turn_budget_s == 7200.0
+
+        os.environ.pop("ENSEMBLE_POK_GATE_TIMEOUT_S", None)
+        os.environ.pop("ENSEMBLE_POK_GATE_WALL_CLOCK_S", None)
+        reset_gate_timeout_resolver_for_tests()
+        assert get_gate_wall_clock_cap_s() < turn_budget_s
+        assert MAX_GATE_WALL_CLOCK_S < turn_budget_s
+        assert MAX_GATE_WALL_CLOCK_S + MAX_GATE_TIMEOUT_S < turn_budget_s
 
 
 # ── the verdict cache (T7.8 / T8.13) ───────────────────────────────────────
