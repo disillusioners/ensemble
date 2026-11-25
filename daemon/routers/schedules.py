@@ -470,7 +470,27 @@ async def update_schedule(schedule_id: str, schedule_update: ScheduleUpdate, req
         )
 
     # Merge updates
-    updated_name = schedule_update.name if schedule_update.name is not None else existing.name
+    #
+    # M-4 — the RENAME normalises the label exactly like CREATE does
+    # (``scheduling_service.create_schedule``: ``label = payload.label.strip()``
+    # then "empty after strip ⇒ 400").  Without the strip the REST rename
+    # stored a padded label and compared a padded value against the
+    # namespace — so " Weekly Report " neither matched the live row that
+    # owns "Weekly Report" (the collision gate was skipped) nor normalised
+    # the stored name.  Symmetric with create: strip, refuse an empty
+    # result, compare the STRIPPED value.
+    if schedule_update.name is not None:
+        updated_name = schedule_update.name.strip()
+        if not updated_name:
+            raise HTTPException(
+                status_code=400,
+                detail=ErrorResponse(
+                    code=ErrorCodes.INVALID_REQUEST,
+                    message="name must be a non-empty string",
+                ).model_dump(),
+            )
+    else:
+        updated_name = existing.name
     updated_config = schedule_update.config if schedule_update.config is not None else existing.config
 
     # Handle partial config update (merge with existing config)
