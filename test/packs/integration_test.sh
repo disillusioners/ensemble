@@ -10,13 +10,12 @@ echo "=== Test Pack: integration_test ==="
 
 cd "$PROJECT_DIR"
 
-timeout 300s .venv/bin/python -m pytest \
+EXIT_CODE=0
+ENSEMBLE_SELF_ENV=dev timeout 300s .venv/bin/python -m pytest \
   tests/integration/ \
   --override-ini="addopts=" \
   -m integration \
-  --tb=short -q 2>&1
-
-EXIT_CODE=$?
+  --tb=short -q 2>&1 || EXIT_CODE=$?
 
 if [ $EXIT_CODE -eq 124 ]; then
   echo "RESULT: TIMEOUT"

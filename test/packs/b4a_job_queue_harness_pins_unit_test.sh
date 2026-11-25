@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# =============================================================================
+# Test Pack: b4a_job_queue_harness_pins_unit_test
+#
+# Lane: feature/pack-coverage-registration (base ed8ab508c) — Wave B family B4a
+#       ("recent-add singletons": job-queue + harness).
+#
+# WHAT IT PINS
+#   tests/job_queue/test_idle_gate_recency.py
+#   tests/job_queue/test_stgh_sweep_truth_pins.py
+#   tests/test_run_tests_scrubbed_selfenv_gate.py
+#   Total: 56 nodes (mechanical --collect-only census at this freeze:
+#   56 collected, RC=0, 0 collection errors).
+#
+# CONTRACT (house shape)
+#   - Dual-layer timeout: inner timeout 280; caller wraps with 300.
+#   - Serial + deterministic: -p no:xdist -p no:randomly.
+#   - PER-VARIABLE env scrub (a POSTGRES_* glob is a SILENT NO-OP in bash).
+#   - ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0 pinned EXPLICITLY.
+#   - Repo addopts KEPT.
+#   - SLICING PROOF: re-derives node count with --collect-only, FAILS on drift.
+#   - VACUOUS-VERDICT GUARD: zero passed or no summary line = FAIL.
+#   - Output: RESULT: PASS|FAIL|TIMEOUT. Exit: 0/1/124.
+# =============================================================================
+set -u
+
+PACK_NAME="b4a_job_queue_harness_pins_unit_test"
+EXPECTED_NODES=56
+
+echo "=== Test Pack: ${PACK_NAME} ==="
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+cd "$PROJECT_DIR" || { echo "RESULT: FAIL (cannot cd to ${PROJECT_DIR})"; exit 1; }
+
+PYTHON_BIN="$PROJECT_DIR/.venv/bin/python"
+if [ ! -x "$PYTHON_BIN" ]; then
+  echo "FATAL: .venv/bin/python not found at $PYTHON_BIN" >&2
+  echo "RESULT: FAIL"
+  exit 1
+fi
+
+UNIT_FILES=(
+  tests/job_queue/test_idle_gate_recency.py
+  tests/job_queue/test_stgh_sweep_truth_pins.py
+  tests/test_run_tests_scrubbed_selfenv_gate.py
+)
+
+for f in "${UNIT_FILES[@]}"; do
+  if [ ! -f "$f" ]; then
+    echo "FATAL: required test file missing: $f" >&2
+    echo "RESULT: FAIL"
+    exit 1
+  fi
+done
+
+SCRUB=(
+  -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_USER -u POSTGRES_PASSWORD
+  -u POSTGRES_DB -u POSTGRES_URL -u DATABASE_URL -u ENSEMBLE_DB_DSN
+  -u SSL_CERT_FILE -u SSL_CERT_DIR
+  -u OPENAI_API_KEY
+  -u ENSEMBLE_AUTH_ENABLED -u ENSEMBLE_AUTH_ISSUER -u ENSEMBLE_AUTH_CLIENT_ID
+  -u ENSEMBLE_AUTH_CLIENT_SECRET -u ENSEMBLE_AUTH_DISCOVERY_URL
+  -u ENSEMBLE_AUTH_ALLOWED_ORIGINS -u ENSEMBLE_AUTH_EXTERNAL_REDIRECT_BASE
+  -u ENSEMBLE_BASH_TRACKING_ID
+)
+
+echo
+echo "--- slicing proof: --collect-only over the declared file set ---"
+COLLECT_OUT="$(mktemp)"
+timeout 120 env \
+  "${SCRUB[@]}" \
+  ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0 \
+  ENSEMBLE_SELF_ENV=dev \
+  PYTHONDONTWRITEBYTECODE=1 \
+  "$PYTHON_BIN" -m pytest \
+    -p no:randomly \
+    -p no:xdist \
+    --collect-only \
+    -q \
+    --color=no \
+    "${UNIT_FILES[@]}" > "$COLLECT_OUT" 2>&1
+COLLECT_EXIT="$?"
+COLLECTED="$(grep -oE '^[0-9]+ tests? collected' "$COLLECT_OUT" | head -1 | grep -oE '^[0-9]+')"
+
+if [ "$COLLECT_EXIT" -ne 0 ]; then
+  echo "SLICING PROOF: FAIL (collection exit=$COLLECT_EXIT)"
+  tail -25 "$COLLECT_OUT"
+  rm -f "$COLLECT_OUT"
+  echo "RESULT: FAIL (slicing proof)"
+  exit 1
+fi
+if [ -z "$COLLECTED" ]; then
+  echo "SLICING PROOF: FAIL (VACUOUS — no 'collected' summary line)"
+  tail -25 "$COLLECT_OUT"
+  rm -f "$COLLECT_OUT"
+  echo "RESULT: FAIL (slicing proof)"
+  exit 1
+fi
+if [ "$COLLECTED" -ne "$EXPECTED_NODES" ]; then
+  echo "SLICING PROOF: FAIL (node-count drift: expected $EXPECTED_NODES, collected $COLLECTED)"
+  rm -f "$COLLECT_OUT"
+  echo "RESULT: FAIL (slicing proof)"
+  exit 1
+fi
+echo "SLICING PROOF: OK ($COLLECTED nodes collected, expected $EXPECTED_NODES)"
+rm -f "$COLLECT_OUT"
+
+echo
+echo "--- B4a: idle-gate recency / stgh sweep truth / scrubbed selfenv gate ---"
+OUT="$(mktemp)"
+timeout 280 env \
+  "${SCRUB[@]}" \
+  ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0 \
+  ENSEMBLE_SELF_ENV=dev \
+  PYTHONDONTWRITEBYTECODE=1 \
+  "$PYTHON_BIN" -m pytest \
+    -q \
+    -p no:randomly \
+    -p no:xdist \
+    --tb=short \
+    --color=no \
+    "${UNIT_FILES[@]}" 2>&1 | tee "$OUT"
+PYTEST_EXIT="${PIPESTATUS[0]}"
+
+SUMMARY="$(grep -E '[0-9]+ (passed|failed|error|skipped|deselected)' "$OUT" | tail -1)"
+PASSED="$(printf '%s\n' "$SUMMARY" | grep -oE '[0-9]+ passed' | head -1 | grep -oE '^[0-9]+')"
+rm -f "$OUT"
+
+if [ -z "$SUMMARY" ]; then
+  echo
+  echo "RESULT: FAIL (VACUOUS — pytest produced NO summary: the suite did not run)"
+  exit 1
+fi
+if [ -z "$PASSED" ] || [ "$PASSED" -eq 0 ]; then
+  echo
+  echo "RESULT: FAIL (VACUOUS — zero tests passed: '${SUMMARY}')"
+  exit 1
+fi
+echo "SUMMARY: ${SUMMARY}"
+
+case "$PYTEST_EXIT" in
+  0)
+    echo "RESULT: PASS"
+    exit 0
+    ;;
+  124)
+    echo "RESULT: TIMEOUT"
+    exit 124
+    ;;
+  *)
+    echo "RESULT: FAIL (pytest exit=$PYTEST_EXIT)"
+    exit 1
+    ;;
+esac
