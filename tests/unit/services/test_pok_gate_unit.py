@@ -39,6 +39,7 @@ from daemon.services.pok_gate import (
     VerdictCache,
     build_active_digest,
     build_judge_prompt,
+    JudgePrompt,
     cache_key,
     classify_answer,
     family_home,
@@ -826,7 +827,7 @@ class TestRetrievabilityLeg:
 
 
 class TestPromptClauses:
-    def _prompt(self, **overrides) -> str:
+    def _prompt(self, **overrides):
         kwargs = {
             "project_name": "proj",
             "slug": "s",
@@ -838,33 +839,155 @@ class TestPromptClauses:
         return build_judge_prompt(**kwargs)
 
     def test_the_r1_beats_r4_clause_is_verbatim(self) -> None:
-        assert "R1 beats R4" in self._prompt()
-        assert "A RAG twin is NOT a rejection basis" in self._prompt()
+        prompt = self._prompt()
+        assert "R1 beats R4" in prompt.system
+        assert "A RAG twin is NOT a rejection basis" in prompt.system
 
     def test_the_r_prov_protective_clause_is_present(self) -> None:
-        assert "R-PROV" in self._prompt()
-        assert "EVIDENCE FOR an operational claim" in self._prompt()
+        prompt = self._prompt()
+        assert "R-PROV" in prompt.system
+        assert "EVIDENCE FOR an operational claim" in prompt.system
 
     def test_the_r_ret_question_is_present(self) -> None:
-        assert "R-RET" in self._prompt()
-        assert "operative terms" in self._prompt()
+        prompt = self._prompt()
+        assert "R-RET" in prompt.system
+        assert "operative terms" in prompt.system
 
     def test_the_judge_question_is_present(self) -> None:
-        assert "What breaks in THIS repo if we drop this?" in self._prompt()
+        assert "What breaks in THIS repo if we drop this?" in self._prompt().system
 
     def test_the_r1_question_never_asks_is_this_general(self) -> None:
         prompt = self._prompt()
         assert (
             "Does the body still teach the same lesson in a repo with no "
-            "ensemble?" in prompt
+            "ensemble?" in prompt.system
         )
         # The forbidden phrasing appears ONLY inside the prohibition.
-        assert "NEVER ask 'is this general?'" in prompt
-        assert prompt.count("is this general") == 1
+        assert "NEVER ask 'is this general?'" in prompt.system
+        assert prompt.system.count("is this general") == 1
 
     def test_the_r3_clause_is_advisory_only(self) -> None:
-        assert "ADVISORY FLAG ONLY" in self._prompt()
-        assert "NEVER a rejection basis" in self._prompt()
+        prompt = self._prompt()
+        assert "ADVISORY FLAG ONLY" in prompt.system
+        assert "NEVER a rejection basis" in prompt.system
+
+    def test_the_system_half_carries_role_and_rules(self) -> None:
+        prompt = self._prompt()
+        assert "Project Operating Knowledge (POK)" in prompt.system
+        assert "RULES:" in prompt.system
+        assert "OUTCOMES:" in prompt.system
+        assert "JSON" in prompt.system
+
+    def test_the_user_half_carries_slug_body_claim_digest(self) -> None:
+        prompt = self._prompt()
+        assert "CANDIDATE SLUG: s" in prompt.user
+        assert "CANDIDATE BODY: b" in prompt.user
+        assert "CALLER'S OPERATIONAL CLAIM" in prompt.user
+        assert "DIGEST" in prompt.user
+
+    def test_the_house_call_sends_system_and_user_roles(self, monkeypatch) -> None:
+        import sys
+        import types
+
+        captured = {}
+
+        class _Completions:
+            def create(self, **kwargs):
+                captured["messages"] = kwargs.get("messages")
+                class _M:
+                    content = (
+                        '{"verdict": "ACCEPT", "family": "scope", '
+                        '"explanation": "ok", "alternative": null, '
+                        '"confidence": 0.9, "target_slug": null, '
+                        '"merged_body_proposal": null, "proposed_slug": null, '
+                        '"question": null}'
+                    )
+
+                class _C:
+                    message = _M()
+
+                return type("R", (), {"choices": [_C()]})()
+
+        class _Chat:
+            completions = _Completions()
+
+        class _Client:
+            chat = _Chat()
+
+        fake_openai = types.ModuleType("openai")
+        fake_openai.OpenAI = lambda **kwargs: _Client()
+        monkeypatch.setitem(sys.modules, "openai", fake_openai)
+
+        from daemon.services import pok_gate
+
+        jp = self._prompt()
+        pok_gate._house_llm_call(
+            {"api_key": "k", "base_url": "http://x"},
+            jp,
+            model="quick",
+            timeout_s=10.0,
+            wall_clock_cap_s=10.0,
+        )
+        msgs = captured["messages"]
+        assert len(msgs) == 2
+        assert msgs[0]["role"] == "system"
+        assert msgs[1]["role"] == "user"
+
+    def test_no_bare_pok_before_its_definition(self) -> None:
+        prompt = build_judge_prompt(
+            project_name=None,
+            slug="s",
+            body="b",
+            reason="r",
+            digest=("PROJECT OPERATING KNOWLEDGE (POK) ACTIVE-ROW DIGEST\n"
+                    "Boundary (R4): ..."),
+        )
+        for text in (prompt.system, prompt.user):
+            idx = text.find("POK")
+            if idx == -1:
+                continue
+            assert "project operating knowledge (" in text[: idx + len("POK")].lower()
+
+    def test_the_glossary_defines_terms_of_art(self) -> None:
+        prompt = self._prompt()
+        assert "slug = " in prompt.system
+        assert "verdict = " in prompt.system
+        assert "digest = " in prompt.system
+
+    def test_the_prompt_never_contains_unnamed_placeholder(self) -> None:
+        prompt = build_judge_prompt(
+            project_name=None,
+            slug="s",
+            body="b",
+            reason="r",
+            digest="DIGEST",
+        )
+        full = prompt.system + prompt.user
+        assert "(unnamed)" not in full
+        assert "was not available to this call" in full
+
+    def test_build_judge_prompt_returns_a_carrier_not_a_string(self) -> None:
+        prompt = self._prompt()
+        assert isinstance(prompt, JudgePrompt)
+        assert isinstance(prompt.system, str)
+        assert isinstance(prompt.user, str)
+
+    def test_project_name_reaches_prompt_from_project_repository(self) -> None:
+        from daemon.tools import pok as pok_mod
+
+        class _Repo:
+            def get(self, pid):
+                return type("P", (), {"name": "My Project"})()
+
+        class _Manager:
+            _project_repository = _Repo()
+
+        assert pok_mod._project_name(_Manager(), "p1") == "My Project"
+
+        class _InstRepo:
+            pass
+
+        assert pok_mod._project_name(_InstRepo(), "p1") is None
 
 
 # ── the pending-ASK store (T8.6 / T8.7) ───────────────────────────────────
