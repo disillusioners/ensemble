@@ -631,7 +631,17 @@ t0=$SECONDS
 LIVEZ_BUDGET_S=6 gate_livez >/dev/null 2>&1
 rc=$?
 elapsed=$((SECONDS - t0))
-assert_eq "C2c bounded ride-out still fails (rc 2 at budget)" "2" "$rc"
+# SANCTIONED PIN UPDATE (ruling E / D-P1-15, phase1 §5.4b row 2) — this leg
+# lands in the SAME commit as the lib.sh livez/readyz probe-2→1
+# normalization. A genuinely unreachable daemon produces NO answer at all,
+# i.e. the probe's budget-exhaustion class, which the gate NORMALIZES to rc 1
+# so the 8b auto-rollback stays armed (the B-dead-daemon leg). The re-cut
+# assertion still proves the same bounded-ride-out property: the gate fails AT
+# the budget with a definitive (nonzero, non-transient) verdict — it must
+# never report rc 2 here, because rc 2 is now reserved for
+# green-but-UNATTRIBUTABLE (a live daemon we cannot pin to our tree), not for
+# a dead one.
+assert_eq "C2c bounded ride-out still fails (rc 1 at budget: dead daemon is a definitive fail)" "1" "$rc"
 if [ "$elapsed" -ge 5 ]; then _pass; else
     _fail "C2c gate failed at the budget, not instantly" ">=5s" "${elapsed}s"
 fi
