@@ -7512,13 +7512,13 @@ _supervision_handback_unit() {
         if [ "$sbrc" = "124" ]; then
             start_hung=1
             _warn "unit start exceeded budget — under-budget child (HANDBACK_START_BUDGET_S=${HANDBACK_START_BUDGET_S}s) was SIGTERM→SIGKILL'd; unit=$unit — NOT terminal (D6 AC-D6-4: systemd keeps processing the start job); continuing into the bounded verify"
+            # RESOLVED H3 (branch dynamic reason × L 0f133d2b9/865ec4ad3
+            # D6 AC-D6-4): _bounded_rc_reason emits the byte-identical
+            # `child: timeout(HANDBACK_START_BUDGET_S=<n>)` text for 124,
+            # and the true rc variable replaces L's hardcoded rc=124.
+            # L's truthful NOT-terminal tail is kept (the start job
+            # continues server-side; the bounded verify owns the verdict).
             journal_history_append subprocess_wait_timeout \
-                # RESOLVED H3 (branch dynamic reason × L 0f133d2b9/865ec4ad3
-                # D6 AC-D6-4): _bounded_rc_reason emits the byte-identical
-                # `child: timeout(HANDBACK_START_BUDGET_S=<n>)` text for 124,
-                # and the true rc variable replaces L's hardcoded rc=124.
-                # L's truthful NOT-terminal tail is kept (the start job
-                # continues server-side; the bounded verify owns the verdict).
                 "site=handback_start kind=budget reason=child: $(_bounded_rc_reason "$sbrc" "" "HANDBACK_START_BUDGET_S=${HANDBACK_START_BUDGET_S}") unit=$unit rc=$sbrc — SIGTERM→SIGKILL of the CLIENT; NOT terminal (D6 AC-D6-4): continuing into the bounded verify (the start job continues server-side)" \
                 || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
         else
