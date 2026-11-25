@@ -18,13 +18,23 @@ a connection, and never reports "healthy" when it could not establish health.
 
 ## 1. The one command
 
-Run from the repo checkout (the script path is `scripts/audit/dump_lane_staleness.py`):
+Run from a checkout whose tree contains `scripts/audit/dump_lane_staleness.py` (tag
+v0.31.53 or later — NOT `/home/nea/ensemble-src`, which is a detached HEAD at
+bf4bfde6e that predates `scripts/audit/`, drifts by design, is never a commit
+target, and ships no `scripts/audit/`). One-time setup:
 
 ```bash
-cd /home/nea/ensemble-src
+WT=/home/nea/ensemble-src-wt-audit
+git worktree add "$WT" v0.31.54
+(cd "$WT" && uv sync)
+cd "$WT"
+```
 
+```bash
 # Password-free DSN + libpq reads PGPASSWORD / ~/.pgpass.
 # (Prefer this over a password on the command line — `ps` is world-readable.)
+test -f scripts/audit/dump_lane_staleness.py || { echo 'CONFIG (78): probe not in this checkout — use a checkout at >= v0.31.53 (not /home/nea/ensemble-src)' >&2; exit 78; }
+test -x .venv/bin/python || { echo 'CONFIG (78): no repo venv — run uv sync in this checkout first' >&2; exit 78; }
 PGPASSWORD='…' .venv/bin/python scripts/audit/dump_lane_staleness.py \
     --db-url "postgresql+psycopg://ensemble@10.44.0.2:5432/ensemble_prod"
 ```
@@ -156,8 +166,12 @@ SELECT lane, last_success_at, updated_at FROM public.dump_lane_heartbeat;
 
 ## 4. Step 3 — run the probe
 
+Run from the same checkout as §1 (tree containing `scripts/audit/dump_lane_staleness.py`,
+tag v0.31.53 or later — NOT `/home/nea/ensemble-src`):
+
 ```bash
-cd /home/nea/ensemble-src
+test -f scripts/audit/dump_lane_staleness.py || { echo 'CONFIG (78): probe not in this checkout — use a checkout at >= v0.31.53 (not /home/nea/ensemble-src)' >&2; exit 78; }
+test -x .venv/bin/python || { echo 'CONFIG (78): no repo venv — run uv sync in this checkout first' >&2; exit 78; }
 PGPASSWORD='…' .venv/bin/python scripts/audit/dump_lane_staleness.py \
     --db-url "postgresql+psycopg://ensemble@10.44.0.2:5432/ensemble_prod"
 echo "exit=$?"
@@ -176,6 +190,12 @@ The probe is read-only and safe to run at any time against the live database.
 | **76** | `STALE` | the last success is older than the threshold | the dump lane is silent — go to §5.2 |
 | **78** | `CONFIG_REFUSED` | a configuration refusal (the probe refused to run) | fix the invocation and re-run. **This is NOT a lane verdict** — do not record it as a dump-lane failure |
 
+### 5.0 `FRESH` — the lane is healthy
+
+| `reason=` | what it means | the action |
+|---|---|---|
+| `within_threshold` | the last success is within the threshold (8 days) | nothing — the lane is healthy |
+
 ### 5.1 `NO_MARKER` — the `reason=` slug tells you which
 
 | `reason=` | what it means | the action |
@@ -183,11 +203,15 @@ The probe is read-only and safe to run at any time against the live database.
 | `marker_row_missing` | the table exists but has **no row** for this lane | the CronJob never published a heartbeat → §3 |
 | `db_unreachable` | the database could not be opened (host down, auth refused, DNS) | check the LB `10.44.0.2:5432` and the `ensemble` credential |
 | `db_query_error` | the query failed (e.g. `relation "public.dump_lane_heartbeat" does not exist`) | the table is missing → §2 |
-| `driver_unavailable` | the psycopg/sqlalchemy driver is not importable | run with the repo venv's python (`.venv/bin/python`) |
+| `driver_unavailable` | the psycopg/sqlalchemy driver is not importable | run with the repo venv's python (`.venv/bin/python`) — the psycopg/sqlalchemy driver is not importable |
 | `marker_file_missing` | the `--marker-file` does not exist | point at the right path, or switch to the `pg` provider |
 | `marker_file_unreadable` | the marker path is not a readable regular file | fix the path/permissions |
 
 ### 5.2 `STALE` — the lane is silent
+
+| `reason=` | what it means | the action |
+|---|---|---|
+| `older_than_threshold` | the last success is older than the threshold | the dump lane is silent — go to the numbered steps below; verify before assuming data loss |
 
 1. Is the CronJob still scheduled? (a disabled/missed schedule is the common cause)
 2. Did the last runs **fail** (non-zero exit) or never **run**? The heartbeat only moves
@@ -204,6 +228,14 @@ The banner names the missing/invalid argument (`--db-url`, `--marker-file`,
 `--max-age-hours`, `--now`, or an unknown flag). Fix it and re-run. The house
 exit-78 idiom is used here so an operator can tell "I mis-configured the probe" apart
 from "the dump lane is stale" (76) and "the dump lane is unobservable" (75).
+
+| `reason=` | what it means | the action |
+|---|---|---|
+| `missing_db_url` | `--db-url` is missing for the `pg` provider (no env fallback) | pass `--db-url` with the cluster DSN |
+| `missing_marker_file` | `--marker-file` is missing for the `file` provider | pass `--marker-file` with the marker path |
+| `bad_max_age_hours` | `--max-age-hours` is not a finite positive number | pass a finite positive number of hours |
+| `bad_now` | `--now` is not a valid RFC-3339 timestamp | pass a valid RFC-3339 instant, or omit `--now` |
+| `bad_argument` | an unknown or invalid flag/argument | remove or fix the offending argument and re-run |
 
 ---
 
@@ -231,6 +263,20 @@ dump-lane failure.
 
 Until the wiring lands, run §4 by hand (weekly) and treat a non-zero exit as
 actionable.
+
+**R4 — OPEN (NOT in the v0.31.54 slice).** The probe is shipped and verified; the
+remaining operator steps are NOT implemented in this slice:
+
+1. **Heartbeat table creation** — the §2 DDL `public.dump_lane_heartbeat`, a staged
+   migration / operator action. **No schema change was made in the slice.**
+2. **CronJob edit** — the heartbeat upsert, §3 — operator / devops.
+3. **Weekly-cadence wiring into the maintenancer chain** — this §6, a DB-versioned
+   prompt artifact via the prompt-versioning approval lane — a follow-up commission.
+4. **The probe is reachable only from a checkout** (not from the staged payload).
+
+Interim alarm already standing (state as of 2026-11-25): the weekly maintenance
+schedule carries a 48h green-dump check (added by Ari) and the devops lane is reviving
+the dump lane tonight.
 
 ---
 

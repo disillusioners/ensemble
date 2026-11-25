@@ -4,6 +4,7 @@
 **Module:** C (dump-health) of the `feeder-grants-dump-health` commission
 **Artifacts:** `scripts/audit/dump_lane_staleness.py` · `docs/runbooks/dump-lane-health-probe.md` ·
 `tests/unit/test_dump_lane_staleness_probe.py` · one `.agents/tester/PACKS.md` registration row
+**Extended by:** v0.31.54 follow-up slice `dump-health-nits-v03154` (runbook-design module).
 
 ---
 
@@ -233,6 +234,33 @@ The `state=` vocabulary is **closed**: `FRESH` · `STALE` · `NO_MARKER` · `CON
 `CONFIG_REFUSED` is a *probe* state, not a *lane* state — a receipt consumer must not
 read it as a lane verdict.
 
+### 4.0 Documented invocation form + first-hand execution leg (2026-11-25)
+
+Documented invocation (credential redacted):
+
+```bash
+PGPASSWORD='…' .venv/bin/python scripts/audit/dump_lane_staleness.py \
+    --db-url "postgresql+psycopg://ensemble@10.44.0.2:5432/ensemble_prod"
+```
+
+Checkout precondition: a checkout whose tree contains `scripts/audit/dump_lane_staleness.py`
+(tag v0.31.53 or later — NOT `/home/nea/ensemble-src`). Guard present rc=0 at
+`/home/nea/ensemble-src-wt-audit @ d07cc64b8` (content >= v0.31.53, pre-tag).
+
+Recorded results (first-hand, 2026-11-25):
+
+- pg §1: exit=75; `RESULT: state=NO_MARKER lane=pgdumpall provider=pg last_success_at=none age_seconds=none max_age_seconds=691200 evaluated_at=2026-11-25T04:49:44Z reason=db_query_error`; stderr detail: `ProgrammingError: (psycopg.errors.UndefinedTable) relation "public.dump_lane_heartbeat" does not exist`.
+- pg §4: exit=75, same line with evaluated_at=2026-11-25T04:49:46Z.
+- file fresh temp marker: exit=0; `RESULT: state=FRESH lane=pgdumpall provider=file last_success_at=2026-11-25T04:49:59Z age_seconds=0 max_age_seconds=691200 evaluated_at=2026-11-25T04:49:59Z reason=within_threshold`.
+- file missing path: exit=75; `RESULT: state=NO_MARKER lane=pgdumpall provider=file last_success_at=none age_seconds=none max_age_seconds=691200 evaluated_at=2026-11-25T04:49:59Z reason=marker_file_missing`.
+- file marker 30 days old: exit=76; `RESULT: state=STALE lane=pgdumpall provider=file last_success_at=2026-10-26T04:49:59Z age_seconds=2592000 max_age_seconds=691200 evaluated_at=2026-11-25T04:49:59Z reason=older_than_threshold`.
+
+Credential: sourced from the live install env file (mode 600) into PGPASSWORD (env, never
+argv); 0 occurrences of the secret in any captured output; the RESULT line carries no DSN.
+
+Interpretation: the live DB has NO heartbeat table yet — the truthful R4 OPEN state
+(fail-closed, correct).
+
 ### 4.1 The `reason=` vocabulary (closed)
 
 `within_threshold` · `older_than_threshold` · `marker_file_missing` ·
@@ -240,13 +268,16 @@ read it as a lane verdict.
 `driver_unavailable` · `missing_db_url` · `missing_marker_file` · `bad_max_age_hours` ·
 `bad_now` · `bad_argument`.
 
+As of v0.31.54, `driver_unavailable` is actually emitted (ImportError at the engine
+open) and `bad_max_age_hours` also refuses non-finite nan/inf.
+
 Every slug maps to an operator action in the runbook.
 
 ---
 
 ## 5. The unit pin
 
-`tests/unit/test_dump_lane_staleness_probe.py` — **36 nodes**, hermetic.
+`tests/unit/test_dump_lane_staleness_probe.py` — **39 nodes**, hermetic.
 
 Coverage of the brief's required set:
 
@@ -298,3 +329,14 @@ executed against the pin; each turned it RED, and each restore was verified
 6. **The maintenancer wiring is absent** (§3.3) — until an operator wires it, the
    weekly run does not call the probe, so the signal is manual. The probe is
    intentionally usable by hand first.
+
+7. **R4 — OPEN (NOT in the v0.31.54 slice).** The probe is shipped and verified; the
+   remaining operator steps are out of scope for this slice: (1) heartbeat table
+   creation — the §2 DDL `public.dump_lane_heartbeat`, a staged migration / operator
+   action (NO schema change was made in the slice); (2) CronJob edit — the heartbeat
+   upsert, §3 — operator / devops; (3) weekly-cadence wiring into the maintenancer
+   chain — this §6, a DB-versioned prompt artifact via the prompt-versioning approval
+   lane — a follow-up commission; (4) the probe is reachable only from a checkout (not
+   from the staged payload). Interim alarm already standing (state as of 2026-11-25):
+   the weekly maintenance schedule carries a 48h green-dump check (added by Ari) and
+   the devops lane is reviving the dump lane tonight.
