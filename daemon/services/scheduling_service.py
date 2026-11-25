@@ -666,8 +666,16 @@ class LabelNamespaceUnavailable(Exception):
 
 
 def is_armed(enabled: Any, status: Any) -> bool:
-    """ARMED = ``enabled`` is True AND ``status`` not in {cancelled, stopped}."""
-    return bool(enabled) and str(status) not in {"cancelled", "stopped"}
+    """ARMED = ``enabled`` is True AND ``status`` not in {cancelled, stopped}.
+
+    The status is compared BY VALUE (``getattr(status, "value", status)``),
+    never by ``str(status)``: a ``SourceStatus`` enum member stringifies to
+    ``"SourceStatus.cancelled"`` (Python's ``Enum.__str__``), which is NOT
+    ``"cancelled"`` — so an enum-valued status read ARMED (a fail-open).
+    Comparing the VALUE closes it (MA-5); a plain string status keeps
+    working (``str`` has no ``.value``, so the default IS the string).
+    """
+    return bool(enabled) and getattr(status, "value", status) not in {"cancelled", "stopped"}
 
 
 def row_next_run(
@@ -1141,11 +1149,21 @@ async def create_schedule(
             "scheduling_service: post-create start failed for %s: %s", row.source_id, exc
         )
 
-    next_local, next_utc, next_warning = _compute_next_run(config_json)
     status = row.status
     if started:
         refreshed = await asyncio.to_thread(repo.get_source_config, row.source_id)
         status = refreshed.status if refreshed is not None else row.status
+
+    # MA-2 — the CREATE echo is ARMED-GATED like every other surface: the
+    # repository creates the row ``stopped`` (``repository.py`` writes
+    # ``SourceStatus.STOPPED``), so until the adapter ACTUALLY starts the
+    # row the echo must render NO next-fire.  The ungated
+    # ``_compute_next_run`` answered a next-fire for a disarmed row — the
+    # one surface where M-A's "no next-fire on a disarmed row" failed, and
+    # it fed the self-alarm resume detector a false "armed" signal.
+    next_local, next_utc, next_warning = row_next_run(
+        config_json, enabled=True, status=status
+    )
     logger.info(
         "scheduling_service: created schedule %s (label=%r, agent=%s, caller=%s/%s, started=%s)",
         row.source_id,
@@ -1466,10 +1484,16 @@ async def update_schedule(
         if config_enabled:
             started = await _rebuild_register_start(row.source_id, updated)
 
-        status = updated.status
-        if started:
-            refreshed = await asyncio.to_thread(repo.get_source_config, row.source_id)
-            status = refreshed.status if refreshed is not None else updated.status
+        # MA-2 — the echo must reflect the POST-WRITE row.  ``updated`` is
+        # the PRE-WRITE snapshot handed back by ``update_source_config``
+        # (the status write above ran in its OWN session), so its
+        # ``status`` is STALE — reading it reported ``armed`` + a next-fire
+        # for a row the DB holds ``stopped``.  Re-read UNCONDITIONALLY
+        # after the write; the ``started`` branch re-read it before, and
+        # the ``not started`` branch (a pause, or an adapter that failed
+        # to start) read the stale snapshot.
+        refreshed = await asyncio.to_thread(repo.get_source_config, row.source_id)
+        status = refreshed.status if refreshed is not None else updated.status
 
     next_local, next_utc, next_warning = row_next_run(
         config, enabled=config_enabled, status=status
