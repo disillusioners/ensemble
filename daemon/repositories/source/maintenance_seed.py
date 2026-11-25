@@ -878,10 +878,14 @@ def _guard_present_row(
         # dead (the registry's boot filter skips stopped rows) — promote it
         # back to RUNNING WITHOUT the chain-specific BR-1 run_at re-mint
         # (that re-mint would graft a chain block onto a canonical row).
-        is_canonical = (
-            row.source_id == CANONICAL_SEED_SOURCE_ID
-            or row.name == CANONICAL_SEED_NAME
-        )
+        #
+        # ID-ONLY discrimination: the seeder always writes the canonical
+        # row WITH the deterministic uuid5 id (§4.3 binds the identity to
+        # that id). The LABEL alone is not enough — an operator-created
+        # row squatting the canonical label must NOT be re-armed by the
+        # seeder, so ``name == CANONICAL_SEED_NAME`` is deliberately NOT
+        # part of this test.
+        is_canonical = row.source_id == CANONICAL_SEED_SOURCE_ID
         if is_canonical:
             logger.warning(
                 "[CentralMaintenance] canonical row %s was stopped — "
