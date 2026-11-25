@@ -612,6 +612,17 @@ def _lateness_cap() -> int | None:
         return None
 
 
+def _seed_label_for(source_id: str) -> str:
+    """The seed LABEL a source id belongs to (canonical row vs chain row).
+
+    The promotion-failure messages name the SEED (a label an operator can
+    grep), never a bare id.
+    """
+    if source_id == CANONICAL_SEED_SOURCE_ID:
+        return CANONICAL_SEED_NAME
+    return SEED_NAME
+
+
 def _write_chain_config(
     source_repo: Any,
     *,
@@ -629,7 +640,7 @@ def _write_chain_config(
     source_repo.update_source_config(source_id, config=config, enabled=enabled)
     if status is not None:
         try:
-            source_repo.update_source_status(source_id, status)
+            promoted = source_repo.update_source_status(source_id, status)
         except Exception as exc:  # noqa: BLE001 — promotion failure is loud
             logger.error(
                 "[CentralMaintenance] could not set the status of %s to %s: %s",
@@ -640,6 +651,24 @@ def _write_chain_config(
             raise MaintenanceSeedError(
                 f"could not promote source {source_id} to {status}: {exc}"
             ) from exc
+        if promoted is None:
+            # MA-3 — a promotion that MATCHES NO ROW is a FAILURE, not a
+            # silent no-op: ``update_source_status`` returns ``None`` when
+            # the row is gone (``repository.py``).  M-B's "promotion
+            # failure is non-silent" must hold for the no-match case too —
+            # the guard must never report a success it did not achieve.
+            label = _seed_label_for(source_id)
+            logger.error(
+                "[CentralMaintenance] could not promote seed %s (source %s) to "
+                "%s: no matching row",
+                label,
+                source_id,
+                status,
+            )
+            raise MaintenanceSeedError(
+                f"could not promote seed {label} (source {source_id}) to "
+                f"{status}: no matching row"
+            )
 
 
 def _mint(
@@ -1060,7 +1089,7 @@ def _guard_missing_row(
                 )
                 return GuardOutcome(action="failed", detail=str(exc))
             try:
-                source_repo.update_source_status(
+                promoted = source_repo.update_source_status(
                     row.source_id, SourceStatus.RUNNING.value
                 )
             except Exception as exc:  # noqa: BLE001 — promotion failure is loud
@@ -1074,6 +1103,18 @@ def _guard_missing_row(
                     f"could not promote revived source {row.source_id} to "
                     f"RUNNING: {exc}"
                 ) from exc
+            if promoted is None:
+                # MA-3 — no matching row is a FAILURE, not a silent no-op.
+                logger.error(
+                    "[CentralMaintenance] could not promote the revived seed %s "
+                    "(source %s) to RUNNING: no matching row",
+                    SEED_NAME,
+                    row.source_id,
+                )
+                raise MaintenanceSeedError(
+                    f"could not promote revived seed {SEED_NAME} (source "
+                    f"{row.source_id}) to RUNNING: no matching row"
+                )
             logger.warning(
                 "[CentralMaintenance] revived the archived chain row %s "
                 "(archived status=stopped, chain block present)",
@@ -1162,7 +1203,9 @@ def _guard_missing_row(
     # Status compensation: create initializes STOPPED; ``start_all``
     # skips stopped/cancelled rows ⇒ promote to RUNNING.
     try:
-        source_repo.update_source_status(row.source_id, SourceStatus.RUNNING.value)
+        promoted = source_repo.update_source_status(
+            row.source_id, SourceStatus.RUNNING.value
+        )
     except Exception as exc:  # noqa: BLE001 — promotion failure is loud
         logger.error(
             "[CentralMaintenance] could not promote the canonical row %s to "
@@ -1173,6 +1216,18 @@ def _guard_missing_row(
         raise MaintenanceSeedError(
             f"could not promote canonical source {row.source_id} to RUNNING: {exc}"
         ) from exc
+    if promoted is None:
+        # MA-3 — no matching row is a FAILURE, not a silent no-op.
+        logger.error(
+            "[CentralMaintenance] could not promote the canonical seed %s "
+            "(source %s) to RUNNING: no matching row",
+            CANONICAL_SEED_NAME,
+            row.source_id,
+        )
+        raise MaintenanceSeedError(
+            f"could not promote canonical seed {CANONICAL_SEED_NAME} (source "
+            f"{row.source_id}) to RUNNING: no matching row"
+        )
     logger.info(
         "[CentralMaintenance] seeded the canonical weekly row %s "
         "(recurrence=weekly, cron=%s)",
