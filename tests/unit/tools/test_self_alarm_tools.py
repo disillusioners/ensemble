@@ -203,6 +203,14 @@ class FakeRepo:
                 return row
         return None
 
+    def list_source_configs(self, source_type=None, status=None, limit=100, offset=0):
+        rows = list(self.rows)
+        if source_type is not None:
+            rows = [r for r in rows if getattr(r, "source_type", None) == source_type]
+        if status is not None:
+            rows = [r for r in rows if getattr(r, "status", None) == status]
+        return rows[offset:offset + (limit or len(rows))]
+
     def create_source_config(
         self,
         source_type,

@@ -191,11 +191,28 @@ class ScheduleCancelResponse(BaseModel):
     last_execution_id: str | None = None  # §5.3 echo — cancel the in-flight JobItem with this
 
 
+class ScheduleWindow(BaseModel):
+    """The scheduling WINDOW of a windowed (chain-mode) schedule.
+
+    READ-side echo of the window ALREADY stored in the row's ``chain``
+    block (``chain.window_start`` / ``window_end`` / ``weekday`` /
+    ``timezone``) — there is NO migration and NO write path for it: the
+    stored shape is the source of truth and this model only names it.
+
+    ``None`` on every row without a window.
+    """
+
+    start: str | None = None  # HH:MM — window start
+    end: str | None = None  # HH:MM — window end
+    weekday: int | None = None  # 0=Sun..6=Sat (canonical)
+    timezone: str | None = None  # IANA name
+
+
 class ScheduleDetail(BaseModel):
     source_id: str
     label: str
     status: str
-    recurrence: str | None  # once | daily | weekly | cron
+    recurrence: str | None  # once | daily | weekly | cron | "weekly (windowed)"
     local_time: str | None  # HH:MM for daily/weekly; full user-stated ISO for once
     timezone: str | None  # IANA name (resolved, as stored)
     weekday: int | None  # 0=Sun..6=Sat (canonical)
@@ -222,6 +239,16 @@ class ScheduleDetail(BaseModel):
     #: crash between the start row and the complete row; ``deferred`` /
     #: ``failed`` / ``completed`` are closed states.
     last_execution_status: str | None = None
+    #: The scheduling WINDOW (start / end / weekday / timezone) — echoed
+    #: from the stored ``chain`` block.  ``None`` for every row that has
+    #: no window (the common case).
+    window: ScheduleWindow | None = None
+    #: Raw ``enabled`` column — the operator's pause flag.  ``False``
+    #: means the row is paused (enabled=False + status='stopped').
+    enabled: bool = True
+    #: Derived armed flag: ``enabled`` is True AND ``status`` not in
+    #: {cancelled, stopped}.  A disarmed row renders NO next-fire.
+    armed: bool = True
 
 
 class ScheduleListItem(ScheduleDetail):
@@ -253,6 +280,8 @@ class ScheduleUpdateResponse(BaseModel):
     next_run_at_local: str | None
     next_run_at_utc: str | None
     tz_warning: str = ""
+    enabled: bool = True
+    armed: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -522,6 +551,99 @@ def _compute_next_run(config: dict[str, Any]) -> tuple[str | None, str | None, s
     return local_iso, utc_iso, ""
 
 
+def compute_next_run(config: dict[str, Any]) -> tuple[str | None, str | None, str]:
+    """PUBLIC — the stored-config next-fire computation (ONE source).
+
+    EVERY surface (tool list, REST list, REST GET, REST PUT, and the
+    tool-update echo) reads its next-fire from THIS function, which
+    computes it from the STORED config.  The stored config is the only
+    source: there is NO adapter-derived path (M-D deleted it), so no
+    sentinel (e.g. "__PAST_LATENESS_CAP__") can reach a response.
+    """
+    return _compute_next_run(config)
+
+
+#: The EFFECTIVE recurrence label rendered for a chain-mode (windowed)
+#: row.  A chain row STORES ``recurrence="once"`` (its ``run_at`` is
+#: rewritten at each fire by the adapter's re-arm), so echoing the
+#: stored value told the operator "once" about a self-rescheduling
+#: weekly task.  The derivation is READ-SIDE ONLY — the stored value is
+#: never rewritten and no row is migrated.
+DERIVED_CHAIN_RECURRENCE = "weekly (windowed)"
+
+#: A CANCELLED row is TERMINAL: it keeps its name (history) and its
+#: execution history, but it no longer OWNS its label — a live row may
+#: reuse it.
+_STATUS_CANCELLED = "cancelled"
+
+
+def _chain_block(config: Any) -> dict[str, Any] | None:
+    """Return the row's ``chain`` block (the windowed-chain marker).
+
+    ``None`` for a missing / empty / non-dict ``chain`` — the same rule
+    the scheduler adapter applies when it decides whether a row is a
+    chain row (``daemon/sources/adapters/scheduler.py``).
+    """
+    if not isinstance(config, dict):
+        return None
+    chain = config.get("chain")
+    if isinstance(chain, dict) and chain:
+        return chain
+    return None
+
+
+def _derive_window(config: Any) -> ScheduleWindow | None:
+    """Derive the scheduling WINDOW from the stored chain block.
+
+    ``None`` when the row carries no chain block (the common case).
+    """
+    chain = _chain_block(config)
+    if chain is None:
+        return None
+    weekday = chain.get("weekday")
+    try:
+        weekday_int = int(weekday) if weekday is not None else None
+    except (TypeError, ValueError):
+        weekday_int = None
+    return ScheduleWindow(
+        start=chain.get("window_start"),
+        end=chain.get("window_end"),
+        weekday=weekday_int,
+        timezone=chain.get("timezone"),
+    )
+
+
+def listing_view(config: Any) -> dict[str, Any]:
+    """PUBLIC — the truth-telling listing view of a STORED config.
+
+    Returns ``{"recurrence": ..., "window": {...} | None, "project_id":
+    ...}``:
+
+    * ``recurrence`` — the EFFECTIVE recurrence.  For a windowed
+      (chain-mode) row this is the DERIVED label, NEVER the stored
+      "once" (the stored value is echoed only for rows without a
+      window);
+    * ``window`` — the window echo (start / end / weekday / timezone),
+      ``None`` for every row without a window;
+    * ``project_id`` — the row's project scope.
+
+    BOTH listing surfaces (the agent tool list and the REST list) derive
+    their values through THIS function, so the two surfaces can never
+    disagree about the same row.
+    """
+    config = config if isinstance(config, dict) else {}
+    chain = _chain_block(config)
+    recurrence = (
+        DERIVED_CHAIN_RECURRENCE if chain is not None else config.get("recurrence")
+    )
+    window = _derive_window(config)
+    return {
+        "recurrence": recurrence,
+        "window": window.model_dump() if window is not None else None,
+        "project_id": config.get("project_id"),
+    }
+
+
 def _scheduler_row_or_none(config: Any) -> Any:
     """Return the row when it exists and is a scheduler row, else None."""
     if config is None:
@@ -531,18 +653,166 @@ def _scheduler_row_or_none(config: Any) -> Any:
     return config
 
 
+class LabelNamespaceUnavailable(Exception):
+    """Raised when the label-namespace scan cannot be completed.
+
+    The scan is FAIL-CLOSED: an unavailable repository (or any error
+    during the paged scan) must NOT be answered as "no conflict".  This
+    exception propagates from ``_rows_named`` through ``live_label_conflict``
+    and ``resolve_label_row``; callers refuse the operation (REST → 503
+    ``SCHEDULE_LABEL_CHECK_UNAVAILABLE``; the tool surface surfaces its
+    usual ``ERROR: ...`` string).
+    """
+
+
+def is_armed(enabled: Any, status: Any) -> bool:
+    """ARMED = ``enabled`` is True AND ``status`` not in {cancelled, stopped}."""
+    return bool(enabled) and str(status) not in {"cancelled", "stopped"}
+
+
+def row_next_run(
+    config: Any, *, enabled: bool, status: str | None
+) -> tuple[str | None, str | None, str]:
+    """ONE next-fire value for EVERY surface.
+
+    Computes from the STORED config via ``_compute_next_run`` and applies
+    the M-A armed gate: a disarmed row renders NO next-fire (None, None).
+    Returns ``(local_iso, utc_iso, tz_warning)``.
+    """
+    # The tz_warning is a property of the STORED CONFIG (it explains
+    # how the stored timezone was resolved), not of the armed state — so a
+    # disarmed (paused/cancelled/stopped) row keeps its warning while the
+    # two fire instants are nulled.  Only the fire instants are gated on
+    # armed state.
+    _local, _utc, warning = _compute_next_run(config if isinstance(config, dict) else {})
+    if not is_armed(enabled, status):
+        return None, None, warning
+    return _local, _utc, warning
+
+
+
+def _rows_named(repo: Any, label: str, *, exclude_source_id: Any = None) -> list[Any]:
+
+
+    """Every source row whose name matches ``label`` (paged scan).
+
+    ``get_source_config_by_name`` returns only the FIRST match.  With
+    dead labels reusable (a cancelled row keeps its name for history),
+    that single row cannot answer "does a LIVE row own this label?" —
+    so the namespace questions read the FULL set.
+
+    The scan reads every page (the repository's default limit is a PAGE,
+    not a completeness contract — the same discipline the list surfaces
+    use).  A scan that cannot run (an unavailable / non-conforming
+    repository) FAILS CLOSED: it raises ``LabelNamespaceUnavailable``
+    and the caller refuses the operation (never "no conflict").
+    """
+    rows: list[Any] = []
+    offset = 0
+    while True:
+        try:
+            page = list(
+                repo.list_source_configs(None, None, SOURCE_CONFIG_PAGE_SIZE, offset) or []
+            )
+        except Exception as exc:  # noqa: BLE001 — FAIL CLOSED
+            logger.warning(
+                "scheduling_service: label scan for %r failed (%s) — "
+                "raising LabelNamespaceUnavailable (fail-closed)",
+                label,
+                exc,
+            )
+            raise LabelNamespaceUnavailable(
+                f"label-namespace scan unavailable for {label!r}: {exc}"
+            ) from exc
+        rows.extend(
+            r for r in page
+            if getattr(r, "name", None) == label
+            and (exclude_source_id is None or getattr(r, "source_id", None) != exclude_source_id)
+        )
+        # A short page ends the scan; an over-sized page (a repository
+        # that ignores the limit) ends it too — the scan never loops on
+        # a repository that does not honour the page contract.
+        if len(page) != SOURCE_CONFIG_PAGE_SIZE:
+            break
+        offset += SOURCE_CONFIG_PAGE_SIZE
+    return rows
+
+
+def _live_rows(rows: list[Any]) -> list[Any]:
+    """The LIVE subset of ``rows`` — everything that is not cancelled."""
+    # NOTE: "namespace-live" (status != cancelled) is DELIBERATELY
+    # broader than "armed" (enabled AND status not in
+    # {cancelled, stopped}).  A PAUSED row still OWNS its label
+    # (it blocks create/rename) while rendering NO next-fire —
+    # the v4 record §4.2 excludes only the CANCELLED row from
+    # the namespace.  Do not conflate the two predicates.
+    return [r for r in rows if getattr(r, "status", None) != _STATUS_CANCELLED]
+
+
+def live_label_conflict(repo: Any, label: str, *, exclude_source_id: Any = None) -> bool:
+    """True when a LIVE row already owns ``label``.
+
+    Create-time uniqueness is scoped to LIVE rows: a CANCELLED row keeps
+    its name for history but no longer blocks a new schedule from
+    reusing it.  The check spans every source type (the historical
+    behaviour was "any row with that name blocks the label").
+    """
+    return bool(_live_rows(_rows_named(repo, label, exclude_source_id=exclude_source_id)))
+
+
+def resolve_label_row(repo: Any, label: str, *, exclude_source_id: Any = None) -> Any:
+    """Resolve a human LABEL to its row — the LIVE row wins.
+
+    With dead labels reusable, a plain first-match lookup can resolve a
+    label to a CANCELLED row while a LIVE row owns the same label — the
+    operator would then cancel (or inspect) history instead of the live
+    schedule.  This resolver:
+
+    * prefers the LIVE row that owns the label;
+    * REFUSES an ambiguity between two LIVE rows (the caller must use
+      ``source_id``) — a silent first-match pick would be a guess;
+    * falls back to the historical first-match lookup when NO live row
+      carries the label, so the terminal-row semantics are preserved
+      (cancelling an already-cancelled schedule still resolves to that
+      row and still reports "already cancelled").
+    """
+    live = [
+        r
+        for r in _live_rows(_rows_named(repo, label, exclude_source_id=exclude_source_id))
+        if getattr(r, "source_type", None) == SCHEDULER_SOURCE_TYPE
+    ]
+    if len(live) > 1:
+        raise ValueError(
+            f"ambiguous label '{label}': {len(live)} live schedules share it "
+            "— use source_id"
+        )
+    if len(live) == 1:
+        return live[0]
+    # Historical first-match fallback: runs ONLY when NO live row
+    # carries the label AND the scan SUCCEEDED.  A repository
+    # error here is fail-closed (refuse), not a silent 500.
+    try:
+        return repo.get_source_config_by_name(label)
+    except Exception as exc:  # noqa: BLE001 — fail closed
+        raise LabelNamespaceUnavailable(
+            f"label-namespace scan unavailable for {label!r}: {exc}"
+        ) from exc
+
+
 async def _resolve_schedule_ref(schedule_id: str) -> tuple[Any, Any]:
     """Resolve an id-or-label reference to a scheduler row.
 
     Tries ``source_id`` first, then falls back to the table-level name
     column (the schedule label) — REST DELETE/GET accept either form
-    (phase-3 §1.5). Returns ``(row_or_None, repo)``.
+    (phase-3 §1.5).  The label branch PREFERS THE LIVE row and refuses
+    an ambiguity between two live rows (dead labels are reusable).
+    Returns ``(row_or_None, repo)``.
     """
     repo = _require_repo()
     row = _scheduler_row_or_none(await asyncio.to_thread(repo.get_source_config, schedule_id))
     if row is None:
         row = _scheduler_row_or_none(
-            await asyncio.to_thread(repo.get_source_config_by_name, schedule_id)
+            await asyncio.to_thread(resolve_label_row, repo, schedule_id)
         )
     return row, repo
 
@@ -620,7 +890,14 @@ def _last_execution_id(schedule_id: str) -> str | None:
 
 
 def _last_run_at(schedule_id: str) -> str | None:
-    """Latest ``schedule_executions.triggered_at`` for the detail surfaces."""
+    """Latest ``schedule_executions.triggered_at`` for the detail surfaces.
+
+    ASSUMPTION (execution-receipt contract): last-fire and status are
+    rendered from ``schedule_executions`` as stored; outcome-truth
+    (instance linkage + terminal status) is owned by the
+    execution-receipt lane (job d271db9d) — until that lands,
+    ``last_execution_status`` is NOT evidence that a turn ran.
+    """
     repo = _require_repo()
     try:
         latest = repo.get_latest_execution(schedule_id)
@@ -676,9 +953,24 @@ def _row_to_detail(
     computes it via ``asyncio.to_thread(_last_execution_status, ...)``).
     ``deferred_count`` is read straight off the row's ``config`` JSON
     (``_defer_count`` — the carrier's authoritative counter).
+
+    The EFFECTIVE recurrence is DERIVED, never echoed raw: a chain-mode
+    (windowed) row STORES ``recurrence="once"`` (its ``run_at`` is
+    rewritten at each fire), so echoing the stored value told the
+    operator "once" about a self-rescheduling weekly task.  The
+    derivation is READ-SIDE ONLY — the stored value is never rewritten
+    and no row is migrated.
+
+    ASSUMPTION (execution-receipt contract): last-fire and status are
+    rendered from ``schedule_executions`` as stored; outcome-truth
+    (instance linkage + terminal status) is owned by the
+    execution-receipt lane (job d271db9d) — until that lands,
+    ``last_execution_status`` is NOT evidence that a turn ran.
     """
     config = row.config or {}
-    next_local, next_utc, next_warning = _compute_next_run(config)
+    next_local, next_utc, next_warning = row_next_run(
+        config, enabled=getattr(row, "enabled", True), status=getattr(row, "status", None)
+    )
     warning = tz_warning or next_warning
     cancelled_at = None
     if row.status == "cancelled":
@@ -687,11 +979,12 @@ def _row_to_detail(
         deferred_count = int(config.get("_defer_count") or 0)
     except (TypeError, ValueError):
         deferred_count = 0
+    view = listing_view(config)
     return ScheduleDetail(
         source_id=row.source_id,
         label=row.name,
         status=row.status,
-        recurrence=config.get("recurrence"),
+        recurrence=view["recurrence"],
         local_time=config.get("local_time"),
         timezone=config.get("timezone"),
         weekday=None,  # stored cron DOW is authoritative; weekday echo is create-time only
@@ -700,12 +993,15 @@ def _row_to_detail(
         next_run_at_local=next_local,
         next_run_at_utc=next_utc,
         agent=config.get("agent"),
-        project_id=config.get("project_id"),
+        project_id=view["project_id"],
         last_run_at=last_run_at,
         cancelled_at=cancelled_at,
         tz_warning=warning,
         deferred_count=deferred_count,
         last_execution_status=last_execution_status,
+        window=ScheduleWindow(**view["window"]) if view["window"] else None,
+        enabled=bool(getattr(row, "enabled", True)),
+        armed=is_armed(getattr(row, "enabled", True), getattr(row, "status", None)),
     )
 
 
@@ -734,11 +1030,15 @@ async def create_schedule(
     repo = _require_repo()
 
     # (1) Label validation + uniqueness (table-level name column IS the label).
+    #
+    # Uniqueness is scoped to LIVE rows: a CANCELLED row keeps its name
+    # for history but no longer OWNS the label — a new schedule may
+    # reuse it (the live-preferring label resolver below then resolves
+    # the label to the live row, never to the dead one).
     label = payload.label.strip()
     if not label:
         raise ValueError("label must be a non-empty string")
-    existing = await asyncio.to_thread(repo.get_source_config_by_name, label)
-    if existing is not None:
+    if await asyncio.to_thread(live_label_conflict, repo, label):
         raise ValueError(f"label already exists: {label}")
 
     # (2) Fail-fast agent existence (OD-3) — BEFORE any DB write.
@@ -1114,8 +1414,12 @@ async def update_schedule(
             if not new_label:
                 raise ValueError("label must be a non-empty string")
             if new_label != row.name:
-                clash = await asyncio.to_thread(repo.get_source_config_by_name, new_label)
-                if clash is not None:
+                # Same namespace rule as create-time: only a LIVE row
+                # blocks the label (a cancelled row keeps its name for
+                # history but does not own it).
+                if await asyncio.to_thread(
+                    live_label_conflict, repo, new_label, exclude_source_id=row.source_id
+                ):
                     raise ValueError(f"label already exists: {new_label}")
 
         was_enabled = bool(row.enabled)
@@ -1167,7 +1471,9 @@ async def update_schedule(
             refreshed = await asyncio.to_thread(repo.get_source_config, row.source_id)
             status = refreshed.status if refreshed is not None else updated.status
 
-    next_local, next_utc, next_warning = _compute_next_run(config)
+    next_local, next_utc, next_warning = row_next_run(
+        config, enabled=config_enabled, status=status
+    )
     logger.info(
         "scheduling_service: updated schedule %s (paused=%s, started=%s, when_changed=%s)",
         row.source_id,
@@ -1183,4 +1489,6 @@ async def update_schedule(
         next_run_at_local=next_local,
         next_run_at_utc=next_utc,
         tz_warning=tz_warning or next_warning,
+        enabled=bool(config_enabled),
+        armed=is_armed(config_enabled, status),
     )
