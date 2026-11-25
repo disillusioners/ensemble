@@ -1498,6 +1498,39 @@ class TestPromptClauses:
         assert pok_mod._project_name(_InstRepo(), "p1") is None
 
 
+
+class TestRealDigestHeader:
+    """B4: pin over the REAL build_active_digest output (not a hand-built
+    string). The real header must be the expansion form (never a bare
+    "POK"), and the real boundary clause must carry no bare abbreviation.
+    """
+
+    def test_the_real_digest_header_is_the_expansion_form(self) -> None:
+        digest = build_active_digest(
+            candidate_slug="s",
+            candidate_body="b",
+            rows=[_row("r1", "body")],
+            reason="r",
+        )
+        assert (
+            "PROJECT OPERATING KNOWLEDGE (POK) ACTIVE-ROW DIGEST "
+            "(project-scoped, bounded)" in digest
+        )
+        clause = next(
+            line for line in digest.splitlines() if line.startswith("Boundary (R4):")
+        )
+        # The boundary clause must carry no bare "POK" abbreviation.
+        i = 0
+        while True:
+            idx = clause.find("POK", i)
+            if idx == -1:
+                break
+            prefix = clause[idx - len("Project Operating Knowledge (") : idx]
+            assert prefix.lower() == "project operating knowledge (", clause
+            i = idx + 3
+
+
+
 # ── the pending-ASK store (T8.6 / T8.7) ───────────────────────────────────
 
 

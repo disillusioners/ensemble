@@ -625,10 +625,11 @@ def build_active_digest(
         "PROJECT OPERATING KNOWLEDGE (POK) ACTIVE-ROW DIGEST "
         "(project-scoped, bounded)",
         (
-            "Boundary (R4): redundancy means INTRA-STORE duplication only "
-            "— an ACTIVE row in this Project Operating Knowledge (POK) "
-            "store already carrying the fact. A twin in the general "
-            "knowledge base is explicitly NOT a rejection basis; judge the BOUNDARY "
+            "Boundary (R4): INTRA-STORE = within this same store; "
+            "redundancy means INTRA-STORE duplication only — an ACTIVE row "
+            "in this Project Operating Knowledge (POK) store already "
+            "carrying the fact. A twin in the general knowledge base is "
+            "explicitly NOT a rejection basis; judge the BOUNDARY "
             "(operational how-to vs general knowledge), never store "
             "exclusivity."
         ),
@@ -780,7 +781,11 @@ def build_judge_prompt(
         "(kebab-case name) of a knowledge entry; body = its one-paragraph "
         "content; row = one entry already in the store; digest = the "
         "bounded list of existing entries supplied with this write; "
-        "verdict = the outcome you return (ACCEPT / MERGE / ASK / REJECT).",
+        "verdict = the outcome you return (ACCEPT / MERGE / ASK / REJECT); "
+        "ACTIVE = a row currently in the store (status active); "
+        "INTRA-STORE = within this same store (not the general knowledge "
+        "base); KV / board = a release-tree snapshot or a board entry "
+        "(an episode, not a durable rule).",
         "",
         "RULES:",
         R0_CLAUSE,
