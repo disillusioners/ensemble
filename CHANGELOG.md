@@ -5,6 +5,12 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.31.59] — 2026-11-25
+
+### Fixed — promote hand-back recovery (board wi-aa89581b)
+
+- promote hand-back false-halt cure (ladder + deferral + rc taxonomy + reason handling) + C-1 severed-continuation fix (board wi-aa89581b); supersedes v0.31.58 (tagged at f418bdd6e, never staged — the integration tip advanced before staging); staged only, not promoted
+
 ## [v0.31.58] — 2026-11-25
 
 ### Fixed — promote hand-back recovery (board wi-aa89581b)
