@@ -429,6 +429,198 @@ class TestTimeoutResolver:
             reset_gate_timeout_resolver_for_tests()
 
 
+class TestGateWallBoundsTheWholeCycle:
+    """THE 300s TOTAL BOUNDS THE WHOLE JUDGE CYCLE (pokgt-fix-ceiling).
+
+    The Emperor's 2026-11-25 ruling is FIVE MINUTES for the WHOLE
+    judge cycle. The gate's wall cap alone did NOT deliver it: the
+    failover facade evaluates its own cap ONLY BETWEEN attempts, and
+    the house factory captured ONE per-request timeout at client-build
+    time — so a facade attempt that started just before expiry ran
+    under the FULL 300s client timeout with nothing left to kill it
+    (the worst case was wall + one attempt ≈ 600s).
+
+    These pins drive the REAL house path (``_house_llm_call`` + the
+    REAL failover facade) with a FAKE CLOCK and a FAKE ``openai``
+    client that RECORDS the timeout it is handed:
+
+    * EVERY recorded request timeout is <= the LIVE remaining wall at
+      the moment that client was built — a request that starts near
+      expiry CANNOT run the full 300s;
+    * the cycle ends FAIL-CLOSED (``POKGateUnavailable("timeout")``)
+      when the clock passes the wall, and the elapsed time NEVER
+      exceeds the wall.
+    """
+
+    _FAKE_LLM_CONFIG = {"api_key": "k", "base_url": "http://127.0.0.1:9"}
+
+    def setup_method(self) -> None:
+        import os
+
+        os.environ.pop("ENSEMBLE_POK_GATE_TIMEOUT_S", None)
+        os.environ.pop("ENSEMBLE_POK_GATE_WALL_CLOCK_S", None)
+        reset_gate_timeout_resolver_for_tests()
+
+    def teardown_method(self) -> None:
+        import os
+
+        os.environ.pop("ENSEMBLE_POK_GATE_TIMEOUT_S", None)
+        os.environ.pop("ENSEMBLE_POK_GATE_WALL_CLOCK_S", None)
+        reset_gate_timeout_resolver_for_tests()
+
+    @staticmethod
+    def _judge_once(**overrides):
+        kwargs = dict(
+            project_id=PROJECT,
+            project_name="proj",
+            slug="s",
+            body="a well formed operating fact",
+            reason="the operational invariant",
+            rows=[],
+            mode="llm",
+            llm_config=TestGateWallBoundsTheWholeCycle._FAKE_LLM_CONFIG,
+            is_production=False,
+        )
+        kwargs.update(overrides)
+        return judge_pok_write(**kwargs)
+
+    @staticmethod
+    def _install_recording_client(monkeypatch, clock, behaviour):
+        """Install a fake ``openai`` module whose client RECORDS the
+        per-request timeout it is handed (plus the clock reading at
+        build time).
+
+        ``behaviour(call_index, timeout)`` runs inside
+        ``chat.completions.create`` — it advances the fake clock and/or
+        raises to simulate a hanging request.
+        """
+        import sys
+        import types
+
+        recorded: list[dict] = []
+
+        class _Completions:
+            def create(self, **kwargs):
+                index = len(recorded) - 1
+                behaviour(index, recorded[index]["timeout"])
+                message = type("_M", (), {"content": _judge_payload()})()
+                choice = type("_C", (), {"message": message})()
+                return type("_R", (), {"choices": [choice]})()
+
+        class _Chat:
+            completions = _Completions()
+
+        class _Client:
+            chat = _Chat()
+
+            def __init__(self, **kwargs):
+                recorded.append(
+                    {
+                        "timeout": float(kwargs.get("timeout")),
+                        "at": clock.monotonic(),
+                    }
+                )
+
+        fake_openai = types.ModuleType("openai")
+        fake_openai.OpenAI = _Client
+        monkeypatch.setitem(sys.modules, "openai", fake_openai)
+        # the judge path reads the clock through the module namespace
+        # (``pok_gate.time``) — the fake clock is the ONLY clock the
+        # gate and the house factory see.
+        monkeypatch.setattr(pok_gate, "time", _FakeTimeModule(clock))
+        return recorded
+
+    @staticmethod
+    def _neutralise_backoff(monkeypatch) -> None:
+        """The facade's exponential-jitter backoff sleeps REAL seconds
+        between attempts (tenacity's default wait: ~1s, 2s, 4s, 8s
+        across the facade's 5-attempt ceiling) — neutralise it (the
+        WAIT is not under test here; the per-request timeout DERIVATION
+        is)."""
+        from daemon.services import llm_failover
+        from tenacity import wait_none
+
+        monkeypatch.setattr(
+            llm_failover, "wait_exponential_jitter", lambda: wait_none()
+        )
+
+    def test_a_request_that_starts_near_expiry_cannot_run_the_full_budget(
+        self, monkeypatch
+    ) -> None:
+        """PIN (j): the per-request timeout is RE-DERIVED from the LIVE
+        remaining wall on EVERY facade attempt.
+
+        The first request consumes 295 of the 300 wall-seconds and
+        times out; the facade re-enters the factory with 5 seconds
+        left. The SECOND client must be handed <= 5s — it CANNOT run
+        the full 300s. The defect: the timeout was captured ONCE (at
+        client-build time), so every facade attempt got the same
+        value and the last attempt could outlive the wall by a whole
+        attempt."""
+        clock = _FakeMonotonicClock()
+        deadline = clock.monotonic() + get_gate_wall_clock_cap_s()
+
+        def _behaviour(index: int, timeout: float) -> None:
+            if index == 0:
+                clock.advance(295.0)
+                raise TimeoutError("fake house client: request timed out")
+
+        recorded = self._install_recording_client(
+            monkeypatch, clock, _behaviour
+        )
+        self._neutralise_backoff(monkeypatch)
+
+        verdict = self._judge_once()
+        assert verdict.verdict == "ACCEPT"
+        assert len(recorded) == 2
+        # the FIRST request had the whole wall ...
+        assert recorded[0]["timeout"] == 300.0
+        # ... the SECOND (near-expiry) request was CUT to the live
+        # remaining wall.
+        live_remaining = deadline - recorded[1]["at"]
+        assert live_remaining == 5.0
+        assert recorded[1]["timeout"] <= live_remaining
+        assert recorded[1]["timeout"] < 300.0
+
+    def test_the_cycle_ends_fail_closed_and_never_outlives_the_wall(
+        self, monkeypatch
+    ) -> None:
+        """PIN (k): the WHOLE cycle stays INSIDE the wall and ends
+        FAIL-CLOSED (``POKGateUnavailable("timeout")``).
+
+        Every request hangs for its FULL handed timeout. The cycle
+        stops AT the wall: the elapsed time never exceeds the cap, the
+        wall is spent ⇒ the fail-closed timeout error (never a
+        reject), and NO client is built once the wall is spent (the
+        abort happens BEFORE the client exists — a client is never
+        built with a non-positive timeout). The pre-fix code (ONE
+        captured client timeout for every attempt) ran the cycle PAST
+        the wall by a full attempt."""
+        clock = _FakeMonotonicClock()
+        deadline = clock.monotonic() + get_gate_wall_clock_cap_s()
+
+        def _behaviour(index: int, timeout: float) -> None:
+            clock.advance(timeout)
+            raise TimeoutError("fake house client: request timed out")
+
+        recorded = self._install_recording_client(
+            monkeypatch, clock, _behaviour
+        )
+        self._neutralise_backoff(monkeypatch)
+
+        with pytest.raises(POKGateUnavailable) as excinfo:
+            self._judge_once()
+        assert excinfo.value.code == "pok_gate_unavailable"
+        assert excinfo.value.reason == "timeout"
+        # the WHOLE cycle stayed inside the wall
+        assert clock.monotonic() <= deadline
+        # EVERY request was cut to the live remaining wall
+        for entry in recorded:
+            assert entry["timeout"] <= deadline - entry["at"]
+        # and NO client was built after the wall was spent
+        assert len(recorded) == 1
+
+
 class TestGateWallClockKnob:
     """The NEW TOTAL knob (``ENSEMBLE_POK_GATE_WALL_CLOCK_S``): the
     same fail-open + clamp posture as the per-attempt knob, with its
@@ -538,13 +730,29 @@ def _install_fake_judge(
     timeout-classification surface). The gate's OWN enforcement is
     the top-of-loop ``remaining <= 0`` deadline check, which kills
     any retry beyond the wall.
+
+    The fake accepts the house seam's ``deadline`` (the ABSOLUTE
+    monotonic instant the cycle must finish by) and RECORDS it — the
+    house factory re-derives the per-request client timeout from that
+    deadline on every facade attempt (see
+    :class:`TestGateWallBoundsTheWholeCycle`).
     """
 
     def _fake_house_call(
-        llm_config, prompt, *, model, timeout_s, wall_clock_cap_s
+        llm_config,
+        prompt,
+        *,
+        model,
+        timeout_s,
+        wall_clock_cap_s,
+        deadline=None,
     ):
         calls.append(
-            {"timeout_s": timeout_s, "wall_clock_cap_s": wall_clock_cap_s}
+            {
+                "timeout_s": timeout_s,
+                "wall_clock_cap_s": wall_clock_cap_s,
+                "deadline": deadline,
+            }
         )
         if mid_call_guard is not None:
             mid_call_guard()

@@ -1069,6 +1069,7 @@ def _house_llm_call(
     model: str,
     timeout_s: float,
     wall_clock_cap_s: float,
+    deadline: float | None = None,
 ) -> str:
     """ONE judge call through the house failover facade (T7.2).
 
@@ -1077,6 +1078,28 @@ def _house_llm_call(
     RE-READS the failover URL on every attempt (capturing it in a
     closure would break the primary→backup swap), the per-attempt HTTP
     timeout rides the client, and the wall clock rides the facade.
+
+    THE WALL BINDS EVERY REQUEST (the Emperor's 2026-11-25 five-minute
+    ruling): the facade evaluates its own wall cap ONLY BETWEEN
+    attempts, so a per-request timeout captured ONCE (at client-build
+    time) cannot bound the cycle — the LAST facade attempt could start
+    just before expiry and then run the FULL per-attempt timeout with
+    nothing left to kill it (the worst case was wall + one attempt,
+    ~600s, NOT the ruled 300s). The wall therefore reaches the factory
+    as an ABSOLUTE monotonic instant (``deadline`` — NOT a pre-computed
+    duration), and the factory RE-DERIVES the client timeout from the
+    LIVE remaining wall on EVERY entry (the factory is re-entered once
+    per facade attempt)::
+
+        remaining = request_deadline - time.monotonic()
+        client_timeout = min(timeout_s, remaining)
+
+    A non-positive ``remaining`` ABORTS the request with the fail-closed
+    timeout error (:class:`POKGateUnavailable` ``"timeout"``) — a
+    client is NEVER built with a non-positive timeout. ``deadline=None``
+    means NO cycle deadline was supplied (a direct call outside the
+    judge cycle): the facade's own wall window, measured from THIS
+    call, is used instead — the request is bounded either way.
     """
     import openai  # noqa: PLC0415 — lazy init
 
@@ -1101,12 +1124,33 @@ def _house_llm_call(
         # LLM config must never reach out to a provider).
         raise POKGateUnavailable("llm_error")
 
+    # THE WALL EVERY REQUEST MUST FIT INSIDE: the cycle deadline (an
+    # ABSOLUTE monotonic instant) when the caller handed one, else the
+    # facade's own wall window measured from THIS call. The request
+    # timeout is re-derived from it on EVERY factory entry.
+    request_deadline = (
+        float(deadline)
+        if deadline is not None
+        else time.monotonic() + float(wall_clock_cap_s)
+    )
+
     def _factory() -> str:
         url = current_failover_url() or base_url
+        # THE PER-REQUEST TIMEOUT IS RE-DERIVED HERE, ON EVERY FACTORY
+        # ENTRY (the facade re-enters the factory once per attempt):
+        # it is bounded by the LIVE remaining wall, so a request that
+        # starts near expiry can NEVER run the full per-attempt budget.
+        remaining = request_deadline - time.monotonic()
+        if remaining <= 0:
+            # The wall is spent — ABORT the request (the fail-closed
+            # timeout error). Never build a client with a non-positive
+            # timeout.
+            raise POKGateUnavailable("timeout")
+        request_timeout = min(float(timeout_s), remaining)
         client = openai.OpenAI(
             api_key=api_key,
             base_url=url or None,
-            timeout=float(timeout_s),
+            timeout=request_timeout,
             max_retries=0,
         )
         response = client.chat.completions.create(
@@ -1381,7 +1425,7 @@ def judge_pok_write(
     reason: str,
     rows: Sequence[ActiveRow],
     llm_config: Mapping[str, Any] | None = None,
-    llm_call: Callable[[Any], str] | None = None,
+    llm_call: Callable[[JudgePrompt], str] | None = None,
     mode: str | None = None,
     merge_policy: str = DEFAULT_MERGE_POLICY,
     cache: VerdictCache | None = None,
@@ -1394,6 +1438,11 @@ def judge_pok_write(
     The function is PURE with respect to the knowledge store: it
     READS the digest rows it is handed and RETURNS a typed verdict. It
     never writes a POK row (the TOOL executes — the authority split).
+
+    The ``llm_call`` seam is a ONE-argument callable that receives the
+    split :class:`JudgePrompt` (the SYSTEM + USER halves — NOT a
+    string) and returns the RAW judge answer; it is the injection point
+    for a test double in place of the house client.
 
     ``shadow=True`` marks the verdict ADVISORY: the caller still
     writes, but the verdict is logged (``phase=ASK_SHADOW`` for an ASK,
@@ -1514,22 +1563,41 @@ def judge_pok_write(
 
 
 def _call_judge_with_retry(
-    prompt: str,
+    prompt: JudgePrompt,
     *,
     llm_config: Mapping[str, Any] | None,
-    llm_call: Callable[[str], str] | None,
+    llm_call: Callable[[JudgePrompt], str] | None,
     model: str,
 ) -> str:
     """The judge call + its retry budget (T7.2 / T7.10).
 
     At most ONE retry (so at most TWO attempts): the retry fires on a
     timeout or an UNPARSABLE answer (the attestation judge's
-    retry-once semantics). The total wall clock is capped at
+    retry-once semantics). The TOTAL wall clock is capped at
     :data:`GATE_WALL_CLOCK_CAP_S` (300s — the Emperor's 2026-11-25
     five-minute ruling; env-tunable via ``ENSEMBLE_POK_GATE_WALL_CLOCK_S``
-    through :mod:`daemon.services.pok_gate_timeout_resolver`), and
-    each attempt spends ``min(attempt, remaining)`` — so a single
-    judge call may use the WHOLE budget and the per-attempt value
+    through :mod:`daemon.services.pok_gate_timeout_resolver`).
+
+    THE WALL BOUNDS THE WHOLE CYCLE — and it does so because EVERY
+    request's client timeout is derived from the LIVE remaining
+    deadline: the deadline is an ABSOLUTE monotonic instant, handed to
+    the house factory, which RE-DERIVES
+    ``min(per_attempt, deadline - now)`` on EVERY facade attempt (the
+    facade re-enters the factory once per attempt). A request that
+    starts near expiry therefore CANNOT run the full per-attempt budget
+    — it is cut to the seconds that are actually left — so the time
+    spent in requests stays inside the cap (the gate's own top-of-loop
+    ``remaining <= 0`` check aborts the cycle when the wall is spent,
+    and the house factory aborts the request with the same fail-closed
+    timeout error). The one component OUTSIDE the wall is the failover
+    facade's inter-attempt BACKOFF SLEEP: tenacity checks its stop
+    BEFORE it sleeps, so a sleep that starts just before expiry can
+    carry the cycle a few seconds past the cap (the wait strategy
+    lives in :mod:`daemon.services.llm_failover`, outside this
+    module).
+
+    The per-attempt budget stays ``min(attempt_timeout, remaining)`` —
+    one judge call may use the WHOLE budget and the per-attempt value
     never silently truncates a ruling. The ceiling that actually
     bounds the gate is the daemon TURN budget —
     ``graph_timeout_minutes`` (default 120 min = 7200s, enforced by
@@ -1557,6 +1625,7 @@ def _call_judge_with_retry(
                     model=model,
                     timeout_s=budget,
                     wall_clock_cap_s=max(remaining, 1.0),
+                    deadline=deadline,
                 )
         except POKGateUnavailable:
             raise
