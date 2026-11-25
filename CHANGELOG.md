@@ -5,6 +5,18 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.31.55] — 2026-11-25
+
+### Changed — POK gate judge timeout budget + self-contained prompt (commission pok-gate-timeout-prompt)
+
+- Judge budget (Emperor's revised ruling of 2026-11-25) — the TOTAL wall clock moves 45s → 300s (5 minutes) and the per-attempt timeout moves 20s → 300s, so a SINGLE judge call may now use the whole budget; the retry budget is UNCHANGED (at most 1 retry). The total is now env-tunable via the NEW knob `ENSEMBLE_POK_GATE_WALL_CLOCK_S` (Pattern C: cached global, one-shot WARN per bucket, clamps 30s–1800s) beside the existing `ENSEMBLE_POK_GATE_TIMEOUT_S`. The per-attempt max clamp moves 180s → 360s — the old clamp would have silently cut a 300s setting down to 180s.
+- Split prompt — the gate's judge prompt is now SPLIT into two messages: the SYSTEM message carries the role + instructions (the R0–R5 + R-RET/R-PROV ruleset VERBATIM, the outcome set, the exemplar rejections, and the JSON output contract), and the USER message carries the per-write payload (slug, body, the caller's operational claim, and the bounded active-row digest). The house call sends BOTH messages.
+- Jargon rule — no bare "POK" appears anywhere in either message, and every term of art (POK, RAG, slug, body, row, digest, verdict) is defined on first use — per the Emperor's 2026-11-25 ruling that a competent agent with zero prior exposure must understand the prompt alone.
+- "(unnamed)" root-cause fix — the project name was read off the instance repository, which never carries one, so the prompt ALWAYS said "(unnamed)"; it now resolves from the project repository that actually holds the name, and says so honestly when the name is genuinely unavailable instead of printing a placeholder.
+- Pins — the gate's unit file grew 67 → 82 nodes (+15); the W2 pack is now 270 nodes (was 255); the registered packs measured green at 275 (family-key) / 176 (W1) / 270 (W2). The new timeout pins are mutation-proven via a fake clock + fake house client, proving the 300s budget is ENFORCED and that a judge outlasting the wall raises the D2 fail-closed timeout; the jargon/split/placeholder pins are mutation-proven too.
+- Fences held — the semantic judge and the soft-max stay OFF; the ASK contract (one turn, owner-scoped, TTL 1200s, fail-closed) is untouched; the gate's brain (R0–R5 + R-RET/R-PROV) is untouched; no queue, no new agent, no schema change.
+- NO promote (STAGED ONLY — the Emperor's ceremony owns the flip).
+
 ## [v0.31.54] — 2026-11-25
 
 ### Fixed — Dump-lane probe advisories R1/R2/R3 + curator filing (commission dump-health-nits-v03154)
