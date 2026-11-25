@@ -554,11 +554,11 @@ def _compute_next_run(config: dict[str, Any]) -> tuple[str | None, str | None, s
 def compute_next_run(config: dict[str, Any]) -> tuple[str | None, str | None, str]:
     """PUBLIC — the stored-config next-fire computation (ONE source).
 
-    BOTH listing surfaces read their next-fire from THIS function, which
-    computes it from the STORED config.  The live adapter's in-memory
-    The stored config is the only source: there is NO adapter-derived
-    path (M-D deleted it), so no sentinel (e.g. "__PAST_LATENESS_CAP__")
-    can reach a response.
+    EVERY surface (tool list, REST list, REST GET, REST PUT, and the
+    tool-update echo) reads its next-fire from THIS function, which
+    computes it from the STORED config.  The stored config is the only
+    source: there is NO adapter-derived path (M-D deleted it), so no
+    sentinel (e.g. "__PAST_LATENESS_CAP__") can reach a response.
     """
     return _compute_next_run(config)
 
