@@ -860,3 +860,84 @@ the entry is no longer re-runnable. Historical run evidence:
 - **Result**: PASS — 14/14 cases, exit 0, 3 runs reproducible (3.0s); acceptance criterion proven both directions (HEAD ACCEPT + BASE-executed REFUSE with green control)
 - **Quick Fixes**: none (read-only gate)
 - **Report**: RESULTS/2026-11-10-explain-image-related-dirs-verification.md §2–3
+
+---
+
+## Mock Test: Promote Hand-Back False-Halt — RED-at-base / GREEN-at-merge harness
+
+### Metadata
+- **Created**: 2026-11-25 (tester FULL HOUSE gate, landing merge M = 8d306f2e)
+- **Script**: `tests/packs/promote_handback_false_halt_repro_test.sh` (registered in PACKS.md as
+  `promote_handback_false_halt_repro_test`; commits `dc92b8b4` + the d3 leg commit)
+- **Language**: Bash
+- **Status**: ACTIVE — **currently RED at HEAD by design** (it is the C1 defect repro; it goes green
+  when the `scripts/upgrade/lib.sh:7515-7523` severed-continuation fix lands)
+
+### Configuration
+- **Timeout**: 300 s script-internal self-cap + `timeout 300` command-level wrapper (dual layer)
+- **Service Port**: none — no listener is bound; `systemctl` / `lsof` / `curl` are PATH stubs
+- **Mock Ports**: 18377 (ephemeral, > 10000); 9797 / 8079 untouched
+- **Cleanup**: `mktemp -d` FAKE_HOME via `tests/upgrade_test_lib.sh` `setup_fake_home` + the
+  `preflight_guard` escape guard (4 stages); sandbox install root is `$FAKE_HOME/installs/agents-ensemble`
+  (never a `$HOME`-derived live path — two live-install deletions happened on 2026-10-12);
+  all fixture dirs registered with the shared EXIT-trap registry.
+- **Env**: per-variable scrubs only (`POSTGRES_*`, `PG*`, `DATABASE_URL*`, `ENSEMBLE_DB_DSN`,
+  `SSL_CERT_*`, `OPENAI_API_KEY`) — `env -u POSTGRES_*` is a SILENT NO-OP; `POSTGRES_DB != ensemble_prod`
+  asserted; `PG_TEST_ALLOWED_DBS` set explicitly; `ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0` pinned.
+
+### What It Tests
+The recovered promote hand-back false-halt mechanism, driven against the **REAL**
+`scripts/upgrade/lib.sh` + `scripts/upgrade/status.sh` with stubbed externals — never a copy of lib.sh.
+
+- **(a)** the is-active rc=3 taxonomy: INFO-class handling, the additive truthful
+  `handback_is_active_state kind=state reason=state:<state>` row, and **no failure-shaped row**
+  (never `timeout(` / `kind=budget` / `kind=nonzero_exit`) — the H2 ruling's acceptance criterion.
+- **(b)** the attribution gate on a TRANSIENT (a child holding the inherited LISTEN fd, argv-owned by an
+  MCP child, not the supervised unit's pid): no `attribution-refused`, a `kind=attr_deferred` row, the
+  ladder ACCEPT, and the boot reaching GREEN.
+- **(c)** *(PIN-only)* the attribution gate's GENUINE refusal (a foreign, uncontained holder) — must
+  still HALT (the false-GREEN guard).
+- **(d)** *(PIN-only)* the rc=124 budget arm is still a real timeout (`kind=budget`,
+  `reason=child: timeout(<label>)`).
+- **(d2)** the hand-back START-timeout journal row in the **nounset-OFF** regime: the row must carry
+  `site=handback_start` / `kind=budget` / `reason=child: timeout(HANDBACK_START_BUDGET_S=<n>)` / the true
+  rc, with no `command not found` and no spurious "journal event append FAILED" warn.
+- **(d3)** the same start-timeout path in the **nounset-ON** regime (the REAL promote lane: `promote.sh:69`,
+  `restart.sh:63`, `rollback.sh:32` all `set -u` before sourcing lib.sh, and
+  `journal_history_append()` references `"$2"` unguarded at lib.sh:1890): the caller must NOT abort with
+  `$2: unbound variable`, and the row must carry its detail.
+- **(e)** mechanism ii end-to-end: ladder → `return 2` → the probe `case` → the callers' `case "$hsp_rc"`
+  keep polling → green.
+- **(f)** mechanism iv reason handling: the dynamic reason only for the right rc classes, a SINGLE writer
+  on the reason slot, and no transient "attribution-refused" poisoning a later halt's diagnosis.
+- **(g)** ROW 20 / T7e: `scripts/upgrade/status.sh` on a transient rc ⇒ the transient note is PRESENT and
+  the exit code is 0 (no test rode with the ROW 20 commit — this fixture closed that gap).
+- **(h)** the soak tick handles rc=2 NON-FATAL (INCONCLUSIVE / freeze), not as a version-drift failure.
+
+### Success Criteria
+- [x] Every repro prints its own PASS/FAIL line; the pack prints `RESULT: PASS|FAIL|TIMEOUT` and exits
+      non-zero on any failure.
+- [x] Runnable at BOTH revs — every M-only symbol is guarded, so the BASE run is a clean, MEANINGFUL red
+      (measured: 0 "command not found", 0 syntax errors, 0 unbound-variable noise in the base run).
+- [x] Dual-layer timeout (script-internal 300 s + command-level `timeout 300`).
+- [x] No live-install contact; FAKE_HOME escape guard; per-variable env scrubs; ports > 10000 only.
+- [ ] **Currently RED at HEAD** — the C1 defect repro (`d2` + `d3`). GREEN requires the one-line comment
+      relocation at `scripts/upgrade/lib.sh:7515-7523` (option A; option B — moving the trailing `\` — is
+      WRONG and does not fix it).
+
+### Implementation Notes
+- The cure gate (a, b, c, d, e, f, g, h) is **46/46 green at M**; the merge-defect gate (d2, d3) is
+  **red at M and green at the base** — the inverse signature of a merge-introduced defect.
+- At the RED base P1 = `35ec50e3c` the cure gate is red (15 passed / 31 failed) across a, b, e, f, g, h
+  (c and d are PIN-only and green on both sides).
+- The P1 measurement corrects the original framing: the base does **not** label rc=3 as a timeout (the
+  two-way split already landed on L) — it WARNs it and omits `reason=state:`; it labels rc=4 as
+  `kind=state` where M says `kind=nonzero_exit`; and at the base the soak tick treats rc=2 as FATAL
+  ("soak FAILURE: version drifted") where M treats it as INCONCLUSIVE.
+
+### Last Run
+- **Date**: 2026-11-25
+- **Worker Instance**: `phh-g2-harness` (8e692c9c-f7ba-43ee-81a5-2adc499f9e36) + `phh-c1-verify`
+- **Result**: RED at M (C1 defect repro), RED at base (cure repro) — see
+  `RESULTS/2026-11-25-promote-handback-full-house-gates.md`
+- **Quick Fixes**: none to production code (frozen); the harness is test-code only

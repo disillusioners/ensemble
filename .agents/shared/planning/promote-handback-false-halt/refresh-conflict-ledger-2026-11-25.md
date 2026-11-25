@@ -188,3 +188,90 @@ Follow-ups (routed, not executed here):
 2. **Regression suite → tester:** run the L-side tests in §8 plus the branch's promote-handback legs on the merged tree; specifically adjudicate the H2 behavioral delta (D-P1-1's literal "no journal row for rc=3" vs L's additive `handback_is_active_state` row) and the event-kind adaptation for rc 4/1 (`kind=nonzero_exit` on L's additive event, not on `subprocess_wait_timeout`).
 3. **Indirect rc-2 consumers** (`promote.sh:1076/1085/1139/1440/1445/1451`, `restart.sh:323/333/365`, `rollback.sh:298/303/309`) still treat any nonzero gate rc as a definitive failure. This is pre-existing in the branch (not a merge regression and not touched by L); a T7c-style rc-capture across those surfaces needs its own commission or tester finding.
 4. `_gate_consume` / `_gate_outcome` / `_gate_defer_reset` remain defined but unwired at call sites, exactly as in the branch pre-merge tree; no wiring change was made in this refresh.
+
+
+---
+
+## 11. CORRECTION (2026-11-25 — tester FULL HOUSE gate at the landing merge M = 8d306f2e)
+
+> Added by the **tester** gate (the lane's own conflict-resolution record is left intact above; this section
+> appends the execution evidence that **falsifies** part of it). Authority for the correction:
+> 4 independent witnesses (the new RED-at-base/GREEN-at-merge harness; the evil-merge audit; the
+> pre-existing landed reader `tests/test_bounded_subprocess_waits.sh`; an independent sandbox verifier),
+> all pointing at one construct. The FIX is specified and validated below but **NOT APPLIED** — production
+> is frozen under the operating freeze; the landing decision belongs to the lane owner.
+
+### 11.1 The H3 resolution is SEMANTICALLY BROKEN — the start-timeout journal row never lands
+
+`scripts/upgrade/lib.sh:7515-7523` (inside `_supervision_handback_unit()`, def :7324):
+
+```bash
+7515  journal_history_append subprocess_wait_timeout \
+7516      # RESOLVED H3 (branch dynamic reason × L 0f133d2b9/865ec4ad3
+…     # (six comment lines, 7516-7521)
+7522      "site=handback_start kind=budget reason=child: $(_bounded_rc_reason "$sbrc" …) unit=$unit rc=$sbrc — …" \
+7523      || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
+```
+
+Bash removes the `\`+newline, then `#` starts a comment to end-of-line ⇒ the payload argument is never
+passed. `journal_history_append()` (lib.sh:1889-1891) is `_splice_journal append-history "$1" "$2"` —
+`$2` unguarded. Measured outcomes:
+
+| regime | measured result |
+|---|---|
+| **nounset OFF** (the test harnesses) | `argc=1` ⇒ the detail payload is LOST; the orphaned payload string executes as a command (`command not found`, rc 127); the `\|\| _warn` fires a misleading *"journal event append FAILED (best-effort)"*; the row lands as `{"event":"subprocess_wait_timeout","detail":""}` — no `site=`, no `kind=`, no `reason=`, no `rc=` |
+| **nounset ON** (the REAL lane) | the helper aborts at **lib.sh:1890** with `$2: unbound variable` ⇒ **NO ROW AT ALL**, the `\|\| _warn` never fires, and **the abort propagates to the caller**: the shell exits rc=1 inside the hand-back function, **bypassing** the clean-halt arms that would write the `halt` journal event and consume/clear the side channels |
+
+**Real callers run with nounset ON** (`set -u` before `source lib.sh`, no `set +u` anywhere):
+`promote.sh:69`/`:123` (reaches the branch via `restart_via_launcher` at `:950` and `:1431`),
+`restart.sh:63`/`:88` (`:279`), `rollback.sh:32`/`:58` (`:269`).
+`status.sh:26`/`:43` is **not affected** — the branch is unreachable there (no `restart_via_launcher`).
+
+**Entry point:** the defect was introduced **at R = 5ba3223ed** — the H3 conflict resolution of the
+refresh merge. Both parents are clean (`573c5c4b1` blob `f01714d9`, P1 `35ec50e3c` blob `edc14878`);
+R, P2 `6056d1d05` and M all carry blob `bf5cb77e`. It rode unchanged to the landing merge.
+Whole-file scans (independent Python scan + a `journal_history_append` call-site audit): **exactly one**
+severed continuation in the whole file — `7515 → 7516`; of 68 `journal_history_append` calls, only this
+one has comment lines between the `\` and the payload. `status.sh`: 0.
+
+**Why every static gate missed it:** `bash -n scripts/upgrade/lib.sh` exits **0** (the construct is
+syntactically valid); the evil-merge line-set audit found **0** evil lines outside H1-H3 (the comment
+block IS mapped, legitimately-looking resolution content); a *textual* reading of H3 cannot see that the
+argument became a comment. Only a **runtime drive** catches it — which is why this lane's new harness
+and the pre-existing landed reader at `tests/test_bounded_subprocess_waits.sh:450`/`:496` both fire RED.
+
+### 11.2 Ledger claims FALSIFIED by the execution evidence
+
+| § | Claim | Verdict |
+|---|---|---|
+| §4 H3 (WHY) | "the reason string is **byte-identical** … **no L-side parser loses its token**" | **FALSE** — the token never reaches the row; both `:450`/`:496` greps fail |
+| §4 H3 (KEPT) | "the branch's dynamic `_bounded_rc_reason` + true `$sbrc`" | present as SOURCE TEXT but **never executed** — falsified in effect |
+| §5c row 19 | "byte-equivalent dynamic reason … true `$sbrc`" | **FALSE** — the row is empty (or absent, under nounset) |
+| §8 reader table | `:450`/`:496` "satisfied; reason text byte-equivalent" | **NOT satisfied** — both fire RED at M |
+| §4 H3 | "`bash -n …` clean" | literally true, but **vacuous** for this defect class |
+| §5b | "`:7518` is a comment, not a journal row" | literally true — but the comment's PRESENCE is the defect |
+
+### 11.3 Ledger claims that REMAIN TRUE
+
+- §5: "no runtime control decision reads those rows" — unchanged; the D6 state machine keys on the stdout
+  `isact_state`, not the journal. The **behaviour** is intact: the `sbrc = 124` arm still sets
+  `start_hung=1` and continues into the bounded verify (AC-D6-4 control flow unaffected).
+- §5c: `+828/−76`, no duplicate function definitions, no conflict-marker remnants, no dropped L logic.
+- §4 H3's string property — `_bounded_rc_reason` DOES emit `timeout(HANDBACK_START_BUDGET_S=<n>)` for 124.
+  It is the **wiring**, not the string, that fails.
+- §6 mechanism-survival anchors: all verified present at M by the evil-merge audit.
+
+### 11.4 The fix — validated, NOT applied (one-line relocation)
+
+Option **A** (CORRECT): move the six comment lines 7516-7521 **above** the
+`journal_history_append subprocess_wait_timeout \` line. Sandbox-verified: `argc=2`, detail = the full
+payload, and the nounset-ON path no longer aborts.
+
+Option **B** (WRONG — do not use): "move the trailing `\` to :7521". The verifier tested it: a `\` on a
+comment line does not rescue the call — `argc=1` persists, the payload still executes as a command (rc 127)
+and the warn still fires.
+
+Effect of the fix: the row again carries `site=handback_start`, `kind=budget`,
+`reason=child: timeout(HANDBACK_START_BUDGET_S=<n>)` and the true `rc=$sbrc`; the nounset-ON callers no
+longer abort mid-hand-back. **This is a production edit to the audited landing tree and is the lane
+owner's call — the tester gate did not apply it.**
