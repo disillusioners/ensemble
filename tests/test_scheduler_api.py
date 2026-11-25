@@ -2322,6 +2322,13 @@ class TestSchedulePhase1GuardsRest:
         mock_manager._source_repository.list_source_configs = Mock(
             return_value=[live_other]
         )
+        # The rename is NOT expected to reach the repository — but the
+        # repository double is still shaped like a successful write so a
+        # REGRESSION (the gate removed) surfaces as a clean status-code
+        # assertion (200 != 409) instead of an incidental fixture error.
+        updated = self._rest_source("sched-1", "taken-label")
+        mock_manager._source_repository.update_source_config = Mock(return_value=updated)
+        mock_manager._source_repository.get_latest_execution = Mock(return_value=None)
 
         response = await client.put("/schedules/sched-1", json={"name": "taken-label"})
         assert response.status_code == 409, response.text
