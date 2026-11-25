@@ -677,9 +677,15 @@ def row_next_run(
     the M-A armed gate: a disarmed row renders NO next-fire (None, None).
     Returns ``(local_iso, utc_iso, tz_warning)``.
     """
+    # The tz_warning is a property of the STORED CONFIG (it explains
+    # how the stored timezone was resolved), not of the armed state — so a
+    # disarmed (paused/cancelled/stopped) row keeps its warning while the
+    # two fire instants are nulled.  Only the fire instants are gated on
+    # armed state.
+    _local, _utc, warning = _compute_next_run(config if isinstance(config, dict) else {})
     if not is_armed(enabled, status):
-        return None, None, ""
-    return _compute_next_run(config if isinstance(config, dict) else {})
+        return None, None, warning
+    return _local, _utc, warning
 
 
 

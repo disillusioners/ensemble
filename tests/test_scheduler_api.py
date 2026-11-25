@@ -515,6 +515,7 @@ class TestCreatorCaptureRest:
         row.config = None
         row.enabled = True
         repo.get_source_config_by_name = Mock(return_value=None)
+        repo.list_source_configs = Mock(return_value=[])
         repo.create_source_config = Mock(return_value=row)
         repo.get_source_config = Mock(return_value=row)
         orig = ss._require_repo

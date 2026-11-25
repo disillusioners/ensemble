@@ -136,14 +136,12 @@ async def list_schedules(request: Request, include_cancelled: bool = False):
                 continue
             # ── next_run_at: ONE authoritative source (the STORED config) ──
             #
-            # The adapter's in-memory ``_get_next_trigger_time`` was the
-            # OLD source here — a SECOND source for a field the tool
-            # surface already computed from the stored config, and one
-            # that goes null whenever the adapter is not registered (the
-            # two surfaces could therefore disagree).  The stored config
-            # is now the authority; the adapter survives ONLY as an
-            # explicit fallback for a row whose stored config yields no
-            # next-fire at all.
+            # ONE source — the STORED config via the shared
+            # ``row_next_run`` helper (scheduling_service).  There is NO
+            # adapter-derived path (M-D): no ``_get_next_trigger_time``
+            # fallback, so no sentinel (e.g. "__PAST_LATENESS_CAP__")
+            # can reach a response.  The tool surface and the REST
+            # surface share this single helper.
             next_local, next_utc, _tz_warning = row_next_run(
                 src.config or {},
                 enabled=getattr(src, "enabled", True),
@@ -560,10 +558,16 @@ async def update_schedule(schedule_id: str, schedule_update: ScheduleUpdate, req
     
     # Calculate next_run_at from the STORED config (the one authoritative
     # source on EVERY surface — no adapter fallback).
+    row_enabled = (
+        getattr(updated, "enabled", None)
+        if getattr(updated, "enabled", None) is not None
+        else existing.enabled
+    )
+    row_status = getattr(updated, "status", None) or existing.status
     next_local, next_utc, _tz_warning = row_next_run(
         updated.config or {},
-        enabled=getattr(updated, "enabled", None) if getattr(updated, "enabled", None) is not None else existing.enabled,
-        status=getattr(updated, "status", None) or existing.status,
+        enabled=row_enabled,
+        status=row_status,
     )
     next_run_at = parse_utc_datetime(next_utc) if next_utc else None
 
@@ -604,8 +608,8 @@ async def update_schedule(schedule_id: str, schedule_update: ScheduleUpdate, req
         window=view["window"],
         project_id=view["project_id"],
         last_execution_status=last_execution_status,
-        enabled=bool(getattr(updated, "enabled", None) if getattr(updated, "enabled", None) is not None else existing.enabled),
-        armed=is_armed(getattr(updated, "enabled", None) if getattr(updated, "enabled", None) is not None else existing.enabled, getattr(updated, "status", None) or existing.status),
+        enabled=bool(row_enabled),
+        armed=is_armed(row_enabled, row_status),
     )
 
 
