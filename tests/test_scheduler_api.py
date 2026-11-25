@@ -2364,7 +2364,15 @@ class TestSchedulePhase1GuardsRest:
         conflict gate is skipped entirely (the exclusion guard keeps the
         row from ever conflicting with itself).  The scan sees the row
         ITSELF — so a broken exclusion (exclude-every-row mutation shape)
-        turns this pin RED with a 409."""
+        turns this pin RED with a 409.
+
+        The own-name SHORT-CIRCUIT is pinned by the scan never running:
+        a rename to the row's own label must not even reach the
+        namespace scan (MA-4).
+
+        COUNTER-MUTATION: drop the ``updated_name != existing.name``
+        guard in the router ⇒ the scan RUNS ⇒ the assert below fails ⇒
+        RED."""
         existing = self._rest_source("sched-1", "my-schedule")
         mock_manager._source_repository.get_source_config = Mock(return_value=existing)
         # The scan WILL see the row itself.
@@ -2378,6 +2386,87 @@ class TestSchedulePhase1GuardsRest:
         response = await client.put("/schedules/sched-1", json={"name": "my-schedule"})
         assert response.status_code == 200, response.text
         assert response.json()["name"] == "my-schedule"
+        # The own-name short-circuit skipped the namespace scan entirely.
+        mock_manager._source_repository.list_source_configs.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_put_case_variant_self_rename_exercises_the_conflict_gate(
+        self, client, mock_manager
+    ):
+        """M-C/MA-4 — a CASE-VARIANT self-rename ("Weekly Report" →
+        "weekly report") is NOT the own-name short-circuit: the collision
+        GATE runs.  The namespace scan reports a row that carries the
+        TARGET label under the row's OWN source id — the exclusion's
+        raison d'être (a row never conflicts with itself) — so the
+        exclusion is LOAD-BEARING in this leg.
+
+        COUNTER-MUTATION: drop ``exclude_source_id=schedule_id`` from the
+        router's ``live_label_conflict`` call ⇒ the scanned row matches
+        ⇒ 409 SCHEDULE_LABEL_CONFLICT ⇒ RED."""
+        existing = self._rest_source("sched-1", "Weekly Report")
+        # The scan sees the row ITSELF, carrying the label the client asks for.
+        scanned_self = self._rest_source("sched-1", "weekly report")
+        mock_manager._source_repository.get_source_config = Mock(return_value=existing)
+        mock_manager._source_repository.list_source_configs = Mock(
+            return_value=[scanned_self]
+        )
+        updated = self._rest_source("sched-1", "weekly report")
+        mock_manager._source_repository.update_source_config = Mock(return_value=updated)
+        mock_manager._source_repository.get_latest_execution = Mock(return_value=None)
+
+        response = await client.put("/schedules/sched-1", json={"name": "weekly report"})
+        assert response.status_code == 200, response.text
+        assert response.json()["name"] == "weekly report"
+
+    @pytest.mark.asyncio
+    async def test_put_whitespace_padded_rename_colliding_with_a_live_row_is_409(
+        self, client, mock_manager
+    ):
+        """M-4 — the rename NORMALISES the label (strip) exactly like
+        create does: "  taken-label  " collides with the LIVE row that
+        owns "taken-label" ⇒ 409 SCHEDULE_LABEL_CONFLICT (NOT 200).
+
+        COUNTER-MUTATION: drop the ``.strip()`` in the router's rename ⇒
+        the padded label misses the namespace ⇒ the rename is accepted ⇒
+        200 ⇒ RED."""
+        existing = self._rest_source("sched-1", "my-schedule")
+        live_other = self._rest_source("sched-2", "taken-label", status="running")
+        mock_manager._source_repository.get_source_config = Mock(return_value=existing)
+        mock_manager._source_repository.list_source_configs = Mock(
+            return_value=[live_other]
+        )
+        updated = self._rest_source("sched-1", "taken-label")
+        mock_manager._source_repository.update_source_config = Mock(return_value=updated)
+        mock_manager._source_repository.get_latest_execution = Mock(return_value=None)
+
+        response = await client.put(
+            "/schedules/sched-1", json={"name": "  taken-label  "}
+        )
+        assert response.status_code == 409, response.text
+        assert response.json()["detail"]["code"] == "SCHEDULE_LABEL_CONFLICT"
+        # The rename never reached the repository.
+        mock_manager._source_repository.update_source_config.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_put_whitespace_only_rename_is_400(self, client, mock_manager):
+        """M-4 — a whitespace-ONLY rename is a 400 (the label is EMPTY
+        after the strip) — symmetric with create's "label must be a
+        non-empty string".
+
+        COUNTER-MUTATION: drop the ``.strip()`` (and the empty check) in
+        the router's rename ⇒ the blank label is accepted ⇒ 200 ⇒ RED."""
+        existing = self._rest_source("sched-1", "my-schedule")
+        mock_manager._source_repository.get_source_config = Mock(return_value=existing)
+        mock_manager._source_repository.list_source_configs = Mock(return_value=[])
+        updated = self._rest_source("sched-1", "my-schedule")
+        mock_manager._source_repository.update_source_config = Mock(return_value=updated)
+        mock_manager._source_repository.get_latest_execution = Mock(return_value=None)
+
+        response = await client.put("/schedules/sched-1", json={"name": "   "})
+        assert response.status_code == 400, response.text
+        assert response.json()["detail"]["code"] == "INVALID_REQUEST"
+        # The rename never reached the repository.
+        mock_manager._source_repository.update_source_config.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_put_rename_with_an_unavailable_scan_is_503(
@@ -2530,6 +2619,64 @@ class TestSchedulePhase1GuardsRest:
         assert body["next_run_at_utc"] is None
         assert body["enabled"] is False
         assert body["armed"] is False
+
+    @pytest.mark.asyncio
+    async def test_rest_put_past_due_row_with_a_live_adapter_renders_null_next_run(
+        self, client, mock_manager
+    ):
+        """M-D — a REST PUT on a PAST-DUE row (the stored config yields NO
+        next-fire) renders ``next_run_at`` NULL even though a LIVE adapter
+        claims an instant: the stored config is the ONLY next-fire source
+        on the PUT span too (M-D deleted BOTH adapter-fallback spans in
+        the router).
+
+        COUNTER-MUTATION: reintroduce an adapter-derived next-fire in the
+        router's PUT path ⇒ the adapter's 1999 reaches the response ⇒
+        RED."""
+        from datetime import datetime, timedelta, timezone as _tz
+
+        run_at_past = datetime.now(_tz.utc) - timedelta(days=1)
+        config = {
+            "agent": "ari",
+            "message": "hi",
+            "timezone": "UTC",
+            "recurrence": "once",
+            "local_time": run_at_past.strftime("%H:%M"),
+            "run_at": run_at_past.isoformat(),
+            "instance_mode": "new_instance",
+            "project_id": "agents-ensemble",
+        }
+        existing = self._rest_source(
+            "past-1", "past-once", config=config, status="running", enabled=True
+        )
+        updated = self._rest_source(
+            "past-1", "past-once", config=config, status="running", enabled=True
+        )
+        mock_manager._source_repository.get_source_config = Mock(return_value=existing)
+        mock_manager._source_repository.list_source_configs = Mock(return_value=[])
+        mock_manager._source_repository.update_source_config = Mock(return_value=updated)
+        mock_manager._source_repository.get_latest_execution = Mock(return_value=None)
+        # A LIVE adapter that claims a DIFFERENT next-fire.
+        adapter = Mock()
+        adapter._get_next_trigger_time = Mock(
+            return_value=datetime(1999, 1, 1, 0, 0, tzinfo=_tz.utc)
+        )
+        registry = Mock()
+        registry.get = Mock(return_value=adapter)
+        mock_manager.source_registry = registry
+
+        response = await client.put(
+            "/schedules/past-1", json={"config": {"priority": 3}}
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        # The stored config is the authority ⇒ NULL (never the adapter's 1999).
+        assert body["next_run_at"] is None
+        assert not str(body["next_run_at"] or "").startswith("1999")
+        # The row is ARMED — the null comes from the stored config, not
+        # from the armed gate (the asymmetry control).
+        assert body["armed"] is True
+        assert body["enabled"] is True
 
     @pytest.mark.asyncio
     async def test_rest_put_on_a_disarmed_row_renders_null_next_run(

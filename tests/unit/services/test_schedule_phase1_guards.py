@@ -31,9 +31,12 @@ b6157743a), each traced to the v4 ruling of record
   propagate it (the historical first-match fallback is guarded too).
   NOTHING answers "no conflict" when the scan is unavailable.
 
-MUTATION-VERIFIED (skill ``mutation-verified-regression-pins``): each
-pin was proven to bite in the lane's IN-LANE MUTATION WINDOW — plant
-the defect ⇒ RED, restore ⇒ GREEN, per transition.
+MUTATION EVIDENCE (skill ``mutation-verified-regression-pins``): the pins
+are PER-PIN mutation-proven — each pin's own docstring names the SINGLE
+edit that turns it RED, and that RED was demonstrated in the round that
+added the pin (mutate ⇒ RED ⇒ revert ⇒ GREEN).  There is NO blanket
+"each pin" claim here: where a pin can only bite a COMBINED mutation
+(the two halves of one rule), its docstring says so explicitly.
 
 SAFETY FENCE: pure unit tests — in-memory doubles only.  No DB, no
 daemon boot, no live contact.
@@ -83,11 +86,45 @@ def _row(
     )
 
 
+def _snapshot(row: SimpleNamespace) -> SimpleNamespace:
+    """A DETACHED copy of a row — the repository hands out fresh objects.
+
+    The real repository returns a NEW object per read/write (a
+    session-scoped ``session.get`` / ``session.refresh``): a value read
+    BEFORE a later write does NOT observe that write.  The double must
+    behave the same way — when it ALIASES the stored row, a pre-write
+    read and a post-write read are the SAME object and every pin that
+    asserts "the echo reflects the POST-write row" is masked (MA-4).
+    """
+    return SimpleNamespace(
+        source_id=row.source_id,
+        source_type=row.source_type,
+        name=row.name,
+        config=dict(row.config or {}),
+        credentials=row.credentials,
+        enabled=row.enabled,
+        autostart=row.autostart,
+        status=row.status,
+        error_message=row.error_message,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
 class _FakeRepo:
-    """In-memory source repository double with PAGE-AWARE listing."""
+    """In-memory source repository double with PAGE-AWARE listing.
+
+    Every read AND every write hands back a DETACHED snapshot (see
+    ``_snapshot``) — the double mirrors the real repository's
+    session-per-call object identity.
+    """
 
     def __init__(self) -> None:
         self.rows: dict[str, SimpleNamespace] = {}
+        #: How many times the PAGE SCAN ran — the namespace scan's
+        #: observable side effect (the own-name short-circuit must NOT
+        #: reach the scan).
+        self.scan_calls = 0
 
     def add(self, row: SimpleNamespace) -> SimpleNamespace:
         self.rows[row.source_id] = row
@@ -95,26 +132,50 @@ class _FakeRepo:
 
     # -- reads --------------------------------------------------------------
     def get_source_config(self, source_id):
-        return self.rows.get(source_id)
+        row = self.rows.get(source_id)
+        return _snapshot(row) if row is not None else None
 
     def get_source_config_by_name(self, name):
         for row in self.rows.values():
             if row.name == name:
-                return row
+                return _snapshot(row)
         return None
 
     def list_source_configs(self, enabled=None, status=None, limit=100, offset=0):
+        self.scan_calls += 1
         rows = list(self.rows.values())
         if status is not None:
             rows = [r for r in rows if r.status == status]
         if enabled is not None:
             rows = [r for r in rows if r.enabled == enabled]
-        return rows[offset : offset + limit]
+        return [_snapshot(r) for r in rows[offset : offset + limit]]
 
     def get_latest_execution(self, schedule_id):
         return None
 
     # -- writes -------------------------------------------------------------
+    def create_source_config(self, source_type, name, config, credentials=None,
+                             enabled=True, autostart=True, source_id=None):
+        source_id = source_id or f"created-{len(self.rows) + 1}"
+        row = SimpleNamespace(
+            source_id=source_id,
+            source_type=source_type,
+            name=name,
+            config=dict(config or {}),
+            credentials=credentials,
+            enabled=enabled,
+            autostart=autostart,
+            # The real repository creates a row STOPPED — a fresh row is
+            # not armed until the adapter starts it.  The double mirrors
+            # that, so the create echo's armed gate is exercised.
+            status="stopped",
+            error_message=None,
+            created_at="2026-11-01T00:00:00+00:00",
+            updated_at="2026-11-01T00:00:00+00:00",
+        )
+        self.rows[source_id] = row
+        return _snapshot(row)
+
     def update_source_config(self, source_id, source_type=None, name=None,
                              config=None, credentials=None, enabled=True,
                              autostart=True):
@@ -129,7 +190,7 @@ class _FakeRepo:
             row.credentials = credentials
         row.enabled = enabled
         row.autostart = autostart
-        return row
+        return _snapshot(row)
 
     def update_source_status(self, source_id, status, error_message=None):
         row = self.rows.get(source_id)
@@ -137,7 +198,7 @@ class _FakeRepo:
             return None
         row.status = status
         row.error_message = error_message
-        return row
+        return _snapshot(row)
 
 
 def _cron_config(cron: str = "30 3 * * 0", tz: str = "Asia/Ho_Chi_Minh") -> dict:
@@ -165,6 +226,26 @@ def _once_config(run_at: datetime, tz: str = "UTC") -> dict:
         "instance_mode": "new_instance",
         "project_id": "agents-ensemble",
     }
+
+
+def _registry_double(repo, *, starts: bool):
+    """A source-registry double whose adapter start DOES or DOES NOT flip
+    the row to ``running`` (the real registry writes RUNNING when the
+    adapter starts).  ``starts=False`` models an adapter that failed to
+    start — the row stays ``stopped`` in the DB."""
+    registry = MagicMock()
+    registry.get = MagicMock(return_value=None)
+    registry._create_adapter_from_config = AsyncMock(return_value=MagicMock())
+
+    async def _start(source_id):
+        if starts:
+            row = repo.rows.get(source_id)
+            if row is not None:
+                row.status = "running"
+        return starts
+
+    registry.start_adapter = AsyncMock(side_effect=_start)
+    return registry
 
 
 class _UnavailableRepo(_FakeRepo):
@@ -296,6 +377,281 @@ class TestArmedGateMA:
         assert response.next_run_at_utc is None
         assert response.next_run_at_local is None
         assert response.status == "stopped"
+
+
+# ---------------------------------------------------------------------------
+# MA-2 — the echo surfaces are ARMED-GATED (the pre-write snapshot bug)
+# ---------------------------------------------------------------------------
+
+
+class TestArmedGatedEchoMA2:
+    """MA-2 — the CREATE and UPDATE echoes render the POST-WRITE row.
+
+    The defect: both echoes read the PRE-WRITE snapshot.
+    ``update_source_config`` hands back an object from its OWN session and
+    the status write that follows opened ANOTHER session, so the
+    snapshot's ``status`` stayed STALE (``running``) while the DB held
+    ``stopped`` — the echo then reported ``armed`` + a next-fire for a
+    DISARMED row.  The self-alarm resume detector
+    (``daemon/tools/self_alarm.py:1403-1425``) reads exactly those three
+    fields (``paused`` / ``status`` / ``next_run_at_utc``), so the false
+    "armed" signal was read as a successful resume.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_update_echo_reports_a_stopped_row_as_disarmed(
+        self, guards_env, monkeypatch
+    ):
+        """MA-2 (UPDATE) — a row the DB holds ``stopped`` is echoed as
+        DISARMED: ``armed is False`` and NO next-fire on either instant.
+
+        COUNTER-MUTATION: revert the post-write re-read in
+        ``scheduling_service.update_schedule`` (read ``updated.status``
+        again) ⇒ the STALE pre-write status (``running``) is echoed ⇒
+        ``armed`` is True and a next-fire is rendered ⇒ RED."""
+        import daemon.registry as registry_module
+
+        repo = guards_env
+        agent_registry = MagicMock()
+        agent_registry.exists = MagicMock(return_value=True)
+        monkeypatch.setattr(registry_module, "get_registry", lambda: agent_registry)
+        # The adapter does NOT start ⇒ the row stays ``stopped`` in the DB.
+        svc.configure(
+            source_repo=repo, source_registry=_registry_double(repo, starts=False)
+        )
+
+        response = await svc.update_schedule("armed-1", {"paused": False})
+
+        # The DB holds ``stopped`` — the echo must reflect the POST-WRITE row.
+        assert repo.rows["armed-1"].status == "stopped"
+        assert response.status == "stopped"
+        assert response.armed is False
+        assert response.next_run_at_utc is None
+        assert response.next_run_at_local is None
+
+    @pytest.mark.asyncio
+    async def test_the_update_echo_reports_a_started_row_as_armed(
+        self, guards_env, monkeypatch
+    ):
+        """MA-2 (UPDATE) CONTROL leg — the adapter STARTED ⇒ the row is
+        ``running`` in the DB ⇒ the echo reports ``armed`` and renders the
+        next-fire (the asymmetry control for the pin above)."""
+        import daemon.registry as registry_module
+
+        repo = guards_env
+        agent_registry = MagicMock()
+        agent_registry.exists = MagicMock(return_value=True)
+        monkeypatch.setattr(registry_module, "get_registry", lambda: agent_registry)
+        svc.configure(
+            source_repo=repo, source_registry=_registry_double(repo, starts=True)
+        )
+
+        response = await svc.update_schedule("armed-1", {"paused": False})
+
+        assert repo.rows["armed-1"].status == "running"
+        assert response.status == "running"
+        assert response.armed is True
+        assert response.next_run_at_utc is not None
+
+    @pytest.mark.asyncio
+    async def test_the_create_echo_of_a_row_the_adapter_did_not_start_renders_no_next_fire(
+        self, guards_env, monkeypatch
+    ):
+        """MA-2 (CREATE) — the repository creates the row ``stopped``
+        (``daemon/repositories/source/repository.py``); until the adapter
+        ACTUALLY starts it the create echo must render NO next-fire.
+
+        COUNTER-MUTATION: revert the create echo to the ungated
+        ``_compute_next_run(config_json)`` ⇒ a next-fire is echoed for a
+        DISARMED row ⇒ RED."""
+        import daemon.registry as registry_module
+
+        repo = guards_env
+        agent_registry = MagicMock()
+        agent_registry.exists = MagicMock(return_value=True)
+        monkeypatch.setattr(registry_module, "get_registry", lambda: agent_registry)
+        svc.configure(
+            source_repo=repo, source_registry=_registry_double(repo, starts=False)
+        )
+
+        payload = svc.ScheduleCreatePayload(
+            label="fresh-cron",
+            agent="maintenancer",
+            message="weekly run",
+            when="03:30",
+            timezone="UTC",
+            recurrence="weekly",
+            weekday=0,
+            instance_mode="new_instance",
+            project_id="agents-ensemble",
+        )
+        response = await svc.create_schedule(
+            payload, caller_instance_id="", caller_agent_id=""
+        )
+
+        # The repository creates the row STOPPED — the echo must agree.
+        assert repo.rows[response.source_id].status == "stopped"
+        assert response.status == "stopped"
+        assert response.next_run_at_utc is None
+        assert response.next_run_at_local is None
+
+    @pytest.mark.asyncio
+    async def test_the_create_echo_of_a_started_row_renders_its_next_fire(
+        self, guards_env, monkeypatch
+    ):
+        """MA-2 (CREATE) CONTROL leg — the adapter STARTED ⇒ the row is
+        ``running`` ⇒ the create echo renders the stored config's
+        next-fire (the asymmetry control for the pin above)."""
+        import daemon.registry as registry_module
+
+        repo = guards_env
+        agent_registry = MagicMock()
+        agent_registry.exists = MagicMock(return_value=True)
+        monkeypatch.setattr(registry_module, "get_registry", lambda: agent_registry)
+        svc.configure(
+            source_repo=repo, source_registry=_registry_double(repo, starts=True)
+        )
+
+        payload = svc.ScheduleCreatePayload(
+            label="fresh-cron-2",
+            agent="maintenancer",
+            message="weekly run",
+            when="03:30",
+            timezone="UTC",
+            recurrence="weekly",
+            weekday=0,
+            instance_mode="new_instance",
+            project_id="agents-ensemble",
+        )
+        response = await svc.create_schedule(
+            payload, caller_instance_id="", caller_agent_id=""
+        )
+
+        assert repo.rows[response.source_id].status == "running"
+        assert response.status == "running"
+        assert response.next_run_at_utc is not None
+
+
+# ---------------------------------------------------------------------------
+# MA-5 — the armed gate compares the status BY VALUE
+# ---------------------------------------------------------------------------
+
+
+class TestEnumStatusMA5:
+    """MA-5 — ``is_armed`` compares the status BY VALUE.
+
+    ``str(SourceStatus.cancelled)`` is ``"SourceStatus.cancelled"`` (the
+    enum's ``__str__``), NOT ``"cancelled"`` — so an enum-valued status
+    read ARMED.  That is a fail-open: a cancelled or stopped row handed
+    over as an enum would report a next-fire.
+
+    COUNTER-MUTATION: revert ``is_armed`` to
+    ``str(status) not in {"cancelled", "stopped"}`` ⇒ every enum leg below
+    goes RED (``armed`` is True for a cancelled/stopped enum).
+    """
+
+    def test_an_enum_valued_status_is_never_armed(self):
+        """MA-5 — the REST enum's non-armed members read DISARMED; the
+        armed member stays armed; the str-typed case is unchanged."""
+        from daemon.models.source import SourceStatus
+
+        # The enum-valued non-armed members.
+        assert svc.is_armed(True, SourceStatus.cancelled) is False
+        assert svc.is_armed(True, SourceStatus.stopped) is False
+        # The enum-valued armed member.
+        assert svc.is_armed(True, SourceStatus.running) is True
+        # The str-typed case stays green.
+        assert svc.is_armed(True, "cancelled") is False
+        assert svc.is_armed(True, "stopped") is False
+        assert svc.is_armed(True, "running") is True
+        # The repository's own enum (upper-case members, same values).
+        from daemon.repositories.source.models import SourceStatus as RepoStatus
+
+        assert svc.is_armed(True, RepoStatus.CANCELLED) is False
+        assert svc.is_armed(True, RepoStatus.STOPPED) is False
+        assert svc.is_armed(True, RepoStatus.RUNNING) is True
+
+    def test_row_next_run_gates_on_an_enum_valued_status(self):
+        """MA-5 — the ONE next-fire helper gates on an enum-valued status
+        too (a cancelled row renders no fire instant)."""
+        from daemon.models.source import SourceStatus
+
+        run_at = datetime.now(timezone.utc) + timedelta(days=3)
+        config = _once_config(run_at)
+        assert svc.row_next_run(config, enabled=True, status=SourceStatus.running)[1]
+        assert (
+            svc.row_next_run(config, enabled=True, status=SourceStatus.cancelled)[1]
+            is None
+        )
+        assert (
+            svc.row_next_run(config, enabled=True, status=SourceStatus.stopped)[1]
+            is None
+        )
+
+
+# ---------------------------------------------------------------------------
+# M-6 — the TOOL-path rename rule (the service layer)
+# ---------------------------------------------------------------------------
+
+
+class TestToolPathRenameM6:
+    """M-6 — the TOOL-path rename rule, which every existing rename pin
+    left UNPINNED (they were all REST-level).
+
+    * the own-name short-circuit: renaming a row to its OWN label is a
+      no-op — the namespace scan is never reached;
+    * a live/live collision: renaming onto another LIVE row's label is
+      refused at the SERVICE layer (``ValueError`` → the tool surface's
+      usual ERROR string).
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_tool_path_rename_to_the_own_name_is_a_noop(
+        self, guards_env
+    ):
+        """M-6 — a rename to the row's OWN label is allowed (no error) and
+        the namespace scan is NEVER reached (the own-name short-circuit).
+
+        COUNTER-MUTATION: drop the ``new_label != row.name`` guard in
+        ``scheduling_service.update_schedule`` ⇒ the scan runs ⇒
+        ``scan_calls`` grows ⇒ RED."""
+        repo = guards_env
+        svc.configure(
+            source_repo=repo, source_registry=_registry_double(repo, starts=False)
+        )
+        scans_before = repo.scan_calls
+
+        response = await svc.update_schedule("armed-1", {"label": "armed-cron"})
+
+        assert response.label == "armed-cron"
+        assert repo.rows["armed-1"].name == "armed-cron"
+        # The own-name short-circuit skipped the namespace scan entirely.
+        assert repo.scan_calls == scans_before
+
+    @pytest.mark.asyncio
+    async def test_the_tool_path_rename_onto_a_live_label_is_refused(
+        self, guards_env
+    ):
+        """M-6 — renaming onto another LIVE row's label raises at the
+        SERVICE layer, and the rename never reaches the repository.
+
+        COUNTER-MUTATION: drop the ``live_label_conflict`` check in
+        ``scheduling_service.update_schedule`` ⇒ no ValueError ⇒ RED."""
+        repo = guards_env
+        repo.add(
+            _row("other-1", name="taken-label", config=_cron_config(),
+                 status="running", enabled=True)
+        )
+        svc.configure(
+            source_repo=repo, source_registry=_registry_double(repo, starts=False)
+        )
+
+        with pytest.raises(ValueError) as excinfo:
+            await svc.update_schedule("armed-1", {"label": "taken-label"})
+
+        assert "already exists" in str(excinfo.value)
+        # The rename never reached the repository.
+        assert repo.rows["armed-1"].name == "armed-cron"
 
 
 # ---------------------------------------------------------------------------

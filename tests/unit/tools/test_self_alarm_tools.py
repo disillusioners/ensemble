@@ -330,13 +330,15 @@ class FakeRegistry:
 
     The REAL registry writes ``running`` onto the row when the adapter
     starts (``daemon/sources/registry.py``) — the double does the same,
-    because the ENGINE's update path re-reads the row ONLY when the
-    adapter start succeeded (``scheduling_service.py:1050-1052``) and the
-    wrapper's response assertions depend on that re-read.
+    because the ENGINE's update path re-reads the row after the status
+    write (``scheduling_service.py`` — the echo reflects the POST-write
+    row, MA-2) and the wrapper's response assertions depend on that
+    re-read.
 
     ``fail_rebuild=True`` reproduces the engine's "the adapter could not
-    be rebuilt" branch: ``started`` stays False ⇒ no re-read ⇒ the
-    response carries the PRE-update status.
+    be rebuilt" branch: ``started`` stays False ⇒ the row keeps the
+    ``stopped`` status the update wrote ⇒ the response carries the
+    POST-write status (``stopped``), never the pre-update one.
     """
 
     def __init__(self, repo: FakeRepo | None = None, *, fail_rebuild: bool = False) -> None:
@@ -1639,32 +1641,39 @@ class TestRealServiceContract:
     the REAL service (fake repo + registry doubles, no DB)."""
 
     @pytest.mark.asyncio
-    async def test_the_pause_response_carries_paused_true_and_a_stale_status(
+    async def test_the_pause_response_carries_paused_true_and_the_post_write_status(
         self, real_service
     ) -> None:
+        """The pause response carries ``paused=True`` AND the POST-write
+        status.
+
+        The engine writes 'stopped' to the ROW and then RE-READS it — the
+        echo must reflect the post-write row (MA-2) — so the response
+        carries 'stopped', NOT the stale pre-pause status.  (The stale
+        echo is what fed the self-alarm resume detector a false "armed"
+        signal.)
+        """
         row = FakeRow(status="running", enabled=True)
         repo = FakeRepo([row])
         real_service.configure(source_repo=repo, source_registry=FakeRegistry(repo))
         response = await real_service.update_schedule("src-1", {"paused": True})
         assert response.paused is True
-        # The engine writes 'stopped' to the ROW, but the RESPONSE echoes
-        # the stale pre-pause status — the wrapper asserts `paused` only.
-        assert response.status == "running"
+        assert response.status == "stopped"
         assert ("src-1", "stopped") in repo.status_writes
         assert repo.get_source_config("src-1").status == "stopped"
         assert repo.get_source_config("src-1").enabled is False
 
     @pytest.mark.asyncio
-    async def test_the_update_response_status_is_the_pre_update_status(
+    async def test_the_update_response_status_is_the_post_write_status(
         self, real_service
     ) -> None:
-        """NO re-read ⇒ the response carries the PRE-update status.
+        """A FAILED adapter rebuild still echoes the POST-write status.
 
-        The engine re-reads the row ONLY when the adapter start
-        succeeded (``scheduling_service.py:1050-1052``) — with a failed
-        rebuild the response echoes the stale pre-update value.
+        The engine writes 'stopped' to the row and re-reads it
+        UNCONDITIONALLY (the echo reflects the post-write row — MA-2), so
+        a failed rebuild does NOT leak the pre-update status.
         """
-        row = FakeRow(status="stopped", enabled=False)
+        row = FakeRow(status="running", enabled=True)
         repo = FakeRepo([row])
         real_service.configure(
             source_repo=repo, source_registry=FakeRegistry(repo, fail_rebuild=True)
@@ -1679,6 +1688,9 @@ class TestRealServiceContract:
             },
         )
         assert response.paused is False
+        # The PRE-update status was 'running'; the post-write row is
+        # 'stopped' (the adapter could not be rebuilt) — the response
+        # carries the POST-write row.
         assert response.status == "stopped"
 
     @pytest.mark.asyncio
@@ -1686,8 +1698,8 @@ class TestRealServiceContract:
         self, real_service
     ) -> None:
         """The other half of the contract: a successful adapter start
-        re-reads the row, so the response carries the POST-update
-        status."""
+        writes RUNNING onto the row and the echo re-reads it — so the
+        response carries the POST-update status ('running')."""
         row = FakeRow(status="stopped", enabled=False)
         repo = FakeRepo([row])
         real_service.configure(source_repo=repo, source_registry=FakeRegistry(repo))

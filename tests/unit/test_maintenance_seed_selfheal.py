@@ -23,11 +23,19 @@ The rules this file pins:
   the guard reports NO success (``action="failed"``, never
   ``"reenabled"``) and an ERROR-level log record is emitted.
 
-MUTATION-VERIFIED (skill ``mutation-verified-regression-pins``): the
-"chain-is-None early exit restored BEFORE the canonical self-heal"
-mutation turns pin (a) RED; the "promotion failure silenced (warning,
-no raise)" mutation turns pin (c) RED; each restore turns it GREEN
-again.
+* **(d) a promotion that MATCHES NO ROW is LOUD too (MA-3)** — the
+  repository's ``update_source_status`` returns ``None`` when no row
+  matches the source id (``daemon/repositories/source/repository.py``).
+  A silent no-op there would let the guard report a promotion it never
+  performed, so the seeder raises ``MaintenanceSeedError`` and the
+  message NAMES THE SEED LABEL.
+
+MUTATION EVIDENCE (skill ``mutation-verified-regression-pins``): the
+pins are PER-PIN mutation-proven — each pin's own docstring names the
+SINGLE edit that turns it RED, and that RED was demonstrated in the
+round that added the pin (mutate ⇒ RED ⇒ revert ⇒ GREEN).  No blanket
+"each pin" claim: where a pin can only bite a COMBINED mutation, its
+docstring says so.
 
 SAFETY FENCE: a throwaway SQLite database under ``tmp_path`` — no
 PostgreSQL, no daemon, no live contact, no network.  The artifact root
@@ -175,6 +183,25 @@ class _ExplodingStatusRepo:
         raise RuntimeError("status write failed (injected)")
 
 
+class _NullStatusRepo:
+    """A repository wrapper whose ``update_source_status`` matches NO ROW.
+
+    The REAL repository returns ``None`` when no row matches the source
+    id (``daemon/repositories/source/repository.py``: the row is gone) —
+    a silent no-op.  Everything else is delegated to the real repository,
+    so the ONLY injected defect is the no-match promotion.
+    """
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def update_source_status(self, *args, **kwargs):
+        return None
+
+
 class TestCanonicalSelfHealMB:
     def test_a_stopped_canonical_row_is_promoted_to_running_and_enabled(
         self, guard_engine, results_root
@@ -297,3 +324,63 @@ class TestCanonicalSelfHealMB:
         assert any(
             "CentralMaintenance" in r.getMessage() for r in errors
         ), [r.getMessage() for r in errors]
+
+    def test_a_promotion_that_matches_no_row_is_loud_and_never_reports_success(
+        self, guard_engine, results_root, monkeypatch, caplog
+    ):
+        """(d) M-B/MA-3 — a promotion that MATCHES NO ROW is LOUD: the
+        repository returns ``None`` (the row is gone) and the guard must
+        raise ``MaintenanceSeedError`` — it never reports a success it
+        did not perform.  The message names the SEED LABEL.
+
+        COUNTER-MUTATION: drop the ``if promoted is None: raise
+        MaintenanceSeedError(...)`` branch in
+        ``maintenance_seed._write_chain_config`` ⇒ the no-match promotion
+        is SILENT ⇒ the outcome reports ``"reenabled"`` and the direct
+        call does not raise ⇒ RED."""
+        _insert_row(
+            guard_engine,
+            source_id=CANONICAL_SEED_SOURCE_ID,
+            name=CANONICAL_SEED_NAME,
+            config=_canonical_config(),
+            status=SourceStatus.STOPPED.value,
+            enabled=True,
+        )
+        real_factory = ms.create_source_repository
+
+        def _null_factory(*args, **kwargs):
+            return _NullStatusRepo(real_factory(*args, **kwargs))
+
+        monkeypatch.setattr(ms, "create_source_repository", _null_factory)
+
+        # (i) THROUGH THE GUARD — never a success, and LOUD.
+        with caplog.at_level(logging.ERROR):
+            outcome = seed_central_maintenance_schedule(
+                guard_engine, results_root=results_root
+            )
+        assert outcome.action != "reenabled", outcome.detail
+        assert outcome.action == "failed", outcome.detail
+        # The failure NAMES THE SEED LABEL (an operator can grep it).
+        assert CANONICAL_SEED_NAME in outcome.detail, outcome.detail
+        errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert errors, (
+            "a promotion that matched no row must be logged at ERROR level "
+            f"(records: {[r.getMessage() for r in caplog.records]})"
+        )
+        assert any(
+            "CentralMaintenance" in r.getMessage() for r in errors
+        ), [r.getMessage() for r in errors]
+
+        # (ii) AT THE SEAM — the promotion itself raises.
+        repo = _NullStatusRepo(
+            real_factory(engine=guard_engine, create_tables=False)
+        )
+        with pytest.raises(ms.MaintenanceSeedError) as excinfo:
+            ms._write_chain_config(
+                repo,
+                source_id=CANONICAL_SEED_SOURCE_ID,
+                config=_canonical_config(),
+                enabled=True,
+                status=SourceStatus.RUNNING.value,
+            )
+        assert CANONICAL_SEED_NAME in str(excinfo.value)
