@@ -5,6 +5,18 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.31.55] — 2026-11-25
+
+### Added — Truthful schedule listing + live-scoped label namespace, Phase 1 (commission schedule-listing-truth-phase1)
+
+- Schedule listing truth (architecture v3 §4.1–§4.3, Phase 1) — a windowed (chain-mode) row lists as its EFFECTIVE recurrence, `weekly (windowed)`, with its window (start/end/weekday/timezone) echoed from the stored chain block instead of the stored "once"; READ-SIDE only — no migration, the stored config is never rewritten. `next_run_at` has ONE source on both surfaces: the STORED config (`compute_next_run`); the REST adapter-derived value is demoted to an explicit fallback. The row's `project_id` (project scope) is surfaced on both surfaces.
+- Last-fire + status rendered AS STORED — every surface renders last-fire and status from `schedule_executions` exactly as stored (the REST surfaces gained the missing status echo); nothing is synthesized. The listing RENDERS, it never fabricates: the stored `last_execution_status` is NOT evidence that a turn ran — outcome-truth (instance linkage + terminal status) is owned by the execution-receipt lane (job d271db9d) — and the code carries that assumption note at every render site.
+- Live-scoped label namespace — create-time and rename-time label uniqueness is scoped to LIVE rows: a cancelled row keeps its name for history but no longer owns it, so the label is reusable. Resolution PREFERS the live row and REFUSES a live/live ambiguity (REST 409 `SCHEDULE_LABEL_AMBIGUOUS`); the terminal-row semantics are preserved (no live row ⇒ the historical first-match lookup).
+- Canonical maintenance seed row — the seeder writes CANONICAL recurring rows (`recurrence=weekly` + cron + local_time + timezone) under a DISTINCT label with NO chain block; the archive-aware guard rule (an archived CANCELLED chain is never revived) is preserved. The seed slot stays FIXED — no jitter knob.
+- Pins — the architect's pins ship unweakened and unrenamed: `tests/unit/services/test_schedule_listing_truth.py` (5 nodes), `tests/unit/services/test_schedule_namespace.py` (5), `tests/unit/test_maintenance_seed_canonical.py` (3) and the REST class `TestScheduleListingTruthRest`; none carries a skip or xfail marker. The REST scheduler test file gains a hermetic per-variable `ENSEMBLE_AUTH_*` fence (test-process only: no assertion change, no application-code change, no prod auth bypass).
+- Phase 2 is NOT in this release — the architect's ruling v4 collapsed it: no generic windowed-scheduling feature and no jitter knob ships here.
+- NO promote by this lane (STAGED ONLY — the Emperor's ceremony owns the flip).
+
 ## [v0.31.54] — 2026-11-25
 
 ### Fixed — Dump-lane probe advisories R1/R2/R3 + curator filing (commission dump-health-nits-v03154)
