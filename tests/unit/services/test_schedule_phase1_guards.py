@@ -32,11 +32,12 @@ b6157743a), each traced to the v4 ruling of record
   NOTHING answers "no conflict" when the scan is unavailable.
 
 MUTATION EVIDENCE (skill ``mutation-verified-regression-pins``): the pins
-are PER-PIN mutation-proven — each pin's own docstring names the SINGLE
-edit that turns it RED, and that RED was demonstrated in the round that
-added the pin (mutate ⇒ RED ⇒ revert ⇒ GREEN).  There is NO blanket
-"each pin" claim here: where a pin can only bite a COMBINED mutation
-(the two halves of one rule), its docstring says so explicitly.
+are PER-PIN mutation-proven — each pin's own docstring names — or states
+in prose — the single edit that turns it RED, and that RED was
+demonstrated in the round that added the pin (mutate ⇒ RED ⇒ revert ⇒
+GREEN).  There is NO blanket "each pin" claim here: where a pin can only
+bite a COMBINED mutation (the two halves of one rule), its docstring
+says so explicitly.
 
 SAFETY FENCE: pure unit tests — in-memory doubles only.  No DB, no
 daemon boot, no live contact.
