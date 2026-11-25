@@ -129,6 +129,18 @@ SEED_NAME = "central-maintenance-weekly"
 SEED_SOURCE_TYPE = "scheduler"
 SEED_SOURCE_ID = str(uuid.uuid5(uuid.NAMESPACE_DNS, SEED_NAME))
 
+#: The CANONICAL row's label (architecture v3 §4.3).
+#:
+#: The seeder no longer composes CHAIN-shaped rows for NEW schedules —
+#: it writes the canonical recurring row (``recurrence=weekly`` + cron +
+#: local_time + timezone) under this label.  The label is DISTINCT from
+#: ``SEED_NAME`` (the chain row's label — the cancelled chain row keeps
+#: it for history and stays greppable) and from any operator-created
+#: row: a distinct label is what makes the dead-label reuse impossible
+#: in the first place.
+CANONICAL_SEED_NAME = "central-maintenance-weekly-canonical"
+CANONICAL_SEED_SOURCE_ID = str(uuid.uuid5(uuid.NAMESPACE_DNS, CANONICAL_SEED_NAME))
+
 #: The chain marker written into the row config.  Its presence is the
 #: ONE marker shared by the re-arm seam (adapter side), the boot guard
 #: and the archive-aware revive — "one concept, one marker" (BR-3).
@@ -431,6 +443,58 @@ def build_chain_config(
     return config
 
 
+def build_canonical_config(
+    *,
+    project_id: str,
+    knobs: Any,
+) -> dict[str, Any]:
+    """Build the CANONICAL recurring row's config (architecture v3 §4.3).
+
+    The canonical shape is ONE user-facing mechanism: ``recurrence=weekly``
+    + a raw cron expression + the local time + the timezone.  There is NO
+    ``chain`` block — the chain marker is demoted to an internal
+    compatibility representation, readable for legacy rows but never
+    composed for new ones — and NO ``run_at`` (a recurring row re-arms
+    itself through its cron expression).
+
+    The fire instant is the window START: the FIXED slot.  Jitter is
+    refused until a recurring collision is MEASURED (architecture v3
+    §2.2, Branch A) — a random pick inside the window would be
+    unearned complexity.
+    """
+    local_time = (getattr(knobs, "window_start", "") or "").strip()
+    parts = local_time.split(":")
+    if len(parts) != 2:
+        raise ValueError(
+            f"maintenance knobs: window_start={local_time!r} is malformed "
+            "— expected HH:MM"
+        )
+    try:
+        hour = int(parts[0])
+        minute = int(parts[1])
+    except ValueError as exc:
+        raise ValueError(
+            f"maintenance knobs: window_start={local_time!r} is malformed "
+            "— expected HH:MM"
+        ) from exc
+    if not (0 <= hour <= 23) or not (0 <= minute <= 59):
+        raise ValueError(
+            f"maintenance knobs: window_start={local_time!r} is out of range "
+            "— expected 00:00..23:59"
+        )
+    weekday = int(getattr(knobs, "weekday", 0))
+    return {
+        "agent": "maintenancer",
+        "message": WEEKLY_RUN_MESSAGE,
+        "timezone": knobs.timezone,
+        "recurrence": "weekly",
+        "local_time": local_time,
+        "schedule": f"{minute} {hour} * * {weekday}",
+        "instance_mode": "new_instance",
+        "project_id": project_id,
+    }
+
+
 def _chain_block(config: dict[str, Any] | None) -> dict[str, Any] | None:
     """Return the ``chain`` block of a config, or ``None``."""
     if not isinstance(config, dict):
@@ -458,6 +522,25 @@ def _parse_run_at(raw: Any) -> datetime | None:
 # ---------------------------------------------------------------------------
 # The guard
 # ---------------------------------------------------------------------------
+
+
+def _effective_source_id(source_repo: Any) -> str:
+    """The source id of the row that ACTUALLY fires (canonical row first).
+
+    The canonical recurring row (architecture v3 §4.3) is the row the
+    seeder writes for new schedules; the chain row is the legacy
+    identity.  The reportless-week / empty-root detectors must follow the
+    row that fires, so the canonical identity wins when it exists.
+    """
+    for candidate in (CANONICAL_SEED_SOURCE_ID, SEED_SOURCE_ID):
+        try:
+            if source_repo.get_source_config(candidate) is not None:
+                return candidate
+        except Exception as exc:  # noqa: BLE001 — the probe is best-effort
+            logger.warning(
+                "[CentralMaintenance] could not probe %s: %s", candidate, exc
+            )
+    return SEED_SOURCE_ID
 
 
 def _read_archived_row(
@@ -673,22 +756,31 @@ def seed_central_maintenance_schedule(
             )
             outcome.reportless_week = _detect_and_surface_reportless_week(
                 source_repo,
-                source_id=SEED_SOURCE_ID,
+                source_id=_effective_source_id(source_repo),
                 results_root=results_root,
                 engine=engine,
             )
             outcome.results_root_empty = _detect_and_surface_results_root_empty(
                 source_repo,
-                source_id=SEED_SOURCE_ID,
+                source_id=_effective_source_id(source_repo),
                 results_root=results_root,
                 engine=engine,
             )
             return outcome
 
         # ── the row: id first, then name (seed.py:161-166) ──────────────
+        #
+        # The CANONICAL identity is looked up too (architecture v3 §4.3):
+        # the seeder writes the canonical recurring row under a distinct
+        # label, and the guard MUST find it on the next boot — otherwise
+        # every boot would try to create it again.
         row = source_repo.get_source_config(SEED_SOURCE_ID)
         if row is None:
             row = source_repo.get_source_config_by_name(SEED_NAME)
+        if row is None:
+            row = source_repo.get_source_config(CANONICAL_SEED_SOURCE_ID)
+        if row is None:
+            row = source_repo.get_source_config_by_name(CANONICAL_SEED_NAME)
 
         if row is not None:
             outcome = _guard_present_row(
@@ -833,6 +925,20 @@ def _guard_present_row(
         return outcome
 
     # (iii) A live row: BR-1 governs the past-``run_at`` question only.
+    #
+    # The BR-1 repair is CHAIN-SPECIFIC (it re-mints a stale one-shot's
+    # ``run_at`` and refreshes the chain keys).  A CANONICAL recurring row
+    # (or any row without a chain block) has no ``run_at`` to re-mint —
+    # running the repair on it would GRAFT a chain block onto a canonical
+    # row, undoing the canonical shape (architecture v3 §4.3).  Such a
+    # row is left exactly as it is.
+    if chain is None:
+        return GuardOutcome(
+            action="noop_existing",
+            source_id=row.source_id,
+            run_at=config.get("run_at"),
+            detail="live row without a chain block — no BR-1 repair",
+        )
     remint_config, remint_action = _apply_br1_past_run_at(
         source_repo,
         row,
@@ -965,25 +1071,54 @@ def _guard_missing_row(
             return outcome
 
     # No usable archive ⇒ CREATE.
-    picked = _mint(knobs, now=now, allow_today=True, rng=rng)
-    config = build_chain_config(
-        project_id=project_id,
-        picked=picked,
-        knobs=knobs,
+    #
+    # The CANONICAL recurring row (architecture v3 §4.3): the seeder no
+    # longer composes a chain-shaped row for a NEW schedule.  The row is
+    # a plain ``recurrence=weekly`` + cron + local_time + timezone row
+    # under a DISTINCT label — no ``chain`` block, no ``run_at``, no
+    # random pick (the fixed window-start slot; jitter is refused until
+    # a recurring collision is MEASURED — architecture v3 §2.2).
+    #
+    # The CANONICAL identity carries its own archive rule: an archived
+    # CANCELLED canonical row is never revived either (operator intent).
+    canonical_archive = _read_archived_row(
+        engine,
+        source_id=CANONICAL_SEED_SOURCE_ID,
+        name=CANONICAL_SEED_NAME,
     )
+    if canonical_archive is not None:
+        canonical_status = (canonical_archive.status or "").strip().lower()
+        if canonical_status == SourceStatus.CANCELLED.value:
+            logger.warning(
+                "[CentralMaintenance] the canonical row was archived as "
+                "CANCELLED — NOT reviving it (operator intent)"
+            )
+            return GuardOutcome(
+                action="noop_archived_cancelled",
+                source_id=CANONICAL_SEED_SOURCE_ID,
+                detail="archived cancelled canonical row — never revived",
+            )
+    try:
+        config = build_canonical_config(project_id=project_id, knobs=knobs)
+    except Exception as exc:  # noqa: BLE001 — a bad knob shape never aborts boot
+        logger.warning(
+            "[CentralMaintenance] could not build the canonical row config: %s",
+            exc,
+        )
+        return GuardOutcome(action="failed", detail=str(exc))
     try:
         row = source_repo.create_source_config(
             source_type=SEED_SOURCE_TYPE,
-            name=SEED_NAME,
+            name=CANONICAL_SEED_NAME,
             config=config,
             credentials=None,
             enabled=True,
             autostart=True,
-            source_id=SEED_SOURCE_ID,
+            source_id=CANONICAL_SEED_SOURCE_ID,
         )
     except Exception as exc:  # noqa: BLE001 — the create is best-effort
         logger.warning(
-            "[CentralMaintenance] could not create the chain row: %s", exc
+            "[CentralMaintenance] could not create the canonical row: %s", exc
         )
         return GuardOutcome(action="failed", detail=str(exc))
     # Status compensation: create initializes STOPPED; ``start_all``
@@ -992,21 +1127,22 @@ def _guard_missing_row(
         source_repo.update_source_status(row.source_id, SourceStatus.RUNNING.value)
     except Exception as exc:  # noqa: BLE001 — status is best-effort
         logger.warning(
-            "[CentralMaintenance] could not promote the chain row %s to "
+            "[CentralMaintenance] could not promote the canonical row %s to "
             "RUNNING: %s",
             row.source_id,
             exc,
         )
     logger.info(
-        "[CentralMaintenance] seeded the weekly chain row %s (run_at=%s)",
+        "[CentralMaintenance] seeded the canonical weekly row %s "
+        "(recurrence=weekly, cron=%s)",
         row.source_id,
-        config.get("run_at"),
+        config.get("schedule"),
     )
     return GuardOutcome(
         action="created",
         source_id=row.source_id,
-        run_at=config.get("run_at"),
-        detail="chain row created",
+        run_at=None,
+        detail="canonical recurring row created (no chain block)",
     )
 
 
