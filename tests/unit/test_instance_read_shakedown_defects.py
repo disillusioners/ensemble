@@ -28,14 +28,17 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlmodel import Session, SQLModel
 
-from tests.helpers.checkpoints_fixture import create_checkpoints_table
+from tests.helpers.checkpoints_fixture import (
+    create_checkpoints_table,
+    insert_checkpoint_row,
+)
 
 from daemon.repositories.instance.models import Instance
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
-from daemon.repositories.job_queue.models import JobItem
+from daemon.repositories.job_queue.models import JobItem, JobLock, JobQueue
 from daemon.repositories.message_queue.models import MessageQueue
 from daemon.repositories.task.models import Task
 from daemon.services.instance_lifecycle import InstanceLifecycleService
@@ -1617,16 +1620,22 @@ class TestF8DocSurface:
         assert "now becomes a successful plain read" in doc
         assert "Side effects:\n    NONE." in doc
 
-    def test_health_doc_states_seven_detectors(self):
+    def test_health_doc_states_eight_detectors(self):
         tools = ir.create_instance_read_tools(
             FakeFleetManager(), current_instance_id="m", agent_id="maintenancer"
         )
         doc = by_name(tools, "instance_health")._full_doc_ or ""
 
-        assert "seven read-only detector classes" in doc
+        assert "eight read-only detector classes" in doc
         assert "never-dispatched-husk" in doc
         assert "DEFAULT_HUSK_MIN_AGE_SECONDS" in doc
         assert "`idle_seconds` is the AGE since `created_at`" in doc
+        # The eighth detector's contract is documented on the same surface.
+        assert "never-started-running" in doc
+        assert "NEVER_STARTED_MIN_AGE_SECONDS" in doc
+        assert "held_job_locks" in doc
+        assert "queued_jobs_behind_queue" in doc
+        assert "strictly READ-ONLY" in doc
 
     def test_health_doc_states_the_live_fleet_paging_disclosure(self):
         tools = ir.create_instance_read_tools(
@@ -1659,8 +1668,8 @@ class TestF8DocSurface:
         assert "CORRECT" in doc
         assert "F12" in doc
 
-    def test_category_doc_says_seven_detectors(self):
-        assert "seven detector classes" in ir.CATEGORY_DOC
+    def test_category_doc_says_eight_detectors(self):
+        assert "eight detector classes" in ir.CATEGORY_DOC
 
     def test_module_doc_says_five_tools(self):
         assert "5 tools" in (ir.__doc__ or "")
@@ -2184,3 +2193,266 @@ class TestHuskEvidenceLegsDegradation:
         payload = await self._health(manager)
 
         assert payload["evidence_legs"] == "ok"
+
+
+# ────────────────────────────────────────────────────────────────────────
+# never-started-running — the EIGHTH wedge detector
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestNeverStartedRunningDetector:
+    """The eight-class surface's new READ-ONLY wedge detector.
+
+    Predicate (schema-adapted, verbatim-equivalent): running + older than
+    ``NEVER_STARTED_MIN_AGE_SECONDS`` + zero ``checkpoints`` rows for the
+    thread + a ``task`` row with ``status='pending'`` and
+    ``started_at IS NULL``. Cases a–f of the commission are pinned below;
+    the actionability pairing (f) is asserted on the RENDERED finding,
+    not on an internal helper.
+
+    PLANNED MUTATION (one behaviour per run):
+      * drop the checkpoint NOT EXISTS leg → (b) fires → RED;
+      * drop the age leg → (c) fires → RED;
+      * drop the ``started_at IS NULL`` conjunct → (d) fires → RED;
+      * drop the ``status='running'`` conjunct → (e) fires → RED;
+      * drop the actionability context → (f) loses the lock/job pairing
+        → RED;
+      * add any write to the path → the table-count fence below → RED.
+    """
+
+    async def _health(self, manager):
+        return await call(_read_tools(manager), "instance_health")
+
+    def _detector(self, payload):
+        for detector in payload["detectors"]:
+            if detector["detector"] == "never-started-running":
+                return detector
+        raise AssertionError("never-started-running detector is missing")
+
+    def _flagged_ids(self, payload):
+        return {
+            row["instance_id"] for row in self._detector(payload)["instances"]
+        }
+
+    @staticmethod
+    def _wedge(iid: str, **kw):
+        """A running instance aged past the 45-minute threshold."""
+        defaults = dict(
+            status="running",
+            created_at=datetime.now(timezone.utc)
+            - timedelta(seconds=ir.NEVER_STARTED_MIN_AGE_SECONDS + 600),
+        )
+        defaults.update(kw)
+        return _instance(iid, **defaults)
+
+    @staticmethod
+    def _pending_task(iid: str, started_at=None):
+        return Task(
+            instance_id=iid,
+            task_type="PROCESS_MESSAGE",
+            status="pending",
+            started_at=started_at,
+        )
+
+    @staticmethod
+    def _counts(engine):
+        with engine.connect() as conn:
+            return {
+                table: conn.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar()
+                for table in (
+                    "instances",
+                    "task",
+                    "checkpoints",
+                    "job_locks",
+                    "job_queues",
+                    "job_queue_items",
+                )
+            }
+
+    async def test_a_positive_wedge_is_flagged(self, fleet_db):
+        """(a) running + zero checkpoints + pending never-started task."""
+        _insert_instances(fleet_db, [self._wedge("nsr-a")])
+        with Session(fleet_db) as session:
+            session.add(self._pending_task("nsr-a"))
+            session.commit()
+        manager = RepoBackedManager(fleet_db)
+
+        payload = await self._health(manager)
+
+        assert self._flagged_ids(payload) == {"nsr-a"}
+        detector = self._detector(payload)
+        assert detector["count"] == 1
+        assert detector["evidence_legs"] == "ok"
+        row = detector["instances"][0]
+        assert row["pending_task_id"] is not None
+        assert row["age_minutes"] >= ir.NEVER_STARTED_MIN_AGE_SECONDS / 60
+        assert "never started" in row["detail"]
+        assert "started_at NULL" in row["detail"]
+
+    async def test_b_healthy_long_running_with_checkpoints(self, fleet_db):
+        """(b) a long-running instance that HAS a checkpoint is not flagged."""
+        _insert_instances(fleet_db, [self._wedge("nsr-b")])
+        with Session(fleet_db) as session:
+            session.add(self._pending_task("nsr-b"))
+            session.commit()
+        insert_checkpoint_row(fleet_db, "nsr-b", "cp-b")
+        manager = RepoBackedManager(fleet_db)
+
+        payload = await self._health(manager)
+
+        assert "nsr-b" not in self._flagged_ids(payload)
+
+    async def test_c_young_instance_inside_pickup_tail(self, fleet_db):
+        """(c) age < threshold — inside the measured p99/max pickup tail."""
+        young = _instance(
+            "nsr-c",
+            status="running",
+            created_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+        )
+        _insert_instances(fleet_db, [young])
+        with Session(fleet_db) as session:
+            session.add(self._pending_task("nsr-c"))
+            session.commit()
+        manager = RepoBackedManager(fleet_db)
+
+        payload = await self._health(manager)
+
+        assert "nsr-c" not in self._flagged_ids(payload)
+
+    async def test_d_task_with_started_at_is_not_flagged(self, fleet_db):
+        """(d) a task that actually STARTED is not a never-started wedge."""
+        _insert_instances(fleet_db, [self._wedge("nsr-d")])
+        with Session(fleet_db) as session:
+            session.add(
+                self._pending_task(
+                    "nsr-d", started_at=datetime.now(timezone.utc)
+                )
+            )
+            session.commit()
+        manager = RepoBackedManager(fleet_db)
+
+        payload = await self._health(manager)
+
+        assert "nsr-d" not in self._flagged_ids(payload)
+
+    async def test_e_non_running_instance_is_not_flagged(self, fleet_db):
+        """(e) that is the husk detector's job, not this one's."""
+        _insert_instances(
+            fleet_db,
+            [
+                _instance(
+                    "nsr-e",
+                    status="idle",
+                    created_at=datetime.now(timezone.utc) - timedelta(hours=2),
+                )
+            ],
+        )
+        with Session(fleet_db) as session:
+            session.add(self._pending_task("nsr-e"))
+            session.commit()
+        manager = RepoBackedManager(fleet_db)
+
+        payload = await self._health(manager)
+
+        assert "nsr-e" not in self._flagged_ids(payload)
+
+    async def test_f_rendered_finding_pairs_lock_with_queued_jobs(self, fleet_db):
+        """(f) held lock id + the jobs queued behind that queue, RENDERED."""
+        _insert_instances(fleet_db, [self._wedge("nsr-f")])
+        with Session(fleet_db) as session:
+            session.add(self._pending_task("nsr-f"))
+            session.add(
+                JobQueue(
+                    queue_id="q-nsr",
+                    project_id="p-nsr",
+                    queue_name="blueprinter_queue",
+                    queue_name_lower="blueprinter_queue",
+                    queue_type="fifo",
+                    concurrency_limit=1,
+                )
+            )
+            session.commit()
+        with Session(fleet_db) as session:
+            session.add(
+                JobLock(
+                    lock_id="lock-nsr",
+                    project_id="p-nsr",
+                    queue_id="q-nsr",
+                    job_id="job-held",
+                    instance_id="nsr-f",
+                    acquired_at=datetime.now(timezone.utc).isoformat(),
+                )
+            )
+            for job_id, admission in (
+                ("job-held", "active"),
+                ("job-blocked-1", "queued"),
+                ("job-blocked-2", "queued"),
+            ):
+                session.add(
+                    JobItem(
+                        job_id=job_id,
+                        agent_id="blueprinter",
+                        agent_dir="/tmp/agents/blueprinter",
+                        message="work",
+                        queue_id="q-nsr",
+                        project_id="p-nsr",
+                        admission_state=admission,
+                    )
+                )
+            session.commit()
+        manager = RepoBackedManager(fleet_db)
+
+        payload = await self._health(manager)
+
+        row = self._detector(payload)["instances"][0]
+        assert row["instance_id"] == "nsr-f"
+        locks = row["held_job_locks"]
+        assert [lock["lock_id"] for lock in locks] == ["lock-nsr"]
+        assert locks[0]["queue_id"] == "q-nsr"
+        assert locks[0]["queue_name"] == "blueprinter_queue"
+        assert locks[0]["agent_id"] == "blueprinter"
+        queued = row["queued_jobs_behind_queue"]
+        assert {job["job_id"] for job in queued} == {
+            "job-blocked-1",
+            "job-blocked-2",
+        }
+        assert all(job["queue_name"] == "blueprinter_queue" for job in queued)
+        assert all(job["admission_state"] == "queued" for job in queued)
+        assert all(job["age_seconds"] is not None for job in queued)
+        assert "lock-nsr" in row["detail"]
+        assert row.get("context_degraded") is None
+
+    async def test_read_only_path_writes_nothing(self, fleet_db):
+        """The detector path is strictly READ-ONLY — no table changes."""
+        _insert_instances(fleet_db, [self._wedge("nsr-ro")])
+        with Session(fleet_db) as session:
+            session.add(self._pending_task("nsr-ro"))
+            session.commit()
+        manager = RepoBackedManager(fleet_db)
+        before = self._counts(fleet_db)
+
+        await self._health(manager)
+
+        assert self._counts(fleet_db) == before
+
+    async def test_failed_predicate_probe_does_not_flag(self, fleet_db):
+        """A predicate leg that cannot run suppresses the verdict."""
+        _insert_instances(fleet_db, [self._wedge("nsr-deg")])
+        with Session(fleet_db) as session:
+            session.add(self._pending_task("nsr-deg"))
+            session.commit()
+        manager = RepoBackedManager(fleet_db)
+        original = ir._checkpoint_thread_ids
+
+        def _boom(_manager, _ids):
+            raise RuntimeError("checkpoint probe unavailable")
+
+        ir._checkpoint_thread_ids = _boom
+        try:
+            payload = await self._health(manager)
+        finally:
+            ir._checkpoint_thread_ids = original
+
+        detector = self._detector(payload)
+        assert detector["count"] == 0
+        assert detector["evidence_legs"] == "degraded"
