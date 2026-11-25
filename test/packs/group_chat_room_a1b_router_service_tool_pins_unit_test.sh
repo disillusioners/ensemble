@@ -1,34 +1,38 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Test Pack: group_chat_room_pins_unit_test
+# Test Pack: group_chat_room_a1b_router_service_tool_pins_unit_test
 #
-# Lane: feature/pack-coverage-registration (base `ed8ab508c`) — Family A1
-#       "group-chat room" pins (14 files).
+# Family A1 "group-chat room" pins — HALF A1b (the routers + services + tools half, 8 files)
 #
-# WHAT IT PINS
-#   tests/unit/repositories/test_room_capability_row_pin.py
-#   tests/unit/repositories/test_room_close_producer.py
-#   tests/unit/repositories/test_room_gc_repository.py
-#   tests/unit/repositories/test_room_migration_runner_execution.py
-#   tests/unit/repositories/test_room_models_and_migration.py
-#   tests/unit/repositories/test_room_repository.py
-#   tests/unit/routers/test_room_http_api.py
-#   tests/unit/routers/test_rooms_list_api.py
-#   tests/unit/services/test_room_delivery_refactor_pins.py
-#   tests/unit/services/test_room_gc_sweeper.py
-#   tests/unit/services/test_room_p6_wiring_pin.py
-#   tests/unit/services/test_room_post_cap.py
-#   tests/unit/services/test_spawn_room_join_broadcast.py
-#   tests/unit/tools/test_room_close.py
-#   Total: 227 nodes (mechanical `--collect-only` census at this freeze:
-#   227 collected, RC=0, 0 collection errors).
+# Lane: feature/pack-coverage-registration (base `40301a5e3`).
 #
-#   Agent group-chat room P6 pins: the capability row, the closed-state
-#   producer, the GC repository query surface, migration runner, models
-#   and migration, the room repository, the room HTTP/SSE API, the
-#   rooms-list API, the delivery refactor pins, the GC purge sweeper,
-#   the P6 wiring pin, the per-turn post budget, the spawn/join
-#   broadcast, and the room_close verb.
+# A1 SPLIT (2026-11-25). The former single 14-file room pack measured
+#   181.4 s standalone, 200.15 s under the cold verifier's conditions and
+#   247.7 s (270 s wall) UNDER LOAD — up to 88 % of its inner 280 s timeout,
+#   against a documented outer 300 s bound. A flaky gate is worse than no
+#   gate, so the family is split in two by directory:
+#     A1a = the 6 tests/unit/repositories/ room files
+#           (group_chat_room_a1a_repo_pins_unit_test)
+#     A1b = the 8 tests/unit/routers/ + tests/unit/services/
+#           + tests/unit/tools/ room files
+#           (group_chat_room_a1b_router_service_tool_pins_unit_test)
+#
+# WHAT IT PINS (per-file node counts = mechanical `--collect-only` census at
+# this freeze, under the repo addopts: 126 collected, RC=0, 0 collection errors)
+#   tests/unit/routers/test_room_http_api.py                             16
+#   tests/unit/routers/test_rooms_list_api.py                            41
+#   tests/unit/services/test_room_delivery_refactor_pins.py              10
+#   tests/unit/services/test_room_gc_sweeper.py                          25
+#   tests/unit/services/test_room_p6_wiring_pin.py                        6
+#   tests/unit/services/test_room_post_cap.py                            12
+#   tests/unit/services/test_spawn_room_join_broadcast.py                 7
+#   tests/unit/tools/test_room_close.py                                   9
+#   Total: 126 nodes.
+#
+#   Agent group-chat room P6 pins, routers + services + tools half: the room HTTP/SSE API,
+#   the rooms-list API, the delivery refactor pins, the GC purge sweeper, the P6 wiring pin,
+#   the §9 per-turn post budget (≤4, manager-level, turn-boundary reset), the spawn/join
+#   broadcast, and the room_close verb (owner-only, typed refusals, read-only after close).
 #
 # CONTRACT (house shape — mirrors the engine-arc lane packs)
 #   - Dual-layer timeout: inner `timeout 280`; caller wraps with 300.
@@ -43,7 +47,7 @@
 #     census that produced the node count was measured under the SAME
 #     filter, so the pack's node count and the census are comparable.
 #   - SLICING PROOF: the pack re-derives its own node count with
-#     `--collect-only` and FAILS if it drifts from the declared 227 — a
+#     `--collect-only` and FAILS if it drifts from the declared 126 — a
 #     pack that silently runs a different node set is inadmissible.
 #   - VACUOUS-VERDICT GUARD: zero passed tests or no summary line = FAIL
 #     (a pack that can PASS from an empty run is worthless).
@@ -52,8 +56,8 @@
 # =============================================================================
 set -u
 
-PACK_NAME="group_chat_room_pins_unit_test"
-EXPECTED_NODES=227
+PACK_NAME="group_chat_room_a1b_router_service_tool_pins_unit_test"
+EXPECTED_NODES=126
 
 echo "=== Test Pack: ${PACK_NAME} ==="
 
@@ -69,12 +73,6 @@ if [ ! -x "$PYTHON_BIN" ]; then
 fi
 
 UNIT_FILES=(
-  tests/unit/repositories/test_room_capability_row_pin.py
-  tests/unit/repositories/test_room_close_producer.py
-  tests/unit/repositories/test_room_gc_repository.py
-  tests/unit/repositories/test_room_migration_runner_execution.py
-  tests/unit/repositories/test_room_models_and_migration.py
-  tests/unit/repositories/test_room_repository.py
   tests/unit/routers/test_room_http_api.py
   tests/unit/routers/test_rooms_list_api.py
   tests/unit/services/test_room_delivery_refactor_pins.py
@@ -148,7 +146,7 @@ echo "SLICING PROOF: OK ($COLLECTED nodes collected, expected $EXPECTED_NODES)"
 rm -f "$COLLECT_OUT"
 
 echo
-echo "--- family A1: group-chat room pins (14 files) ---"
+echo "--- family A1b: group-chat room pins — routers + services + tools half (8 files) ---"
 OUT="$(mktemp)"
 timeout 280 env \
   "${SCRUB[@]}" \
