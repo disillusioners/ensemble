@@ -1449,8 +1449,17 @@ def _call_judge_with_retry(
     At most ONE retry (so at most TWO attempts): the retry fires on a
     timeout or an UNPARSABLE answer (the attestation judge's
     retry-once semantics). The total wall clock is capped at
-    :data:`GATE_WALL_CLOCK_CAP_S` (45s) — the binding defense that
-    keeps the gate inside the 180s graph heartbeat.
+    :data:`GATE_WALL_CLOCK_CAP_S` (300s — the Emperor's 2026-11-25
+    five-minute ruling; env-tunable via ``ENSEMBLE_POK_GATE_WALL_CLOCK_S``
+    through :mod:`daemon.services.pok_gate_timeout_resolver`), and
+    each attempt spends ``min(attempt, remaining)`` — so a single
+    judge call may use the WHOLE budget and the per-attempt value
+    never silently truncates a ruling. The ceiling that actually
+    bounds the gate is the daemon TURN budget —
+    ``graph_timeout_minutes`` (default 120 min = 7200s, enforced by
+    MainLoopBridge); the old "180s graph heartbeat" figure was a
+    ``log_sumup`` INFO window (``daemon/graph.py``), a LOG line,
+    never a kill.
     """
     attempt_timeout = get_gate_timeout_s()
     wall_cap = get_gate_wall_clock_cap_s()
