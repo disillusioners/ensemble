@@ -40,7 +40,7 @@ HANDOFF is the next commit on top).
 - `pyproject.toml` · `daemon/__init__.py` · `tests/test_api.py` · `uv.lock`
   (written by `scripts/bump_version.py patch`, never by hand — the house 5-file convention)
 
-**Deliberately UNTOUCHED (sha256 verified identical at base and at the merged tip):**
+**Deliberately UNTOUCHED (sha256 verified identical at base and at the merged tip) — EXCEPT `daemon/__init__.py`, which carries the version bump only and no behavior change:**
 - `.agents/shared/metrics/tool-categories.json` — `66832459500763ba3eb9b268cb828b9d28390d5144bd5694deab6076ffba0365`
 - `agents/.prompt-artifacts.sha256` — `3c089361c9862b08861c17763037beae7a746840eac0190a59ed8f79d2aaa443`
   (house generator `scripts/protection/generate_prompt_artifact_baseline.py --check` → `PROMPT-BASELINE: OK — 217 versioned artifact(s) match`, rc=0, on the merged tree)
