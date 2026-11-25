@@ -77,6 +77,12 @@ EXPECTED_SPAWN_SITES: tuple[tuple[str, int], ...] = (
     ("daemon/mcp/connection_manager.py", 2),  # both cold spawns
 )
 
+#: The spawn-env resolution seam (F-11): the resolution lives in the
+#: shared helper ``daemon/mcp/warmup_pool.resolve_spawn_env`` and every
+#: spawn site DISPATCHES to it.
+SPAWN_ENV_HELPER_FILE = "daemon/mcp/warmup_pool.py"
+SPAWN_ENV_HELPER_FUNC = "resolve_spawn_env"
+
 
 @dataclass(frozen=True)
 class Finding:
@@ -109,16 +115,76 @@ def _find_needles(source: str, rel: str) -> list[Finding]:
 
 
 def _count_resolve_calls_in_module(source: str) -> int:
-    """AST count of ``resolve_secret_markers(...)`` Call nodes."""
+    """AST count of ``resolve_spawn_env`` NAME loads.
+
+    F-11 re-pin, clause 1 ("resolution alive behind
+    ``resolve_spawn_env``"): the spawn-env resolution was extracted into
+    the shared helper ``daemon/mcp/warmup_pool.resolve_spawn_env``
+    (defined at ``warmup_pool.py:121``; its body is the single
+    ``resolve_secret_markers`` call at ``warmup_pool.py:149``). The
+    three effective spawn sites now DISPATCH to that helper instead of
+    calling the resolver directly:
+
+    * ``warmup_pool.py:588`` -- the warm pool
+      (``_create_pooled_connection``),
+    * ``connection_manager.py:216`` and ``:497`` -- both cold spawns.
+
+    So the literal ``resolve_secret_markers`` no longer appears in
+    ``connection_manager.py`` at all (measured: 0 Call nodes there, 1 in
+    ``warmup_pool.py``). An AST name-count pin cannot follow the
+    indirection, so this pin was bound to a seam that no longer exists
+    and was RED at latest.
+
+    This counter counts the ``resolve_spawn_env`` NAME loads at the
+    spawn sites instead. The helper is handed to ``run_in_executor`` as
+    an ARGUMENT (never called directly), so a CALL-node count would be
+    0 in BOTH files and the pin would be vacuous. The NAME-load count
+    is warmup_pool.py = 1, connection_manager.py = 2 -- exactly the
+    ``EXPECTED_SPAWN_SITES`` tuple, which is therefore UNCHANGED.
+
+    SCOPE (deliberately narrow): this counter proves the DISPATCH
+    survives. It does NOT detect a re-added direct
+    ``resolve_secret_markers`` call (that adds an ``ast.Call`` node and
+    leaves these NAME loads untouched) and it does NOT detect a gutted
+    ``resolve_spawn_env`` body (the dispatch would still be there). Both
+    are covered by the companion guard
+    ``test_resolution_lives_only_behind_the_helper`` (clause 2). The two
+    counters are complementary -- neither alone is sufficient.
+    """
     tree = ast.parse(source)
     count = 0
     for node in ast.walk(tree):
-        if isinstance(node, ast.Call):
-            func = node.func
-            name = getattr(func, "id", None) or getattr(func, "attr", None)
-            if name == "resolve_secret_markers":
-                count += 1
+        if (
+            isinstance(node, ast.Name)
+            and isinstance(node.ctx, ast.Load)
+            and node.id == "resolve_spawn_env"
+        ):
+            count += 1
     return count
+
+
+def _count_direct_resolve_calls_in_module(source: str) -> int:
+    """AST count of DIRECT ``resolve_secret_markers(...)`` Call nodes.
+
+    The F-11 clause-2 companion to ``_count_resolve_calls_in_module``.
+    The dispatch counter proves the spawn sites still reach the shared
+    helper; this one proves the resolution was not duplicated back into
+    them (the double-resolve regression F-11 forbids) and that the
+    helper still owns it. A re-added direct call ADDS a Call node here
+    and leaves the helper's NAME loads untouched, so the two counters
+    are complementary -- neither alone is sufficient.
+    """
+    tree = ast.parse(source)
+    return sum(
+        1
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and (
+            getattr(node.func, "id", None)
+            or getattr(node.func, "attr", None)
+        )
+        == "resolve_secret_markers"
+    )
 
 
 def _resolve_calls_in_function(source: str, func_name: str) -> list[ast.Call]:
@@ -195,6 +261,41 @@ class TestSpawnPointsStillResolve:
             f"call(s): expected >= {expected}, found {count} — "
             f"the §1c spawn-point design regressed"
         )
+
+    @pytest.mark.parametrize(
+        "rel", [rel for rel, _ in EXPECTED_SPAWN_SITES]
+    )
+    def test_resolution_lives_only_behind_the_helper(
+        self, rel: str
+    ) -> None:
+        """F-11 clause 2 -- resolution lives ONLY behind the shared helper.
+
+        The dispatch counter above proves the spawn sites still CALL the
+        helper; this proves the resolution is not duplicated back into
+        them (double-resolve) and that the helper still owns it -- a
+        gutted helper body would leave the dispatch intact while
+        deleting the resolution, which the class docstring forbids
+        ("the byte-clean pins above must never be satisfied by someone
+        deleting resolution entirely").
+        """
+        source = _read(rel)
+        direct = _count_direct_resolve_calls_in_module(source)
+        if rel == SPAWN_ENV_HELPER_FILE:
+            inside = _resolve_calls_in_function(
+                source, SPAWN_ENV_HELPER_FUNC
+            )
+            assert direct == 1 and len(inside) == 1, (
+                f"{rel}: the shared helper must own EXACTLY ONE "
+                f"resolve_secret_markers call, and it must sit INSIDE "
+                f"{SPAWN_ENV_HELPER_FUNC}; found {direct} module-wide / "
+                f"{len(inside)} inside {SPAWN_ENV_HELPER_FUNC}"
+            )
+        else:
+            assert direct == 0, (
+                f"{rel}: resolution must live ONLY behind "
+                f"{SPAWN_ENV_HELPER_FUNC} -- {direct} direct "
+                f"resolve_secret_markers call(s) found (double-resolve)"
+            )
 
 
 class TestDetectorSensitivity:
