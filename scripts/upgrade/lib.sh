@@ -7512,13 +7512,13 @@ _supervision_handback_unit() {
         if [ "$sbrc" = "124" ]; then
             start_hung=1
             _warn "unit start exceeded budget — under-budget child (HANDBACK_START_BUDGET_S=${HANDBACK_START_BUDGET_S}s) was SIGTERM→SIGKILL'd; unit=$unit — NOT terminal (D6 AC-D6-4: systemd keeps processing the start job); continuing into the bounded verify"
+            # RESOLVED H3 (branch dynamic reason × L 0f133d2b9/865ec4ad3
+            # D6 AC-D6-4): _bounded_rc_reason emits the byte-identical
+            # `child: timeout(HANDBACK_START_BUDGET_S=<n>)` text for 124,
+            # and the true rc variable replaces L's hardcoded rc=124.
+            # L's truthful NOT-terminal tail is kept (the start job
+            # continues server-side; the bounded verify owns the verdict).
             journal_history_append subprocess_wait_timeout \
-                # RESOLVED H3 (branch dynamic reason × L 0f133d2b9/865ec4ad3
-                # D6 AC-D6-4): _bounded_rc_reason emits the byte-identical
-                # `child: timeout(HANDBACK_START_BUDGET_S=<n>)` text for 124,
-                # and the true rc variable replaces L's hardcoded rc=124.
-                # L's truthful NOT-terminal tail is kept (the start job
-                # continues server-side; the bounded verify owns the verdict).
                 "site=handback_start kind=budget reason=child: $(_bounded_rc_reason "$sbrc" "" "HANDBACK_START_BUDGET_S=${HANDBACK_START_BUDGET_S}") unit=$unit rc=$sbrc — SIGTERM→SIGKILL of the CLIENT; NOT terminal (D6 AC-D6-4): continuing into the bounded verify (the start job continues server-side)" \
                 || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
         else
@@ -9365,7 +9365,7 @@ _gate_attr_unprobeable() {
 # Wording classes are CLOSED vocabularies: definitive labels
 # (/livez unreachable >Ns, version verify mismatch, soak failure, ...) go ONLY
 # into the surface's failure carrier (byte-preserved); transient labels go
-# ONLY into gate_defer_reason + the gate-defer: halt detail. Never cross-
+# ONLY into gate_defer_reason + the gate-defer: detail. Never cross-
 # contaminated (D-P1-4 / T7c).
 gate_defer_reason=""
 # _gate_consume <surface> <rc> <label> — consume a one-shot gate call's rc.
@@ -9373,7 +9373,7 @@ gate_defer_reason=""
 #   rc=1: set the surface's FAILURE CARRIER with today's byte-exact string;
 #         return 1 so the caller's existing branch keeps its shape.
 #   rc=2: set gate_defer_reason (transient wording — never a definitive
-#         label), failure carrier UNTOUCHED, write ONE halt row per run
+#         label), failure carrier UNTOUCHED, write ONE gate_defer row per run
 #         (fire-once latch = the carrier itself), _warn per tick, return 2.
 #   unknown rc: contract violation -> treated as 2 + a warn row.
 # Post-defer chain semantics (§5.4a-1, ruling D-P1-14, NORMATIVE precedence
@@ -9424,7 +9424,7 @@ _gate_consume() {
             fi
             gate_defer_reason="$__label: attribution deferred (transient — budget expired)"
             _warn "gate-consume [$__surface]: '$__label' attribution DEFERRED (transient) — $gate_defer_reason"
-            journal_history_append halt "gate-defer: $__surface $__label — $gate_defer_reason (transient; NOT a failure verdict; no rollback, no quarantine)"                 || true
+            journal_history_append gate_defer "gate-defer: $__surface $__label — $gate_defer_reason (transient; NOT a failure verdict; no rollback, no quarantine)"                 || true
             printf '%s' "defer"
             return 2
             ;;
@@ -9432,7 +9432,7 @@ _gate_consume() {
             # Contract violation (I-B13): an unknown rc is treated as 2.
             _warn "gate-contract violation: $__surface '$__label' returned rc=$__rc (expected 0|1|2) — treating as transient"
             gate_defer_reason="$__label: gate-contract violation (rc=$__rc treated as transient)"
-            journal_history_append halt "gate-defer: $__surface $__label — $gate_defer_reason (contract violation; treated as transient)"                 || true
+            journal_history_append gate_defer "gate-defer: $__surface $__label — $gate_defer_reason (contract violation; treated as transient)"                 || true
             printf '%s' "defer"
             return 2
             ;;
@@ -9471,9 +9471,10 @@ _gate_defer_reset() { gate_defer_reason=""; }
 # ── T7 — the pooled deferral seam (I-B8, leader D1/D3; NOT an exported knob,
 # NOT registered — routed through _numeric_knob for its integer parse, then
 # CLAMPED to [0,5], and honoured only under the dual-key test marker
-# ENSEMBLE_TEST_GATE_DEFER=1; never exported; per-shell by construction).
-# The pool counts SECONDS (decrement by the slept duration — the honest bound
-# is <= _GATE_ATTR_DEFER_S seconds per shell, not iterations).
+# ENSEMBLE_TEST_GATE_DEFER=1; never exported; re-armed per CALL).
+# The pool counts SECONDS (decrement by the slept duration — the honest
+# sleep bound is <= _GATE_ATTR_DEFER_S + 1s per CALL at 2s granularity
+# (5s => 3 sleeps = 6s), not iterations and not a per-shell total).
 _GATE_ATTR_DEFER_S="$(_numeric_knob _GATE_ATTR_DEFER_S "${_GATE_ATTR_DEFER_S:-}" 5)"
 case "$_GATE_ATTR_DEFER_S" in
     ''|*[!0-9]*) _GATE_ATTR_DEFER_S=5 ;;
@@ -9734,8 +9735,9 @@ _gate_serving_attribution() {
         # The residual "unattributable-yet" class: the deciding tooling could
         # not answer (systemctl wedged, cgroup unreadable, ps absent). The
         # ladder NEVER accepts on missing evidence — it DEFERS, bounded by a
-        # per-shell patience pool that counts SECONDS (the honest bound is
-        # <= _GATE_ATTR_DEFER_S seconds per shell, never iterations).
+        # per-call patience pool that counts SECONDS (the honest sleep bound
+        # is <= _GATE_ATTR_DEFER_S + 1s per CALL at 2s granularity:
+        # _GATE_ATTR_DEFER_S=5 => 3 sleeps => 6s; NOT a per-shell total).
         # Exhaustion => the TRANSIENT rc 2 (leader D1): refusal happens ONLY
         # at the caller's budget end through the unchanged floor-wins verdict.
         # A positively-foreign holder (ladder_refuse) never reaches this rung.
@@ -10190,10 +10192,6 @@ gate_soak() {
     # that separates "we could not tell" (rc 2, transient) from "genuinely
     # never green" (rc 1, auto-rollback).
     local __soak_inconclusive=0
-    # ROW 19 (T7f): INCONCLUSIVE-tick counter — the cap-reach discriminator
-    # that separates "we could not tell" (rc 2, transient) from "genuinely
-    # never green" (rc 1, auto-rollback).
-    local __soak_inconclusive=0
     local soak_absolute_bound=$(( soak_start + ADAPTIVE_SOAK_CAP_S + GRACE_EXTENSION_CAP_S_INT ))
     while :; do
         lock_heartbeat
@@ -10268,7 +10266,6 @@ gate_soak() {
             __soak_tick_rc="$__soak_version_rc"
         fi
         if [ "$__soak_tick_rc" = "2" ]; then
-            __soak_inconclusive=$(( ${__soak_inconclusive:-0} + 1 ))
             __soak_inconclusive=$(( ${__soak_inconclusive:-0} + 1 ))
             # INCONCLUSIVE — a third observation kind, distinct from the
             # probe-transient RESET (which is preserved). The streak FREEZES.
@@ -10393,15 +10390,6 @@ gate_soak() {
             if [ "$consecutive_green" -ge "$adaptive_n" ]; then
                 _log "soak SUCCESS at cap (${waited}s) — ${consecutive_green} consecutive greens"
                 return 0
-            fi
-            # ROW 19 (phase1 §5.4b) — cap-reach disposition. A cap reached
-            # with INCONCLUSIVE ticks and no definitive red is NOT a health
-            # verdict: it returns the TRANSIENT rc 2 so the promote consumer
-            # takes the defer arm (never 8b). A genuine never-green
-            # (inconclusive == 0) keeps the C-1 anti-silent-commit rc 1.
-            if [ "${__soak_inconclusive:-0}" -gt 0 ]; then
-                _warn "soak: cap-reach at ${waited}s with consecutive_green=$consecutive_green < $adaptive_n AND ${__soak_inconclusive} inconclusive (unattributable) tick(s) — INCONCLUSIVE, deferring (transient; NOT an auto-rollback verdict)"
-                return 2
             fi
             # ROW 19 (phase1 §5.4b) — cap-reach disposition. A cap reached
             # with INCONCLUSIVE ticks and no definitive red is NOT a health
