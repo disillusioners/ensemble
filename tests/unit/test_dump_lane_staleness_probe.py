@@ -9,12 +9,21 @@ WHAT IS PINNED HERE
   integer, no rounding drift between the verdict and the receipt);
 * the REFUSAL TO GUESS A CONNECTION — no ``--db-url``, no matter what the
   ambient environment says, is exit 78;
+* the NON-FINITE THRESHOLD — ``argparse``'s ``type=float`` ACCEPTS
+  ``nan``/``inf``/``+inf``/``infinity``; every one of them must land on the
+  house exit-78 refusal path, never a bare traceback (exit 1);
+* the DRIVER-vs-DATABASE DISTINCTION — a missing psycopg/sqlmodel is
+  ``driver_unavailable`` (run the repo venv's python), NOT
+  ``db_unreachable`` (check the LB and the credential);
 * the DSN REDACTION in the error path — the password must not survive into
   stderr, not even when the driver exception itself echoes it back;
 * the NO-WRITE ASSERTION — the probe issues no ``INSERT``/``UPDATE``/
   ``DELETE``/DDL (structural, by AST: the only SQL it can execute is a
   read-only session ``SET`` plus one bound-parameter ``SELECT``), it opens no
-  write path on the filesystem, and a provider failure leaves NO side effect.
+  write path on the filesystem, and a provider failure leaves NO side effect;
+* the RUNBOOK COVERAGE — every reason slug the probe can emit has EXACTLY ONE
+  action row in ``docs/runbooks/dump-lane-health-probe.md``, and the runbook
+  documents no slug the probe cannot emit.
 
 HERMETICITY (hard requirement)
 ------------------------------
@@ -22,6 +31,8 @@ This file NEVER connects to a database and NEVER writes outside ``tmp_path``:
 
 * the ``pg`` provider is exercised through a FAKE engine injected at the
   ``_open_pg_engine`` seam — no socket is ever opened;
+* the driver-missing leg blocks the lazy ``sqlmodel`` import BEFORE any
+  socket is opened;
 * the ``file`` provider reads and writes only inside ``tmp_path``;
 * the credential path is exercised by making the fake engine RAISE, so the
   real error path (and its redaction) runs without any network at all.
@@ -462,6 +473,35 @@ class TestConfigRefusals:
         fields = _parse_result(capsys.readouterr().out)
         assert fields["reason"] == "bad_max_age_hours"
 
+    def test_non_finite_max_age_refuses_with_exit_78(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """``argparse``'s ``type=float`` ACCEPTS the non-finite spellings.
+
+        A NaN threshold never trips the ``<= 0`` comparison and an infinite
+        one OVERFLOWS the conversion to seconds — at base both escaped as a
+        bare traceback (exit 1), OUTSIDE the 78 family. Every spelling must
+        land on the house exit-78 refusal path instead.
+        """
+        marker = tmp_path / "dump-marker"
+        marker.write_text("dump ok\n", encoding="utf-8")
+        for spelling in ("nan", "inf", "+inf", "infinity"):
+            rc = probe.main(
+                [
+                    "--provider",
+                    "file",
+                    "--marker-file",
+                    str(marker),
+                    "--max-age-hours",
+                    spelling,
+                ]
+            )
+            captured = capsys.readouterr()
+            assert rc == 78, f"--max-age-hours {spelling!r} must refuse with exit 78"
+            fields = _parse_result(captured.out)
+            assert fields["reason"] == "bad_max_age_hours", spelling
+            assert "Traceback" not in captured.err, spelling
+
     def test_unparseable_now_refuses_with_exit_78(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -718,6 +758,45 @@ class TestPgProvider:
         fields = _parse_result(capsys.readouterr().out)
         assert fields["reason"] == "db_query_error"
 
+    def test_a_missing_driver_is_driver_unavailable_not_db_unreachable(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A missing psycopg/sqlmodel is an OBSERVABILITY gap, NOT a dead DB.
+
+        The operator's fix for ``driver_unavailable`` is "run the repo venv's
+        python"; the fix for ``db_unreachable`` is "check the LB and the
+        credential". Collapsing the two sends the operator to the wrong place,
+        so the two reasons must never share a code path.
+        """
+        real_open = probe._open_pg_engine
+
+        def _no_driver(dsn: str) -> Any:
+            raise ModuleNotFoundError("No module named 'psycopg'")
+
+        monkeypatch.setattr(probe, "_open_pg_engine", _no_driver)
+        rc = probe.main(
+            ["--db-url", "postgresql://ensemble@10.44.0.2:5432/ensemble_prod"]
+        )
+        captured = capsys.readouterr()
+        assert rc == 75, "an unobservable marker is NO-MARKER, never FRESH"
+        fields = _parse_result(captured.out)
+        assert fields["state"] == "NO_MARKER"
+        assert fields["reason"] == "driver_unavailable"
+
+        # Second leg: the REAL ``_open_pg_engine`` with the lazy import
+        # blocked. The ImportError is raised BEFORE any socket is opened, so
+        # this leg stays hermetic — no database, no network.
+        monkeypatch.setattr(probe, "_open_pg_engine", real_open)
+        monkeypatch.setitem(sys.modules, "sqlmodel", None)
+        rc = probe.main(
+            ["--db-url", "postgresql://ensemble@10.44.0.2:5432/ensemble_prod"]
+        )
+        captured = capsys.readouterr()
+        assert rc == 75
+        fields = _parse_result(captured.out)
+        assert fields["state"] == "NO_MARKER"
+        assert fields["reason"] == "driver_unavailable"
+
     def test_both_providers_feed_the_same_state_machine(self) -> None:
         """One state machine: the verdict shape is provider-independent."""
         now = datetime(2026, 11, 25, 0, 0, 0, tzinfo=timezone.utc)
@@ -808,3 +887,42 @@ class TestReportShape:
         err = capsys.readouterr().err
         assert "***" not in err
         assert "[DUMP-LANE] state=FRESH" in err
+
+
+class TestRunbookCoverage:
+    """The reason vocabulary and the runbook action table must AGREE.
+
+    The probe publishes a CLOSED reason vocabulary; the runbook maps every
+    slug to an operator action. A slug the probe can emit but the runbook
+    does not document is an operator dead-end — the exact failure the
+    ``driver_unavailable`` slug had (documented, never emitted). This pin
+    closes the loop in BOTH directions: no undocumented slug, and no
+    runbook row for a slug the probe cannot emit.
+    """
+
+    RUNBOOK_PATH = REPO_ROOT / "docs" / "runbooks" / "dump-lane-health-probe.md"
+
+    #: The FIRST cell of a table row: a backticked, lowercase slug.
+    ROW_SLUG_RE = re.compile(r"^\|\s*`([a-z_]+)`\s*\|", re.MULTILINE)
+
+    def test_every_reason_slug_has_exactly_one_runbook_action_row(self) -> None:
+        vocabulary = sorted(
+            value
+            for name, value in vars(probe).items()
+            if name.startswith("REASON_") and isinstance(value, str)
+        )
+        assert vocabulary, "the probe must publish a reason vocabulary"
+
+        text = self.RUNBOOK_PATH.read_text(encoding="utf-8")
+        row_slugs = self.ROW_SLUG_RE.findall(text)
+
+        missing = [slug for slug in vocabulary if row_slugs.count(slug) != 1]
+        assert not missing, (
+            "every reason slug needs EXACTLY ONE runbook action row; "
+            f"missing or duplicated: {missing} — vocabulary: {vocabulary}, "
+            f"runbook rows: {sorted(set(row_slugs))}"
+        )
+        unknown = sorted(set(row_slugs) - set(vocabulary))
+        assert not unknown, (
+            f"the runbook documents reason slugs the probe cannot emit: {unknown}"
+        )
