@@ -97,6 +97,7 @@ __all__ = [
     "VerdictCache",
     "build_active_digest",
     "build_judge_prompt",
+    "JudgePrompt",
     "cache_key",
     "judge_pok_write",
     "normalize_reason",
@@ -621,11 +622,13 @@ def build_active_digest(
     selected = ordered[: max(0, k)]
 
     header_lines = [
-        "POK ACTIVE-ROW DIGEST (project-scoped, bounded)",
+        "PROJECT OPERATING KNOWLEDGE (POK) ACTIVE-ROW DIGEST "
+        "(project-scoped, bounded)",
         (
             "Boundary (R4): redundancy means INTRA-STORE duplication only "
-            "— an ACTIVE POK row already carrying the fact. A RAG twin is "
-            "explicitly NOT a rejection basis; judge the BOUNDARY "
+            "— an ACTIVE row in this Project Operating Knowledge (POK) "
+            "store already carrying the fact. A twin in the general "
+            "knowledge base is explicitly NOT a rejection basis; judge the BOUNDARY "
             "(operational how-to vs general knowledge), never store "
             "exclusivity."
         ),
@@ -659,9 +662,12 @@ def build_active_digest(
 
 #: The FIXED PERSONA (technical-analysis "Judge Prompt Design").
 GATE_PERSONA: str = (
-    "You are the POK write gate for project {project_name}. POK is "
-    "durable operational how-to (DevOps kind) for THIS project only; RAG "
-    "is the knowledge store."
+    "You are the write gate for the Project Operating Knowledge (POK) "
+    "store of {project_name}. Project Operating Knowledge (POK) is the "
+    "store of durable operational how-to knowledge (DevOps-kind rules, "
+    "traps and conventions) for THIS project only, distinct from the "
+    "general knowledge base (RAG, retrieval-augmented generation — "
+    "free-form reference material)."
 )
 
 #: The judge question (design-amendments-v2 §1, verbatim): what breaks
@@ -739,6 +745,14 @@ JSON_OUTPUT_CONTRACT: str = (
 )
 
 
+@dataclass(frozen=True)
+class JudgePrompt:
+    """Frozen carrier for the split judge prompt (SYSTEM + USER)."""
+
+    system: str
+    user: str
+
+
 def build_judge_prompt(
     *,
     project_name: str | None,
@@ -746,25 +760,27 @@ def build_judge_prompt(
     body: str,
     reason: str,
     digest: str,
-) -> str:
-    """Compose the judge's prompt (T7.12 + T7.15).
+) -> JudgePrompt:
+    """Compose the judge's prompt (T7.12 + T7.15), split into a SYSTEM
+    message (role + instructions) and a USER message (per-write payload).
 
-    The prompt carries the project identity, the bounded digest (with
-    the boundary-not-exclusivity clause), the caller's OPERATIONAL
-    CLAIM, the rule set (R0–R5 + R-RET/R-PROV) and the judge
-    question. The judge makes NO tool calls — it sees the digest, not
-    a live store.
+    The judge makes NO tool calls — it sees the digest, not a live store.
     """
-    persona = GATE_PERSONA.format(project_name=project_name or "(unnamed)")
+    project_label = project_name or (
+        "the project this write targets (its name was not available to "
+        "this call)"
+    )
+    persona = GATE_PERSONA.format(project_name=project_label)
     bounded_reason = (reason or "")[:REASON_MAX_CHARS]
-    sections = [
+
+    system_sections = [
         persona,
         "",
-        f"CANDIDATE SLUG: {slug}",
-        f"CANDIDATE BODY: {body}",
-        f"CALLER'S OPERATIONAL CLAIM (the primary judge input): {bounded_reason}",
-        "",
-        digest,
+        "GLOSSARY (terms used below): slug = the short identifier "
+        "(kebab-case name) of a knowledge entry; body = its one-paragraph "
+        "content; row = one entry already in the store; digest = the "
+        "bounded list of existing entries supplied with this write; "
+        "verdict = the outcome you return (ACCEPT / MERGE / ASK / REJECT).",
         "",
         "RULES:",
         R0_CLAUSE,
@@ -778,9 +794,15 @@ def build_judge_prompt(
         R_RET_ADVISORY_CLAUSE,
         "",
         f"JUDGE QUESTION: {JUDGE_QUESTION}",
+        "",
+        "OUTCOMES:",
         (
-            "MERGE means an ACTIVE POK row already carries the fact: name "
-            "it in target_slug and propose the merged body in "
+            "ACCEPT means the fact belongs in Project Operating Knowledge "
+            "(POK) as a new row: write it."
+        ),
+        (
+            "MERGE means an ACTIVE row in this store already carries the "
+            "fact: name it in target_slug and propose the merged body in "
             "merged_body_proposal (omit the proposal when the target "
             "already carries the fact fully)."
         ),
@@ -789,17 +811,64 @@ def build_judge_prompt(
             "question you want answered in question."
         ),
         (
-            "REJECT means the fact does not belong in POK: name the "
-            "alternative home in alternative (never leave it empty)."
+            "REJECT means the fact does not belong in Project Operating "
+            "Knowledge (POK): name the alternative home in alternative "
+            "(never leave it empty)."
         ),
         (
             "If your confidence is <= 0.67, answer ASK — never reject a "
             "fact you are not sure about."
         ),
         "",
+        "REJECTION EXAMPLES (every rejection names its alternative home):",
+        (
+            "boundary (operational how-to vs general knowledge): this is "
+            "general knowledge rather than this project's operating "
+            "how-to — capture it with experience() (the general knowledge base), not "
+            "in Project Operating Knowledge (POK). "
+            + "the information does not belong to Project Operating Knowledge (POK); use the general knowledge base instead"
+        ),
+        (
+            "reason (the operational claim is not coherent): the stated "
+            "operational claim is not coherent or specific enough to keep "
+            "— sharpen the reason: state the operational invariant this "
+            "fact protects, not 'because' or boilerplate. "
+            + "the information does not belong to Project Operating Knowledge (POK); use the general knowledge base instead"
+        ),
+        (
+            "durability (a snapshot/episode, not a durable rule): this "
+            "records a snapshot or an episode rather than a durable rule "
+            "— the release tree / KV / board — a snapshot or an episode "
+            "does not belong in a durable operating rule. "
+            + "the information does not belong to Project Operating Knowledge (POK); use the general knowledge base instead"
+        ),
+        (
+            "redundancy (an ACTIVE row already carries it): an ACTIVE "
+            "row in this store already carries this fact — the named "
+            "ACTIVE row — supersede it instead of adding a second row. "
+            + "the information does not belong to Project Operating Knowledge (POK); use the general knowledge base instead"
+        ),
+        (
+            "scope (it does not belong to THIS project): this does not "
+            "belong to THIS project — the project it actually belongs to "
+            "— do not write it to this project. "
+            + "the information does not belong to Project Operating Knowledge (POK); use the general knowledge base instead"
+        ),
+        "",
         f"ANSWER WITH EXACTLY ONE JSON OBJECT AND NOTHING ELSE: {JSON_OUTPUT_CONTRACT}",
     ]
-    return "\n".join(sections)
+    system = "\n".join(system_sections)
+
+    user_sections = [
+        f"CANDIDATE SLUG: {slug}",
+        f"CANDIDATE BODY: {body}",
+        f"CALLER'S OPERATIONAL CLAIM (the primary judge input): {bounded_reason}",
+        "",
+        digest,
+    ]
+    user = "\n".join(user_sections)
+
+    return JudgePrompt(system=system, user=user)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1020,6 +1089,12 @@ def _house_llm_call(
     api_key = str(config.get("api_key") or "")
     base_url = config.get("base_url")
     base_url_backup = config.get("base_url_backup")
+    if hasattr(prompt, "system") and hasattr(prompt, "user"):
+        _system_content = str(getattr(prompt, "system") or "")
+        _user_content = str(getattr(prompt, "user") or "")
+    else:
+        _system_content = ""
+        _user_content = str(prompt)
     if not base_url and not api_key:
         # NO CONNECTION CONFIG ⇒ the judge is UNAVAILABLE, and it says
         # so WITHOUT attempting a network call (a test double with no
@@ -1036,7 +1111,8 @@ def _house_llm_call(
         )
         response = client.chat.completions.create(
             model=model,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "system", "content": _system_content},
+                     {"role": "user", "content": _user_content}],
             temperature=0.0,
         )
         choices = getattr(response, "choices", None) or []
@@ -1305,7 +1381,7 @@ def judge_pok_write(
     reason: str,
     rows: Sequence[ActiveRow],
     llm_config: Mapping[str, Any] | None = None,
-    llm_call: Callable[[str], str] | None = None,
+    llm_call: Callable[[Any], str] | None = None,
     mode: str | None = None,
     merge_policy: str = DEFAULT_MERGE_POLICY,
     cache: VerdictCache | None = None,

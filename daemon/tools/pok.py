@@ -186,11 +186,19 @@ def _resolve_project_id(instance_repository: Any, current_instance_id: str) -> s
     return str(project_id) if project_id else None
 
 
-def _project_name(instance_repository: Any, project_id: str | None) -> str | None:
-    """The project's name (the is_system_default name fallback needs it)."""
-    if instance_repository is None or not project_id:
+def _project_name(source: Any, project_id: str | None) -> str | None:
+    """The project's name (the is_system_default name fallback needs it).
+
+    ``source`` may be the manager (which holds ``_project_repository``),
+    an instance repository (which does not), or the project repository
+    itself. The lookup is wired to the object that actually holds the
+    project repository; a missing repository yields None (degraded).
+    """
+    if source is None or not project_id:
         return None
-    project_repo = getattr(instance_repository, "_project_repository", None)
+    project_repo = getattr(source, "_project_repository", None)
+    if project_repo is None and hasattr(source, "get"):
+        project_repo = source
     if project_repo is None:
         return None
     try:
@@ -772,7 +780,7 @@ def create_pok_tools(
                 "this instance is not linked to a project — "
                 "project_operating_knowledge is project-scoped",
             )
-        name = _project_name(instance_repository, project_id)
+        name = _project_name(manager, project_id)
         if is_default_project(project_id, name):
             return None, name, _err(
                 "pok_default_project",
