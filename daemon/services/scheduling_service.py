@@ -280,6 +280,8 @@ class ScheduleUpdateResponse(BaseModel):
     next_run_at_local: str | None
     next_run_at_utc: str | None
     tz_warning: str = ""
+    enabled: bool = True
+    armed: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -554,9 +556,9 @@ def compute_next_run(config: dict[str, Any]) -> tuple[str | None, str | None, st
 
     BOTH listing surfaces read their next-fire from THIS function, which
     computes it from the STORED config.  The live adapter's in-memory
-    ``_get_next_trigger_time`` is a SECOND source that goes null when the
-    adapter is not registered — it is never the authority (it survives
-    only as an explicit fallback on the REST surface).
+    The stored config is the only source: there is NO adapter-derived
+    path (M-D deleted it), so no sentinel (e.g. "__PAST_LATENESS_CAP__")
+    can reach a response.
     """
     return _compute_next_run(config)
 
@@ -702,8 +704,8 @@ def _rows_named(repo: Any, label: str, *, exclude_source_id: Any = None) -> list
     The scan reads every page (the repository's default limit is a PAGE,
     not a completeness contract — the same discipline the list surfaces
     use).  A scan that cannot run (an unavailable / non-conforming
-    repository) degrades to "no rows seen" and the caller falls back to
-    the historical first-match lookup — never a silent wrong answer.
+    repository) FAILS CLOSED: it raises ``LabelNamespaceUnavailable``
+    and the caller refuses the operation (never "no conflict").
     """
     rows: list[Any] = []
     offset = 0
@@ -738,6 +740,12 @@ def _rows_named(repo: Any, label: str, *, exclude_source_id: Any = None) -> list
 
 def _live_rows(rows: list[Any]) -> list[Any]:
     """The LIVE subset of ``rows`` — everything that is not cancelled."""
+    # NOTE: "namespace-live" (status != cancelled) is DELIBERATELY
+    # broader than "armed" (enabled AND status not in
+    # {cancelled, stopped}).  A PAUSED row still OWNS its label
+    # (it blocks create/rename) while rendering NO next-fire —
+    # the v4 record §4.2 excludes only the CANCELLED row from
+    # the namespace.  Do not conflate the two predicates.
     return [r for r in rows if getattr(r, "status", None) != _STATUS_CANCELLED]
 
 
@@ -780,7 +788,15 @@ def resolve_label_row(repo: Any, label: str, *, exclude_source_id: Any = None) -
         )
     if len(live) == 1:
         return live[0]
-    return repo.get_source_config_by_name(label)
+    # Historical first-match fallback: runs ONLY when NO live row
+    # carries the label AND the scan SUCCEEDED.  A repository
+    # error here is fail-closed (refuse), not a silent 500.
+    try:
+        return repo.get_source_config_by_name(label)
+    except Exception as exc:  # noqa: BLE001 — fail closed
+        raise LabelNamespaceUnavailable(
+            f"label-namespace scan unavailable for {label!r}: {exc}"
+        ) from exc
 
 
 async def _resolve_schedule_ref(schedule_id: str) -> tuple[Any, Any]:
@@ -1455,7 +1471,9 @@ async def update_schedule(
             refreshed = await asyncio.to_thread(repo.get_source_config, row.source_id)
             status = refreshed.status if refreshed is not None else updated.status
 
-    next_local, next_utc, next_warning = _compute_next_run(config)
+    next_local, next_utc, next_warning = row_next_run(
+        config, enabled=config_enabled, status=status
+    )
     logger.info(
         "scheduling_service: updated schedule %s (paused=%s, started=%s, when_changed=%s)",
         row.source_id,
@@ -1471,4 +1489,6 @@ async def update_schedule(
         next_run_at_local=next_local,
         next_run_at_utc=next_utc,
         tz_warning=tz_warning or next_warning,
+        enabled=bool(config_enabled),
+        armed=is_armed(config_enabled, status),
     )
