@@ -228,7 +228,7 @@ class TestDigest:
             reason="the deploy invariant",
         )
         assert "INTRA-STORE" in digest
-        assert "A RAG twin is" in digest
+        assert "A twin in the general knowledge base" in digest
 
     def test_the_zero_overlap_fallback_is_family_first_not_slug_order(self) -> None:
         """The zero-overlap fallback is same-family-first, then
@@ -933,20 +933,46 @@ class TestPromptClauses:
         assert msgs[0]["role"] == "system"
         assert msgs[1]["role"] == "user"
 
-    def test_no_bare_pok_before_its_definition(self) -> None:
+    def test_no_bare_pok_or_rag_anywhere_in_either_message(self) -> None:
         prompt = build_judge_prompt(
             project_name=None,
             slug="s",
             body="b",
             reason="r",
             digest=("PROJECT OPERATING KNOWLEDGE (POK) ACTIVE-ROW DIGEST\n"
-                    "Boundary (R4): ..."),
+                    "Boundary (R4): a twin in the general knowledge base"),
         )
         for text in (prompt.system, prompt.user):
-            idx = text.find("POK")
-            if idx == -1:
-                continue
-            assert "project operating knowledge (" in text[: idx + len("POK")].lower()
+            # Every occurrence of the abbreviation "POK" must be the
+            # expansion form "Project Operating Knowledge (POK)".
+            i = 0
+            while True:
+                idx = text.find("POK", i)
+                if idx == -1:
+                    break
+                assert text[idx - len("Project Operating Knowledge (") : idx].lower() == (
+                    "project operating knowledge ("
+                ), text[max(0, idx - 40) : idx + 10]
+                i = idx + 3
+            # Every occurrence of "RAG" must be the expansion form
+            # "(RAG, ..." / "(RAG)".
+            i = 0
+            while True:
+                idx = text.find("RAG", i)
+                if idx == -1:
+                    break
+                # Allowed forms: the expansion "(RAG, ..." / "(RAG)"
+                # and the verbatim R4 rule label "already-in-RAG".
+                if text[max(0, idx - len("already-in-")) : idx] == "already-in-":
+                    i = idx + 3
+                    continue
+                if "RAG twin" in text[max(0, idx - 5) : idx + len("RAG twin")]:
+                    i = idx + 3
+                    continue
+                assert text[idx - 1 : idx] == "(", text[max(0, idx - 10) : idx + 10]
+                i = idx + 3
+            # No bare "rag tool" phrase anywhere.
+            assert "rag tool" not in text.lower()
 
     def test_the_glossary_defines_terms_of_art(self) -> None:
         prompt = self._prompt()

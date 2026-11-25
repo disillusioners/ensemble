@@ -627,8 +627,8 @@ def build_active_digest(
         (
             "Boundary (R4): redundancy means INTRA-STORE duplication only "
             "— an ACTIVE row in this Project Operating Knowledge (POK) "
-            "store already carrying the fact. A RAG twin is "
-            "explicitly NOT a rejection basis; judge the BOUNDARY "
+            "store already carrying the fact. A twin in the general "
+            "knowledge base is explicitly NOT a rejection basis; judge the BOUNDARY "
             "(operational how-to vs general knowledge), never store "
             "exclusivity."
         ),
@@ -662,8 +662,8 @@ def build_active_digest(
 
 #: The FIXED PERSONA (technical-analysis "Judge Prompt Design").
 GATE_PERSONA: str = (
-    "You are the write gate for Project Operating Knowledge (POK) for "
-    "project {project_name}. Project Operating Knowledge (POK) is the "
+    "You are the write gate for the Project Operating Knowledge (POK) "
+    "store of {project_name}. Project Operating Knowledge (POK) is the "
     "store of durable operational how-to knowledge (DevOps-kind rules, "
     "traps and conventions) for THIS project only, distinct from the "
     "general knowledge base (RAG, retrieval-augmented generation — "
@@ -824,35 +824,35 @@ def build_judge_prompt(
         (
             "boundary (operational how-to vs general knowledge): this is "
             "general knowledge rather than this project's operating "
-            "how-to — capture it with experience() (the RAG tool), not "
+            "how-to — capture it with experience() (the general knowledge base), not "
             "in Project Operating Knowledge (POK). "
-            + EMPEROR_TRACE_PHRASE
+            + "the information does not belong to Project Operating Knowledge (POK); use the general knowledge base instead"
         ),
         (
             "reason (the operational claim is not coherent): the stated "
             "operational claim is not coherent or specific enough to keep "
             "— sharpen the reason: state the operational invariant this "
             "fact protects, not 'because' or boilerplate. "
-            + EMPEROR_TRACE_PHRASE
+            + "the information does not belong to Project Operating Knowledge (POK); use the general knowledge base instead"
         ),
         (
             "durability (a snapshot/episode, not a durable rule): this "
             "records a snapshot or an episode rather than a durable rule "
             "— the release tree / KV / board — a snapshot or an episode "
             "does not belong in a durable operating rule. "
-            + EMPEROR_TRACE_PHRASE
+            + "the information does not belong to Project Operating Knowledge (POK); use the general knowledge base instead"
         ),
         (
             "redundancy (an ACTIVE row already carries it): an ACTIVE "
             "row in this store already carries this fact — the named "
             "ACTIVE row — supersede it instead of adding a second row. "
-            + EMPEROR_TRACE_PHRASE
+            + "the information does not belong to Project Operating Knowledge (POK); use the general knowledge base instead"
         ),
         (
             "scope (it does not belong to THIS project): this does not "
             "belong to THIS project — the project it actually belongs to "
             "— do not write it to this project. "
-            + EMPEROR_TRACE_PHRASE
+            + "the information does not belong to Project Operating Knowledge (POK); use the general knowledge base instead"
         ),
         "",
         f"ANSWER WITH EXACTLY ONE JSON OBJECT AND NOTHING ELSE: {JSON_OUTPUT_CONTRACT}",
