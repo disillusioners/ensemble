@@ -279,7 +279,7 @@ PLANTS: dict[str, dict] = {
             # literal in the SAME change — plant literals pin exact bytes and
             # ERROR-plant loudly on drift (see .agents/tester/PACKS.md matrix row;
             # precedent dec3a82c2/M8).
-            "PIPELINE_SCRIPTS_REV=087f782afbf1957dd0bf6acea5198314093d2a89",
+            "PIPELINE_SCRIPTS_REV=46d55b002d35092c29c391fc76e6b897c0819e11",
             "# PLANT M22: stamp line removed (a stale tree predates the stamp)",
         )],
     },
