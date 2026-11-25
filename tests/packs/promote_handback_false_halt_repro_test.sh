@@ -22,6 +22,17 @@
 #       timeout.  PIN-ONLY.
 #   (d2) the hand-back START budget (rc=124, the H3 site) must still
 #       write its `kind=budget` row with `reason=child: timeout(...)`.
+#       This is the NOUNSET-OFF (observability) regime: the row is written
+#       with an EMPTY detail and the payload executes as a command.
+#   (d3) the SAME start-timeout path under the REAL caller's NOUNSET-ON
+#       regime (promote.sh:69 / restart.sh:63 / rollback.sh:32 all set -u
+#       before sourcing lib.sh).  With the severed continuation the
+#       unguarded `$2` in journal_history_append (lib.sh:1889-1891) dies
+#       with `$2: unbound variable` BEFORE any row is written and the
+#       abort PROPAGATES through `if ! restart_via_launcher; then ...`
+#       to the shell exit — BYPASSING the clean-halt arms and their side-
+#       channel cleanup.  d3 proves nounset took effect in the SAME shell
+#       and asserts the caller still reaches its post-hand-back code.
 #   (e) mechanism ii END-TO-END — the ladder's `return 2` producer → the
 #       probe's `case "$__attr_rc"` arm → the caller's `case "$hsp_rc"`
 #       keep-polling arm.
@@ -300,6 +311,31 @@ phh_run() {
 }
 hb_rc() { printf '%s' "$1" | grep -oE 'hb-rc=[0-9]+' | head -1 | sed 's/hb-rc=//'; }
 
+# phh_run_nounset <extra-shell-setup> — the REAL caller regime: `set -u` is
+# EXPLICITLY ON in the SAME shell that sources lib.sh and runs the
+# hand-back (promote.sh:69 + :123, restart.sh:63/:88, rollback.sh:32/:58;
+# no caller sets `set +u`).  The nounset proof is printed from INSIDE that
+# shell — the two regimes are otherwise indistinguishable from the output.
+phh_run_nounset() {
+    PATH="$STUBBIN:$PATH" INSTALL_DIR="$INSTALL_DIR" \
+    SYSTEMCTL_BIN="$STUBBIN/systemctl" SC_LOG="$SC_LOG" PORT="$PHH_PORT" \
+    PROMOTE_EXPECTED_VERSION="${PHH_EXPECTED_VERSION:-}" \
+    HANDBACK_VERIFY_BUDGET_S="${PHH_VERIFY_BUDGET:-12}" \
+    HANDBACK_VERIFY_GRACE_S="${PHH_VERIFY_GRACE:-0}" \
+    _GATE_ATTR_DEFER_S="${PHH_DEFER_S:-2}" ENSEMBLE_TEST_GATE_DEFER=1 \
+    PHH_HOLDER="${PHH_HOLDER:-424242}" PHH_VERSION="${PHH_VERSION:-0.28.5}" \
+    bash -c '
+        set -u
+        printf "NOUNSET-PROOF: %s\n" "$(set -o | grep nounset | tr -s " ")"
+        unset ENSEMBLE_SUPERVISION ENSEMBLE_RESTART_UNIT 2>/dev/null || true
+        . '"$LIBSH"' >/dev/null 2>&1
+        _supervision_owned_pids() { printf "%s\n" 424242; }
+        SUPERVISION_MODE=unit; SUPERVISION_STATE=UNIT_MANAGED
+        SUPERVISION_UNIT=ensemble-phh.service; SUPERVISION_PRESTOP_MAINPID=7777
+        '"$1"'
+    ' 2>&1
+}
+
 # the "MCP child" — a REAL pid (so /proc/<pid>/cgroup is readable) that is
 # NOT the supervised unit's pid and NOT in the argv-owned set.
 MCP_CHILD=""
@@ -322,10 +358,12 @@ REPRO_PASS=0
 REPRO_FAIL=0
 # The two gates this pack carries, kept APART so the summary is unambiguous:
 #   CURE GATE      — the false-halt cure itself (repros a,b,c,d,e,f,g,h)
-#   MERGE-DEFECT   — repro (d2) alone: the H3 hand-back-start budget row, the
-#                    merge's own C1 defect (the row's payload is lost there)
+#   MERGE-DEFECT   — repros (d2) + (d3): the H3 hand-back-start budget row,
+#                    the merge's own C1 defect, in BOTH severity regimes
+#                    (d2 nounset-OFF = observability; d3 nounset-ON = the
+#                    real caller's abort)
 CURE_REPROS="a b c d e f g h"
-DEFECT_REPROS="d2"
+DEFECT_REPROS="d2 d3"
 declare -A REPRO_PASS_MAP
 declare -A REPRO_FAIL_MAP
 repro_begin() {
@@ -365,6 +403,19 @@ rp_assert_not_contains() {
         *"$needle"*) rp_fail "$name" "absent '$needle'" "$(printf '%s' "$haystack" | head -c 400)" ;;
         *) rp_pass "$name" ;;
     esac
+}
+rp_assert_not_grep() {
+    local name="$1" ere="$2" haystack="$3"
+    if printf '%s' "$haystack" | grep -qE "$ere"; then
+        rp_fail "$name" "NOT matches /$ere/" "$(printf '%s' "$haystack" | grep -E "$ere" | head -2)"
+    else
+        rp_pass "$name"
+    fi
+}
+rp_assert_grep() {
+    local name="$1" ere="$2" haystack="$3"
+    if printf '%s' "$haystack" | grep -qE "$ere"; then rp_pass "$name"
+    else rp_fail "$name" "matches /$ere/" "$(printf '%s' "$haystack" | head -c 400)"; fi
 }
 
 printf '=== promote hand-back false-halt — RED-at-base / GREEN-at-merge harness ===\n'
@@ -603,6 +654,67 @@ rp_assert_not_contains "d2.5 no spurious 'journal event append FAILED' warn" \
 repro_end
 
 # ===========================================================================
+# REPRO (d3) — the NOUNSET-ON (real caller) regime of the H3 start-timeout
+# ===========================================================================
+phh_cap_check
+repro_begin "d3" "the start-timeout path under the REAL caller's nounset-ON regime does NOT abort"
+reset_stub_state
+# The REAL caller shape: promote.sh / restart.sh / rollback.sh all `set -u`
+# BEFORE sourcing lib.sh, and call the hand-back as `if ! restart_via_launcher;
+# then ...`.  The sentinel arms prove whether the caller actually completed.
+D3_OUT="$(SC_HANG=1 SC_HANG_SUB=start SC_MAINPID=9999 SC_ACTIVESTATE=active \
+    phh_run_nounset '
+        SYSTEMCTL_PROBE_BUDGET_S=2
+        HANDBACK_START_BUDGET_S=2
+        if ! restart_via_launcher; then
+            echo "D3-HALT-ARM-REACHED"
+        else
+            echo "D3-SUCCESS-ARM-REACHED"
+        fi
+        echo "D3-POST-HANDBACK-REACHED"
+        echo "d3-rc=$?"
+    ')"
+D3_J="$(journal_text)"
+printf '   [d3] %s\n' "$(printf '%s' "$D3_OUT" | grep -E 'NOUNSET-PROOF|D3-|d3-rc=|unbound variable|command not found' | tr '\n' '|' | head -c 400)"
+# d3.0 — the regime is PROVEN, not assumed: nounset is on in the SAME shell
+#        that sourced lib.sh and ran the hand-back.
+# `set -o` separates the name and value with a TAB on this host — match
+# whitespace generically so the regime proof is portable.
+rp_assert_grep "d3.0 nounset is EXPLICITLY on in the hand-back shell (regime proof)" \
+    'NOUNSET-PROOF: nounset[[:space:]]+on' "$D3_OUT"
+# d3.1 / d3.2 — the abort signature is absent.
+rp_assert_not_contains "d3.1 NO '\$2: unbound variable' abort" \
+    '$2: unbound variable' "$D3_OUT"
+rp_assert_not_grep "d3.2 NO lib.sh:1890 reference in the output" \
+    'lib\.sh: (line )?1890' "$D3_OUT"
+# d3.3 / d3.4 — the surrounding function COMPLETED: the caller reached its
+#        post-hand-back code and one of the real arms ran.  At the merge the
+#        shell aborts inside journal_history_append and NEITHER prints.
+rp_assert_contains "d3.3 the caller reaches its post-hand-back code (no shell abort)" \
+    "D3-POST-HANDBACK-REACHED" "$D3_OUT"
+rp_assert_grep "d3.4 one of the caller's real arms ran (halt or success)" \
+    'D3-(HALT|SUCCESS)-ARM-REACHED' "$D3_OUT"
+# d3.5-d3.8 — the journal row is written AND carries its detail + the true rc.
+D3_ROW="$(printf '%s' "$D3_J" | grep -o 'site=handback_start[^"]*' | head -1)"
+rp_assert_contains "d3.5 the start-timeout row is journaled with site=handback_start" \
+    "site=handback_start" "$D3_J"
+rp_assert_contains "d3.6 the row carries kind=budget" \
+    "kind=budget" "$D3_ROW"
+rp_assert_contains "d3.7 the row carries reason=child: timeout(HANDBACK_START_BUDGET_S=2)" \
+    "reason=child: timeout(HANDBACK_START_BUDGET_S=2)" "$D3_ROW"
+rp_assert_contains "d3.8 the row carries the TRUE rc=124" \
+    "rc=124" "$D3_ROW"
+# d3.9 / d3.10 — no command-execution symptom and no spurious best-effort
+#        warn.  NOTE (measured): under nounset-ON the unbound-$2 abort fires
+#        BEFORE the payload string can execute, so these two symptoms belong
+#        to d2's nounset-OFF regime; they are asserted here for completeness.
+rp_assert_not_contains "d3.9 NO 'command not found' (the payload never executes as a command)" \
+    "command not found" "$D3_OUT"
+rp_assert_not_contains "d3.10 NO spurious 'journal event append FAILED (best-effort)' warn" \
+    "journal event append FAILED" "$D3_OUT"
+repro_end
+
+# ===========================================================================
 # REPRO (e) — mechanism ii END-TO-END: ladder rc=2 → probe case → caller
 # ===========================================================================
 phh_cap_check
@@ -808,7 +920,7 @@ for r in $DEFECT_REPROS; do
 done
 printf 'CURE GATE (repros %s): %d passed, %d failed\n' "$CURE_REPROS" "$_cure_p" "$_cure_f"
 if [ "$_cure_f" -eq 0 ]; then printf '  -> CURE GATE: GREEN\n'; else printf '  -> CURE GATE: RED\n'; fi
-printf 'MERGE-DEFECT GATE (repro %s — the H3 hand-back-start budget row): %d passed, %d failed\n' "$DEFECT_REPROS" "$_def_p" "$_def_f"
+printf 'MERGE-DEFECT GATE (repros %s — the H3 hand-back-start budget row, both nounset regimes): %d passed, %d failed\n' "$DEFECT_REPROS" "$_def_p" "$_def_f"
 if [ "$_def_f" -eq 0 ]; then printf '  -> MERGE-DEFECT GATE: GREEN\n'; else printf '  -> MERGE-DEFECT GATE: RED (the merge\047s own C1 defect — see the d2 evidence above)\n'; fi
 printf 'passed: %d\n' "$PASS"
 printf 'failed: %d\n' "$FAIL"
