@@ -630,13 +630,16 @@ def _write_chain_config(
     if status is not None:
         try:
             source_repo.update_source_status(source_id, status)
-        except Exception as exc:  # noqa: BLE001 — status is best-effort
-            logger.warning(
+        except Exception as exc:  # noqa: BLE001 — promotion failure is loud
+            logger.error(
                 "[CentralMaintenance] could not set the status of %s to %s: %s",
                 source_id,
                 status,
                 exc,
             )
+            raise MaintenanceSeedError(
+                f"could not promote source {source_id} to {status}: {exc}"
+            ) from exc
 
 
 def _mint(
@@ -814,7 +817,7 @@ def seed_central_maintenance_schedule(
         )
         return outcome
     except Exception as exc:  # noqa: BLE001 — the guard never aborts boot
-        logger.warning("[CentralMaintenance] chain guard failed: %s", exc)
+        logger.error("[CentralMaintenance] chain guard failed: %s", exc)
         return GuardOutcome(action="failed", detail=str(exc))
 
 
@@ -871,6 +874,33 @@ def _guard_present_row(
     # (``daemon/sources/registry.py:325-334``), so the status must be
     # promoted to RUNNING for the row to be picked up again.
     if row.status == SourceStatus.STOPPED.value:
+        # Canonical self-heal (M-B): a stopped canonical recurring row is
+        # dead (the registry's boot filter skips stopped rows) — promote it
+        # back to RUNNING WITHOUT the chain-specific BR-1 run_at re-mint
+        # (that re-mint would graft a chain block onto a canonical row).
+        is_canonical = (
+            row.source_id == CANONICAL_SEED_SOURCE_ID
+            or row.name == CANONICAL_SEED_NAME
+        )
+        if is_canonical:
+            logger.warning(
+                "[CentralMaintenance] canonical row %s was stopped — "
+                "RE-ENABLING it (the canonical self-heal)",
+                row.source_id,
+            )
+            _write_chain_config(
+                source_repo,
+                source_id=row.source_id,
+                config=config,
+                enabled=True,
+                status=SourceStatus.RUNNING.value,
+            )
+            return GuardOutcome(
+                action="reenabled",
+                source_id=row.source_id,
+                run_at=config.get("run_at"),
+                detail="stopped canonical row re-enabled at boot",
+            )
         if chain is None:
             logger.info(
                 "[CentralMaintenance] chain row %s is stopped and carries no "
@@ -1029,13 +1059,17 @@ def _guard_missing_row(
                 source_repo.update_source_status(
                     row.source_id, SourceStatus.RUNNING.value
                 )
-            except Exception as exc:  # noqa: BLE001 — status is best-effort
-                logger.warning(
+            except Exception as exc:  # noqa: BLE001 — promotion failure is loud
+                logger.error(
                     "[CentralMaintenance] could not promote the revived chain "
                     "row %s to RUNNING: %s",
                     row.source_id,
                     exc,
                 )
+                raise MaintenanceSeedError(
+                    f"could not promote revived source {row.source_id} to "
+                    f"RUNNING: {exc}"
+                ) from exc
             logger.warning(
                 "[CentralMaintenance] revived the archived chain row %s "
                 "(archived status=stopped, chain block present)",
@@ -1125,13 +1159,16 @@ def _guard_missing_row(
     # skips stopped/cancelled rows ⇒ promote to RUNNING.
     try:
         source_repo.update_source_status(row.source_id, SourceStatus.RUNNING.value)
-    except Exception as exc:  # noqa: BLE001 — status is best-effort
-        logger.warning(
+    except Exception as exc:  # noqa: BLE001 — promotion failure is loud
+        logger.error(
             "[CentralMaintenance] could not promote the canonical row %s to "
             "RUNNING: %s",
             row.source_id,
             exc,
         )
+        raise MaintenanceSeedError(
+            f"could not promote canonical source {row.source_id} to RUNNING: {exc}"
+        ) from exc
     logger.info(
         "[CentralMaintenance] seeded the canonical weekly row %s "
         "(recurrence=weekly, cron=%s)",
