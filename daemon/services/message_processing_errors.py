@@ -42,6 +42,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from daemon.constants import MAX_ERROR_LEN, RETRY_BUDGET_EXHAUSTED_MARKER
+from daemon.services.event_registry import record as _event_registry_record
 
 if TYPE_CHECKING:
     pass
@@ -273,6 +274,11 @@ async def handle_message_processing_error(
                 instance_id=instance_id,
                 error=error_data,
             )
+            # Phase 5 event registry — class-2 bridge (T5.4/L-10): observe
+            # the durable error row AFTER the emitter returns.
+            _event_registry_record("event_bus:error",
+                                   instance_id=instance_id,
+                                   source="event_bus")
         except Exception as ebus_err:
             logger.warning(
                 f"handle_message_processing_error: failed to write error event "
@@ -290,6 +296,13 @@ async def handle_message_processing_error(
                     data=error_data,
                     message_id=message_id,
                 )
+                # Phase 5 event registry — class-2 bridge (T5.4/L-10):
+                # the repo-direct fallback IS a real producer (L-10
+                # CONSCIOUS INCLUSION — the earlier "non-class-2
+                # fallback" exclusion was an enumeration-round artifact).
+                _event_registry_record("event_bus:error",
+                                       instance_id=instance_id,
+                                       source="event_repo_fallback")
             except Exception as repo_err:
                 logger.warning(
                     f"handle_message_processing_error: failed to write error event "

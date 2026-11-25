@@ -1,7 +1,7 @@
 # roadmap.md — Memoir Store v1→v4 under the rolling doctrine
 
 **Lane:** `feature/ari-memoir-store` @ worktree `/home/nea/ensemble-src-wt-memoir-store`, base **`1f6898ae2`** == origin/latest.
-**Status:** **PHASE A — FAITHFUL CAPTURE.** Blessed in the joint Emperor + Ari design session, **2026-11-04**.
+**Status:** **PHASE A — FAITHFUL CAPTURE.** Blessed in the joint user + Ari design session, **2026-11-04**.
 **What builds now: v1 ONLY.** v2 and v3 are *planned ahead* (R3); v4 is planned when v2 starts (R3). No v2/v3/v4 work is in scope for this lane, and nothing below authorises it.
 
 ---
@@ -10,7 +10,7 @@
 
 > **R3.** ROLLING ROADMAP DOCTRINE: build v1, plan v2+v3 ahead; plan v4 when v2 starts. Doctrine: "crafting into future correct and improve the present plan."
 
-**How to read that:** the future versions are not a wish list and not a backlog. They are **design pressure applied backwards**. Every v1 choice is judged by whether it still stands when v2, v3, and a federated Constella arrive — and when a future requirement reveals that a present choice was wrong, **the present plan gets corrected now**, not deferred. That is what "crafting into future correct and improve the present plan" means in practice: look far enough ahead that today's schema, seams, and vocabulary do not have to be demolished later.
+**How to read that:** the future versions are not a wish list and not a backlog. They are **design pressure applied backwards**. Every v1 choice is judged by whether it still stands when v2, v3, and a federated constellation arrive — and when a future requirement reveals that a present choice was wrong, **the present plan gets corrected now**, not deferred. That is what "crafting into future correct and improve the present plan" means in practice: look far enough ahead that today's schema, seams, and vocabulary do not have to be demolished later.
 
 Two concrete instances of the doctrine already firing inside the blessed v1 design:
 
@@ -25,7 +25,7 @@ Two concrete instances of the doctrine already firing inside the blessed v1 desi
 |---|---|---|---|
 | **v1** | **USABLE MEMORY** | Ari can write, pin, recall, and wake up remembering. | **BUILDING (this lane)** |
 | **v2** | **THE REFLECTING MIND** | She can *think about* her memories: nightly reflection, cited beliefs, the Constellation, a governed persona. | planned (R3: planned ahead) |
-| **v3** | **THE LIVING CHRONICLE** | Memory that ages honestly: expiry-with-revival, archives, belief history, scale, and the Constella-compatible mirror. | planned (R3: planned ahead) |
+| **v3** | **THE LIVING CHRONICLE** | Memory that ages honestly: expiry-with-revival, archives, belief history, scale, and the constellation-compatible mirror. | planned (R3: planned ahead) |
 | **v4** | **THE FEDERATION** | Cross-kingdom memory: sync, stargate-mediated exchange, persona merge. | planned when v2 starts (R3) |
 
 ---
@@ -58,10 +58,10 @@ Two concrete instances of the doctrine already firing inside the blessed v1 desi
 |---|---|
 | **Bounded nightly reflection** | **Idle-debounce by day with warm-up doubling** (`1 → 2 → 4 → 8 → N`) — (tencentdb-agent-memory `pipeline-manager` shape — Lane-3 first-hand study; **[citation needed: study artifact, board `wi-e0019d2d`]**). Plus a **nightly budgeted pass** (ReMe `auto_dream` shape — Lane-3 first-hand study; **[citation needed: study artifact, board `wi-e0019d2d`]**). *Rationale:* a fixed nightly cron over-reflects after a quiet day and under-reflects after a loud one; debounce lets activity set the rhythm while the budget bounds the cost. |
 | **Cited syntheses** | Writes `memoir_syntheses` (the v1-empty table) with `source_episode_ids[]` and the four verbs **CREATE / CORROBORATE / REFINE / CORRECT**; `supersedes`/`superseded_by` + `confidence`+ validity interval. |
-| **Constellation layer proper** | `memoir_star` (canonical name + **alias table** — "the Emperor" / "my dear" / real name merge), `memoir_line` (episode↔star mentions, counts, first/last), `memoir_thread` (episode↔episode continuity), **domain stars with heat**, and **`memoir_about` + entity-centric 1-hop recall**. Drawn **only in the cold path**; consolidation cost scales with **change**, not corpus; **no graph DB** (R4). |
+| **Constellation layer proper** | `memoir_star` (canonical name + **alias table** — "the user" / "the operator" / real name merge), `memoir_line` (episode↔star mentions, counts, first/last), `memoir_thread` (episode↔episode continuity), **domain stars with heat**, and **`memoir_about` + entity-centric 1-hop recall**. Drawn **only in the cold path**; consolidation cost scales with **change**, not corpus; **no graph DB** (R4). |
 | **JEV persona gate** | Persona regeneration is gated by what kind of change occurred: **conflict > boundary_change > new_rule force regeneration; reinforcement and none do not.** (This is the discipline that stops the persona churning on every pleasantry while forcing it to move on a genuine contradiction.) |
 | **LLM importance scoring** | Replaces/augments self-declared `importance` (v1's DD-5 placeholder). |
-| **Keepsake promotion proposals** | The system may *propose* an episode for keepsake status — **surfaced to both Emperor and Empress**, never auto-pinned. (R2 still holds: the pin decision belongs to the two of them.) |
+| **Keepsake promotion proposals** | The system may *propose* an episode for keepsake status — **surfaced to both the user and the assistant**, never auto-pinned. (R2 still holds: the pin decision belongs to the two of them.) |
 | **Per-turn wake-refresh on alarm wakes** | A refreshed briefing on alarm wakes specifically. *Design note:* scheduler wakes are **deliberately bare HUMAN** (`instance_messaging.py:422-427`, product ruling) — landmine L4 — so this item must choose its delivery lane **consciously**, never by "fixing" the stamp. |
 
 **Entry condition (as the design implies):** v1 must be *used* long enough that reflection has a corpus worth reflecting on, and the nightly pass must be budget-bound before it is enabled.
@@ -78,7 +78,7 @@ Two concrete instances of the doctrine already firing inside the blessed v1 desi
 | **Archive tier** | Cold memories move to an archive tier that remains **searchable** — cheaper to keep than to consult. |
 | **Supersedes-DAG surfacing** | "What did I believe then?" becomes answerable: walk the belief chain and render the *history* of a belief, not just its current value. |
 | **pgvector + re-embedding pipeline — IF scale demands** | DD-1's deferred door. Only if personal scale stops being personal. Re-embedding must respect **per-row model identity** (`design.md` §3): a re-embed is a new identity for the whole corpus, not a silent in-place swap. |
-| **markdown+hash mirror — the Constella door** | A markdown + hash mirror format using the **`baselineVersion` optimistic-locking** shape — (`baselineVersion` optimistic-locking shape — Lane-3 first-hand study; **[citation needed: study artifact, board `wi-e0019d2d`]**). **INTRODUCED, NOT SYNCED** (R1): v3 creates the *format*; it does not create federation. Optimistic locking is what lets a future federated writer detect "this changed under me" instead of clobbering a sibling kingdom's edit. |
+| **markdown+hash mirror — the constellation door** | A markdown + hash mirror format using the **`baselineVersion` optimistic-locking** shape — (`baselineVersion` optimistic-locking shape — Lane-3 first-hand study; **[citation needed: study artifact, board `wi-e0019d2d`]**). **INTRODUCED, NOT SYNCED** (R1): v3 creates the *format*; it does not create federation. Optimistic locking is what lets a future federated writer detect "this changed under me" instead of clobbering a sibling kingdom's edit. |
 
 ---
 
@@ -91,7 +91,7 @@ Recorded scope shape only:
 | Component | Shape |
 |---|---|
 | Cross-kingdom sync | multiple daemons, each a kingdom, exchanging memory deltas |
-| Stargate-mediated memory exchange | the Constella protocol as the transport/negotiation layer |
+| Stargate-mediated memory exchange | the constellation protocol as the transport/negotiation layer |
 | Persona merge policies | what happens when two kingdoms' "who we are" documents disagree — merge, fork, or negotiated lineage |
 
 **What v1–v3 must not foreclose** (this is the doctrine's actual constraint on today's work):

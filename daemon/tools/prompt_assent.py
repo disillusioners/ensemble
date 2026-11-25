@@ -1,5 +1,5 @@
 """The ``prompt_assent`` tool — the conversational approval lane
-("The Emperor's Word / Assent") — Phase 2 (tool surface + registration).
+("The user's Word / Assent") — Phase 2 (tool surface + registration).
 
 One tool, FOUR verbs (AR-2 — ``action ∈ {list, mint, approve, reject}``),
 behind the house's THREE-LAYER access posture:
@@ -43,7 +43,7 @@ requires a live, FRESH factor-2 window, and the mint context
 DAEMON-SIDE from the WINDOW'S MESSAGE ROW (the nested
 ``metadata["discord"]``) — NEVER from tool arguments. Without that, a
 prompt-injected ari could mint for any CORE pending row and supersede
-the Emperor's live token (DoS + authority fabrication). The mint branch:
+the user's live token (DoS + authority fabrication). The mint branch:
 
     M-4a. the row exists / is CORE class / is ``pending_approval``
           → ``item-not-found`` / ``item-not-assentable`` / ``item-not-pending``
@@ -145,9 +145,9 @@ import time
 from datetime import datetime, timezone
 from typing import Annotated, Any, Optional
 
-from langchain_core.tools import tool
 from pydantic import BaseModel, Field, ValidationError
 
+from ._schema_registry import tool
 from ..config import (
     PROMPT_ASSENT_DEFAULT_ENABLED,
     PROMPT_ASSENT_DEFAULT_HOURLY_MISMATCH_BUDGET,
@@ -844,7 +844,7 @@ def _emit_info_line(
 def canonical_token_form(token: str) -> str:
     """Normalize an echoed token to the STORED raw form.
 
-    The Emperor may echo the grouped rendering (``CONFIRM-XXXX-XXXX``)
+    The user may echo the grouped rendering (``CONFIRM-XXXX-XXXX``)
     or the raw one; the durable row stores ``sha256`` of the RAW form
     (``CONFIRM-XXXXXXXX``). This maps any accepted spelling onto the
     raw form so the hash lookup is stable. Non-token strings are
@@ -1574,6 +1574,94 @@ def _render_mint_response(
     ])
 
 
+# ── The input model (module level — hoisted out of the factory body) ──────
+#
+# The class statement used to run INSIDE the factory body, so every
+# factory call rebuilt the pydantic model class. The schema is a pure
+# function of the field declarations (no closure dependency), so it
+# lives at MODULE level; the ``@tool(args_schema=...)`` reference below
+# is unchanged.
+
+
+class PromptAssentInput(BaseModel):
+    """Input schema for ``prompt_assent`` (AR-2's four verbs)."""
+
+    action: Annotated[
+        str,
+        Field(
+            description=(
+                "One of exactly four verbs: list | mint | approve | reject. "
+                "list — the pending CORE prompt versions (read "
+                "only); mint — mint an assent token for one pending item "
+                "(gated on a live user turn); approve / reject — relay "
+                "the user's decision for a minted token. Any other "
+                "verb is refused with invalid-arguments."
+            ),
+        ),
+    ]
+    version_id: Annotated[
+        str,
+        Field(
+            default="",
+            description=(
+                "The pending prompt-version row (mint / approve / "
+                "reject). Ignored by list."
+            ),
+        ),
+    ] = ""
+    token: Annotated[
+        str,
+        Field(
+            default="",
+            description=(
+                "The grouped assent token the user received at mint "
+                "time (approve / reject only). It must also appear in "
+                "the human message that triggered this turn."
+            ),
+        ),
+    ] = ""
+    user_confirmed: Annotated[
+        bool,
+        Field(
+            default=False,
+            description=(
+                "The relay agent's explicit confirmation that the human "
+                "confirmed the decision (approve / reject only). The "
+                "three factors are always required."
+            ),
+        ),
+    ] = False
+    reject_reason: Annotated[
+        str,
+        Field(
+            default="",
+            description=(
+                "The rejection reason (reject only; required, <= 500 "
+                "chars)."
+            ),
+        ),
+    ] = ""
+    limit: Annotated[
+        int,
+        Field(
+            default=PROMPT_ASSENT_LIST_LIMIT_DEFAULT,
+            description=(
+                "The list bound (list only; default 50, max 200)."
+            ),
+        ),
+    ] = PROMPT_ASSENT_LIST_LIMIT_DEFAULT
+    force: Annotated[
+        bool,
+        Field(
+            default=False,
+            description=(
+                "Mint only: explicitly supersede an existing live token "
+                "for this item (M-4b). A re-mint re-shows the diff."
+            ),
+        ),
+    ] = False
+
+
 # ── The factory ───────────────────────────────────────────────────────────
 
 
@@ -1594,84 +1682,6 @@ def create_prompt_assent_tools(
     """
     caller_agent_id = agent_id or ""
     caller_instance_id = current_instance_id or ""
-
-    class PromptAssentInput(BaseModel):
-        """Input schema for ``prompt_assent`` (AR-2's four verbs)."""
-
-        action: Annotated[
-            str,
-            Field(
-                description=(
-                    "One of exactly four verbs: list | mint | approve | reject. "
-                    "list — the pending CORE prompt versions (read "
-                    "only); mint — mint an assent token for one pending item "
-                    "(gated on a live user turn); approve / reject — relay "
-                    "the Emperor's decision for a minted token. Any other "
-                    "verb is refused with invalid-arguments."
-                ),
-            ),
-        ]
-        version_id: Annotated[
-            str,
-            Field(
-                default="",
-                description=(
-                    "The pending prompt-version row (mint / approve / "
-                    "reject). Ignored by list."
-                ),
-            ),
-        ] = ""
-        token: Annotated[
-            str,
-            Field(
-                default="",
-                description=(
-                    "The grouped assent token the Emperor received at mint "
-                    "time (approve / reject only). It must also appear in "
-                    "the human message that triggered this turn."
-                ),
-            ),
-        ] = ""
-        user_confirmed: Annotated[
-            bool,
-            Field(
-                default=False,
-                description=(
-                    "The relay agent's explicit confirmation that the human "
-                    "confirmed the decision (approve / reject only). The "
-                    "three factors are always required."
-                ),
-            ),
-        ] = False
-        reject_reason: Annotated[
-            str,
-            Field(
-                default="",
-                description=(
-                    "The rejection reason (reject only; required, <= 500 "
-                    "chars)."
-                ),
-            ),
-        ] = ""
-        limit: Annotated[
-            int,
-            Field(
-                default=PROMPT_ASSENT_LIST_LIMIT_DEFAULT,
-                description=(
-                    "The list bound (list only; default 50, max 200)."
-                ),
-            ),
-        ] = PROMPT_ASSENT_LIST_LIMIT_DEFAULT
-        force: Annotated[
-            bool,
-            Field(
-                default=False,
-                description=(
-                    "Mint only: explicitly supersede an existing live token "
-                    "for this item (M-4b). A re-mint re-shows the diff."
-                ),
-            ),
-        ] = False
 
     @register_tool_category(PROMPT_ASSENT_CATEGORY_KEY)
     @tool(args_schema=PromptAssentInput)
@@ -1840,7 +1850,7 @@ async def _dispatch(
         return _refusal(
             "invalid-arguments",
             "the token is REQUIRED for approve/reject — it is the grouped "
-            "token the Emperor received at mint time",
+            "token the user received at mint time",
         )
 
     # ── the READ surface (side-effect free) ────────────────────────────
@@ -1910,7 +1920,7 @@ async def _list_branch(
     """The READ surface — the CORE pending rows. Side-effect free.
 
     NOT agent-filtered: the relay lane must be able to approve any
-    agent's row. The body goes to the Emperor's chat, NEVER into the
+    agent's row. The body goes to the user's chat, NEVER into the
     daemon log (the INFO line stays content-free).
     """
     pv_repo = getattr(manager, "_prompt_version_repo", None)
@@ -2383,7 +2393,7 @@ async def _decide_branch(
     # THE 4f SPLIT (T2.5 / refusal-cell-matrix §1.3 — BLOCKING). This site
     # used to call ``_record_mismatch`` UNCONDITIONALLY, before the code's
     # class was examined — so five Phase-1.5 refusals would have REVOKED the
-    # Emperor's live token (threshold 5) and burned the K-9 budget. Now:
+    # user's live token (threshold 5) and burned the K-9 budget. Now:
     #   * the two NEW codes (operator fault / re-designation) refuse BEFORE
     #     the recording call — no counter motion, no revoke, no budget burn
     #     (A-9, A-10 / AC7);

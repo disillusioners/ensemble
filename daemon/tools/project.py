@@ -13,10 +13,10 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING
 
-from langchain_core.tools import tool
 
 logger = logging.getLogger(__name__)
 
+from ._schema_registry import tool
 from ..repositories.project.repository import SQLModelProjectRepository
 from ..repositories.project.models import ProjectStatus, ProjectType
 from ._tool_registry import register_tool_category
@@ -98,13 +98,24 @@ Example:
 
 Provide either project_id, name, or shortname (project_id takes precedence, then name).
 
+Name and shortname lookups run a resolution ladder that resolves to exactly ONE project:
+exact name -> exact shortname -> case-insensitive exact name -> case-insensitive exact
+shortname -> case-insensitive substring over name/shortnames. A reference matching several
+projects returns a typed AMBIGUOUS_PROJECT error listing the candidates (the tool NEVER
+picks one for you) — retry with an explicit project_id. Descriptions are never searched,
+and projects of any status (active, paused, archived) stay resolvable.
+
 Args:
     project_id: The unique project identifier.
-    name: The project name (used if project_id not provided).
+    name: The project name or shortname (used if project_id not provided).
     shortname: A project shortname/nickname (used if project_id and name not provided).
+               Resolved against SHORTNAMES ONLY — never against the project name.
 
 Returns:
-    Project dictionary with all details, or None if not found.""",
+    Project dictionary with all details, or an error dictionary:
+    {"error": "Project not found", "error_code": "NOT_FOUND"} when nothing matches, or
+    {"error": ..., "error_code": "AMBIGUOUS_PROJECT", "candidates": [...]} when the
+    reference matches more than one project.""",
     
     "project_list": """List projects with optional filters.
 
@@ -441,20 +452,48 @@ def create_project_tools(
     
     @register_tool_category("project")
     @tool
-    def project_get(project_id: str | None = None, name: str | None = None, shortname: str | None = None) -> dict | None:
-        """Get a project by ID or name. Use tool_help("project_get") for details."""
+    def project_get(project_id: str | None = None, name: str | None = None, shortname: str | None = None) -> dict:
+        """Get a project by ID, name, or shortname. Use tool_help("project_get") for details."""
         if project_id:
             project = store.get(project_id)
-        elif name:
-            project = store.get_by_name(name)
+            if project is None:
+                return {
+                    "error": "Project not found",
+                    "error_code": "NOT_FOUND",
+                    "query": project_id,
+                    "candidates": [],
+                }
+            return project.to_dict()
+
+        if name:
+            resolution = store.resolve_project_reference(name, scope="name")
+            query = name
         elif shortname:
-            project = store.get_by_shortname(shortname)
+            resolution = store.resolve_project_reference(shortname, scope="shortname")
+            query = shortname
         else:
             return {"error": "Must provide either project_id, name, or shortname"}
-        
-        if project is None:
-            return {"error": "Project not found", "error_code": "NOT_FOUND"}
-        return project.to_dict()
+
+        if resolution.get("found"):
+            return resolution["project"].to_dict()
+
+        if resolution.get("error_code") == "AMBIGUOUS_PROJECT":
+            # NEVER silently pick one of several candidates — the caller
+            # gets the candidates and must retry with an explicit id.
+            return {
+                "error": resolution["error"],
+                "error_code": "AMBIGUOUS_PROJECT",
+                "query": query,
+                "candidates": resolution.get("candidates", []),
+                "candidate_count": resolution.get("candidate_count", 0),
+            }
+
+        return {
+            "error": "Project not found",
+            "error_code": "NOT_FOUND",
+            "query": query,
+            "candidates": [],
+        }
     project_get._full_doc_ = _FULL_DOCS["project_get"]
     
     @register_tool_category("project")

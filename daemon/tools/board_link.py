@@ -52,9 +52,9 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Annotated
 
-from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
+from ._schema_registry import tool
 from ._tool_registry import register_tool_category
 from .views_auth import BOARD_LINK_AGENTS, _is_views_authorized
 
@@ -113,6 +113,38 @@ def _error(msg: str) -> str:
     return f"Error: {msg}"
 
 
+# --------------------------------------------------------------------------
+# Module-level input models — HOISTED from the factory body.
+#
+# WHY (c2r-hoist-a): a ``class X(BaseModel)`` statement INSIDE a tool
+# factory executes on EVERY factory call, so every graph assembly
+# rebuilt this pydantic class from scratch. The process-level schema
+# registry (``daemon/tools/_schema_registry.py``) memoises the
+# DECORATOR's schema but CANNOT prevent the factory-local class
+# statement — that class is the CALLER-supplied ``args_schema``, not a
+# decorator-inferred one. At module level the class is built ONCE at
+# import, the registry then serves it from cache on every assembly,
+# and the agent-visible schema is byte-identical (pinned against the
+# BASE fixture ``tests/unit/tools/fixtures/module_level_inputs_a_base.json``
+# by ``tests/unit/tools/test_module_level_inputs_a.py``).
+# --------------------------------------------------------------------------
+
+class BoardLinkInput(BaseModel):
+    """Input schema for board_link."""
+
+    refresh: Annotated[
+        bool,
+        Field(
+            default=False,
+            description=(
+                "Issue a NEW passcode: bump the generation (revoking "
+                "every outstanding grant cookie) and clear a lockout. "
+                "This is the only recovery path after 10 wrong attempts."
+            ),
+        ),
+    ]
+
+
 def create_board_link_tools(
     manager: "InstanceManager",
     *,
@@ -134,21 +166,6 @@ def create_board_link_tools(
     """
     caller_agent_id = agent_id or ""
     caller_instance_id = current_instance_id or ""
-
-    class BoardLinkInput(BaseModel):
-        """Input schema for board_link."""
-
-        refresh: Annotated[
-            bool,
-            Field(
-                default=False,
-                description=(
-                    "Issue a NEW passcode: bump the generation (revoking "
-                    "every outstanding grant cookie) and clear a lockout. "
-                    "This is the only recovery path after 10 wrong attempts."
-                ),
-            ),
-        ]
 
     @register_tool_category("board-link")
     @tool(args_schema=BoardLinkInput)

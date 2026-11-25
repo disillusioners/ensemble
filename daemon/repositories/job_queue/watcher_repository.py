@@ -477,3 +477,19 @@ class JobWatcherRepository:
         with SQLModelSession(self.engine) as db_session:
             stmt = select(JobWatcher)
             return list(db_session.exec(stmt).all())
+
+
+    def get_active_watches(self) -> list[JobWatcher]:
+        """Get all active watches (for reconciliation scan).
+
+        Carries the same (currently unfiltered) read as
+        ``get_all_active_watches`` — there is no persisted
+        active-state column on ``job_watchers``, so every row is an
+        active watch. Retained as a distinct method so the reconciliation
+        hot path can use a bound, single-purpose read while the legacy
+        ``get_all_active_watches`` stays available for callers/tests that
+        expect the unbounded full-table shape.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            stmt = select(JobWatcher)
+            return list(db_session.exec(stmt).all())

@@ -4,7 +4,7 @@ Phase 4 of the Memoir Store v1 lane (plan:
 ``.agents/shared/planning/ari-memoir-store/phase4-plan.md`` — the whole
 phase; decisions D4.1-D4.16).
 
-Six callable tools, four families (pin/unpin are one family):
+Eight callable tools, four families (pin/unpin are one family):
 
 * ``memoir_write(text, title?, importance?, event_at?, stars?, keepsake?,
   reason?, actor?)`` — THE HOT APPEND. One INSERT; the write never blocks
@@ -12,7 +12,7 @@ Six callable tools, four families (pin/unpin are one family):
   result says so (``semantic_status: "pending"`` — AM-23: the model must
   be TOLD the semantic index lags).
 * ``memoir_pin(id, reason, actor)`` — keepsake governance. The ``actor``
-  is a CLAIM, never derived (R2): the caller names empress/emperor and a
+  is a CLAIM, never derived (R2): the caller names an actor claim and a
   wrong claim is detectable at write time (the result carries the house
   provenance class beside the claim — D4.10). ``actor`` is REQUIRED.
 * ``memoir_unpin(id)`` — the BLESSED signature (no ``actor``: no column
@@ -103,9 +103,9 @@ import logging
 from datetime import datetime
 from typing import Annotated, Any
 
-from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
+from ._schema_registry import tool
 from ..config import MEMOIR_ENABLED_ENV_VAR
 from ..repositories.memoir.constellation_repository import (
     MemoirConstellationRepository,
@@ -175,6 +175,8 @@ MEMOIR_TOOL_NAMES: frozenset[str] = frozenset(
         "memoir_recall",
         "memoir_timeline",
         "memoir_about",
+        "memoir_review",
+        "memoir_persona_ratify",
     }
 )
 
@@ -583,6 +585,252 @@ def _render_synthesis_block(synthesis: dict[str, Any]) -> str:
     """
     return render_synthesis(synthesis)
 
+# ── the input schemas — MODULE LEVEL (c2r-hoist-c) ────────────
+# A class statement inside a factory body re-runs on EVERY factory
+# call (one fresh pydantic model per assembly). At module level each
+# class is built ONCE at import and the schema registry then serves
+# every later assembly from cache. VERBATIM move: the fields,
+# annotations, defaults and descriptions are unchanged.
+
+class MemoirWriteInput(BaseModel):
+    """Input schema for memoir_write."""
+
+    text: Annotated[
+        str,
+        Field(
+            description=(
+                "The memory itself — FIRST-PERSON narrative about me "
+                "and the user (what happened, what I learned, what "
+                "matters). Not project state, task progress or code."
+            )
+        ),
+    ]
+    title: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=(
+                "Optional short title (<=200 chars) — the first line "
+                "of the keepsake zone rendering."
+            ),
+        ),
+    ]
+    importance: Annotated[
+        int,
+        Field(
+            default=5,
+            description=(
+                "1-10 (default 5). 9-10 = shaped who we are; 1-2 = "
+                "noise. Affects recall ranking."
+            ),
+        ),
+    ]
+    event_at: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=(
+                "Optional ISO-8601 timestamp of WHEN the event "
+                "happened (defaults to now). Naive digits are read "
+                "as UTC; the house timezone is Asia/Ho_Chi_Minh "
+                "(+07:00) — carry the offset or pre-convert."
+            ),
+        ),
+    ]
+    stars: Annotated[
+        list[str] | None,
+        Field(
+            default=None,
+            description=(
+                "Optional flat list of mention strings (@people, "
+                "#projects) — self-declared, verbatim, <=16 entries."
+            ),
+        ),
+    ]
+    keepsake: Annotated[
+        bool,
+        Field(
+            default=False,
+            description=(
+                "True = pin as a keepsake (the always-injected zone). "
+                "Requires BOTH reason and actor; refused at the cap "
+                "(nothing is ever evicted)."
+            ),
+        ),
+    ]
+    reason: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=(
+                "Required when keepsake=true — why this memory must "
+                "always be in context."
+            ),
+        ),
+    ]
+    actor: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=(
+                "Required when keepsake=true — WHO decided: exactly "
+                "'empress' or 'emperor'. A CLAIM, never derived; a "
+                "wrong claim is detectable (the result carries the "
+                "turn's provenance class beside it)."
+            ),
+        ),
+    ]
+
+class MemoirPinInput(BaseModel):
+    """Input schema for memoir_pin."""
+
+    id: Annotated[
+        str,
+        Field(description="The episode id to pin as a keepsake."),
+    ]
+    reason: Annotated[
+        str,
+        Field(
+            description=(
+                "Why this memory must always be in context — part of "
+                "the pin's meaning, never optional."
+            ),
+        ),
+    ]
+    actor: Annotated[
+        str,
+        Field(
+            description=(
+                "WHO decided: exactly 'empress' or 'emperor'. A CLAIM, "
+                "never derived."
+            ),
+        ),
+    ]
+
+class MemoirUnpinInput(BaseModel):
+    """Input schema for memoir_unpin."""
+
+    id: Annotated[
+        str,
+        Field(
+            description=(
+                "The episode id to unpin. The episode itself is kept; "
+                "only the pin (and its claim) is cleared. Idempotent."
+            ),
+        ),
+    ]
+
+class MemoirRecallInput(BaseModel):
+    """Input schema for memoir_recall."""
+
+    query: Annotated[
+        str,
+        Field(
+            description=(
+                "What to remember — free text matched against my own "
+                "episodes (lexical always; semantic when indexed)."
+            ),
+        ),
+    ]
+    k: Annotated[
+        int,
+        Field(
+            default=5,
+            description=(
+                "How many episodes (default 5, hard max 20). An "
+                "out-of-range k is REFUSED, never silently clamped."
+            ),
+        ),
+    ]
+
+class MemoirTimelineInput(BaseModel):
+    """Input schema for memoir_timeline."""
+
+    since: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=(
+                "Inclusive lower bound on event_at (ISO-8601; naive "
+                "digits read as UTC)."
+            ),
+        ),
+    ]
+    until: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=(
+                "Inclusive upper bound on event_at (ISO-8601; naive "
+                "digits read as UTC)."
+            ),
+        ),
+    ]
+    q: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=(
+                "Optional lexical narrowing term inside the window."
+            ),
+        ),
+    ]
+
+class MemoirAboutInput(BaseModel):
+    """Input schema for memoir_about."""
+
+    star: Annotated[
+        str,
+        Field(
+            description=(
+                "The star (entity) name to retrieve a dossier for "
+                "(<=100 chars)."
+            ),
+        ),
+    ]
+
+class MemoirReviewInput(BaseModel):
+    """Input schema for memoir_review."""
+
+    title: Annotated[
+        str,
+        Field(
+            description=(
+                "The proposal's title exactly as shown in the "
+                "briefing's proposals zone."
+            ),
+        ),
+    ]
+    decision: Annotated[
+        str,
+        Field(
+            description=(
+                "The review decision: 'accepted' or 'declined'."
+            ),
+        ),
+    ]
+    actor: Annotated[
+        str,
+        Field(
+            description=(
+                "WHO decided — the actor claim. Validated against the "
+                "allowed set."
+            ),
+        ),
+    ]
+
+class MemoirPersonaRatifyInput(BaseModel):
+    """Input schema for memoir_persona_ratify."""
+
+    version_id: Annotated[
+        str,
+        Field(
+            description=(
+                "The pending persona version id to ratify."
+            ),
+        ),
+    ]
+
 
 def create_memoir_tools(
     manager: Any,
@@ -591,7 +839,7 @@ def create_memoir_tools(
     agent_id: str = "",
     agent_tag: str | None = None,
 ) -> list:
-    """Build the six memoir tools for one instance/agent.
+    """Build the eight memoir tools for one instance/agent.
 
     Args:
         manager: The ``InstanceManager`` — the tools read ONLY its
@@ -608,209 +856,12 @@ def create_memoir_tools(
         agent_tag: The caller's version tag (signature parity; unused).
 
     Returns:
-        A list of the six ``@tool``-decorated callables. NO
+        A list of the eight ``@tool``-decorated callables. NO
         ``*_if_available`` wrapper (D4.6): a degraded boot leaves the
         tools PRESENT and loudly refusing.
     """
     caller_agent_id = agent_id or ""
     caller_instance_id = current_instance_id or ""
-
-    class MemoirWriteInput(BaseModel):
-        """Input schema for memoir_write."""
-
-        text: Annotated[
-            str,
-            Field(
-                description=(
-                    "The memory itself — FIRST-PERSON narrative about me "
-                    "and the user (what happened, what I learned, what "
-                    "matters). Not project state, task progress or code."
-                )
-            ),
-        ]
-        title: Annotated[
-            str | None,
-            Field(
-                default=None,
-                description=(
-                    "Optional short title (<=200 chars) — the first line "
-                    "of the keepsake zone rendering."
-                ),
-            ),
-        ]
-        importance: Annotated[
-            int,
-            Field(
-                default=5,
-                description=(
-                    "1-10 (default 5). 9-10 = shaped who we are; 1-2 = "
-                    "noise. Affects recall ranking."
-                ),
-            ),
-        ]
-        event_at: Annotated[
-            str | None,
-            Field(
-                default=None,
-                description=(
-                    "Optional ISO-8601 timestamp of WHEN the event "
-                    "happened (defaults to now). Naive digits are read "
-                    "as UTC; the house timezone is Asia/Ho_Chi_Minh "
-                    "(+07:00) — carry the offset or pre-convert."
-                ),
-            ),
-        ]
-        stars: Annotated[
-            list[str] | None,
-            Field(
-                default=None,
-                description=(
-                    "Optional flat list of mention strings (@people, "
-                    "#projects) — self-declared, verbatim, <=16 entries."
-                ),
-            ),
-        ]
-        keepsake: Annotated[
-            bool,
-            Field(
-                default=False,
-                description=(
-                    "True = pin as a keepsake (the always-injected zone). "
-                    "Requires BOTH reason and actor; refused at the cap "
-                    "(nothing is ever evicted)."
-                ),
-            ),
-        ]
-        reason: Annotated[
-            str | None,
-            Field(
-                default=None,
-                description=(
-                    "Required when keepsake=true — why this memory must "
-                    "always be in context."
-                ),
-            ),
-        ]
-        actor: Annotated[
-            str | None,
-            Field(
-                default=None,
-                description=(
-                    "Required when keepsake=true — WHO decided: exactly "
-                    "'empress' or 'emperor'. A CLAIM, never derived; a "
-                    "wrong claim is detectable (the result carries the "
-                    "turn's provenance class beside it)."
-                ),
-            ),
-        ]
-
-    class MemoirPinInput(BaseModel):
-        """Input schema for memoir_pin."""
-
-        id: Annotated[
-            str,
-            Field(description="The episode id to pin as a keepsake."),
-        ]
-        reason: Annotated[
-            str,
-            Field(
-                description=(
-                    "Why this memory must always be in context — part of "
-                    "the pin's meaning, never optional."
-                ),
-            ),
-        ]
-        actor: Annotated[
-            str,
-            Field(
-                description=(
-                    "WHO decided: exactly 'empress' or 'emperor'. A CLAIM, "
-                    "never derived."
-                ),
-            ),
-        ]
-
-    class MemoirUnpinInput(BaseModel):
-        """Input schema for memoir_unpin."""
-
-        id: Annotated[
-            str,
-            Field(
-                description=(
-                    "The episode id to unpin. The episode itself is kept; "
-                    "only the pin (and its claim) is cleared. Idempotent."
-                ),
-            ),
-        ]
-
-    class MemoirRecallInput(BaseModel):
-        """Input schema for memoir_recall."""
-
-        query: Annotated[
-            str,
-            Field(
-                description=(
-                    "What to remember — free text matched against my own "
-                    "episodes (lexical always; semantic when indexed)."
-                ),
-            ),
-        ]
-        k: Annotated[
-            int,
-            Field(
-                default=5,
-                description=(
-                    "How many episodes (default 5, hard max 20). An "
-                    "out-of-range k is REFUSED, never silently clamped."
-                ),
-            ),
-        ]
-
-    class MemoirTimelineInput(BaseModel):
-        """Input schema for memoir_timeline."""
-
-        since: Annotated[
-            str | None,
-            Field(
-                default=None,
-                description=(
-                    "Inclusive lower bound on event_at (ISO-8601; naive "
-                    "digits read as UTC)."
-                ),
-            ),
-        ]
-        until: Annotated[
-            str | None,
-            Field(
-                default=None,
-                description=(
-                    "Inclusive upper bound on event_at (ISO-8601; naive "
-                    "digits read as UTC)."
-                ),
-            ),
-        ]
-        q: Annotated[
-            str | None,
-            Field(
-                default=None,
-                description=(
-                    "Optional lexical narrowing term inside the window."
-                ),
-            ),
-        ]
-
-    class MemoirAboutInput(BaseModel):
-        """Input schema for memoir_about."""
-
-        star: Annotated[
-            str,
-            Field(
-                description=(
-                    "The star (entity) name to retrieve a dossier for "
-                    "(<=100 chars)."
-                ),
-            ),
-        ]
 
     @register_tool_category(MEMOIR_CATEGORY_KEY)
     @tool(args_schema=MemoirWriteInput)
@@ -1320,6 +1371,166 @@ def create_memoir_tools(
                 "an unexpected error occurred (logged server-side)",
             )
 
+    @register_tool_category(MEMOIR_CATEGORY_KEY)
+    @tool(args_schema=MemoirReviewInput)
+    async def memoir_review(
+        title: str,
+        decision: str,
+        actor: str,
+    ) -> dict | str:
+        """Record a keepsake-proposal review decision (accepted or declined). Use tool_help("memoir_review") for details."""
+        label = "memoir_review"
+        try:
+            refusal = _gate(label, "recorded", caller_agent_id, manager)
+            if refusal is not None:
+                return refusal
+            # ── D4.2 gate 3: argument validation (pre-DB) ────────────
+            if not isinstance(title, str) or not title.strip():
+                return _refuse(
+                    label,
+                    MEMOIR_CODE_NOT_FOUND,
+                    "a proposal title is required",
+                )
+            if decision not in ("accepted", "declined"):
+                return _refuse(
+                    label,
+                    MEMOIR_CODE_INTERNAL_ERROR,
+                    "the decision must be 'accepted' or 'declined'",
+                )
+            if not isinstance(actor, str) or not actor.strip():
+                return _refuse(
+                    label,
+                    MEMOIR_CODE_ACTOR_REQUIRED,
+                    "a review requires an actor claim",
+                )
+            if actor not in PIN_ACTORS:
+                return _refuse(
+                    label,
+                    MEMOIR_CODE_INVALID_ACTOR,
+                    f"the review actor must be one of {sorted(PIN_ACTORS)}; "
+                    f"got {actor!r} — the claim is never derived",
+                )
+            # ── D4.2 gate 4: the DB touch (off-loop) ─────────────────
+            engine = getattr(manager, "_engine", None)
+            if engine is None:
+                return _refuse(
+                    label,
+                    MEMOIR_CODE_INTERNAL_ERROR,
+                    "the memoir store is not available on this manager "
+                    "(no engine); nothing was recorded",
+                )
+            from daemon.services.memoir_keepsake_proposal_service import (
+                MemoirKeepsakeProposalService,
+            )
+
+            service = MemoirKeepsakeProposalService(engine)
+
+            def _sync() -> Any:
+                return service.record_review(
+                    title=title, decision=decision, actor=actor
+                )
+
+            try:
+                result = await asyncio.to_thread(_sync)
+            except ValueError as exc:
+                code = str(getattr(exc, "code", "") or "")
+                mapped = {
+                    "not_found": MEMOIR_CODE_NOT_FOUND,
+                    "invalid_decision": MEMOIR_CODE_INTERNAL_ERROR,
+                    "invalid_actor": MEMOIR_CODE_INVALID_ACTOR,
+                }.get(code, MEMOIR_CODE_INTERNAL_ERROR)
+                message = str(
+                    getattr(exc, "message", None) or getattr(exc, "args", ("",))[0] or exc
+                )
+                return _refuse(label, mapped, message or code or "invalid")
+            if not isinstance(result, dict):
+                result = {"result": result}
+            if decision == "accepted":
+                result.setdefault("next_action", "memoir_pin")
+                result.setdefault(
+                    "note",
+                    "decision recorded; pin the episode with memoir_pin",
+                )
+            return result
+        except Exception:  # noqa: BLE001 — house pattern: error string, never raise
+            logger.exception("memoir_review failed")
+            return _refuse(
+                label,
+                MEMOIR_CODE_INTERNAL_ERROR,
+                "an unexpected error occurred (logged server-side); nothing "
+                "was recorded",
+            )
+
+    @register_tool_category(MEMOIR_CATEGORY_KEY)
+    @tool(args_schema=MemoirPersonaRatifyInput)
+    async def memoir_persona_ratify(
+        version_id: str,
+    ) -> dict | str:
+        """Ratify a pending persona version through the human lane. Use tool_help("memoir_persona_ratify") for details."""
+        label = "memoir_persona_ratify"
+        try:
+            refusal = _gate(label, "recorded", caller_agent_id, manager)
+            if refusal is not None:
+                return refusal
+            if not isinstance(version_id, str) or not version_id.strip():
+                return _refuse(
+                    label,
+                    MEMOIR_CODE_NOT_FOUND,
+                    "a persona version id is required",
+                )
+            engine = getattr(manager, "_engine", None)
+            if engine is None:
+                return _refuse(
+                    label,
+                    MEMOIR_CODE_INTERNAL_ERROR,
+                    "the memoir store is not available on this manager "
+                    "(no engine); nothing was recorded",
+                )
+            from daemon.repositories.memoir.repository import (
+                MemoirPersonaRepository,
+            )
+            from daemon.repositories.prompt_version.repository import (
+                actor_from_instance,
+            )
+            from daemon.services.prompt_version_service import (
+                HumanLaneRequiredError,
+            )
+
+            actor = actor_from_instance(caller_instance_id, caller_agent_id)
+
+            def _sync() -> Any:
+                repo = MemoirPersonaRepository(engine)
+                return repo.approve(version_id, actor)
+
+            try:
+                result = await asyncio.to_thread(_sync)
+            except HumanLaneRequiredError as exc:
+                return _refuse(
+                    label,
+                    MEMOIR_CODE_NOT_AUTHORIZED,
+                    str(exc),
+                )
+            except ValueError as exc:
+                message = str(exc)
+                if "not found" in message.lower():
+                    return _refuse(label, MEMOIR_CODE_NOT_FOUND, message)
+                return _refuse(label, MEMOIR_CODE_INTERNAL_ERROR, message)
+            if not isinstance(result, dict):
+                # render a small dict summary
+                result = {
+                    "version_id": getattr(result, "id", version_id),
+                    "status": getattr(result, "status", "approved"),
+                }
+            return result
+        except Exception:  # noqa: BLE001 — house pattern: error string, never raise
+            logger.exception("memoir_persona_ratify failed")
+            return _refuse(
+                label,
+                MEMOIR_CODE_INTERNAL_ERROR,
+                "an unexpected error occurred (logged server-side); nothing "
+                "was recorded",
+            )
+
     # ── the tool_help surface (the ``_full_doc_`` contract) ─────────────
     # D0.7: the resolved knob state is embedded from the knob module's
     # own text — the wording has exactly one home.
@@ -1387,6 +1598,14 @@ def create_memoir_tools(
         "linked episodes returns an empty-dossier SUCCESS. Unauthorized "
         "callers and a disabled surface are refused." + shared_tail
     )
+    memoir_review._full_doc_ = (
+        "Record a keepsake-proposal review decision (accepted or declined). "
+        "The decision is recorded only; nothing is pinned. For an accepted "
+        "decision, the next action is memoir_pin." + shared_tail
+    )
+    memoir_persona_ratify._full_doc_ = (
+        "Ratify a pending persona version through the human lane." + shared_tail
+    )
 
     return [
         memoir_write,
@@ -1395,6 +1614,8 @@ def create_memoir_tools(
         memoir_recall,
         memoir_timeline,
         memoir_about,
+        memoir_review,
+        memoir_persona_ratify,
     ]
 
 

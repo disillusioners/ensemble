@@ -74,7 +74,6 @@ def mock_config():
         ),
         persistence=PersistenceConfig(
             db_path=":memory:",
-            checkpoint_interval=1,
             checkpoint_ttl_hours=168,
             checkpoint_cleanup_interval=24,
             max_instance_history=300

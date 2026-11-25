@@ -54,9 +54,9 @@ import json
 import logging
 from typing import Annotated, Optional
 
-from langchain_core.tools import tool
 from pydantic import Field
 
+from ._schema_registry import tool
 from ._tool_registry import register_tool_category
 from .service_spawner import DEFAULT_TAIL_LINES
 

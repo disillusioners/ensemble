@@ -6,7 +6,7 @@ Lane commits: `681de8081` (phases 1+2: category #22 tools + registration + 4 gra
 
 ## Ruling record
 
-- **Design FIXED 2026-11-13 (Emperor ruling).** The release payload IS the source of truth: no DB copy, no cache, no write path — a read-only window (`guidelines_list` parsed summaries + `guideline_read` verbatim) onto `releases/<v>/guidelines/`, staged flat from `docs/guidelines/` by `stage.sh`.
+- **Design FIXED 2026-11-13 (user ruling).** The release payload IS the source of truth: no DB copy, no cache, no write path — a read-only window (`guidelines_list` parsed summaries + `guideline_read` verbatim) onto `releases/<v>/guidelines/`, staged flat from `docs/guidelines/` by `stage.sh`.
 - **Architecture adjudication Q1–Q4 BINDING 2026-11-13** (`.agents/shared/planning/guideline-read-tool/architecture-adjudication.md`): Q1 payload-resolution ladder (explicit `base_dir` → frozen `<exe-dir>/guidelines` → dev repo `docs/guidelines` → typed refusal); Q2/Q3 seam + dev-fallback rulings; Q4 kill-switch ruling (below).
 
 ## Allow-list record — EXACTLY 4

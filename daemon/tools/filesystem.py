@@ -26,9 +26,9 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path, PurePath
-from langchain_core.tools import tool
 
 from daemon.services.workspace_guard import WorkspaceGuard
+from ._schema_registry import tool
 from ._tool_registry import register_tool_category
 from ._truncate import truncate_output
 from .prompt_artifacts import check_write as _check_prompt_artifact_write

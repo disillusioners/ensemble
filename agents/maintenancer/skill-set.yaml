@@ -35,3 +35,33 @@ skills:
     auto_load: false
     category: maintenance
     description: "MaintenanceJob registry + StaleTaskRecovery sweep; read-only diagnostic"
+  - name: lane-disk-sweep
+    version: "1.0.0"
+    auto_load: false
+    category: maintenance
+    description: "Bounded bash scratch sweep with an open-by-process deletion fence"
+  - name: lane-pok-sweep
+    version: "1.0.0"
+    auto_load: false
+    category: maintenance
+    description: "Read-only POK census + delta reconcile; query-only POK surface"
+  - name: lane-skill-check
+    version: "1.0.0"
+    auto_load: false
+    category: maintenance
+    description: "Consolidated skill-set/body drift and version-consistency check"
+  - name: lane-abnormality-check
+    version: "1.0.0"
+    auto_load: false
+    category: maintenance
+    description: "Anomaly signals + old-tier health and reportless-week watch"
+  - name: lane-metrics-watch
+    version: "1.0.0"
+    auto_load: false
+    category: maintenance
+    description: "Read-only metrics digest freshness and cross-run delta watch"
+  - name: run-report-writer
+    version: "1.0.0"
+    auto_load: false
+    category: maintenance
+    description: "Weekly run report/receipt/INDEX authoring with writer ladder and run_id mint"

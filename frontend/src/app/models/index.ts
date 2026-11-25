@@ -4,7 +4,8 @@
 // rationale); runtime values from the mirrors are imported from the
 // model files directly by the modules that use them.
 //
-// Why this file is large (~1,097 lines): the single barrel
+// FE-UI lane marker (central maintenance P4 report slice): PD-2.
+// Why this file is large (1,109 lines): the single barrel
 // aggregation of the FE's wire-mirror types — one import site by
 // design.
 // FE-UI lane marker (group-chat P6 room modal surface): A-P6-23.
@@ -1078,6 +1079,12 @@ export type * from './room.model';
 // the wire-contract notes (snake_case as-is, ISO-8601 UTC strings, the
 // `count` == page-length rule).
 export * from './mcps-gateway.model';
+
+// Report (Central Maintenance System Phase 4, D-E) — the READ-ONLY
+// operator surface: list of maintenance runs + view URLs into the
+// live_views `maintenance-reports` root. See report.model.ts for the
+// wire-contract notes.
+export * from './report.model';
 
 // Metrics query door (central-metrics-v1 Phase 5) — the VERBATIM mirror of
 // the FROZEN envelope + the three route payloads. The door is

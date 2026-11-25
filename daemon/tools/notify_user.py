@@ -129,9 +129,9 @@ import weakref
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
-from langchain_core.tools import tool
 from pydantic import BaseModel, Field, ValidationError
 
+from ._schema_registry import tool
 from ..config import NotifyUserConfig
 from ..repositories.notify_audit.models import (
     OUTCOME_DELIVERY_FAILED,
@@ -457,6 +457,22 @@ def _body_digest(message: str) -> tuple[int, str]:
     return len(message), hashlib.sha256(message.encode("utf-8")).hexdigest()
 
 
+class NotifyUserInput(BaseModel):
+    """Input schema for notify_user."""
+
+    message: Annotated[
+        str,
+        Field(
+            description=(
+                "The message text, 1-2000 chars (one notify = one "
+                "chat message; over-length is refused BEFORE any "
+                "resolution or dispatch). Plain text — no "
+                "attachments, no markdown tables."
+            )
+        ),
+    ]
+
+
 def create_notify_user_tools(
     manager: Any,
     *,
@@ -485,20 +501,6 @@ def create_notify_user_tools(
     caller_agent_id = agent_id or ""
     caller_instance_id = current_instance_id or ""
 
-    class NotifyUserInput(BaseModel):
-        """Input schema for notify_user."""
-
-        message: Annotated[
-            str,
-            Field(
-                description=(
-                    "The message text, 1-2000 chars (one notify = one "
-                    "chat message; over-length is refused BEFORE any "
-                    "resolution or dispatch). Plain text — no "
-                    "attachments, no markdown tables."
-                )
-            ),
-        ]
 
     @register_tool_category(NOTIFY_CATEGORY_KEY)
     @tool(args_schema=NotifyUserInput)

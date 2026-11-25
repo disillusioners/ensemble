@@ -257,7 +257,6 @@ limits:
   
 persistence:
   db_path: "./data/instances.db"
-  checkpoint_interval: 1  # every message
   checkpoint_ttl_hours: 168        # 7 days, then eligible for cleanup
   checkpoint_cleanup_interval: 24  # hours between cleanup runs
   checkpoint_max_count: 1000       # max checkpoints per instance

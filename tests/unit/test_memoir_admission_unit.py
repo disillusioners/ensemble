@@ -305,13 +305,13 @@ def test_an_oversized_star_is_refused(repo):
 def test_the_star_bounds_are_hygiene_not_normalization(repo):
     """The bound is measured POST-TRIM; the stored value is VERBATIM."""
     episode = repo.insert_episode(
-        agent_id="ari", body="fine", stars=["  the Emperor  "]
+        agent_id="ari", body="fine", stars=["  the user  "]
     )
     with Session(repo.engine) as session:
         row = session.exec(
             select(MemoirEpisode).where(MemoirEpisode.id == episode)
         ).first()
-        assert row.stars == ["  the Emperor  "]
+        assert row.stars == ["  the user  "]
 
 
 @pytest.mark.parametrize("bad_importance", [0, 11, -3, 42])

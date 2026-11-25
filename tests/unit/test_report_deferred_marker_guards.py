@@ -104,6 +104,10 @@ def dependency_bus() -> MagicMock:
     """Install a zero-pending-child bus for the root completion path."""
     bus = MagicMock(name="DependencyBus")
     bus.count_pending_for_target_sync.return_value = 0
+    # F-1: the QUALIFIED (S3) name is stamped too — the
+    # production paths read the qualified count; a mock that
+    # only answers the old name would answer a MagicMock.
+    bus.count_fulfillable_pending_for_target_sync.return_value = 0
     set_dependency_bus(bus)
     try:
         yield bus

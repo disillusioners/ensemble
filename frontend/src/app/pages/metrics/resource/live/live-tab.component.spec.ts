@@ -579,3 +579,135 @@ describe('LiveTabComponent — the attribution card (phase 6)', () => {
     expect(verbatimBlock).not.toMatch(/attributed.*\/.*anon|\/\s*anon/);
   });
 });
+
+// ── The visibility gate (hidden tab stops polling) ─────────────────────
+//
+// The house gate (jobs page #3 / nest-reports #7 / room #12): a HIDDEN
+// browser tab issues NO request, a REFOCUS produces EXACTLY ONE immediate
+// refresh (debounced 2 s — never a catch-up burst), and the teardown
+// detaches the listener.
+//
+// jsdom's ``document.visibilityState`` is a prototype getter — the test
+// shadows it with an own property so the production code reads the
+// simulated value.
+function setVisibility(state: 'visible' | 'hidden'): void {
+  Object.defineProperty(document, 'visibilityState', {
+    configurable: true,
+    get: () => state,
+  });
+}
+
+function fireVisibilityChange(): void {
+  document.dispatchEvent(new Event('visibilitychange'));
+}
+
+describe('LiveTabComponent — the visibility gate (hidden tab stops polling)', () => {
+  let fixture: ComponentFixture<LiveTabComponent>;
+  const resourcesMock: {
+    getLive: jest.Mock;
+    getSelfCost: jest.Mock;
+  } = { getLive: jest.fn(), getSelfCost: jest.fn() };
+
+  beforeEach(async () => {
+    await TestBed.configureTestingModule({
+      imports: [LiveTabComponent],
+      providers: [{ provide: ResourcesService, useValue: resourcesMock }],
+    }).compileComponents();
+    fixture = TestBed.createComponent(LiveTabComponent);
+    resourcesMock.getLive.mockReset();
+    resourcesMock.getSelfCost.mockReset();
+    resourcesMock.getLive.mockReturnValue(of(makeLive()));
+    resourcesMock.getSelfCost.mockReturnValue(of(makeSelfCost()));
+    setVisibility('visible');
+  });
+
+  afterEach(() => {
+    setVisibility('visible');
+    jest.useRealTimers();
+  });
+
+  it('a HIDDEN tab issues NO request — the poll tick is gated', () => {
+    jest.useFakeTimers();
+    fixture.detectChanges(); // ngOnInit → the first (unconditional) fetch
+    expect(resourcesMock.getLive).toHaveBeenCalledTimes(1);
+
+    setVisibility('hidden');
+    fireVisibilityChange();
+
+    jest.advanceTimersByTime(8000);
+    expect(resourcesMock.getLive).toHaveBeenCalledTimes(1);
+    jest.advanceTimersByTime(8000);
+    expect(resourcesMock.getLive).toHaveBeenCalledTimes(1);
+  });
+
+  it('a REFOCUS issues EXACTLY ONE refresh (no catch-up burst)', () => {
+    jest.useFakeTimers();
+    fixture.detectChanges();
+    expect(resourcesMock.getLive).toHaveBeenCalledTimes(1);
+
+    setVisibility('hidden');
+    fireVisibilityChange();
+    jest.advanceTimersByTime(8000);
+    expect(resourcesMock.getLive).toHaveBeenCalledTimes(1);
+
+    setVisibility('visible');
+    fireVisibilityChange();
+    // The refresh is DEBOUNCED (2 s) — before the window elapses, none.
+    jest.advanceTimersByTime(1999);
+    expect(resourcesMock.getLive).toHaveBeenCalledTimes(1);
+    jest.advanceTimersByTime(1);
+    expect(resourcesMock.getLive).toHaveBeenCalledTimes(2);
+  });
+
+  it('a rapid hide/show storm collapses into ONE refresh', () => {
+    jest.useFakeTimers();
+    fixture.detectChanges();
+
+    setVisibility('hidden');
+    fireVisibilityChange();
+    setVisibility('visible');
+    fireVisibilityChange();
+    setVisibility('hidden');
+    fireVisibilityChange();
+    setVisibility('visible');
+    fireVisibilityChange();
+
+    jest.advanceTimersByTime(2000);
+    expect(resourcesMock.getLive).toHaveBeenCalledTimes(2); // init + ONE refocus
+  });
+
+  it('destroy detaches the visibility listener and clears the interval', () => {
+    jest.useFakeTimers();
+    fixture.detectChanges();
+    expect(resourcesMock.getLive).toHaveBeenCalledTimes(1);
+
+    const removeSpy = jest.spyOn(document, 'removeEventListener');
+    fixture.destroy();
+    expect(removeSpy).toHaveBeenCalledWith('visibilitychange', expect.any(Function));
+    removeSpy.mockRestore();
+
+    // The interval is cleared — no tick survives the teardown.
+    jest.advanceTimersByTime(80_000);
+    expect(resourcesMock.getLive).toHaveBeenCalledTimes(1);
+
+    // A visibilitychange after the teardown issues NO request either.
+    setVisibility('hidden');
+    fireVisibilityChange();
+    setVisibility('visible');
+    fireVisibilityChange();
+    jest.advanceTimersByTime(2000);
+    expect(resourcesMock.getLive).toHaveBeenCalledTimes(1);
+  });
+
+  it('the 8 s cadence is UNCHANGED — the gate suppresses ticks, it does not slow them', () => {
+    jest.useFakeTimers();
+    fixture.detectChanges();
+
+    // Visible → the cadence is exactly 8 s (the Emperor ruling: the
+    // interval literal is NOT touched by the gate).
+    jest.advanceTimersByTime(8000);
+    expect(resourcesMock.getLive).toHaveBeenCalledTimes(2);
+    jest.advanceTimersByTime(8000);
+    expect(resourcesMock.getLive).toHaveBeenCalledTimes(3);
+  });
+});

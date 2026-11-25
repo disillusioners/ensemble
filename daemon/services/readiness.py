@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from concurrent.futures import TimeoutError as FuturesTimeout
 from datetime import datetime, timedelta, timezone
@@ -43,10 +44,11 @@ from daemon.constants import (
     CHECKPOINT_SENTINEL_TASK_ID,
     CHECKPOINT_SENTINEL_THREAD_ID,
     CHECKPOINT_SENTINEL_VALUE,
+    READINESS_BOOT_WARM_WINDOW_S,
     READINESS_GRACE_HORIZON_S,
     READINESS_LEAK_TICK_THRESHOLD,
 )
-from daemon.services.boot_epoch import BOOT_EPOCH_FLOOR
+from daemon.services.boot_epoch import BOOT_EPOCH_FLOOR, get_boot_epoch
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +100,100 @@ READINESS_COMPONENT_NAMES: tuple[str, ...] = (
     "services",
     "checkpoint_saver",
 )
+
+# ── The BOOT-WARM window (checkpoint-saver transient tolerance) ─────────────
+#
+# WHY: the checkpoint-saver sentinel RIDES THE HOT PATH BY DESIGN — the
+# sentinel ``aget_tuple`` takes the saver's ONE ``asyncio.Lock``, which
+# every production checkpoint op also takes. During the boot-restore
+# storm that lock is held for longer than the probe's inner budget
+# (0.9s), so the probe returns a GRACE-ELIGIBLE class (``pool_busy`` /
+# ``read_timeout``) — "the system was simply too busy to answer within
+# its budget". The grace tracker DELIBERATELY never changes
+# ``ready``/``reasons`` (the daemon never lies; the gate decides), so
+# the composite degraded anyway: a green→503→green flap INSIDE the
+# boot window (live evidence: one tick at ~112s into the v0.31.33 boot
+# on 2026-11-22, self-healed by the next tick).
+#
+# THE WINDOW TOLERATES EXACTLY TWO CLASSES. It is NOT "grace is on":
+#   * ``pool_busy``    — the saver's lock was held (contention).
+#   * ``read_timeout`` — the read did not answer in time, lock free.
+# It NEVER tolerates:
+#   * ``hard_component_red`` — the checkpoint path RAISED (a genuine
+#     failure: a broken path must never be masked);
+#   * ``probe_timeout``      — the OUTER budget expired (the probe
+#     thread did not answer at all — the orchestrator's own
+#     attribution, not the probe's);
+#   * ANY class after the window closes.
+BOOT_WINDOW_TOLERATED_FAILURE_CLASSES: frozenset[str] = frozenset(
+    {
+        FAILURE_CLASS_POOL_BUSY,
+        FAILURE_CLASS_READ_TIMEOUT,
+    }
+)
+
+#: Monotonic anchor captured at import — an approximation of the daemon
+#: process start (readiness.py is imported during daemon startup, just
+#: before the boot epoch is captured). Used ONLY to BOUND the boot
+#: window when the clocks disagree (see :func:`_boot_warm_window_state`):
+#: the tolerance may never outlive the process itself.
+_READINESS_PROCESS_MONOTONIC_START = time.monotonic()
+
+
+def _readiness_process_uptime_seconds() -> float:
+    """Seconds since this module was imported (monotonic clock).
+
+    A SEPARATE function (not an inline ``time.monotonic()``) so the
+    unit pins can pin the skew-guard leg deterministically.
+    """
+    return time.monotonic() - _READINESS_PROCESS_MONOTONIC_START
+
+
+def _as_naive_utc(value: datetime) -> datetime:
+    """Normalize a datetime into the boot epoch's frame (naive-UTC)."""
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _boot_warm_window_state(now: datetime) -> Optional[dict[str, Any]]:
+    """The BOOT-WARM window state at ``now`` (``None`` = window closed).
+
+    The window opens at the daemon boot epoch
+    (:func:`daemon.services.boot_epoch.get_boot_epoch` — DB time) and
+    closes ``READINESS_BOOT_WARM_WINDOW_S`` later (the Emperor boot
+    SLO: boot_epoch→readyz-green ≤ 120s).
+
+    FAIL-CLOSED on every uncertainty:
+      * no epoch captured (the capture failed, or this is not the
+        daemon process) ⇒ NO window ⇒ the checkpoint-saver component
+        degrades exactly as it did before;
+      * the epoch is OLDER than the window ⇒ NO window;
+      * the epoch is in the daemon's FUTURE (the DB clock is ahead of
+        the daemon clock — a clock disagreement, not a fact about the
+        boot): the daemon has just booted (the epoch IS the boot
+        instant), so the window is open — but it is BOUNDED by the
+        process uptime, so a large clock skew can never mask
+        checkpoint contention for hours.
+
+    Returns the marker dict (without the failure class — the caller
+    fills that in) or ``None``.
+    """
+    epoch = get_boot_epoch()
+    if epoch is None:
+        return None
+    elapsed = (_as_naive_utc(now) - _as_naive_utc(epoch)).total_seconds()
+    if elapsed > READINESS_BOOT_WARM_WINDOW_S:
+        return None
+    if elapsed < 0.0:
+        # Clock disagreement (the epoch is in our future) — see above.
+        if _readiness_process_uptime_seconds() > READINESS_BOOT_WARM_WINDOW_S:
+            return None
+        elapsed = 0.0
+    return {
+        "boot_elapsed_seconds": elapsed,
+        "window_seconds": READINESS_BOOT_WARM_WINDOW_S,
+    }
 
 # ── The queue-age provenance vocabulary ──────────────────────────────────────
 #
@@ -361,6 +457,14 @@ class ReadinessComposite:
     # /readyz (503 + reason). On SQLite installs this is always True
     # (no probe runs; SQLite saver has no long-lived conn to monitor).
     checkpoint_saver: bool = True
+    # fix/post-outage-recovery SCOPE (b): the boot-consistency reconciler
+    # leg. DEFAULT True so every existing caller (SQLite installs, hand-
+    # built composites, older tests) is byte-identical. The lane publishes
+    # ``False`` via the process-global state in
+    # ``daemon/services/boot_consistency_reconciler.py`` when it hit a
+    # DB/unreachable error at boot; readiness then reports degraded
+    # (503-with-reason) while the daemon still boots (never-wedge holds).
+    boot_recovery_ok: bool = True
     reasons: list[str] = field(default_factory=list)
     queue_max_age_seconds: Optional[float] = None
     # WHY the age is (or is not) there — see the QUEUE_AGE_REASON_*
@@ -447,6 +551,21 @@ class ReadinessComposite:
     # absent key). ``None`` (older callers/tests) ⇒ key absent —
     # consumers fail-closed on absence.
     skill_sources: Optional[dict[str, Any]] = None
+    # ``checkpoint_saver_boot_warm`` — the BOOT-WARM TOLERANCE marker
+    # (``{tolerated, failure_class, boot_elapsed_seconds,
+    # window_seconds}``). It is published ONLY when a grace-eligible
+    # checkpoint-saver failure (pool_busy / read_timeout) was TOLERATED
+    # inside the boot window: the component reports HEALTHY (the verdict
+    # is truthful — the sentinel rides the hot path by design), but the
+    # transient is NEVER silent: the operator sees the class, the age
+    # and the window in ``detail.checkpoint_saver_boot_warm`` and in the
+    # readiness warning log. ``None`` = nothing was tolerated (the key
+    # is absent from the payload).
+    #
+    # ADVISORY ONLY: it NEVER feeds ``ready``/``reasons``/``components``
+    # (the tolerance itself is what keeps the component healthy — this
+    # block only explains WHY).
+    checkpoint_saver_boot_warm: Optional[dict[str, Any]] = None
 
     @property
     def ready(self) -> bool:
@@ -456,6 +575,7 @@ class ReadinessComposite:
             and self.queue_freshness
             and self.services
             and self.checkpoint_saver
+            and self.boot_recovery_ok
             and not self.forced_degraded
         )
 
@@ -516,6 +636,18 @@ class ReadinessComposite:
             },
             "draining": draining,
         }
+        # fix/post-outage-recovery SCOPE (b): the boot_recovery leg is
+        # published ONLY when degraded, so the healthy payload stays
+        # byte-identical (the exact-components OFF-state contract).
+        if not self.boot_recovery_ok:
+            payload["components"]["boot_recovery"] = False
+            payload["detail"]["boot_recovery"] = {
+                "status": "degraded",
+                "reason": (
+                    "boot-consistency reconciler hit DB/unreachable errors "
+                    "at boot (see [BOOT_RECOVERY_DB_ERROR] logs)"
+                ),
+            }
         if self.auth_dependency_status is not None:
             payload["auth_dependency_status"] = self.auth_dependency_status
             payload["detail"]["auth_dependency_status"] = (
@@ -604,6 +736,18 @@ class ReadinessComposite:
         # roots = honest zero, never an absent key).
         if self.skill_sources is not None:
             payload["detail"]["skill_sources"] = dict(self.skill_sources)
+        # ── boot-warm tolerance marker (checkpoint-saver sentinel) ──
+        # ``detail.checkpoint_saver_boot_warm`` — published ONLY when a
+        # grace-eligible checkpoint-saver failure was TOLERATED inside
+        # the boot window. ADVISORY ONLY: it NEVER touches
+        # ``status``/``components``/``detail.reasons`` (the tolerance is
+        # what keeps the component healthy — this block only says WHY
+        # the component is healthy while a transient was observed, so
+        # the transient is never silent).
+        if self.checkpoint_saver_boot_warm is not None:
+            payload["detail"]["checkpoint_saver_boot_warm"] = dict(
+                self.checkpoint_saver_boot_warm
+            )
         return payload
 
 
@@ -1177,6 +1321,9 @@ def compute_readiness_composite(
     checkpoint_saver_ok: bool = True,
     auth_dependency_status: Optional[str] = None,
     component_classes: Optional[dict[str, str]] = None,
+    # fix/post-outage-recovery SCOPE (b): the boot-consistency reconciler
+    # leg. DEFAULT True (healthy) so every existing caller is unchanged.
+    boot_recovery_ok: bool = True,
     first_seen_degraded: Optional[datetime] = None,
     failure_streak: Optional[dict[str, int]] = None,
     pool_state_sqlalchemy: Optional[dict] = None,
@@ -1196,6 +1343,18 @@ def compute_readiness_composite(
     # the key absent from ``detail``.
     skill_sources: Optional[dict[str, Any]] = None,
     queue_max_age_seconds_reason: Optional[str] = None,
+    # The failure CLASS of a degraded checkpoint-saver component (the
+    # §4.0 class the probe reported: ``pool_busy`` / ``read_timeout`` /
+    # ``hard_component_red`` / ``probe_timeout``). It is carried INTO
+    # the degraded reason string so the live log can tell a busy
+    # checkpoint path from a broken one (before this, the live log
+    # rendered both as the same free text). ``None`` = no class known
+    # (a hand-built composite) → the reason keeps its legacy shape.
+    checkpoint_saver_failure_class: Optional[str] = None,
+    # The BOOT-WARM tolerance marker (see the composite field of the
+    # same name). ADVISORY: published as
+    # ``detail.checkpoint_saver_boot_warm``; never feeds the verdict.
+    checkpoint_saver_boot_warm: Optional[dict[str, Any]] = None,
 ) -> ReadinessComposite:
     """Assemble a composite from component outcomes.
 
@@ -1249,15 +1408,32 @@ def compute_readiness_composite(
         # the sentinel ``aget_tuple`` cycle (the old string still named
         # the removed ``AsyncConnectionPool.check()`` probe; decisions §2
         # row 23).
+        #
+        # It ALSO carries the failure CLASS: the live log could not
+        # distinguish "the saver was busy" (``pool_busy`` /
+        # ``read_timeout``) from "the checkpoint path is broken"
+        # (``hard_component_red``) — the observability gap that made the
+        # 2026-11-22 boot flap impossible to triage from the journal.
+        ckpt_class_suffix = (
+            f" (class={checkpoint_saver_failure_class})"
+            if checkpoint_saver_failure_class
+            else ""
+        )
         reasons.append(
             "checkpoint_saver: sentinel checkpoint read (aget_tuple) "
-            "failed or timed out"
+            f"failed or timed out{ckpt_class_suffix}"
+        )
+    if not boot_recovery_ok:
+        reasons.append(
+            "boot_recovery: boot-consistency reconciler hit DB/unreachable "
+            "errors at boot ([BOOT_RECOVERY_DB_ERROR])"
         )
     return ReadinessComposite(
         database=database_ok,
         queue_freshness=queue_fresh_ok,
         services=services_ok,
         checkpoint_saver=checkpoint_saver_ok,
+        boot_recovery_ok=boot_recovery_ok,
         reasons=reasons,
         queue_max_age_seconds=queue_max_age_seconds,
         queue_max_age_seconds_reason=queue_max_age_seconds_reason,
@@ -1280,6 +1456,7 @@ def compute_readiness_composite(
         mcp_servers=mcp_servers,
         mcp_buffered_transitions=mcp_buffered_transitions,
         skill_sources=skill_sources,
+        checkpoint_saver_boot_warm=checkpoint_saver_boot_warm,
     )
 
 
@@ -1308,6 +1485,10 @@ _A1_COMPOSITE_FIELD_NAMES = (
     # project-skill-loader Phase 4: the skill-source census must
     # survive the forced-degradation drill rebuild like the MCP map.
     "skill_sources",
+    # The boot-warm tolerance marker must survive the forced-
+    # degradation drill rebuild too: the drill must not silently drop
+    # the operator's view of a tolerated checkpoint-saver transient.
+    "checkpoint_saver_boot_warm",
 )
 
 
@@ -1354,6 +1535,7 @@ def apply_forced_degradation(
         queue_freshness=composite.queue_freshness,
         services=composite.services,
         checkpoint_saver=composite.checkpoint_saver,
+        boot_recovery_ok=composite.boot_recovery_ok,
         queue_max_age_seconds=composite.queue_max_age_seconds,
         checked_at=composite.checked_at,
         forced_degraded=True,
@@ -1372,6 +1554,24 @@ def apply_forced_degradation(
             f"readiness: degraded forced by {READINESS_FORCE_DEGRADED_ENV} (drill)",
         ]
     return ReadinessComposite(**degraded_copy)
+
+
+def _boot_recovery_leg_ok() -> bool:
+    """Read the boot-consistency reconciler's readyz leg (fail-healthy default).
+
+    Lazy import avoids a module-load cycle (the lane imports
+    auto_continue_boot_pass, not readiness). Any failure to read the leg
+    defaults to healthy — readiness must never wedge on the observability
+    seam itself.
+    """
+    try:
+        from daemon.services.boot_consistency_reconciler import (
+            get_boot_recovery_state,
+        )
+
+        return bool(get_boot_recovery_state().get("ok", True))
+    except Exception:  # noqa: BLE001 — observability seam never wedges readiness
+        return True
 
 
 async def refresh_readiness_composite(
@@ -1518,6 +1718,36 @@ async def refresh_readiness_composite(
     # A timeout / failure / missing probe degrades ``checkpoint_saver``
     # in the same fail-closed way as ``database``: a truthy sentinel
     # leaking into the field would fail OPEN.
+    #
+    # ── BOOT-WARM TOLERANCE (2026-11-22) ────────────────────────────
+    # The sentinel RIDES THE HOT PATH BY DESIGN: its ``aget_tuple``
+    # takes the saver's ONE ``asyncio.Lock``, which every production
+    # checkpoint op also takes. During the boot-restore storm that lock
+    # is held for longer than the probe's inner budget (0.9s), so the
+    # probe returns a GRACE-ELIGIBLE class (``pool_busy`` /
+    # ``read_timeout``) — "the system was too busy to answer within its
+    # budget". The grace tracker DELIBERATELY never changes
+    # ``ready``/``reasons``, so the composite degraded anyway: a
+    # green→503→green flap INSIDE the boot window (live evidence: ONE
+    # tick at ~112s into the v0.31.33 boot on 2026-11-22, self-healed
+    # by the next tick — 3/3 ticks green at 5-9ms afterwards).
+    #
+    # INSIDE the boot window a grace-eligible class therefore does NOT
+    # degrade: the component reports HEALTHY (so the failure streak
+    # resets naturally — the GraceTracker semantics are UNCHANGED) and
+    # the transient is PUBLISHED (``detail.checkpoint_saver_boot_warm``
+    # + a warning log) — never silent.
+    #
+    # WHAT THE TOLERANCE MUST NEVER DO (fail-closed):
+    #   * an EXCEPTION (``hard_component_red``) still degrades — a
+    #     broken checkpoint path is never masked;
+    #   * the OUTER probe timeout (``probe_timeout``) still degrades —
+    #     the probe thread did not answer at all;
+    #   * after the window EVERY class degrades, exactly as before.
+    # The probe budget is UNCHANGED (0.9s inner / 1.0s outer) and the
+    # sentinel keeps riding the hot path: this is a VERDICT-TRUTH fix,
+    # NOT a desensitisation of the probe.
+    checkpoint_saver_boot_warm: Optional[dict[str, Any]] = None
     if checkpoint_saver_probe is None:
         checkpoint_saver_ok = True
         ckpt_extra_reason = ""
@@ -1534,16 +1764,50 @@ async def refresh_readiness_composite(
             ckpt_class = FAILURE_CLASS_PROBE_TIMEOUT
             ckpt_extra_reason = (
                 "checkpoint_saver: sentinel checkpoint read (aget_tuple) "
-                f"timed out after {CHECKPOINT_SAVER_PROBE_TIMEOUT_S}s"
+                f"timed out after {CHECKPOINT_SAVER_PROBE_TIMEOUT_S}s "
+                f"(class={FAILURE_CLASS_PROBE_TIMEOUT})"
             )
         elif not ckpt_value:
-            checkpoint_saver_ok = False
             if ckpt_class in (None, FAILURE_CLASS_OK):
                 ckpt_class = FAILURE_CLASS_HARD_COMPONENT_RED
-            ckpt_extra_reason = (
-                "checkpoint_saver: sentinel checkpoint read failed "
-                "(checkpoint path cannot serve reads — see readiness logs)"
+            ckpt_failure_class = ckpt_class
+            # The window is consulted ONLY for the two grace-eligible
+            # classes — a hard failure never reaches this branch.
+            boot_window = (
+                _boot_warm_window_state(checked_at)
+                if ckpt_failure_class in BOOT_WINDOW_TOLERATED_FAILURE_CLASSES
+                else None
             )
+            if boot_window is not None:
+                # TOLERATED (in-window, grace-eligible class).
+                checkpoint_saver_ok = True
+                ckpt_class = FAILURE_CLASS_OK
+                ckpt_extra_reason = ""
+                checkpoint_saver_boot_warm = {
+                    "tolerated": True,
+                    "failure_class": ckpt_failure_class,
+                    "boot_elapsed_seconds": boot_window[
+                        "boot_elapsed_seconds"
+                    ],
+                    "window_seconds": boot_window["window_seconds"],
+                }
+                logger.warning(
+                    "[Readiness] checkpoint_saver boot-warm transient "
+                    "tolerated (class=%s, boot_elapsed=%.3fs, "
+                    "window=%.1fs) — the component reports HEALTHY inside "
+                    "the boot window (a hard failure or an outer probe "
+                    "timeout still degrades)",
+                    ckpt_failure_class,
+                    boot_window["boot_elapsed_seconds"],
+                    boot_window["window_seconds"],
+                )
+            else:
+                checkpoint_saver_ok = False
+                ckpt_extra_reason = (
+                    "checkpoint_saver: sentinel checkpoint read failed "
+                    f"(class={ckpt_class}; checkpoint path cannot serve "
+                    "reads — see readiness logs)"
+                )
         else:
             checkpoint_saver_ok = True
             if ckpt_class is None:
@@ -1657,8 +1921,20 @@ async def refresh_readiness_composite(
         extra_reasons=extra_reasons,
         inflight_turns=inflight_turns,
         checkpoint_saver_ok=checkpoint_saver_ok,
+        # fix/post-outage-recovery SCOPE (b): the boot-consistency lane's
+        # process-global readyz leg. Lazy import keeps readiness decoupled
+        # from the lane at module load (no cycle); the getter is O(1).
+        boot_recovery_ok=_boot_recovery_leg_ok(),
         auth_dependency_status=auth_dependency_status,
         component_classes=component_classes,
+        # The failure CLASS of a degraded checkpoint-saver component —
+        # carried into the degraded reason string so the live log can
+        # tell a BUSY checkpoint path from a BROKEN one.
+        checkpoint_saver_failure_class=(
+            None if checkpoint_saver_ok else (ckpt_class or None)
+        ),
+        # The boot-warm tolerance marker (published; advisory).
+        checkpoint_saver_boot_warm=checkpoint_saver_boot_warm,
         first_seen_degraded=(observation.first_seen_degraded if observation else None),
         failure_streak=(observation.failure_streak if observation else {}),
         pool_state_sqlalchemy=pool_state_sqlalchemy,
@@ -2030,6 +2306,7 @@ def make_checkpoint_saver_probe(
         # (``read_timeout`` — grace-eligible). The lock is OBSERVED, never
         # acquired.
         future = asyncio.run_coroutine_threadsafe(_sentinel_cycle(), loop)
+        started = time.monotonic()
         try:
             future.result(timeout=CHECKPOINT_SAVER_PROBE_TIMEOUT_S - 0.1)
         except FuturesTimeout:
@@ -2042,8 +2319,23 @@ def make_checkpoint_saver_probe(
             # LIBRARY-BEHAVIOUR question pinned by the ghost-waiter
             # integration pin, not assumed here.
             future.cancel()
+            elapsed = time.monotonic() - started
             if _saver_lock_held():
+                logger.debug(
+                    "[Readiness] checkpoint_saver sentinel latency=%.3fs "
+                    "class=%s (the saver lock was HELD — contention, not "
+                    "a broken path)",
+                    elapsed,
+                    FAILURE_CLASS_POOL_BUSY,
+                )
                 return False, FAILURE_CLASS_POOL_BUSY
+            logger.debug(
+                "[Readiness] checkpoint_saver sentinel latency=%.3fs "
+                "class=%s (the saver lock was FREE — the read did not "
+                "answer in time)",
+                elapsed,
+                FAILURE_CLASS_READ_TIMEOUT,
+            )
             return False, FAILURE_CLASS_READ_TIMEOUT
         except Exception:
             # NO logging here — ``_guarded`` in
@@ -2053,7 +2345,18 @@ def make_checkpoint_saver_probe(
             # degrades the component with the sentinel-read reason and
             # classifies it as ``hard_component_red`` (an EXCEPTION is
             # row 2 — NEVER grace-eligible).
+            logger.debug(
+                "[Readiness] checkpoint_saver sentinel latency=%.3fs "
+                "class=%s (the sentinel cycle raised)",
+                time.monotonic() - started,
+                FAILURE_CLASS_HARD_COMPONENT_RED,
+            )
             raise
+        logger.debug(
+            "[Readiness] checkpoint_saver sentinel latency=%.3fs class=%s",
+            time.monotonic() - started,
+            FAILURE_CLASS_OK,
+        )
         return True, None
 
     return _probe

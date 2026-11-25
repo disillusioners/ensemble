@@ -317,6 +317,8 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     "memoir_recall",
     "memoir_timeline",
     "memoir_about",
+    "memoir_review",
+    "memoir_persona_ratify",
     # prompt-reload (2026-11-06, prompt-reload lane): the ONE
     # ari-self-service prompt refresh tool — created by the
     # create_prompt_reload_tools() factory
@@ -687,7 +689,7 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     #     future read-only grant to another agent is a one-line allow
     #     change on a category that structurally CANNOT carry acts.
     # Both name the SAME two holders (ari, maintenancer) — amended
-    # 2026-11-14 (Emperor directive 2026-11-14 (commission
+    # 2026-11-14 (user directive 2026-11-14 (commission
     # ari-instance-stop-grant): D-13 single-owner population amended to
     # {ari, maintenancer}; the audit ledger, protected-target two-tier
     # policy, provenance gates and the fleet terminate budget are
@@ -845,13 +847,13 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # ceremony — see the SAME-PR RULE block above) are mandatory.
     "prompt-reload",
     # prompt-assent (2026-11-10, prompt-assent lane): the conversational
-    # approval lane ("The Emperor's Word / Assent") — ONE tool, FOUR
+    # approval lane ("The user's Word / Assent") — ONE tool, FOUR
     # verbs (AR-2: list / mint / approve / reject), created by the
     # create_prompt_assent_tools() factory
     # (daemon/tools/prompt_assent.py). PRIVILEGED entry #21 of
     # PRIVILEGED_TOOL_CATEGORIES (20 -> 21 after the prompt-reload
     # entry): the lane mints and consumes ASSENT TOKENS on the
-    # Emperor's behalf, so the empty-allow inherit universe must NOT
+    # user's behalf, so the empty-allow inherit universe must NOT
     # auto-grant that authority. Explicit
     # ``tools.allow: ["prompt-assent"]`` on ari is the only access
     # path — ARI-EXACTLY — and the tool body ALSO carries its own
@@ -1285,7 +1287,7 @@ def scan_tools_for_full_docs(tools: list) -> None:
 CATEGORY_MODULES: dict[str, str | list[str]] = {
     "bash": "daemon.tools.bash",
     "critical_notes": "daemon.tools.critical_notes",
-    # POK Phase 1 (project-operating-knowledge, Emperor GO
+    # POK Phase 1 (project-operating-knowledge, user GO
     # 2026-11-07) — the three project operating-knowledge tools
     # (pok_upsert / pok_query / pok_curate). NON-privileged: grants
     # flow through the per-agent ``tools.allow: ["pok"]`` entries
@@ -1310,7 +1312,7 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # Non-privileged by design (grants via per-agent tools.allow;
     # PRIVILEGED_TOOL_CATEGORIES untouched). Placed near "job" —
     # scheduling is job-adjacent (the adapter fires JobItems).
-    "scheduling": "daemon.tools.scheduling",
+    "scheduling": ["daemon.tools.scheduling", "daemon.tools.tool_usage"],
     # ari-tools Phase 1 (the Workbook) — the global, DB-backed work
     # board. PRIVILEGED category (entry #8 of
     # PRIVILEGED_TOOL_CATEGORIES): the board is global and shared, so
@@ -1732,7 +1734,7 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     # belong in DYNAMIC_TOOL_NAMES and KNOWN_TOOL_NAMES. BOTH
     # categories are PRIVILEGED (#13 / #14) — opt-in only, never
     # default-granted; the runtime gate in the tool bodies authorizes
-    # {ari, maintenancer} per the Emperor directive 2026-11-14
+    # {ari, maintenancer} per the user directive 2026-11-14
     # (commission ari-instance-stop-grant) — D-13 single-owner
     # population amended; the audit ledger, protected-target two-tier
     # policy, provenance gates and the fleet terminate budget are
@@ -1949,6 +1951,16 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "pok_upsert",
     "pok_query",
     "pok_curate",
+    # POK write gate Wave 2 (Phase 8, T8.5 — the G1 answer path): the
+    # dedicated answer tool for a pending write-gate ASK. The plan
+    # pins 269 → 270 (design-amendments-v2 §13.2a: the architect
+    # doc's 271→272 is stale; the true value re-derived in-worktree is
+    # 269 → 270).
+    "pok_gate_answer",
+    # POK write gate Wave 2 (Phase 9, T9.1 — the census read surface):
+    # the curator-only census tool the librarian maintains the store
+    # from. The plan pins 270 → 271 (the T8.5 row's 270 + this one).
+    "pok_census",
     "project_update",
     "queue_create",
     "queue_list",
@@ -2081,6 +2093,8 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "memoir_recall",
     "memoir_timeline",
     "memoir_about",
+    "memoir_review",
+    "memoir_persona_ratify",
     "terminate_instance",
     "time",
     "todo_clear",
@@ -2095,6 +2109,7 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "todo_list_update",
     "todo_view",
     "tool_help",
+    "tool_usage_digest",
     "unwatch_job",
     "upgrade_status",
     "view_link",

@@ -29,11 +29,11 @@ Design line (implementation-readiness G-3): *"grep-confirmed ZERO content on sta
 
 | # | G-3 phrase | verdict | source (note id + the line that sources it) |
 |---|---|---|---|
-| 1 | "wrong flag name" | **SOURCED (best-fit), with a naming-caveat FLAGGED** | `08da5e78`: "GOMEMLIMIT grammar trap '1GiB' not '1Gi'". This is the only crisp wrong-vs-right token pair among the notes that breaks a deploy day. Caveat: the trap is the flag's **value grammar** (the `GiB` suffix), not literally its NAME — if the Emperor's phrase meant a mis-named flag (e.g. the sticky_last_success family, `f7511668`), that alternative remains open. |
+| 1 | "wrong flag name" | **SOURCED (best-fit), with a naming-caveat FLAGGED** | `08da5e78`: "GOMEMLIMIT grammar trap '1GiB' not '1Gi'". This is the only crisp wrong-vs-right token pair among the notes that breaks a deploy day. Caveat: the trap is the flag's **value grammar** (the `GiB` suffix), not literally its NAME — if the user's phrase meant a mis-named flag (e.g. the sticky_last_success family, `f7511668`), that alternative remains open. |
 | 2 | "config.json non-surface" | **SOURCED** | `fc8f6ae0`: "go test rewrites ~/.config/llm-supervisor-proxy/config.json" — config.json is NOT a config surface (the store is config.db; tests rewrite the file), exactly the non-surface correction. |
 | 3 | "PORT gotcha" | **SOURCED** | `fc8f6ae0`: "PORT=9797 leaks from daemon env" — the daemon environment's PORT leaks into the child process, the PORT gotcha. |
 
-**Residual Emperor-question (correction 1 only):** if "wrong flag name" was meant as a mis-named flag rather than the GOMEMLIMIT value-grammar trap, the sticky_last_success flag family (`f7511668`) is the only other candidate in the fact base — the two are mutually exclusive readings and the design line alone cannot adjudicate.
+**Residual user-question (correction 1 only):** if "wrong flag name" was meant as a mis-named flag rather than the GOMEMLIMIT value-grammar trap, the sticky_last_success flag family (`f7511668`) is the only other candidate in the fact base — the two are mutually exclusive readings and the design line alone cannot adjudicate.
 
 ## Standing FLAG — RESOLVED by the 2026-11-07 ruling (was: design-vs-observed discrepancy)
 

@@ -470,7 +470,7 @@ def assent_approver_mismatch_code(
 #: maps to EXACTLY one approve-side code. ``PASS`` is deliberately absent:
 #: it is not a refusal. The two Phase-1.5 codes are here and NOT in the
 #: tool's ``MISMATCH_CODES`` — a re-designation or an operator config fault
-#: must never burn the Emperor's token (the 4f split, refusal-cell-matrix
+#: must never burn the user's token (the 4f split, refusal-cell-matrix
 #: §1.3). ``token-approver-mismatch`` is NOT in this table: it keeps only its
 #: existing 4e different-human role.
 APPROVE_DESIGNATION_CODES: dict[DesignationResult, str] = {

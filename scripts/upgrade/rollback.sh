@@ -191,6 +191,26 @@ fi
 
 TO_BIN_VERSION="$(manifest_field "$TO_VERSION" binary_version 2>/dev/null)"
 
+# D2 containment (c) / AC-D2-5 / the P-5 blind pin: the hand-back's version
+# FAST-FAIL was INACTIVE on the rollback path — PROMOTE_EXPECTED_VERSION was
+# never set here, so the serving conjunct degraded to "2xx, no version
+# comparison" and a WRONG-VERSION daemon was accepted as SUCCESS. The
+# expected version is the TARGET's manifest binary_version (the same value
+# the re-gate compares below) — thread it through the SAME plain-variable
+# channel promote.sh uses (never exported; the child scripts must not
+# inherit it).
+#
+# An unresolvable manifest field ⇒ the fast-fail stays INACTIVE for this
+# run (the degraded-but-known posture of the pre-existing contract) — the
+# re-gate's own version comparison below is the second line of defence.
+if [ -n "$TO_BIN_VERSION" ]; then
+    PROMOTE_EXPECTED_VERSION="$TO_BIN_VERSION"
+    _log "rollback: the hand-back version fast-fail is ARMED (expected=$PROMOTE_EXPECTED_VERSION) — a wrong-version daemon can no longer be accepted as success"
+else
+    PROMOTE_EXPECTED_VERSION=""
+    _warn "rollback: no binary_version in the target manifest — the hand-back version fast-fail stays INACTIVE (degraded-but-known); the re-gate's version comparison remains the defence"
+fi
+
 # ── Transaction (D4) ────────────────────────────────────────────────────────
 if ! journal_open_txn "rollback" "$TO_VERSION"; then
     _warn "an in_flight txn is open — pipeline-busy (resolve it or wait for the sweep)"
@@ -254,9 +274,20 @@ if ! restart_via_launcher; then
     # out-of-band in HANDBACK_ERROR_FILE; the bare variable read degraded
     # to "none captured" because the resolver runs inside $()).
     HB_ERR="$(_handback_last_error_text)"
+    # D6-(iv) / AC-D6-6 (2026-11-19): the VERIFIER-PATH reason rides its
+    # OWN channel (HB_ERR stays the launchd resolver's diagnosis — the
+    # systemd path never writes it, C-9); the halt row takes it when the
+    # launchd channel is empty ⇒ never "none captured" on the systemd path.
+    HB_VERIFY_REASON="$(_handback_verify_reason_text)"
     # Warning #1 (review round 3): consume-then-clear — see promote.sh;
     # $$-keyed file, rm-after-read, never a cross-pid delete.
     rm -f "${HANDBACK_ERROR_FILE:-}" 2>/dev/null || true
+    rm -f "${HANDBACK_VERIFY_REASON_FILE:-}" 2>/dev/null || true
+    # hbk-err inode-churn fix (2026-11-22): the ELAPSED channel had no rm in
+    # any ceremony script — same consume-then-clear discipline (the name
+    # embeds this process id).
+    rm -f "${HANDBACK_VERIFY_ELAPSED_FILE:-}" 2>/dev/null || true
+    HB_ERR="${HB_ERR:-$HB_VERIFY_REASON}"
     journal_history_append halt "manual rollback to $TO_VERSION: unit hand-back failed — halt-for-human, txn left open for sweep recovery (no nohup fallback — Amendment #1; hand-back error: ${HB_ERR:-none captured})" \
                               || true   # history is advisory; the open txn IS the B4 contract
     exit 1

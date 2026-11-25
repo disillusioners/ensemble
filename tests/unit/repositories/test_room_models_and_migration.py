@@ -410,7 +410,6 @@ def test_eventkind_room_family_present_additively():
 
     room_values = {k.value for k in EventKind if k.value.startswith("room_")}
     assert {
-        "room_post",
         "room_join",
         "room_leave",
         "room_tag_delivery",

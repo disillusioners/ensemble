@@ -28,9 +28,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Annotated, Any
 
-from langchain_core.tools import tool
 from pydantic import Field
 
+from ._schema_registry import tool
 from daemon.services.long_tool_nudge import (
     HARD_MAX_THRESHOLD_SECONDS,
     MIN_THRESHOLD_SECONDS,

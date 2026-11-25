@@ -63,8 +63,8 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Annotated, Any, Callable
 
 from pydantic import BaseModel, Field
-from langchain_core.tools import tool
 
+from ._schema_registry import tool
 from ._tool_registry import register_tool_category
 
 if TYPE_CHECKING:
@@ -89,6 +89,51 @@ PROMPT_RELOAD_AUTHORIZED_AGENT = "ari"
 
 #: Off-spellings for the per-call kill-switch (instance_ops.py weight).
 _OFF_SPELLINGS = {"0", "false", "no", "off", "disabled"}
+
+
+class PromptReloadInput(BaseModel):
+    """Input schema for prompt_reload."""
+
+    force: Annotated[
+        bool,
+        Field(
+            default=False,
+            description=(
+                "Pop the cached graph even when nothing changed "
+                "(the escape hatch for the shared-cache edge). "
+                "Optional; default false."
+            ),
+        ),
+    ]
+    compact: Annotated[
+        bool,
+        Field(
+            default=False,
+            description=(
+                "Arm a compact note — your own distillation of this "
+                "conversation. The note is REQUIRED when compact=true "
+                "(compact=false with a note is refused — ignoring it "
+                "would be dishonest). The tool ARMS the note; the "
+                "daemon then appends it as a REQUEST and your own "
+                "model writes the compaction on its next invoke "
+                "(mid-turn — there is no quiet seam and no gate). "
+                "Optional; default false."
+            ),
+        ),
+    ]
+    compact_note: Annotated[
+        str,
+        Field(
+            default="",
+            description=(
+                "Your own distillation of this conversation — it is the "
+                "REQUEST your own model executes on its next invoke "
+                "(it is NOT rendered into the compaction doc). Max the "
+                "configured cap (default 12000 characters; over the cap "
+                "is refused, never truncated). Optional; default empty."
+            ),
+        ),
+    ]
 
 
 def _resolve_enabled() -> bool:
@@ -743,50 +788,6 @@ def create_prompt_reload_tools(
     """
     caller_agent_id = agent_id or ""
     caller_instance_id = current_instance_id or ""
-
-    class PromptReloadInput(BaseModel):
-        """Input schema for prompt_reload."""
-
-        force: Annotated[
-            bool,
-            Field(
-                default=False,
-                description=(
-                    "Pop the cached graph even when nothing changed "
-                    "(the escape hatch for the shared-cache edge). "
-                    "Optional; default false."
-                ),
-            ),
-        ]
-        compact: Annotated[
-            bool,
-            Field(
-                default=False,
-                description=(
-                    "Arm a compact note — your own distillation of this "
-                    "conversation. The note is REQUIRED when compact=true "
-                    "(compact=false with a note is refused — ignoring it "
-                    "would be dishonest). The tool ARMS the note; the "
-                    "daemon then appends it as a REQUEST and your own "
-                    "model writes the compaction on its next invoke "
-                    "(mid-turn — there is no quiet seam and no gate). "
-                    "Optional; default false."
-                ),
-            ),
-        ]
-        compact_note: Annotated[
-            str,
-            Field(
-                default="",
-                description=(
-                    "Your own distillation of this conversation — it is the "
-                    "REQUEST your own model executes on its next invoke "
-                    "(it is NOT rendered into the compaction doc). Max the "
-                    "configured cap (default 12000 characters; over the cap "
-                    "is refused, never truncated). Optional; default empty."
-                ),
-            ),
-        ]
 
     @register_tool_category(PROMPT_RELOAD_CATEGORY_KEY)
     @tool(args_schema=PromptReloadInput)

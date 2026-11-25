@@ -1,8 +1,8 @@
 # POK — Project Operating Knowledge — Plan Overview (v3.4)
 
-## ⛔ PENDING EMPEROR GO — not commissioned
+## ⛔ PENDING USER GO — not commissioned
 
-**Status: DESIGN ONLY — implementation is NOT authorized.** Execution-ready phase plan for the FUTURE implementation lane, derived strictly from `architecture-recommendation.md` **v3.4** (rounds 1+2, C1+W5, F1+F3, leader disposition B1–B8, **Emperor-ruling fold ER-1** — `discharge-round-1.md` / `discharge-round-2.md` + appendices B/C/D). **D1's remaining open content is the implementation go — the split/audience model is DECIDED by ER-1** *(Emperor ruling, 2026-11-07, source: Discord)*; D2 DECIDED (allowlist); D3–D5 pending; P-1 + Phase 1.5 preconditions. Companion: `decisions.md` (v3.4, ER-1).
+**Status: DESIGN ONLY — implementation is NOT authorized.** Execution-ready phase plan for the FUTURE implementation lane, derived strictly from `architecture-recommendation.md` **v3.4** (rounds 1+2, C1+W5, F1+F3, leader disposition B1–B8, **user-ruling fold ER-1** — `discharge-round-1.md` / `discharge-round-2.md` + appendices B/C/D). **D1's remaining open content is the implementation go — the split/audience model is DECIDED by ER-1** *(user ruling, 2026-11-07, source: Discord)*; D2 DECIDED (allowlist); D3–D5 pending; P-1 + Phase 1.5 preconditions. Companion: `decisions.md` (v3.4, ER-1).
 
 **Source:** architecture-recommendation.md v3.4; canon @ 7426e0d8a, amended on `feature/project-operating-knowledge-ruling` @ 5672f055c (fenced dev).
 
@@ -23,7 +23,7 @@ Make the §1 acceptance walkthrough TRUE: the next agent working the llm-supervi
 
 | # | Name | Depends on |
 |---|------|------------|
-| 1 | Minimum slice — the llmproxy walkthrough TRUE **in dev** | Emperor implementation go (D1-remainder); P-1 |
+| 1 | Minimum slice — the llmproxy walkthrough TRUE **in dev** | user implementation go (D1-remainder); P-1 |
 | **1.5** | **LIVE SEEDING (B2 + ER-1)** — true on live, incl. the ari seam | Phase 1 green; next promote carries the schema; leader/devops |
 | 2 | Extensions | Phase-1(+1.5) dogfood; D1 (export); D3; D5 |
 
@@ -158,4 +158,4 @@ Phase 2 on phase-1(+1.5) dogfood; export on D1; guidelines on D3; notes lane on 
 
 ## 9. Open conditions before implementation starts
 
-1. **D1 — remaining open content: the IMPLEMENTATION GO** (the split/audience model is DECIDED by ER-1 — Emperor ruling, 2026-11-07, source: Discord). 2. **D2 — DECIDED (allowlist v1).** 3. **D3** guidelines un-park. 4. **D4** corroboration post-D7. 5. **D5** notes hygiene lane. 6. **P-1** dev llmproxy row. 7. **Phase 1.5** live seeding incl. the ari-dispatch leg — AC21/AC24 gate the live claim.
+1. **D1 — remaining open content: the IMPLEMENTATION GO** (the split/audience model is DECIDED by ER-1 — user ruling, 2026-11-07, source: Discord). 2. **D2 — DECIDED (allowlist v1).** 3. **D3** guidelines un-park. 4. **D4** corroboration post-D7. 5. **D5** notes hygiene lane. 6. **P-1** dev llmproxy row. 7. **Phase 1.5** live seeding incl. the ari-dispatch leg — AC21/AC24 gate the live claim.

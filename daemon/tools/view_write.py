@@ -51,9 +51,9 @@ import os
 import tempfile
 from typing import TYPE_CHECKING, Annotated
 
-from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
+from ._schema_registry import tool
 from ._tool_registry import register_tool_category
 from .views_auth import VIEW_WRITE_AGENTS, _is_views_authorized
 
@@ -167,6 +167,77 @@ def _remove_unpublished_page(target, *, existed: bool) -> None:
         )
 
 
+# --------------------------------------------------------------------------
+# Module-level input models — HOISTED from the factory body.
+#
+# WHY (c2r-hoist-a): a ``class X(BaseModel)`` statement INSIDE a tool
+# factory executes on EVERY factory call, so every graph assembly
+# rebuilt this pydantic class from scratch. The process-level schema
+# registry (``daemon/tools/_schema_registry.py``) memoises the
+# DECORATOR's schema but CANNOT prevent the factory-local class
+# statement — that class is the CALLER-supplied ``args_schema``, not a
+# decorator-inferred one. At module level the class is built ONCE at
+# import, the registry then serves it from cache on every assembly,
+# and the agent-visible schema is byte-identical (pinned against the
+# BASE fixture ``tests/unit/tools/fixtures/module_level_inputs_a_base.json``
+# by ``tests/unit/tools/test_module_level_inputs_a.py``).
+# --------------------------------------------------------------------------
+
+class ViewWriteInput(BaseModel):
+    """Input schema for view_write."""
+
+    path: Annotated[
+        str,
+        Field(
+            description=(
+                "Relative path under the reports root, e.g. "
+                "'2026-10-19/board.html'. '.html' is appended when the "
+                "path carries no extension. No leading '/', no '..' "
+                "segments, no backslashes, no control characters."
+            )
+        ),
+    ]
+    html: Annotated[
+        str,
+        Field(
+            description=(
+                "The full HTML document (UTF-8). Served byte-for-byte; "
+                "never mutated, never wrapped."
+            )
+        ),
+    ]
+    title: Annotated[
+        str,
+        Field(
+            description=(
+                "Human label (1-200 chars). Echoed in the result; NOT "
+                "persisted and NOT injected into the HTML."
+            )
+        ),
+    ]
+    overwrite: Annotated[
+        bool,
+        Field(
+            default=False,
+            description=(
+                "Replace an existing page. Without it, an existing path "
+                "is an error. An overwrite does NOT change the passcode "
+                "or the URL."
+            ),
+        ),
+    ]
+    refresh: Annotated[
+        bool,
+        Field(
+            default=False,
+            description=(
+                "Bump the passcode generation (new code, revokes "
+                "outstanding grants). This is the lockout-recovery path."
+            ),
+        ),
+    ]
+
+
 def create_view_write_tools(
     manager: "InstanceManager",
     *,
@@ -190,60 +261,6 @@ def create_view_write_tools(
     """
     caller_agent_id = agent_id or ""
     caller_instance_id = current_instance_id or ""
-
-    class ViewWriteInput(BaseModel):
-        """Input schema for view_write."""
-
-        path: Annotated[
-            str,
-            Field(
-                description=(
-                    "Relative path under the reports root, e.g. "
-                    "'2026-10-19/board.html'. '.html' is appended when the "
-                    "path carries no extension. No leading '/', no '..' "
-                    "segments, no backslashes, no control characters."
-                )
-            ),
-        ]
-        html: Annotated[
-            str,
-            Field(
-                description=(
-                    "The full HTML document (UTF-8). Served byte-for-byte; "
-                    "never mutated, never wrapped."
-                )
-            ),
-        ]
-        title: Annotated[
-            str,
-            Field(
-                description=(
-                    "Human label (1-200 chars). Echoed in the result; NOT "
-                    "persisted and NOT injected into the HTML."
-                )
-            ),
-        ]
-        overwrite: Annotated[
-            bool,
-            Field(
-                default=False,
-                description=(
-                    "Replace an existing page. Without it, an existing path "
-                    "is an error. An overwrite does NOT change the passcode "
-                    "or the URL."
-                ),
-            ),
-        ]
-        refresh: Annotated[
-            bool,
-            Field(
-                default=False,
-                description=(
-                    "Bump the passcode generation (new code, revokes "
-                    "outstanding grants). This is the lockout-recovery path."
-                ),
-            ),
-        ]
 
     @register_tool_category("view-write")
     @tool(args_schema=ViewWriteInput)

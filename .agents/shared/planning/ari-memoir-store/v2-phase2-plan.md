@@ -9,7 +9,7 @@
 ## 1. Objective
 
 Deliver the Reflection Engine ("The Dream") and activate the Syntheses layer:
-1. Implement `MemoirReflectionService` supporting the two Emperor-blessed reflection cadences:
+1. Implement `MemoirReflectionService` supporting the two user-blessed reflection cadences:
    - **Intra-day idle-debounce with warm-up doubling:** Base 60s window doubling on bursts (`1→2→4→8→16`, capped at 960s), triggered when derived importance sum reaches ≥ 25; plus **force-fire at 3600s** (`MEMOIR_REFLECTION_FORCE_FIRE_S`) to eliminate indefinite deferral under continuous conversational streams.
    - **Nightly bounded pass & Historical Seed (C2 / Leader ruling 2026-11-09):** ReMe `auto_dream` shape with strict caps (max 5 syntheses, max 1000 chars/synthesis, max 4 LLM calls/pass), and a 60s tick budget during quiet hours (02:00–04:00 UTC). Walks unreflected episodes **oldest-first (`ORDER BY created_at ASC LIMIT 30`)** without lookback window restriction during catch-up until the pre-cutover corpus is reflected into Constellation.
 2. Implement background `MemoirReflectionWorker` cloning the robust `MemoirEmbeddingWorker` template (lifespan task on `app.state`, dedicated single-thread executor `memoir-reflect`, park/resume kill-switch logic, sequential nightly-before-in-day execution).

@@ -1,8 +1,8 @@
 """Time tool for getting current date and time information."""
 
 from datetime import datetime, timezone
-from langchain_core.tools import tool
 
+from ._schema_registry import tool
 from ._tool_registry import register_tool_category
 
 CATEGORY_NAME = "Time"

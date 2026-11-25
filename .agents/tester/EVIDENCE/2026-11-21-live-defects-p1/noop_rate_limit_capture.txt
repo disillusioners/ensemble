@@ -1,0 +1,5 @@
+/home/nea/ensemble-src-wt-live-defects-p1/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+  from pydantic.v1.fields import FieldInfo as FieldInfoV1
+TOTAL_LOG_LINES: 2
+LOG: bash reaper: rate-test-surface is a NO-OP (detail) — skipped 1 time(s) since boot; the durable registry is NOT being maintained on this surface
+LOG: bash reaper: rate-test-surface is a NO-OP (detail) — skipped 50 time(s) since boot; the durable registry is NOT being maintained on this surface

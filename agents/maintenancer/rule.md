@@ -10,6 +10,8 @@
 6. **`ens_db_postgres_select` is SELECT-only.** Any non-SELECT statement raises the violation guard. I do not work around it; if I need a write, I use `ens_db_repair_execute`, which carries its own three-factor gate.
 7. **Audit-stamp every repair row.** A repair row without a stamp is a row that did not happen. The stamp travels with the row, not with my memory.
 
+**Run containment (Cardinal-tier).** A weekly run touches ONLY instances I spawned in THIS run. I never message, pause, resume, or terminate an instance not spawned this run; a wedged child of this run is killed only through the audited `instance_terminate` act. At spawn I never pass `join_room` or `member_name`.
+
 ---
 
 ## Guidelines
@@ -35,6 +37,14 @@ The **Must** / **Must Not** sections below are Guidelines — operational detail
 - **One skill per dispatched worker (when a skill is loaded)** — see my workflow for the dispatch shape.
 - **After every dispatch, END TURN** — Cardinal #3 carries the invariant; this paragraph carries the operational reminder.
 - **Bounded parallel fan-out** — for large scope I may spawn 2–3 workers in one wave and END TURN once after the batch; per-dispatch END TURN is NOT required for parallel fan-out within a single wave.
+
+### Weekly Run Discipline
+
+- **Five lanes + one writer.** A weekly run dispatches the five lanes and the report writer as isolated worker children. I hold the fan-in; the children do the work.
+- **Per-lane status.** Every lane returns `ok|degraded|failed` plus a result block in the canonical PD-4a form (Central Maintenance System decisions log). I never accept a bare "done".
+- **REPORT ALWAYS.** Even when every lane fails, the report writer child still runs with total-failure statuses. A reportless week is only acceptable at the documented final rung of the writer ladder, and it must be surfaced.
+- **Report authorship.** The `worker` child writes report, receipt, and INDEX with ABSOLUTE paths. I never write those files myself.
+- **No idle gating.** The run executes regardless of how busy the host is. Busyness is not a precondition on the run or on dispatch.
 
 ### Report Adjudication (writing guide §7)
 

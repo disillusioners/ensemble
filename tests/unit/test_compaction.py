@@ -5484,3 +5484,435 @@ class TestCreatedAtPreservationAfterSentinel:
                 del sys.modules[k]
             sys.modules.update(saved)
 
+
+
+# =============================================================================
+# TIER-A DE-DUP (row2-2a) — byte-identity equivalence sweep
+# =============================================================================
+#
+# The TIER-A de-dup rewrote three counting paths in daemon/compaction.py:
+#
+#   * compact_state's count sites — the SELECTABLE pool was measured up
+#     to FIVE times per compaction (the same list, the same value),
+#   * _apply_ceiling_rule — O(S²) re-summing → O(S) incremental savings,
+#   * emergency_truncate — O(H·N) + O(P·N) whole-list re-counts in the
+#     two loops → O(N + H + P) running count.
+#
+# INVARIANT (deep-dive §2.4): every emitted count and every gate/loop
+# DECISION stays byte-identical to the pre-change implementation.
+#
+# The reference implementations below are VERBATIM copies of the
+# pre-change code (git 213ea6c1e) — the equivalence oracle. They are
+# intentionally NOT imported from the daemon: the point is to compare the
+# NEW implementation against the OLD one.
+
+
+def _ref_emergency_truncate(
+    messages: list[BaseMessage],
+    max_tokens: int,
+    estimate_fn: callable,
+    max_tool_response_chars: int = 2000,
+    max_human_message_chars: int = 4000
+) -> list[BaseMessage]:
+    """VERBATIM pre-change ``emergency_truncate`` (equivalence oracle).
+
+    Copied from daemon/compaction.py @ 213ea6c1e (the whole-list re-count
+    in both loops). Comments trimmed; code identical.
+    """
+    import copy as _copy
+    from daemon.tool_pairing_history import validate_and_heal_messages as _heal
+
+    truncated = _copy.deepcopy(messages)
+    for msg in truncated:
+        if isinstance(msg.content, list):
+            msg.content = _extract_text_from_content(msg.content)
+
+    if estimate_fn(truncated) <= max_tokens:
+        return truncated
+
+    for msg in truncated:
+        if getattr(msg, "type", "") == "tool":
+            content = _extract_text_from_content(msg.content)
+            if len(content) > max_tool_response_chars:
+                msg.content = content[:max_tool_response_chars] + "\n[...truncated]"
+            else:
+                msg.content = content
+
+    if estimate_fn(truncated) <= max_tokens:
+        return truncated
+
+    for msg in truncated:
+        if getattr(msg, "type", "") == "human":
+            content = _extract_text_from_content(msg.content)
+            if len(content) > max_human_message_chars:
+                msg.content = content[:max_human_message_chars] + "\n[...truncated]"
+            else:
+                msg.content = content
+
+    if estimate_fn(truncated) <= max_tokens:
+        return truncated
+
+    for msg in truncated:
+        content = _extract_text_from_content(msg.content)
+        if len(content) > 500:
+            while len(content) > 500 and estimate_fn(truncated) > max_tokens:
+                half_len = len(content) // 2
+                break_point = content.rfind('. ', 0, half_len)
+                if break_point == -1:
+                    break_point = content.rfind('\n', 0, half_len)
+                if break_point == -1:
+                    break_point = half_len
+                content = content[:break_point + 1] + "\n[...truncated]"
+                msg.content = content
+
+            if estimate_fn(truncated) <= max_tokens:
+                return truncated
+
+    while len(truncated) > 1 and estimate_fn(truncated) > max_tokens:
+        truncated.pop(0)
+
+    _heal(truncated, instance_short="emergency_truncate")
+    return truncated
+
+
+def _ref_apply_ceiling_rule(
+    sections: list[dict],
+    global_overview: str | None,
+    context_window: int,
+) -> tuple[list[dict], str | None, int]:
+    """VERBATIM pre-change ``_apply_ceiling_rule`` (equivalence oracle).
+
+    Copied from daemon/compaction.py @ 213ea6c1e (the O(S²) re-sum of
+    every section on every loop iteration). Comments trimmed; code
+    identical — including the ORIGINAL marker literal.
+    """
+    from daemon.compaction import (
+        COMPACTION_DOC_CEILING_FRACTION,
+        GLOBAL_DOC_ARCHIVED_LINE,
+        GLOBAL_DOC_PLACEHOLDER_GLOBAL,
+    )
+
+    cap_tokens = int(context_window * COMPACTION_DOC_CEILING_FRACTION)
+    current_tokens = estimate_messages_tokens(
+        [SystemMessage(content=global_overview or GLOBAL_DOC_PLACEHOLDER_GLOBAL)]
+    ) + sum(
+        estimate_messages_tokens([SystemMessage(content=s["body"])])
+        for s in sections
+    )
+    if current_tokens <= cap_tokens:
+        return sections, None, 0
+
+    archived = 0
+    condensed = list(sections)
+    for i in range(len(condensed)):
+        if current_tokens <= cap_tokens:
+            break
+        old_body = condensed[i]["body"]
+        condensed[i] = {
+            **condensed[i],
+            "body": "(condensed for budget — see GLOBAL OVERVIEW)",
+        }
+        archived += 1
+        current_tokens = estimate_messages_tokens(
+            [SystemMessage(content=global_overview or GLOBAL_DOC_PLACEHOLDER_GLOBAL)]
+        ) + sum(
+            estimate_messages_tokens([SystemMessage(content=s["body"])])
+            for s in condensed
+        )
+
+    if current_tokens > cap_tokens:
+        return [], GLOBAL_DOC_ARCHIVED_LINE.format(n=len(sections)), len(sections)
+    return condensed, None, archived
+
+
+class TestTierAByteIdentity:
+    """TIER-A de-dup (row2-2a) — old-vs-new equivalence oracle."""
+
+    # ── corpora ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _corpus_normal() -> list:
+        """Normal multi-message corpus (mixed roles, mixed sizes)."""
+        msgs: list = []
+        for i in range(8):
+            msgs.append(HumanMessage(
+                content=f"question {i}: " + "please review the plan " * (i + 1),
+                id=f"h{i}",
+            ))
+            msgs.append(AIMessage(
+                content=f"answer {i}: " + "reviewed the request " * (i + 2),
+                id=f"a{i}",
+            ))
+        return msgs
+
+    @staticmethod
+    def _corpus_pathological(kind: str) -> list:
+        """Single-character-class runs — the tiktoken n² trigger shape.
+
+        A long run of ONE character class (letters / whitespace /
+        symbols) is emitted by the cl100k pattern as a single piece,
+        which is what makes the tokenizer quadratic in the run length.
+        """
+        if kind == "letters":
+            body = "a" * 4000
+        elif kind == "whitespace":
+            body = " " * 4000
+        elif kind == "symbols":
+            body = "#" * 4000
+        else:
+            raise ValueError(f"unknown corpus kind: {kind}")
+        return [
+            HumanMessage(content=body, id="h0"),
+            AIMessage(content=body, id="a0"),
+            ToolMessage(content=body, tool_call_id="c0", name="t", id="t0"),
+            HumanMessage(content=body + " tail", id="h1"),
+        ]
+
+    @classmethod
+    def _corpora(cls) -> list[tuple[str, list]]:
+        return [
+            ("normal", cls._corpus_normal()),
+            ("letters", cls._corpus_pathological("letters")),
+            ("whitespace", cls._corpus_pathological("whitespace")),
+            ("symbols", cls._corpus_pathological("symbols")),
+        ]
+
+    # ── helpers ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _assert_identical(new_msgs, ref_msgs, label: str) -> None:
+        assert len(new_msgs) == len(ref_msgs), (
+            f"{label}: message count differs "
+            f"(new={len(new_msgs)} ref={len(ref_msgs)})"
+        )
+        for i, (n, r) in enumerate(zip(new_msgs, ref_msgs)):
+            assert n.content == r.content, (
+                f"{label}: content differs at index {i} "
+                f"(new={n.content[:80]!r} ref={r.content[:80]!r})"
+            )
+            assert getattr(n, "type", None) == getattr(r, "type", None), (
+                f"{label}: message type differs at index {i}"
+            )
+            assert getattr(n, "id", None) == getattr(r, "id", None), (
+                f"{label}: message id differs at index {i}"
+            )
+        # The TOKEN VALUES of the produced list must be identical too
+        # (the "reference recount" of the output list).
+        new_tokens = estimate_messages_tokens(new_msgs)
+        ref_tokens = estimate_messages_tokens(ref_msgs)
+        assert new_tokens == ref_tokens, (
+            f"{label}: token value of the result differs "
+            f"(new={new_tokens} ref={ref_tokens})"
+        )
+
+    # ── emergency_truncate ─────────────────────────────────────────────
+
+    @pytest.mark.parametrize("kind", ["normal", "letters", "whitespace", "symbols"])
+    def test_emergency_truncate_matches_reference(self, kind):
+        """The de-duplicated emergency path returns the SAME list as the
+        pre-change implementation, for every budget in a wide sweep.
+
+        The sweep crosses every decision boundary of the function: the
+        Pass-0/1/2 early returns, the Pass-3 halving loop (H > 0) and
+        the C1 pop loop (P > 0).
+        """
+        corpus = (
+            self._corpus_normal() if kind == "normal"
+            else self._corpus_pathological(kind)
+        )
+        for max_tokens in (1, 5, 25, 100, 400, 1500, 5000, 50_000):
+            new = emergency_truncate(
+                corpus,
+                max_tokens=max_tokens,
+                estimate_fn=estimate_messages_tokens,
+            )
+            ref = _ref_emergency_truncate(
+                corpus,
+                max_tokens=max_tokens,
+                estimate_fn=estimate_messages_tokens,
+            )
+            self._assert_identical(new, ref, f"emergency_truncate[{kind}/{max_tokens}]")
+
+    def test_emergency_truncate_reference_marker_matches_constant(self):
+        """The oracle's marker literal must equal the shipped constant.
+
+        Pins the marker text byte-for-byte (the reference oracle is an
+        independent copy — a drifted marker would silently weaken the
+        equivalence sweep).
+        """
+        from daemon.compaction import GLOBAL_DOC_CONDENSED_MARKER
+
+        assert GLOBAL_DOC_CONDENSED_MARKER == "(condensed for budget — see GLOBAL OVERVIEW)", (
+            "the condensed marker text must stay byte-identical"
+        )
+
+    # ── _apply_ceiling_rule ───────────────────────────────────────────
+
+    @pytest.mark.parametrize("n_sections", [0, 1, 3, 12])
+    def test_apply_ceiling_rule_matches_reference(self, n_sections):
+        """The O(S) ceiling rule returns the SAME result as the O(S²) one.
+
+        The context-window sweep crosses the cap boundary many times, so
+        the incremental accumulation must land on exactly the same
+        condensation count (and the same hard-cap degrade branch) as the
+        re-sum implementation at every step.
+        """
+        from daemon.compaction import _apply_ceiling_rule
+
+        sections = [
+            {
+                "start_idx": i * 10,
+                "end_idx": i * 10 + 9,
+                "body": (f"section {i} body. ") * (50 * (i + 1)),
+                "start_id": f"s{i}-start",
+                "end_id": f"s{i}-end",
+            }
+            for i in range(n_sections)
+        ]
+        for context_window in range(100, 4000, 37):
+            new = _apply_ceiling_rule(sections, "GLOBAL OVERVIEW", context_window)
+            ref = _ref_apply_ceiling_rule(sections, "GLOBAL OVERVIEW", context_window)
+            assert new == ref, (
+                f"ceiling rule diverged at n_sections={n_sections} "
+                f"context_window={context_window}: new={new!r} ref={ref!r}"
+            )
+
+    def test_apply_ceiling_rule_hard_cap_branch_matches_reference(self):
+        """The hard-cap (B-shape degrade) branch stays byte-identical."""
+        from daemon.compaction import _apply_ceiling_rule
+
+        sections = [
+            {
+                "start_idx": i,
+                "end_idx": i,
+                "body": ("body. " * 200),
+                "start_id": f"s{i}",
+                "end_id": f"e{i}",
+            }
+            for i in range(5)
+        ]
+        # A tiny window ⇒ the cap is below the marker cost ⇒ B-shape.
+        new = _apply_ceiling_rule(sections, "GLOBAL", 100)
+        ref = _ref_apply_ceiling_rule(sections, "GLOBAL", 100)
+        assert new == ref
+        assert new[0] == [] and new[2] == len(sections)
+
+    # ── compact_state count sites (A1) ────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_compact_state_measures_selectable_pool_once(self):
+        """The SELECTABLE pool is measured ONCE per compaction (was 5×).
+
+        The anti-refire skip result, the over-budget predicate and the
+        canonical history-token figure all read the SAME measurement
+        now; the value is unchanged (the list is not mutated between
+        the partition and its last reader).
+        """
+        from daemon.compaction import _partition_injected_for_compaction
+        import daemon.compaction as compaction_module
+
+        config = make_compaction_config(
+            min_messages_before_compaction=10,
+            threshold=0.9,
+        )
+        messages = [
+            HumanMessage(content="hello", id="h0"),
+            AIMessage(content="hi", id="a0"),
+            HumanMessage(content="more", id="h1"),
+            AIMessage(content="ok", id="a1"),
+            HumanMessage(
+                content="[SYSTEM CONTEXT] injected block",
+                id="inj-1",
+                additional_kwargs={
+                    "injected_message": True,
+                    "context_kind": "tier_a_test",
+                },
+            ),
+        ]
+        context = CompactionContext(
+            messages=messages,
+            system_prompt_tokens=0,
+            model_name="gpt-4o",
+            config=config,
+            llm_config={},
+        )
+        selectable, hoisted, _absorbed = _partition_injected_for_compaction(messages)
+        selectable_ids = {id(m) for m in selectable}
+        assert selectable_ids != {id(m) for m in messages}, (
+            "the corpus must keep the selectable pool distinguishable "
+            "from the full message list"
+        )
+
+        real = compaction_module.estimate_messages_tokens
+        seen: list = []
+
+        def spy(msgs):
+            seen.append(msgs)
+            return real(msgs)
+
+        with patch("daemon.compaction.estimate_messages_tokens", side_effect=spy):
+            compactor = ContextCompactor(config, {})
+            result = await compactor.compact_state(context)
+
+        selectable_calls = [
+            c for c in seen if c and {id(m) for m in c} == selectable_ids
+        ]
+        assert len(selectable_calls) == 1, (
+            "the selectable pool must be measured ONCE per compaction "
+            f"(measured {len(selectable_calls)}×; pre-change the same "
+            "list was counted up to 5×)"
+        )
+
+        # The VALUE is unchanged: the anti-refire result still carries
+        # selectable + injected + system prompt tokens.
+        assert result is not None
+        assert result.compaction_type == "skipped_below_min_messages"
+        expected = int(
+            real(selectable)
+            + real(hoisted)
+            + context.system_prompt_tokens
+        )
+        assert result.tokens_before == expected
+        assert result.tokens_after == expected
+
+    @pytest.mark.asyncio
+    async def test_compact_state_preserved_pool_measured_once(self):
+        """The PRESERVED pool is measured ONCE (the log line re-counted it)."""
+        import daemon.compaction as compaction_module
+
+        config = make_compaction_config(
+            min_messages_before_compaction=2,
+            threshold=0.9,
+        )
+        messages = [
+            HumanMessage(content="hello", id="h0"),
+            AIMessage(content="hi", id="a0"),
+            HumanMessage(content="more", id="h1"),
+            AIMessage(content="ok", id="a1"),
+        ]
+        context = CompactionContext(
+            messages=messages,
+            system_prompt_tokens=0,
+            model_name="gpt-4o",
+            config=config,
+            llm_config={},
+        )
+        real = compaction_module.estimate_messages_tokens
+        seen: list = []
+
+        def spy(msgs):
+            seen.append(msgs)
+            return real(msgs)
+
+        with patch("daemon.compaction.estimate_messages_tokens", side_effect=spy):
+            compactor = ContextCompactor(config, {})
+            await compactor.compact_state(context)
+
+        # No list object may be counted twice inside one compaction:
+        # the preserved pool used to be counted twice (the value plus the
+        # logger argument).
+        ids = [id(c) for c in seen]
+        assert len(ids) == len(set(ids)), (
+            "a message list was counted more than once inside "
+            f"compact_state ({len(ids)} calls, {len(set(ids))} distinct)"
+        )

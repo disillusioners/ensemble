@@ -87,7 +87,9 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -95,8 +97,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-from langchain_core.tools import tool
 
+from ._schema_registry import tool
 from ._tool_registry import register_tool_category
 from . import upgrade_journal as uj
 from .upgrade_journal import (
@@ -899,6 +901,179 @@ def _current_symlink(install_dir: Path | None) -> tuple[str | None, str]:
         return None, "current symlink unreadable"
 
 
+# The pointer-source label carried by every "current=" display line.
+#
+# TWO pointers exist in a staged install:
+#   <install>/current          -> releases/vX.Y.Z   (install-root current —
+#                                 what the launcher resolves and what
+#                                 _current_symlink() READS)
+#   <install>/releases/current -> vX.Y.Z            (convenience/fence alias —
+#                                 owned by the ceremony, see
+#                                 scripts/upgrade/lib.sh atomic_flip)
+#
+# relcur-pointer M3 (2026-11-23): the display used to label the
+# install-root read as "(via releases/current → …)". The label LIED about
+# the source — an operator reading it believed release_info read the
+# alias, which it never did. The label now names the REAL source, and the
+# alias gets its OWN status line (see _alias_pointer_status) so the
+# display reports BOTH pointers honestly.
+_CURRENT_SOURCE_LABEL = "install-root current"
+
+
+def _alias_pointer_status(
+    install_dir: Path | None, journal_current: str | None
+) -> tuple[str | None, str]:
+    """Read the ``releases/current`` convenience alias.
+
+    Returns ``(status_line, warning_note)``:
+
+    * ``status_line`` is None when the alias does NOT exist — the caller
+      then prints NO alias line at all (an absent alias is not drift; the
+      sibling boot check, daemon/services/release_pointer_check.py, reports
+      that shape separately).
+    * ``warning_note`` is "" when the alias is clean (it resolves AND its
+      basename equals the journal current); otherwise a D-FA5.3-family
+      note naming the ``alias-dangling`` / ``alias-mismatch`` tokens — the
+      same token vocabulary the boot check uses, so the two surfaces read
+      alike.
+
+    READ-ONLY: touches the symlink + the journal's ``current`` value only.
+    Never writes, never locks, never raises.
+    """
+    if install_dir is None:
+        return None, ""
+    alias = install_dir / "releases" / "current"
+    try:
+        if not alias.is_symlink():
+            return None, ""
+        target = os.readlink(alias)
+    except OSError as exc:
+        logger.warning("upgrade_tools: releases/current alias read failed: %s", exc)
+        return None, "releases/current alias unreadable"
+    name = target.rstrip("/").rsplit("/", 1)[-1]
+    # The alias lives in <install>/releases, so a relative target resolves
+    # against THAT directory (same resolution the boot check uses).
+    try:
+        resolves = (install_dir / "releases" / target).is_dir()
+    except OSError:
+        resolves = False
+    state = "resolves" if resolves else "DANGLING"
+    if journal_current:
+        match = "yes" if name == journal_current else "no"
+    else:
+        match = "unknown"
+    line = (
+        f"alias releases/current: target={target} "
+        f"state={state} journal-match={match}"
+    )
+    notes: list[str] = []
+    if not resolves:
+        notes.append(
+            f"alias-dangling: releases/current → {target} resolves to a "
+            "missing release dir (target release missing — layout divergence, "
+            "mutations frozen per D-FA5.3)"
+        )
+    if match == "no":
+        notes.append(
+            f"alias-mismatch: releases/current → {name} != journal "
+            f"current={journal_current}"
+        )
+    return line, "; ".join(notes)
+
+
+def _armtime_rollback_target_invariant(
+    install_dir: Path | None,
+) -> tuple[str, str, str]:
+    """LD-3 / AC-D5-14 (self-service-promote Wave 3): the arm-time
+    rollback-target invariant.
+
+    The would-be rollback target (the ``current`` symlink's release) must
+    be **present ∧ not quarantined ∧ rollback_safe** — else the ARM
+    refuses PRE-NONCE with a named reason (never a mid-ceremony
+    halt-for-human for this class).
+
+    Returns ``("pass", "", "")`` / ``("note", "", why)`` (no invariant to
+    check — e.g. a fresh install with no ``current`` symlink: the
+    ceremony's own no-previous halt covers that shape; the invariant does
+    not retro-block first-install promotes) / ``("refuse", <reason>, <message>)``.
+
+    Refusal reasons (additive, LD-7 — no existing token renamed):
+      * ``rollback-target-missing`` — the symlink names a release whose
+        dir is absent (dangling / manually deleted);
+      * ``rollback-target-quarantined`` — the would-be target is in the
+        journal's ``quarantined[]`` (M4: rolling back onto a known-bad
+        release is what quarantine exists to prevent);
+      * ``rollback-target-not-rollback-safe`` — the target's manifest does
+        not declare ``rollback_safe:true`` (ADR-005 M5 schema-drift guard);
+      * ``rollback-target-unprobeable`` (T7, tidier fold 2026-11-20) —
+        the current symlink itself could not be read (UNKNOWN target —
+        fail-closed; emitted below and at the sweep-side reader).
+    """
+    if install_dir is None:
+        return ("note", "", "no install dir — no rollback-target invariant to check")
+    target, note = _current_symlink(install_dir)
+    if note:
+        # unreadable / dangling — _current_symlink already distinguishes:
+        # a DANGLING symlink names a missing release dir ⇒ refuse.
+        if target:
+            return (
+                "refuse",
+                "rollback-target-missing",
+                f"the would-be rollback target (current -> {target}) has no "
+                f"release dir ({note}) — a ceremony that could not roll "
+                f"back safely never starts (LD-3)",
+            )
+        return (
+            "refuse",
+            "rollback-target-unprobeable",
+            f"the current symlink could not be read ({note or 'unreadable'}) "
+            f"— the would-be rollback target is UNKNOWN; fail-closed",
+        )
+    if target is None:
+        return (
+            "note",
+            "",
+            "no current symlink (fresh install / pre-first-promote) — no "
+            "rollback-target invariant to check; the ceremony's own "
+            "no-previous halt covers the shape",
+        )
+    name = target.rsplit("/", 1)[-1]
+    try:
+        journal = uj.journal_read(install_dir)
+    except Exception:  # noqa: BLE001 — no journal ⇒ nothing quarantined yet
+        journal = None
+    if isinstance(journal, dict):
+        quarantined = journal.get("quarantined")
+        if isinstance(quarantined, list) and name in quarantined:
+            return (
+                "refuse",
+                "rollback-target-quarantined",
+                f"the would-be rollback target (current -> {name}) is "
+                f"QUARANTINED (known-bad — M4): an auto-rollback onto it is "
+                f"impossible, so the ceremony would strand the env "
+                f"halt-for-human (LD-3)",
+            )
+    manifest = install_dir / "releases" / name / "manifest.json"
+    safe: str | None = None
+    try:
+        raw = json.loads(manifest.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            safe = raw.get("rollback_safe")
+    except (OSError, ValueError):
+        safe = None
+    if safe is not True:
+        return (
+            "refuse",
+            "rollback-target-not-rollback-safe",
+            f"the would-be rollback target (current -> {name}) is not "
+            f"rollback_safe (manifest says {safe!r}; ADR-005 M5 schema-drift "
+            f"guard) — an auto-rollback into schema drift is refused by "
+            f"design, so the ceremony would strand the env halt-for-human "
+            f"(LD-3)",
+        )
+    return ("pass", "", "")
+
+
 def _lock_state(install_dir: Path | None) -> str:
     """Pipeline lock display — status.sh parity. READ-ONLY (no mkdir/mv/rm)."""
     if install_dir is None:
@@ -978,6 +1153,15 @@ def _upgrade_log_tail(
     aggregate ``data/upgrade.log`` (unchanged behaviour for callers that
     pass no run_id). Bounded: at most the last 256KB is read, then the
     last ``lines`` lines.
+
+    AC-OBS-2 (2026-11-19): the run narrative ALSO surfaces the run's
+    PAYLOAD log — the executor unit's stdio
+    (``<run_id>.payload.log``), which is a DIFFERENT file from the
+    narrative (the shell's ``ENSEMBLE_UPGRADE_LOG_FILE`` sink). The
+    verify-phase diagnostics reach the payload log only via the shell's
+    unbuffered stderr (F16), so a reader that reads the narrative alone
+    sees a truncated post-mortem. Both tails are returned, each labelled
+    with the file it came from.
     """
     if install_dir is None:
         return "upgrade.log: none (no install dir)"
@@ -996,9 +1180,58 @@ def _upgrade_log_tail(
         if not tail_lines:
             return f"upgrade.log: empty at {lp}"
         body = "\n".join(f"  {ln}" for ln in tail_lines)
-        return f"upgrade.log tail (last {len(tail_lines)} lines, {lp}):\n{body}"
+        out = f"upgrade.log tail (last {len(tail_lines)} lines, {lp}):\n{body}"
     except OSError as exc:
         return f"upgrade.log: unreadable at {lp} ({exc})"
+    payload = _upgrade_payload_log_tail(install_dir, run_id, lines)
+    if payload:
+        out = f"{out}\n{payload}"
+    return out
+
+
+def _upgrade_payload_log_tail(
+    install_dir: Path | None,
+    run_id: str | None,
+    lines: int = _UPGRADE_LOG_TAIL_LINES,
+) -> str:
+    """Bounded tail of the run's PAYLOAD log (AC-OBS-2).
+
+    The payload log is the executor unit's stdio
+    (``StandardOutput/StandardError=append:<run_id>.payload.log``) — NOT
+    the narrative file the shell writes through
+    ``ENSEMBLE_UPGRADE_LOG_FILE``. It is the surface that carries the
+    verify-phase diagnostics (the shell's unbuffered stderr), so it is
+    the executor's own view of the run.
+
+    Empty string when there is no run_id, no payload file, or the file is
+    unreadable/empty — the caller appends it to the narrative tail and
+    an absent payload log must not render as an error (the file is
+    created by the executor unit, which may never have started).
+    """
+    if install_dir is None or not run_id:
+        return ""
+    pp = uj.per_run_payload_log_path(install_dir, run_id)
+    if pp is None:
+        return ""
+    try:
+        if not pp.is_file():
+            return ""
+        size = pp.stat().st_size
+        with pp.open("rb") as fh:
+            if size > _UPGRADE_LOG_TAIL_CHARS:
+                fh.seek(size - _UPGRADE_LOG_TAIL_CHARS)
+            chunk = fh.read()
+        text = chunk.decode("utf-8", errors="replace")
+        tail_lines = text.splitlines()[-lines:] if lines > 0 else []
+        if not tail_lines:
+            return ""
+        body = "\n".join(f"  {ln}" for ln in tail_lines)
+        return (
+            f"payload.log tail (last {len(tail_lines)} lines, {pp} — the "
+            f"executor unit's stdio):\n{body}"
+        )
+    except OSError:
+        return ""
 
 
 def _self_port(manager: "InstanceManager") -> int | None:
@@ -1315,6 +1548,32 @@ _OUTCOME_LABELS: dict[str, str] = {
     # outside the terminal filter.
     "intent_flip": "flip intent recorded",
     "subprocess_wait_timeout": "bounded wait timed out",
+    # D6-(iii) / AC-D6-1 / AC-D6-2 (2026-11-19): the hand-back's is-active
+    # probe ANSWERED (rc≠124) — the observed state word + the rc, NOT a
+    # timeout. Informational (NOT in ``uj._TERMINAL_EVENTS``): it closes
+    # nothing; the hand-back continues into the start attempt.
+    "handback_is_active_state": "unit state observed (not a timeout)",
+    # AC-OBS-1 (2026-11-19): the arm-time journalctl capture's verdict
+    # (captured / unavailable+reason). Informational.
+    "arm-journal-capture": "arm-time journalctl capture verdict",
+    # D2 residue (Wave 4, cosmetic): the watchdog-containment kinds are
+    # NON-TERMINAL observability (test_watchdog_hold_event_kinds pins the
+    # non-terminal property); listed so direct-render surfaces get a human
+    # string instead of the raw key (the .get fallback).
+    "watchdog_probe": "host watchdog probed (state read at runtime)",
+    "watchdog_hold": "watchdog timer held (stop, never disable)",
+    "watchdog_restore": "watchdog timer re-armed (restored)",
+    "watchdog_hold_unavailable": "watchdog hold unavailable (degraded to containment)",
+    "watchdog_hold_deferred": "watchdog restore deferred (RT re-armed itself)",
+    "resume_from_state": "ceremony resume decision (fresh/busy/gates-only/flip-prep)",
+    # D3/D4 (self-service-promote Wave 5): the executor-unit classifier +
+    # scripts-pin advance kinds. ALL NON-TERMINAL (an executor_client_exit
+    # row must not close a pending_op; the halt-for-human token closes
+    # nothing by itself — pinned in test_executor_reaper_classifier.py).
+    "executor_client_exit": "client exited while the ceremony unit is LIVE (op pending)",
+    "executor_liveness_unverifiable": "executor liveness unverifiable (halt-for-human; arm open)",
+    "arm-scripts-advance": "scripts pin self-advanced at arm time (T_old→T_new)",
+    "stage-scripts-advance": "scripts pin advanced/recorded at stage time",
 }
 
 
@@ -2177,11 +2436,29 @@ def create_upgrade_tools(
                 block: list[str] = []
                 target, note = _current_symlink(install_dir)
                 if target is not None:
-                    block.append(f"current={target.rsplit('/', 1)[-1]} (via releases/current → {target})")
+                    block.append(
+                        f"current={target.rsplit('/', 1)[-1]} "
+                        f"(via {_CURRENT_SOURCE_LABEL} → {target})"
+                    )
                 else:
                     block.append("current symlink: none")
                 if note:
                     block.append(f"current: WARNING — {note}")
+                # The releases/current ALIAS is a SECOND pointer — report it
+                # on its own line so the display names BOTH pointers and
+                # never implies the "current=" line came from the alias
+                # (relcur-pointer M3).
+                raw_current = journal.get("current") if isinstance(journal, dict) else None
+                journal_current = (
+                    raw_current if isinstance(raw_current, str) and raw_current else None
+                )
+                alias_line, alias_note = _alias_pointer_status(
+                    install_dir, journal_current
+                )
+                if alias_line:
+                    block.append(alias_line)
+                if alias_note:
+                    block.append(f"alias: WARNING — {alias_note}")
                 if include_journal and isinstance(journal, dict):
                     block.append(
                         f"journal: current={journal.get('current')} "
@@ -2413,7 +2690,10 @@ Args:
     section: One of:
         * "all" (default) — current + journal + releases + changelog +
           user-origin drift probe + upgrade.log tail.
-        * "current" — current symlink, journal current/previous/in-flight,
+        * "current" — current symlink (the INSTALL-ROOT ``current``, the
+          pointer the launcher resolves), the ``releases/current`` alias
+          status line (target / resolves-or-DANGLING / matches-journal),
+          journal current/previous/in-flight,
           /livez + /readyz self-probes, version smoke vs the current
           manifest's binary_version, launcher state.
         * "journal" — full journal state incl. the raw releases/state.json,
@@ -3464,7 +3744,7 @@ never decides go/rollback).
                 )
                 lines = [
                     f"UPGRADE PREFLIGHT (dry-run) — env={self_env} target={version}",
-                    f"current={cur_ver or 'none'} (via releases/current)"
+                    f"current={cur_ver or 'none'} (via {_CURRENT_SOURCE_LABEL})"
                     + (" rollback_safe=true" if cur_ver else ""),
                     f"target staged: releases/{version} manifest "
                     f"rollback_safe={str(manifest.get('rollback_safe')).lower()} "
@@ -3981,12 +4261,197 @@ never decides go/rollback).
                     prov_verdict,
                 )
             if prov_verdict == "refuse":
+                # ── D4-b (self-service-promote Wave 5, §2.6): the ARM-TIME
+                # READER — the scripts-pin SELF-ADVANCE. At this point a
+                # refusal on a FALLBACK dir has already been downgraded to
+                # a warning above, so a surviving refusal is an EXPLICITLY
+                # PINNED dir (F12 carve-out untouched: non-git dirs never
+                # reach a refusal). When the class is BEHIND-FLOOR, the pin
+                # is advanced to the target release's own source_commit
+                # (worktree-local HEAD move — NEVER fetch), journaled as
+                # `arm-scripts-advance`, and the guard re-judged (it must
+                # now arm). When the advance is IMPOSSIBLE the arm refuses
+                # PRE-NONCE with the NEW additive token
+                # `scripts-advance-unavailable` + the exact hand command
+                # (nonce NOT burned — the burn is further down); byte
+                # PARITY failures refuse with `scripts-pin-drift`. Every
+                # OTHER refusal class falls through to the EXISTING
+                # stale-scripts-dir refusal UNCHANGED (W-1/W-3 legs).
+                if os.environ.get(
+                    "ENSEMBLE_UPGRADE_SCRIPTS_DIR", ""
+                ).strip():
+                    adv_status, adv_detail = scripts_pin_self_advance(
+                        scripts_dir,
+                        floor_commit=(PIPELINE_SCRIPTS_FLOOR_COMMIT or None),
+                        target_commit=None,
+                        manifest=manifest,
+                    )
+                    if adv_status == "advanced":
+                        try:
+                            uj.journal_history_append(
+                                install_dir,
+                                "arm-scripts-advance",
+                                f"scripts pin self-advanced: {adv_detail} "
+                                f"scripts_dir={scripts_dir} "
+                                "ownership=release-lane-written "
+                                "(stage-time writer; arm-time reader "
+                                "recovered a missed stage advance)",
+                            )
+                        except (uj.JournalTorn, OSError) as exc:
+                            logger.warning(
+                                "arm-scripts-advance row failed (%s) — "
+                                "the advance itself stands", exc,
+                            )
+                        prov_verdict, prov_detail = (
+                            scripts_dir_provenance_verdict(
+                                scripts_dir,
+                                floor_commit=(
+                                    PIPELINE_SCRIPTS_FLOOR_COMMIT or None
+                                ),
+                                env=os.environ,
+                            )
+                        )
+                        if prov_verdict != "refuse":
+                            try:
+                                uj.journal_history_append(
+                                    install_dir,
+                                    "arm-scripts-provenance",
+                                    f"verdict={prov_verdict} {prov_detail} "
+                                    "(re-judged after arm-scripts-advance)",
+                                )
+                            except (uj.JournalTorn, OSError):
+                                pass
+                        # a still-refusing re-judgement falls through to
+                        # the existing refusal below with the FRESH detail
+                    elif adv_status == "unavailable":
+                        try:
+                            uj.journal_history_append(
+                                install_dir,
+                                "arm-scripts-advance",
+                                f"advance UNAVAILABLE: {adv_detail}",
+                            )
+                        except (uj.JournalTorn, OSError):
+                            pass
+                        journal_lock_release(install_dir)
+                        return _refusal(
+                            label,
+                            "scripts-advance-unavailable",
+                            f"arm preflight: the pinned scripts dir is "
+                            f"behind the floor and cannot self-advance — "
+                            f"{adv_detail} — nonce NOT burned (the arm "
+                            "simply did not happen; nothing consumed)",
+                        )
+                    elif adv_status == "drift":
+                        try:
+                            uj.journal_history_append(
+                                install_dir,
+                                "arm-scripts-advance",
+                                f"advance REFUSED: {adv_detail}",
+                            )
+                        except (uj.JournalTorn, OSError):
+                            pass
+                        journal_lock_release(install_dir)
+                        return _refusal(
+                            label,
+                            "scripts-pin-drift",
+                            f"arm preflight: {adv_detail} — nonce NOT "
+                            "burned (the arm simply did not happen; "
+                            "nothing consumed)",
+                        )
+                    # "not-eligible" ⇒ fall through, unchanged
+                # D4-b: a SUCCESSFUL advance re-judged the guard to a
+                # non-refuse verdict above (prov_verdict reassigned) —
+                # the arm proceeds and this refusal is SKIPPED. Any other
+                # path leaves prov_verdict == "refuse" and the EXISTING
+                # refusal fires with its original (or fresh re-judged)
+                # detail — byte-identical to the pre-Wave-5 behavior.
+                if prov_verdict == "refuse":
+                    journal_lock_release(install_dir)
+                    return _refusal(
+                        label,
+                        "stale-scripts-dir",
+                        f"arm preflight: {prov_detail} — nonce NOT burned "
+                        "(the arm simply did not happen; nothing consumed)",
+                    )
+            # ── Step 0c — arm-time journalctl capture (AC-OBS-1 / C-7) ────
+            # The daemon app log rotates at 10 MB (~15-20 min) and the
+            # AGENT lanes cannot reach journalctl or /var/log at all ⇒ the
+            # incident window is gone by the time a human reads it. The TOOL
+            # lane can: this captures a bounded excerpt of the relevant
+            # units into the RUN NARRATIVE before the ceremony starts.
+            #
+            # BEST-EFFORT + a JOURNALED VERDICT (captured /
+            # unavailable+reason) and NEVER ARM-BLOCKING (the journal-read
+            # privilege of the service user is unverified — Appendix B #7).
+            # It is an OBSERVABILITY step, never a gate: the capture sits
+            # AFTER the provenance guard (a refusal never wastes it) and
+            # BEFORE the nonce burn.
+            try:
+                jc_verdict = uj.arm_journalctl_capture(
+                    install_dir, run_id, uj._ceremony_env_scope([self_env])
+                )
+            except Exception as exc:  # noqa: BLE001 — never blocks the arm
+                jc_verdict = (
+                    f"unavailable reason=capture-error({type(exc).__name__})"
+                )
+            try:
+                uj.journal_history_append(
+                    install_dir, "arm-journal-capture", jc_verdict
+                )
+            except uj.JournalTorn:
+                # virgin install (no nonce flow journaled yet): init the
+                # skeleton ONCE and retry — the row is journal-always.
+                try:
+                    uj.journal_init(install_dir)
+                    uj.journal_history_append(
+                        install_dir, "arm-journal-capture", jc_verdict
+                    )
+                except (uj.JournalTorn, OSError):
+                    logger.warning(
+                        "arm-journal-capture row lost (journal unavailable) "
+                        "— verdict=%s",
+                        jc_verdict,
+                    )
+            except OSError as exc:
+                logger.warning(
+                    "arm-journal-capture row failed (%s: %s) — verdict=%s",
+                    type(exc).__name__,
+                    exc,
+                    jc_verdict,
+                )
+            # ── Step 0d — the ARM-TIME ROLLBACK-TARGET INVARIANT (LD-3 / ────
+            # AC-D5-14, self-service-promote Wave 3) ───────────────────────
+            # At ARM, pre-nonce: the would-be rollback target (the current
+            # symlink's release) must be present ∧ not quarantined ∧
+            # rollback_safe — else REFUSE with a named reason. This
+            # converts the most common mid-ceremony halt-for-human class
+            # (the M4/M5/missing-dir 8b halt arms) into an arm-time
+            # refusal: a ceremony that could not roll back safely never
+            # starts. The nonce is NOT burned (the refusal precedes
+            # consume_pending_action).
+            try:
+                inv = _armtime_rollback_target_invariant(install_dir)
+            except Exception as inv_err:  # noqa: BLE001 — fail-closed below
+                inv = (
+                    "refuse",
+                    "rollback-target-unprobeable",
+                    f"the rollback-target invariant could not be evaluated "
+                    f"({type(inv_err).__name__}: {inv_err}) — fail-closed: "
+                    f"the arm refuses rather than start a ceremony whose "
+                    f"recovery path is unknown",
+                )
+            if inv[0] == "refuse":
                 journal_lock_release(install_dir)
                 return _refusal(
                     label,
-                    "stale-scripts-dir",
-                    f"arm preflight: {prov_detail} — nonce NOT burned "
-                    "(the arm simply did not happen; nothing consumed)",
+                    inv[1],
+                    f"arm preflight: {inv[2]} — nonce NOT burned (the arm "
+                    f"simply did not happen; nothing consumed)",
+                )
+            if inv[0] == "note":
+                logger.info(
+                    "upgrade_tools: arm-time rollback-target invariant: %s",
+                    inv[2],
                 )
             try:
                 if confirmed_action is not None:
@@ -4142,7 +4607,7 @@ go/rollback).
 # match a definition instead of the call site and be vacuous. Relocate
 # only downwards.
 
-PIPELINE_SCRIPTS_FLOOR_COMMIT = "1aa0065eb818ff00cb32730fab54d7f2060c42d8"
+PIPELINE_SCRIPTS_FLOOR_COMMIT = "46d55b002d35092c29c391fc76e6b897c0819e11"
 """The Q1 floor (D6-10, leader ruling FINAL): the commit that introduced
 the preflight-hang fix, compared against a pinned scripts dir's HEAD by
 git ancestry at arm time.
@@ -4388,3 +4853,557 @@ def scripts_dir_provenance_verdict(
         f"non-git-no-stamp: WARNING only, never a refusal (Q2/D6-11); "
         f"{provenance}",
     )
+
+
+# ── D4-b (self-service-promote Wave 5, §2.6): the ARM-TIME READER — the
+# scripts-pin SELF-ADVANCE. Called ONLY after the provenance guard
+# refused an EXPLICITLY PINNED dir in the BEHIND-FLOOR class; the guard's
+# own git-ancestry predicate is BYTE-UNCHANGED (this is a separate step,
+# not a guard edit). The advance is a WORKTREE-LOCAL HEAD move — NEVER a
+# fetch (the daemon has no SSH path in the systemd env).
+#
+# Statuses (closed vocabulary):
+#   "not-eligible" — the refusal is not the behind-floor class (probe
+#       error / floor-unset / stamp-absent / unusable dir / the pin is
+#       already at-or-after the floor): the caller falls through to the
+#       EXISTING refusal unchanged (byte-identical W-1/W-3 behavior).
+#   "advanced"     — pin HEAD == T now; detail names T_old→T_new +
+#       coverage + parity (the caller journals `arm-scripts-advance` and
+#       re-judges the guard, which must now return arm).
+#   "unavailable"  — the advance is IMPOSSIBLE (no source_commit in the
+#       target manifest / T not sha-shaped / T absent locally / floor not
+#       contained in T / a family path missing at T / the flock or the
+#       checkout failed): the caller refuses PRE-NONCE with the NEW
+#       additive token `scripts-advance-unavailable` + the exact command
+#       to run by hand (nonce NOT burned, lock released, no pending_op).
+#   "drift"        — the byte-parity gate failed (the tree at T does not
+#       match the payload manifest's scripts_manifest sha256): the caller
+#       refuses with the NEW additive token `scripts-pin-drift`.
+
+_SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _advance_remedy(pin_root: Path, target: str, why: str) -> str:
+    """The EXACT hand command for a scripts-advance-unavailable refusal
+    (AC-D4-2) — class-specific, copy-pasteable."""
+    return (
+        f"Remedy ({why}): run by hand — "
+        f"git -C {pin_root} fetch origin && "
+        f"git -C {pin_root} checkout --detach {target} "
+        "(the daemon never fetches: no SSH path in the systemd env)"
+    )
+
+
+_PID_MAX_BOUND = 4_194_304  # 2^22 — the kernel's pid_max hard ceiling on
+# 64-bit Linux; an owner file naming a pid ABOVE this can never name a
+# real process (and os.kill would raise OverflowError, not
+# ProcessLookupError) — unattributable, never stolen from.
+
+
+def _advance_lock_steal_verdict(
+    lock_dir: Path,
+) -> tuple[bool, str, str | None]:
+    """Cycle-2 MAJOR-4 + cycle-3 A3: may the stale-break STEAL this lock?
+
+    Returns ``(may_steal, refusal_reason, owner_raw)`` — the refusal
+    reason is ``""`` when the steal is sanctioned, and ``owner_raw``
+    carries the owner-file bytes the verdict QUALIFIED on (the CAS
+    re-check retires only the dir that still answers to those bytes).
+    NEVER RAISES (cycle-3 A3 — the escaped OverflowError class): any
+    unexpected failure computing the verdict folds to
+    ``(False, reason, None)``; a verdict that cannot be computed never
+    sanctions a steal.
+
+    The m4 stale-break gated on the DIR MTIME alone — but the namespace
+    had no heartbeat refresh, so a long LIVE checkout's lock crossed the
+    300s line and was rmtree'd from under its live holder. The steal now
+    requires ALL of:
+
+    * the ``owner`` file names a DEAD pid (``uj._pid_alive`` — EPERM
+      counts as ALIVE, fail-closed; a missing/unreadable/non-numeric
+      owner file is UNATTRIBUTABLE and is never stolen — a human clears
+      it), and
+    * the dir mtime is >300s stale, and
+    * the ``heartbeat`` file is >300s stale (a missing heartbeat falls
+      back to the dir mtime — the holder never refreshed).
+
+    A LIVE owner is never stolen from regardless of clock age. The shell
+    lane's steal gate (executor_family.sh) implements the identical
+    protocol.
+    """
+    try:
+        return _advance_lock_steal_verdict_impl(lock_dir)
+    except Exception as exc:  # pragma: no cover — the never-raises net
+        return False, (
+            f"the steal verdict could not be computed "
+            f"({type(exc).__name__}: {str(exc)[:120]}) — an unverifiable "
+            "verdict never sanctions a steal (clear the lock by hand: "
+            f"{lock_dir})"
+        ), None
+
+
+def _advance_lock_steal_verdict_impl(
+    lock_dir: Path,
+) -> tuple[bool, str, str | None]:
+    now = time.time()
+    try:
+        dir_age = now - lock_dir.stat().st_mtime
+    except OSError:
+        dir_age = float("inf")
+    try:
+        owner_raw = (lock_dir / "owner").read_text(encoding="utf-8").strip()
+    except OSError:
+        return False, (
+            "the owner file is missing/unreadable — the holder cannot be "
+            "attributed; a live holder is never stolen from (clear the "
+            f"lock by hand: {lock_dir})"
+        ), None
+    if not (owner_raw.isascii() and owner_raw.isdigit()):
+        return False, (
+            f"the owner file does not name a pid ({owner_raw!r}) — the "
+            "holder cannot be attributed; a live holder is never stolen "
+            f"from (clear the lock by hand: {lock_dir})"
+        ), None
+    try:
+        owner_pid = int(owner_raw)
+    except ValueError:
+        return False, (
+            f"the owner file does not name a pid ({owner_raw!r}) — the "
+            "holder cannot be attributed; a live holder is never stolen "
+            f"from (clear the lock by hand: {lock_dir})"
+        ), None
+    if owner_pid <= 0:
+        return False, (
+            f"the owner file does not name a pid ({owner_raw!r}) — the "
+            "holder cannot be attributed; a live holder is never stolen "
+            f"from (clear the lock by hand: {lock_dir})"
+        ), None
+    if owner_pid > _PID_MAX_BOUND:
+        # cycle-3 A3: an out-of-range pid can never name a real process
+        # and os.kill would raise OverflowError (not ProcessLookupError)
+        # — the class that escaped the never-raises contract. Bounded
+        # here, unattributable, never stolen from.
+        return False, (
+            f"the owner file does not name a pid ({owner_raw!r} exceeds "
+            f"the kernel pid_max ceiling {_PID_MAX_BOUND}) — the holder "
+            "cannot be attributed; a live holder is never stolen from "
+            f"(clear the lock by hand: {lock_dir})"
+        ), None
+    try:
+        hb_age = now - (lock_dir / "heartbeat").stat().st_mtime
+    except OSError:
+        hb_age = dir_age  # no heartbeat was ever written — the dir clock is it
+    if uj._pid_alive(owner_pid):
+        return False, (
+            f"a LIVE owner (pid {owner_pid}) holds the lock — never stolen "
+            f"from a live holder (dir {dir_age:.0f}s, heartbeat "
+            f"{hb_age:.0f}s old); retry"
+        ), None
+    if not (dir_age > 300.0 and hb_age > 300.0):
+        return False, (
+            f"the holder (pid {owner_pid}) is gone but the lock is not yet "
+            f"stale-breakable (dir {dir_age:.0f}s, heartbeat {hb_age:.0f}s "
+            "old; BOTH must exceed 300s); retry"
+        ), None
+    return True, "", owner_raw
+
+
+def _advance_marker_drop(marker: Path) -> None:
+    try:
+        marker.unlink()
+    except OSError:
+        pass
+
+
+def _advance_marker_reclaimable(marker: Path) -> bool:
+    """Is a blocking steal-won marker reclaimable? It is when it names a
+    DEAD stealer (crashed mid-transition — the marker outlived it), an
+    impossible pid (no live stealer can own it), or is ancient (>3600s —
+    pid-reuse doubt cannot keep a transition wedged forever). A marker
+    naming a LIVE pid inside the window is NOT reclaimable — that
+    transition is in flight; fail-closed refuse."""
+    try:
+        parts = marker.read_text(encoding="utf-8").split()
+        pid, ts = int(parts[0]), int(parts[1])
+    except (OSError, ValueError, IndexError, OverflowError):
+        return False  # unreadable/malformed — a human clears it
+    if pid <= 0 or pid > _PID_MAX_BOUND:
+        return True  # impossible pid — no live stealer can own it
+    if uj._pid_alive(pid) and (time.time() - ts) < 3600.0:
+        return False
+    return True
+
+
+def _advance_lock_acquire(lock_dir: Path) -> tuple[bool, str]:
+    """Acquire the advance lock (ONE namespace with the shell lane's
+    ``_stage_advance_lock_acquire``). Returns ``(held, reason)`` — the
+    reason is ``""`` when held. NEVER RAISES.
+
+    Fast path: the atomic ``mkdir`` (EEXIST ⇒ held elsewhere).
+
+    Held path — the CYCLE-3 A2 TRUE-CAS steal, single winner by
+    construction (the pre-A2 rename-aside let 2–3 stealers interleave:
+    each qualified independently, then each renamed *whatever sat at
+    the path* aside and mkdir'd — a second stealer's rename succeeded
+    against the first stealer's freshly-installed LIVE lock; measured:
+    both lanes advanced, nondeterministic HEAD):
+
+    1. ``_advance_lock_steal_verdict`` qualifies the holder (dead pid,
+       both clocks >300s) — unchanged, and it now returns the owner
+       bytes it qualified on.
+    2. EXCLUSIVE CLAIM: hard-link a claim file to
+       ``<lock>.steal-won``. link(2) is EEXIST-atomic — exactly ONE
+       stealer wins (rename/mkdir cannot do this conditionally: rename
+       silently REPLACES an empty dir). A marker naming a
+       dead/impossible/ancient stealer is reclaimed once (crash
+       recovery); one naming a live stealer blocks fail-closed.
+    3. RETIRE the stale dir (uncontested — every other stealer lost
+       the link) and RE-VERIFY the retired dir still answers to the
+       verdict's owner bytes; a mismatch (the dir was replaced between
+       verdict and retire) is restored best-effort and refused.
+    4. ``mkdir`` the freed path — EEXIST means a concurrent
+       NON-stealing acquirer won it; the stealer LOSES and refuses.
+
+    Every loser exits without touching the winner's lock; the marker is
+    dropped on every exit of the claim winner.
+    """
+    try:
+        os.mkdir(lock_dir)
+        return True, ""
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        return False, (
+            f"cannot create the advance lock dir {lock_dir} "
+            f"({type(exc).__name__}: {exc}) — concurrent arms could "
+            "interleave HEAD moves"
+        )
+    may_steal, why_not, owner_qualified = _advance_lock_steal_verdict(
+        lock_dir)
+    if not may_steal:
+        return False, why_not
+    marker = lock_dir.with_name(lock_dir.name + ".steal-won")
+    claim = lock_dir.with_name(
+        f"{lock_dir.name}.steal-claim.{os.getpid()}")
+    claimed = False
+    for attempt in (0, 1):
+        try:
+            claim.write_text(
+                f"{os.getpid()} {int(time.time())}\n", encoding="utf-8")
+        except OSError as exc:
+            return False, (
+                f"the steal claim could not be staged "
+                f"({type(exc).__name__}: {exc}) — the steal never started"
+            )
+        try:
+            os.link(claim, marker)
+            claimed = True
+            break
+        except FileExistsError:
+            if attempt == 0 and _advance_marker_reclaimable(marker):
+                try:
+                    marker.unlink()
+                except OSError:
+                    pass
+                continue
+            return False, (
+                "another steal owns the transition (the steal-won marker "
+                f"at {marker} names a live stealer) — single-winner CAS; "
+                "retry"
+            )
+        except OSError as exc:
+            return False, (
+                f"the steal claim link failed ({type(exc).__name__}: "
+                f"{exc}) — the steal never started"
+            )
+        finally:
+            try:
+                claim.unlink()
+            except OSError:
+                pass
+    if not claimed:
+        return False, "the steal claim could not be won"
+    retired = lock_dir.with_name(
+        f"{lock_dir.name}.retired.{os.getpid()}")
+    try:
+        os.rename(lock_dir, retired)
+    except OSError as exc:
+        _advance_marker_drop(marker)
+        return False, (
+            f"the steal retire failed ({type(exc).__name__}: {exc}) — "
+            "the lock path changed under the steal; retry"
+        )
+    try:
+        retired_owner = (retired / "owner").read_text(
+            encoding="utf-8").strip()
+    except OSError:
+        retired_owner = None
+    if retired_owner != owner_qualified:
+        # the dir at the path was REPLACED between the verdict and the
+        # retire (a human clear + a fresh acquirer) — restore the live
+        # replacement best-effort and refuse; never steal it.
+        restored = False
+        try:
+            os.rename(retired, lock_dir)
+            restored = True
+        except OSError:
+            pass
+        _advance_marker_drop(marker)
+        return False, (
+            "the lock dir at the path was REPLACED after the verdict — "
+            + ("the replacement is restored" if restored else
+               f"the replacement is parked at {retired} (clear by hand)")
+            + "; never stolen (fail-closed)"
+        )
+    try:
+        os.mkdir(lock_dir)
+    except OSError:
+        shutil.rmtree(retired, ignore_errors=True)
+        _advance_marker_drop(marker)
+        return False, (
+            "the steal lost the free path to a concurrent acquirer — "
+            "single-winner CAS; retry"
+        )
+    try:
+        (lock_dir / "owner").write_text(
+            f"{os.getpid()}\n", encoding="utf-8")
+        (lock_dir / "heartbeat").write_text(
+            f"{int(time.time())}\n", encoding="utf-8")
+    except OSError:
+        pass  # advisory: the dir itself is the lock
+    shutil.rmtree(retired, ignore_errors=True)
+    _advance_marker_drop(marker)
+    return True, ""
+
+
+def scripts_pin_self_advance(
+    scripts_dir: Path,
+    floor_commit: str | None,
+    target_commit: str | None = None,
+    manifest: dict[str, Any] | None = None,
+) -> tuple[str, str]:
+    """Attempt the D4-b self-advance of an explicitly-pinned scripts
+    worktree. Returns ``(status, detail)`` — see the status vocabulary
+    above. NEVER fetches; journals NOTHING (the caller owns the journal
+    rows); never raises.
+
+    ``target_commit``: the staged release's ``manifest.source_commit``
+    (passed explicitly or derived from ``manifest``).
+    """
+    pin_root = Path(scripts_dir).parents[1] if len(
+        Path(scripts_dir).parents
+    ) >= 2 else Path(scripts_dir)
+    # ── eligibility: is the refusal the BEHIND-FLOOR class? ────────────
+    if not floor_commit:
+        return "not-eligible", "floor unset — not the behind-floor class"
+    rev_rc, rev_out, _ = uj.bounded_git_probe(
+        scripts_dir, "rev-parse", "--verify", "HEAD"
+    )
+    if rev_rc != 0:
+        return "not-eligible", f"HEAD unresolvable (rc={rev_rc})"
+    t_old = rev_out.strip()
+    if not t_old:
+        return "not-eligible", "HEAD empty"
+    anc_rc, _, _ = uj.bounded_git_probe(
+        scripts_dir, "merge-base", "--is-ancestor", floor_commit, "HEAD"
+    )
+    if anc_rc == 0:
+        return "not-eligible", (
+            f"HEAD {t_old[:12]} already contains the floor — the refusal "
+            "is not the behind-floor class"
+        )
+    if anc_rc != 1:
+        return "not-eligible", (
+            f"floor ancestry probe rc={anc_rc} — unverifiable, not the "
+            "behind-floor class"
+        )
+    # ── the target commit ──────────────────────────────────────────────
+    t = target_commit
+    if t is None and isinstance(manifest, dict):
+        raw = manifest.get("source_commit")
+        if isinstance(raw, str):
+            t = raw.strip()
+    if not t or not _SHA40_RE.match(t):
+        return "unavailable", (
+            "the target release's manifest carries no sha-shaped "
+            "source_commit (staged by a pre-Wave-5 stage lane) — the pin "
+            "cannot be self-advanced to the release's own source commit; "
+            + _advance_remedy(pin_root, "<the-release-source-commit>",
+                              "no source_commit")
+        )
+    # ── T present locally (NEVER fetch) ────────────────────────────────
+    cf_rc, _, cf_err = uj.bounded_git_probe(
+        scripts_dir, "cat-file", "-e", f"{t}^{{commit}}"
+    )
+    if cf_rc != 0:
+        return "unavailable", (
+            f"target commit {t} is NOT present in the pin worktree's "
+            f"object store (git cat-file rc={cf_rc}: "
+            f"{(cf_err or '').strip()[:120] or 'absent'}) — "
+            "the daemon never fetches; "
+            + _advance_remedy(pin_root, t, "target absent locally")
+        )
+    # ── floor ⊆ T ──────────────────────────────────────────────────────
+    ft_rc, _, _ = uj.bounded_git_probe(
+        scripts_dir, "merge-base", "--is-ancestor", floor_commit, t
+    )
+    if ft_rc != 0:
+        return "unavailable", (
+            f"floor {floor_commit[:12]} is NOT an ancestor of the target "
+            f"{t[:12]} — the staged release predates the floor the daemon "
+            "enforces; re-stage a release whose source contains the floor; "
+            + _advance_remedy(pin_root, t, "floor not contained")
+        )
+    # ── 17-path coverage at T (AC-D4-7) ────────────────────────────────
+    missing: list[str] = []
+    for rel in uj.EXECUTOR_FAMILY_PATHS:
+        m_rc, _, _ = uj.bounded_git_probe(
+            scripts_dir, "cat-file", "-e", f"{t}:{rel}"
+        )
+        if m_rc != 0:
+            missing.append(rel)
+    if missing:
+        return "unavailable", (
+            f"executor-family stamp coverage at target {t[:12]} is "
+            f"NON-EMPTY ({len(missing)} missing: "
+            f"{', '.join(missing[:4])}{'…' if len(missing) > 4 else ''}) — "
+            "the target commit does not contain the whole shipped family; "
+            + _advance_remedy(pin_root, t, "coverage non-empty")
+        )
+    # ── byte parity vs the payload manifest (AC-D4-4) ──────────────────
+    if isinstance(manifest, dict):
+        scripts_map = manifest.get("scripts_manifest")
+        slice_map = manifest.get("daemon_slice_manifest")
+        if not isinstance(scripts_map, dict) or not isinstance(slice_map, dict):
+            return "unavailable", (
+                "the target release's manifest carries no "
+                "scripts_manifest/daemon_slice_manifest maps (pre-Wave-5 "
+                "payload) — byte parity is unverifiable; "
+                + _advance_remedy(pin_root, t, "manifest maps absent")
+            )
+        for rel in uj.EXECUTOR_FAMILY_PATHS:
+            if rel.startswith("scripts/"):
+                key, entry = rel[len("scripts/"):], scripts_map
+            else:
+                key, entry = rel, slice_map
+            want = entry.get(key)
+            if not isinstance(want, str):
+                return "drift", (
+                    f"scripts-pin-drift: family path {rel} is ABSENT from "
+                    f"the payload manifest at key {key!r} — the payload and "
+                    f"the pin tree at {t[:12]} disagree"
+                )
+            got = uj.bounded_git_blob_sha256(scripts_dir, t, rel)
+            if got is None or got != want:
+                return "drift", (
+                    f"scripts-pin-drift: {rel} at target {t[:12]} hashes "
+                    f"to {got or '<unprobeable>'} but the payload manifest "
+                    f"records {want[:12]}… — the executing tree would NOT "
+                    "be byte-identical to the shipped family; refusing "
+                    "(the staged tree diverged from its own source commit)"
+                )
+    # ── MINOR-11 / review-fix m4 (2026-11-20): ONE lock namespace with the
+    # stage lane. The shell advance (executor_family.sh) takes a MKDIR
+    # DIR LOCK at `<pin_root>.scripts-advance.lock.d` (lib.sh's Bash-3.2/
+    # BSD no-flock(1) constraint — the shell lane CANNOT flock); this
+    # reader previously took an fcntl FILE lock at `.scripts-advance.lock`
+    # — a DIFFERENT namespace: the two lanes did NOT exclude each other
+    # and could interleave HEAD moves. The python side now acquires the
+    # SAME dir lock with the SAME protocol the shell lane uses (mkdir ⇒
+    # holder; owner/heartbeat files; release = rm -rf ONLY when the owner
+    # file carries OUR pid — a foreign holder is never touched).
+    #
+    # CYCLE-2 MAJOR-4 (2026-11-20): the m4 stale-break gated on the DIR
+    # MTIME ALONE — but the namespace had NO heartbeat refresh at all,
+    # so a LONG LIVE checkout's lock crossed the 300s line and was
+    # rmtree'd from under its live holder (measured: the shell and python
+    # lanes both advanced concurrently, rc=0 both, nondeterministic pin
+    # HEAD). The steal is now LIVENESS-GATED (both lanes, same protocol):
+    # it fires ONLY when the owner file names a DEAD pid AND the dir
+    # mtime AND the heartbeat are BOTH >300s stale — see
+    # _advance_lock_steal_verdict; the shell holder refreshes its
+    # heartbeat across the checkout (executor_family.sh
+    # _adv_heartbeat_refresher), and this side re-stamps before its own
+    # checkout. With that gate, "a foreign holder is never touched" is
+    # true on EVERY path — release AND steal.
+    lock_dir = Path(f"{pin_root}.scripts-advance.lock.d")
+    # CYCLE-3 A2 (2026-11-20): the acquisition is now the TRUE-CAS
+    # protocol (verdict + link-claim + retire + mkdir-CAS — see
+    # _advance_lock_acquire): under N concurrent stealers EXACTLY ONE
+    # wins, both lanes (the pre-A2 rename-aside measured 2–3 concurrent
+    # winners — each rename succeeded against whatever sat at the path,
+    # including another stealer's freshly-installed LIVE lock).
+    lock_taken, lock_why = _advance_lock_acquire(lock_dir)
+    if not lock_taken:
+        return "unavailable", (
+            f"advance lock HELD ({lock_dir}) — {lock_why}; "
+            + _advance_remedy(pin_root, t, "lock")
+        )
+    try:
+        (lock_dir / "owner").write_text(f"{os.getpid()}\n",
+                                        encoding="utf-8")
+        (lock_dir / "heartbeat").write_text(
+            f"{int(time.time())}\n", encoding="utf-8")
+    except OSError:
+        # owner files are advisory (the dir itself is the lock)
+        pass
+
+    def _release_advance_lock() -> None:
+        # release discipline mirrors lib.sh lock_release / the shell
+        # advance: rm -rf ONLY when this process owns the lock dir (the
+        # owner file carries our pid); a foreign holder is never touched.
+        try:
+            if (lock_dir / "owner").read_text(
+                    encoding="utf-8").strip() == str(os.getpid()):
+                shutil.rmtree(lock_dir)
+        except OSError:
+            pass
+
+    try:
+        # ── review-fix d11 (2026-11-20): fail-closed DIRTY-TREE guard —
+        # `checkout --detach` only ever moves a CLEAN, operator-owned pin
+        # worktree (§2.6(b)); a dirty tree would fold local edits into
+        # the advanced HEAD or lose them. Refuse (never move); the
+        # operator advances by hand.
+        dirty_rc, dirty_out, _ = uj.bounded_git_probe(
+            scripts_dir, "status", "--porcelain",
+        )
+        if dirty_rc != 0:
+            return "unavailable", (
+                "pin worktree cleanliness UNVERIFIABLE "
+                f"(git status rc={dirty_rc}) — fail-closed per §2.6(b); "
+                + _advance_remedy(pin_root, t, "cleanliness unprovable")
+            )
+        if dirty_out.strip():
+            return "unavailable", (
+                "the pin worktree is DIRTY "
+                f"({len(dirty_out.strip().splitlines())} status entries) — "
+                "the daemon never moves the HEAD of an operator-owned "
+                "tree with local changes (§2.6(b) fail-closed; clean or "
+                "commit the tree by hand, then re-arm); "
+                + _advance_remedy(pin_root, t, "dirty tree")
+            )
+        # MAJOR-4: re-stamp the heartbeat immediately before this lane's
+        # own (possibly long) checkout — the shell steal gate reads
+        # heartbeat freshness; a freshly-dead holder's frozen stamp is
+        # what lets BOTH lanes distinguish stale-dead from live-slow.
+        try:
+            (lock_dir / "heartbeat").write_text(
+                f"{int(time.time())}\n", encoding="utf-8")
+        except OSError:
+            pass  # advisory: the dir itself is the lock; pid liveness gates
+        ok, note = uj.bounded_git_checkout_detach(scripts_dir, t)
+        if not ok:
+            return "unavailable", (
+                f"the worktree-local HEAD move FAILED ({note}); "
+                + _advance_remedy(pin_root, t, "checkout failed")
+            )
+        return "advanced", (
+            f"T_old={t_old[:12]} T_new={t[:12]} floor={floor_commit[:12]} "
+            f"coverage=empty({len(uj.EXECUTOR_FAMILY_PATHS)} paths) "
+            "parity=byte-identical lock=held-through-checkout "
+            f"(shared mkdir namespace {lock_dir.name})"
+        )
+    finally:
+        _release_advance_lock()
+

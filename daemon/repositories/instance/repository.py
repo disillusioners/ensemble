@@ -34,7 +34,13 @@ logger = logging.getLogger(__name__)
 KB_AGENT_IDS = frozenset(["experiencer", "kb-importer", "kb-writer", "blueprinter"])
 
 # Terminal instance statuses — the conversation has ENDED. Fixed tuple (not a
-# set) so the rendered ``IN (...)`` bind order is deterministic. Mirrors
+# set) so the rendered ``IN (...)`` bind order is deterministic.
+# SHADOW-HAZARD CROSS-REF (wake-path-carrier-fix review advisory): the
+# ``TERMINAL_INSTANCE_STATUSES`` frozenset at ``daemon/constants.py:1022``
+# is MEMBER-EQUAL to this tuple today. They are deliberately NOT
+# consolidated (this one must stay a tuple — the deterministic bind
+# order is load-bearing for the rendered SQL); any edit to either MUST
+# keep them member-equal. Mirrors
 # ``_TERMINAL_STATUSES_FOR_ZOMBIE_SCAN`` and the FE contract
 # ``isTerminalInstanceStatus`` (frontend/src/app/models/instance-node.model.ts)
 # whose ``isLiveInstanceStatus`` is the exact complement — the ``activity``
@@ -647,6 +653,38 @@ class SQLModelInstanceRepository:
             instance = db_session.get(Instance, instance_id)
             return self._enrich_instance(db_session, instance)
 
+    def list_by_ids(self, instance_ids: list[str]) -> list[Instance]:
+        """Batched read of instances by ID.
+
+        Single SELECT ... WHERE instance_id IN (...) (chunked for very
+        large id lists to stay inside bind-parameter limits). Returns
+        Instance rows enriched via ``_enrich_instances``. Deterministic
+        ORDER BY instance_id ASC across chunks.
+        """
+        if not instance_ids:
+            return []
+        unique = list(dict.fromkeys(instance_ids))
+        result: list[Instance] = []
+        with SQLModelSession(self.engine) as db_session:
+            for chunk in chunked(list(unique), _METADATA_LOOKUP_CHUNK):
+                rows = db_session.exec(
+                    select(Instance)
+                    .where(Instance.instance_id.in_(chunk))
+                    .order_by(Instance.instance_id.asc())
+                ).all()
+                result.extend(rows)
+            # Enrich in the same session scope; re-run over the collected
+            # set is harmless because _enrich_instances is a no-op default.
+            try:
+                enriched = self._enrich_instances(db_session, result)
+                if enriched is not None:
+                    result = enriched
+            except Exception:
+                pass
+        # Final deterministic order across chunks.
+        result.sort(key=lambda inst: getattr(inst, "instance_id", ""))
+        return result
+
     def find_by_instance_id_prefix(self, prefix: str, limit: int = 2) -> list[str]:
         """Find instance ids that START with ``prefix`` (D3 prefix lane).
 
@@ -1089,6 +1127,41 @@ class SQLModelInstanceRepository:
         stmt = select(Instance.instance_id, Instance.status).where(
             Instance.instance_id.in_(chunk)
         )
+        with SQLModelSession(self.engine) as db_session:
+            rows = db_session.exec(stmt).all()
+        return {row[0]: row[1] for row in rows}
+
+    def get_parent_ids(
+        self, instance_ids: list[str]
+    ) -> dict[str, str | None]:
+        """Return ``{instance_id: parent_id}`` for ``instance_ids``.
+
+        The batched sibling of :meth:`get_statuses` — one query for
+        the whole set, no N+1 read pattern.
+
+        **S1 (wake-path-carrier-fix)** — serves the ``DELIVER(w)``
+        delivery filter: the terminal lanes must know a watched
+        child's STRUCTURAL parent (the permanent ``instances.parent_id``
+        column) to decide whether a fired FollowUp may be delivered by
+        the bus at all (``DELIVER(w)`` is false when the watcher's
+        target IS the child's structural parent — that waiter is served
+        by the report lane, not by the bus).
+
+        Args:
+            instance_ids: The ids to read. An empty list returns ``{}``
+                without touching the DB.
+
+        Returns:
+            The ``parent_id`` of every id that exists (``None`` for a
+            root instance — a root has no structural parent). Unknown
+            ids are absent from the mapping.
+        """
+        if not instance_ids:
+            return {}
+        chunk = list(dict.fromkeys(instance_ids))
+        stmt = select(
+            Instance.instance_id, Instance.parent_id
+        ).where(Instance.instance_id.in_(chunk))
         with SQLModelSession(self.engine) as db_session:
             rows = db_session.exec(stmt).all()
         return {row[0]: row[1] for row in rows}

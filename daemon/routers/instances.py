@@ -1,6 +1,7 @@
 """Instance management API endpoints."""
 
 import asyncio
+import json
 import logging
 import time
 import uuid
@@ -8,7 +9,10 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
+
+import orjson
 
 from daemon.auth.decorators import scope_required
 from daemon.constants import (
@@ -308,6 +312,81 @@ def _get_manager(request: Request) -> Any:
     return request.app.state.manager
 
 
+#: orjson render options for the WIRE body of this router.
+#:
+#: ``OPT_NON_STR_KEYS`` — the stdlib renderer this body replaced coerced
+#: a non-``str`` mapping key to its JSON spelling (``1`` → ``"1"``);
+#: without this option orjson RAISES on such a key.  With it the two
+#: renderers agree (the parity pack pins int/bool/float keys).
+#: ``OPT_UTC_Z`` — the stdlib path emitted ``+00:00`` for an aware-UTC
+#: datetime only because ``model_dump(mode="json")`` had already
+#: stringified every datetime; the option keeps that class of value
+#: byte-identical (``Z``) if a future field ever reaches the renderer as
+#: a live ``datetime``.
+_WIRE_ORJSON_OPTIONS = orjson.OPT_NON_STR_KEYS | orjson.OPT_UTC_Z
+
+
+def _stdlib_wire_render(payload: Any) -> bytes:
+    """The PRE-SWAP renderer, kept verbatim as the parity reference.
+
+    Byte-for-byte what :meth:`starlette.responses.JSONResponse.render`
+    produced for this route (``ensure_ascii=False``, ``allow_nan=False``,
+    compact separators).  It is both the fallback and the oracle the
+    parity pack compares against.
+    """
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        allow_nan=False,
+        indent=None,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _encode_list_body(payload: Any) -> bytes:
+    """Encode the ``GET /api/instances`` body with orjson (≥100 KB path).
+
+    WHY THIS SITE: the instance list is the daemon's fattest JSON route
+    (a full-tree poll renders hundreds of rows; the payload is measured
+    in the 150 KB - 2.6 MB range), and it is rendered on the event loop
+    on every poll.  The kernel is 3-9x faster than the stdlib renderer at
+    this size, so the whole win lands on the loop.
+
+    PARITY: ``orjson`` emits ``0.000072`` where ``json`` emits
+    ``7.2e-05`` for the same float — a byte delta that only exists for
+    NON-INTEGRAL floats.  :class:`~daemon.models.instance.InstanceInfo`
+    carries NO float field at all (ids, agent ids, dirs, status, titles,
+    child-id lists, timestamps-as-``str``), and every ``int`` on the row
+    is a count/denial counter — so the delta is UNREACHABLE on this
+    payload.  The parity pack proves byte equality on production-shaped
+    fixtures rather than trusting that argument.
+
+    FALLBACK: a payload the fast path cannot express (an out-of-64-bit
+    integer, an unhashable-by-orjson key type) is rendered by
+    :func:`_stdlib_wire_render` — the pre-swap renderer — so the wire
+    bytes can never REGRESS to an error the route did not already have.
+    """
+    try:
+        return orjson.dumps(payload, option=_WIRE_ORJSON_OPTIONS)
+    except (TypeError, ValueError):  # pragma: no cover — defensive
+        return _stdlib_wire_render(payload)
+
+
+def _render_list_body(payload: Any) -> Response:
+    """The list route's wire response — orjson bytes, FastAPI bypassed.
+
+    Returning a ``Response`` is what makes FastAPI skip the
+    ``response_model`` validation + encode pass (the D2 contract this
+    route already relied on); the handler's ``-> InstanceListResponse``
+    annotation is kept because it is the OpenAPI schema source, and a
+    returned ``Response`` simply bypasses it (the committed byte-identity
+    golden pins both the headers and the body).
+    """
+    return Response(
+        content=_encode_list_body(payload), media_type="application/json"
+    )
+
+
 # 1. POST /instances - Spawn instance
 @router.post("", response_model=InstanceInfo, status_code=201, dependencies=[scope_required("instances:write")])
 async def create_instance(
@@ -372,7 +451,36 @@ async def create_instance(
 
 
 # 2. GET /instances - List instances
-@router.get("", response_model=InstanceListResponse, dependencies=[scope_required("instances:read")])
+#
+# Option A (instances-list-latency ANALYSIS.md §8): the LIST wire shape
+# MUST NOT carry the ``mcp_tool_names`` key AT ALL — key-ABSENT, not
+# ``null``. On live pages that field was ~2.26 KB/row (58 % of every
+# row) and the frontend never read it (0 hits in ``frontend/``); the
+# detail route still serves it.
+#
+# Two halves, both required:
+#   1. ``response_model_exclude`` — ``InstanceInfo.mcp_tool_names`` is
+#      ``Field(default=None)``, so merely dropping the constructor kwarg
+#      would serialize as ``"mcp_tool_names": null`` and VIOLATE the
+#      key-absent contract. The nested-exclude form must be
+#      ``{"instances": {"__all__": {"mcp_tool_names"}}}``: in pydantic v2
+#      a plain ``{"instances": {"mcp_tool_names"}}`` is read as an
+#      INDEX mapping for the sequence and silently excludes NOTHING
+#      (verified: the key survived), whereas ``__all__`` applies the
+#      sub-schema to every item of the list.
+#   2. the constructor kwarg below is deleted — the list route no
+#      longer sources the field at all.
+#
+# NOTE (disclosed): the OpenAPI schema still advertises
+# ``mcp_tool_names`` on ``InstanceInfo`` (no schema surgery — the
+# detail route serves the same model). The runtime shape is narrower
+# than the documented shape; that gap is disclosed in the handoff.
+@router.get(
+    "",
+    response_model=InstanceListResponse,
+    response_model_exclude={"instances": {"__all__": {"mcp_tool_names"}}},
+    dependencies=[scope_required("instances:read")],
+)
 async def list_instances(
     request: Request,
     limit: int = DEFAULT_PAGE_LIMIT,
@@ -445,6 +553,17 @@ async def list_instances(
             "of their own ``source_type`` (lineage is by parent_id)."
         ),
     ),
+    anchor: str | None = Query(
+        None,
+        description=(
+            "Optional instance id used as a presence anchor. When present "
+            "and resolvable, the response's ``instances`` array additionally "
+            "contains the anchor row and ALL its descendants (BFS), appended "
+            "after the normal page rows and deduplicated by instance_id. "
+            "Unknown / malformed / unresolvable anchors degrade to an "
+            "unchanged list (HTTP 200)."
+        ),
+    ),
 ) -> InstanceListResponse:
     """List instances with pagination.
 
@@ -507,8 +626,42 @@ async def list_instances(
     # ``IN (?, ?, ...)`` over the current page's IDs; rows the user
     # has never touched are simply absent from the dict (the merge
     # falls back to ``None``).
+    #
+    # The batch read runs OFF the event loop (``db_offload`` seam) —
+    # the repository is synchronous, so an on-loop call blocked the
+    # whole loop for the duration of the SELECT. SECOND offload call
+    # on purpose: folding the read into ``manager.list_instances``
+    # would widen the change into ``daemon/manager.py`` for no gain.
+    # instances-list-anchor: optional presence guarantee for the selected
+    # instance + its subtree. Fetched via a SECOND offloaded call (event-loop
+    # discipline) and merged into ``instances_data`` BEFORE the prefs fetch so
+    # the UI-prefs merge covers the appended rows too. Unknown / malformed /
+    # unresolvable anchors degrade to an unchanged list (HTTP 200, WARN).
+    if anchor is not None:
+        try:
+            anchor_rows = await _offload(
+                manager.get_instance_anchor_family, anchor
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "Anchor family fetch failed for %r: %s", anchor, exc
+            )
+            anchor_rows = []
+        if anchor_rows:
+            existing_ids = {
+                inst["instance_id"] for inst in instances_data
+            }
+            for row in anchor_rows:
+                rid = row.get("instance_id")
+                if rid is None or rid in existing_ids:
+                    continue
+                instances_data.append(row)
+                existing_ids.add(rid)
+
     instance_ids = [inst["instance_id"] for inst in instances_data]
-    prefs_map = manager._instance_ui_prefs_repo.get_all(instance_ids)
+    prefs_map = await _offload(
+        manager._instance_ui_prefs_repo.get_all, instance_ids
+    )
 
     instances = []
     for inst in instances_data:
@@ -523,7 +676,10 @@ async def list_instances(
             title=inst.get("title"),
             initiative_message=inst.get("initiative_message"),
             children=inst.get("children", []),
-            mcp_tool_names=inst.get("metadata", {}).get("mcp_tool_names"),
+            # ``mcp_tool_names`` is NOT sourced here: the list wire shape
+            # omits the key entirely (see the route decorator's
+            # ``response_model_exclude`` block above). The detail route
+            # (GET /instances/{id}) still serves it.
             model=inst.get("metadata", {}).get("model_override"),
             watchover_enabled=bool(inst.get("metadata", {}).get("watchover_enabled", False)),
             watchover_context=inst.get("metadata", {}).get("watchover_context"),
@@ -542,13 +698,23 @@ async def list_instances(
     
     has_more = (offset + limit) < total
 
-    return InstanceListResponse(
+    resp = InstanceListResponse(
         instances=instances,
         total=total,
         limit=limit,
         offset=offset,
         has_more=has_more,
         truncated=truncated,
+    )
+    # Skip FastAPI's response_model validation + jsonable-encode pass on
+    # the event loop: hand-build the body (reproducing the decorator's
+    # response_model_exclude so mcp_tool_names stays key-ABSENT) and
+    # return a Response so FastAPI bypasses response_model handling.
+    return _render_list_body(
+        resp.model_dump(
+            mode="json",
+            exclude={"instances": {"__all__": {"mcp_tool_names"}}},
+        )
     )
 
 

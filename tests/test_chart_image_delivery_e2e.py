@@ -1539,12 +1539,20 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     # Prior re-pin note: nest-anomaly-report phase 5 / C8 (duty
     # section appended).
     "agents/leader/rule.md": "6a225b9f0becdb9b135efcc5b5e42661f48676aba1b65189e2314343ce5ea09d",
-    # agents/maintenancer/rule.md re-pinned 2026-11-05 (nest-anomaly-report phase
-    # 5 / C8): the duty section was APPENDED to this file by the phase-5 duty
-    # ceremony, so the pinned content-sha256 moved with the real bytes.
-    # Prior value abe43bae715c62a341788fbe5d610138936b7b4e83df87c8bbfd3611bf446aec.
-    # Prior re-pin note: approver i3 follow-up round.
-    "agents/maintenancer/rule.md": "705f1da1692b5943bf24a1085ee0ab3e74f4c6850c28592b5ffa8e19bbcf2af4",
+    # agents/maintenancer/rule.md re-pinned 2026-11-22 (central-maintenance
+    # P5A carried cures / the lane's P2 prompt deliverables): the maintenancer
+    # seat's rule body was REWRITTEN by the central-maintenance lane's P2
+    # phase (the seat's duty + contract + cardinal-rule sections), so the
+    # pinned content-sha256 moved with the real bytes. Re-pinned in the SAME
+    # change-set as the cure that regenerates the prompt-artifact manifest
+    # rows (agents/.prompt-artifacts.sha256) — the house rule: the manifest
+    # row and the seal row move TOGETHER, or the 0-stale gate is a HARD RED.
+    # Prior value 705f1da1692b5943bf24a1085ee0ab3e74f4c6850c28592b5ffa8e19bbcf2af4.
+    # Prior re-pin notes: 2026-11-05 nest-anomaly-report phase 5 / C8 (duty
+    # section appended; prior value
+    # abe43bae715c62a341788fbe5d610138936b7b4e83df87c8bbfd3611bf446aec);
+    # approver i3 follow-up round.
+    "agents/maintenancer/rule.md": "38820145875b2fe8b36014069efa9e0176e11e007969115c9e3dfff6c0879997",
     # agents/planner/rule.md re-pinned 2026-11-05 (nest-anomaly-report phase 5 /
     # C8): the duty section was APPENDED to this file by the phase-5 duty
     # ceremony, so the pinned content-sha256 moved with the real bytes.

@@ -284,7 +284,7 @@ async def test_a_ratified_deciding_seam_applies_its_answer() -> None:
     registry.transition_stage(
         "snapshot.l3.selection",
         DecisionStage.DECIDING,
-        review=ReviewRecord(reviewer="council", ratified_by="the Emperor"),
+        review=ReviewRecord(reviewer="council", ratified_by="the user"),
     )
     result = await overlay.consult(
         "snapshot.l3.selection",
@@ -574,7 +574,7 @@ async def test_the_rb_identity_holds_in_deciding_mode() -> None:
     registry.transition_stage(
         "snapshot.l3.selection",
         DecisionStage.DECIDING,
-        review=ReviewRecord(reviewer="council", ratified_by="the Emperor"),
+        review=ReviewRecord(reviewer="council", ratified_by="the user"),
     )
     failures_before = metrics.failures_total.get(
         seam_id="snapshot.l3.selection", failure_class="http_500", mode="deciding"
@@ -609,7 +609,7 @@ async def test_the_floor_rejection_is_a_subset_view_not_an_additive_term() -> No
     registry.transition_stage(
         "snapshot.l3.selection",
         DecisionStage.DECIDING,
-        review=ReviewRecord(reviewer="council", ratified_by="the Emperor"),
+        review=ReviewRecord(reviewer="council", ratified_by="the user"),
     )
     failures_before = metrics.failures_total.get(
         seam_id="snapshot.l3.selection",

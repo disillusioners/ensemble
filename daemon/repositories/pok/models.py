@@ -14,7 +14,7 @@ architecture-recommendation v3.4 §4.1 — the column set is VERBATIM):
   scoring with the lag surfaced (AC14); the row is never
   authoritative content.
 
-AUDIENCE DIMENSION (Emperor ruling ER-1, 2026-11-07): ``audience``
+AUDIENCE DIMENSION (user ruling ER-1, 2026-11-07): ``audience``
 ∈ {operation, implementation, both} gates ACTIVE injection ONLY.
 ``pok_query`` NEVER filters by audience (universal read, ER-1.4 —
 injection is curated; reading is free). ``audience_agents`` (TEXT
@@ -52,17 +52,29 @@ fresh-PG artifact.
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import Boolean, CheckConstraint, Column, Index, Integer, Text, false, text
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    Column,
+    Float,
+    Index,
+    Integer,
+    Text,
+    false,
+    text,
+)
 from sqlmodel import Field, SQLModel
 
 from daemon.repositories.infra.types import JSONBType
 
 __all__ = [
     "POK_AUDIENCES",
+    "POK_ARCHIVE_BASES",
     "POK_DEFAULT_AUDIENCE",
     "POK_DEFAULT_DOMAIN",
     "POK_DEFAULT_PROVENANCE",
@@ -70,11 +82,18 @@ __all__ = [
     "POK_DEFAULT_STATUS",
     "POK_DOMAINS",
     "POK_FAMILY_SLUG_PATTERN",
+    "POK_FAMILY_RE",
+    "pok_family_key",
+    "POK_LEDGER_MERGE_KINDS",
+    "POK_LEDGER_PHASES",
+    "POK_LEDGER_SOURCES",
+    "POK_LEDGER_VERDICTS",
     "POK_PROVENANCE_VALUES",
     "POK_SOURCE_TIERS",
     "POK_STATUSES",
     "ProjectOperatingKnowledge",
     "ProjectOperatingKnowledgeEmbedding",
+    "POKWriteGateLedger",
 ]
 
 
@@ -97,7 +116,7 @@ POK_DOMAINS: tuple[str, ...] = (
     "catalog",
     "other",
 )
-#: Emperor ruling ER-1: the classification stated at capture,
+#: user ruling ER-1: the classification stated at capture,
 #: curator-adjustable. Gates ACTIVE injection ONLY — never retrieval.
 POK_AUDIENCES: tuple[str, ...] = ("operation", "implementation", "both")
 POK_PROVENANCE_VALUES: tuple[str, ...] = ("declared", "observed")
@@ -126,9 +145,118 @@ POK_DEFAULT_STATUS = "active"
 POK_DEFAULT_SOURCE_TIER = "agent"
 
 #: Slug-family ordering regex (§4.5): ``<family>-<NN>-<slug>`` —
-#: lowercase head, two-digit ordinal, free tail. Single source for
+#: lowercase family head (possibly multi-token, e.g. ``prompt-assent`` or
+#: ``snapshot-l3``), two-digit ordinal, free tail. Single source for
 #: tools, injection, and tests.
-POK_FAMILY_SLUG_PATTERN = r"^([a-z][a-z0-9]*)-(\d{2})-(.+)$"
+POK_FAMILY_SLUG_PATTERN = r"^([a-z][a-z0-9]*(?:-[a-z][a-z0-9]*)*)-(\d{2})-(.+)$"
+
+#: Compiled form of the canonical pattern — the SINGLE source every
+#: family-membership decision derives from.
+POK_FAMILY_RE = re.compile(POK_FAMILY_SLUG_PATTERN)
+
+
+def pok_family_key(slug: str) -> str | None:
+    """The canonical family key of a slug, else ``None``.
+
+    THE single derivation: the maximal run of letter-led tokens before
+    the leftmost ``-NN-`` ordinal (``prompt-assent-01-x`` -> ``prompt-assent``).
+    Family MEMBERSHIP is decided by comparing this key for EQUALITY —
+    never by a prefix match.
+    """
+    m = POK_FAMILY_RE.match(slug)
+    return m.group(1) if m else None
+
+
+# ── WRITE-GATE LEDGER VOCABULARIES (pok-write-gate Phase 1, T1.1) ──────
+#
+# The ledger is the DECISION SUBSTRATE for the write gate (plan
+# ``.agents/shared/planning/pok-write-gate/`` — design-amendments-v2
+# §13.5 "Binding schema consequences (no-pick-foreclosed rule)").
+# These vocabularies land UP FRONT so the table can represent a
+# proposal, a verdict, and an ASK round-trip without a later migration.
+
+#: The gate's four outcomes (design-amendments-v2 §8). The set is
+#: CLOSED — the verdict token set is unchanged by the R-RET/R-PROV
+#: rider (gate-rules-r6-r7-amendment.md §2.4).
+POK_LEDGER_VERDICTS: tuple[str, ...] = ("ACCEPT", "MERGE", "ASK", "REJECT")
+
+#: The ledger's CHAIN-STEP discriminator.
+#:
+#: A gate event is recorded as a chain of rows keyed by ``gate_id`` +
+#: ``phase`` (design-amendments-v2 §13.2 fork G):
+#:   * a PLAIN chain (ACCEPT / MERGE / REJECT) keeps TWO rows —
+#:     ``ADMISSION`` (the gate's verdict) → ``EXECUTION`` (the tool's
+#:     write);
+#:   * an ASK chain keeps THREE rows — ``ASK_MINTED`` (the verdict
+#:     row) → ``ASK_ANSWERED`` (post-answer adjudication) →
+#:     ``ASK_EXECUTED`` (the tool's write);
+#:   * ``ASK_EXPIRED`` records a gate that expired unanswered
+#:     (fail-closed — NO write);
+#:   * ``ASK_SHADOW`` records the advisory-only shadow-ASK verdict
+#:     (NO pending mint, NO execution row);
+#:   * ``RETRIEVAL`` records a retrieval event (a stored row was
+#:     retrieved/injected) — these counts SUPERSEDE ``access_count``
+#:     for the librarian (design-amendments-v2 §13.2 fork J,
+#:     amendment 1: they disambiguate query-vs-injection).
+POK_LEDGER_PHASES: tuple[str, ...] = (
+    "ADMISSION",
+    "RETRIEVAL",
+    "EXECUTION",
+    "ASK_MINTED",
+    "ASK_ANSWERED",
+    "ASK_EXECUTED",
+    "ASK_EXPIRED",
+    "ASK_SHADOW",
+)
+
+#: Merge-proposal kinds (design-amendments-v2 §13.2 fork F). A
+#: ``no_delta`` merge is NEVER a write — it stamps the target only.
+POK_LEDGER_MERGE_KINDS: tuple[str, ...] = ("no_delta", "delta")
+
+#: WHERE a retrieval came from. The ledger's retrieval counts
+#: SUPERSEDE ``access_count`` for the librarian precisely because they
+#: DISAMBIGUATE query-vs-injection, which ``access_count`` alone
+#: cannot (design-amendments-v2 §13.2 fork J, amendment 1: "they
+#: disambiguate query-vs-injection, which the effectiveness brief
+#: :104 explicitly could not").
+#:
+#: The column lands UP FRONT (no-pick-foreclosed rule, §13.5): a
+#: retrieval that cannot say where it came from is exactly the
+#: ambiguity the ledger exists to remove. ``query`` is the read-path
+#: side (the ``pok_query`` tool); ``injection`` is the context-block
+#: side. A row that is NOT a retrieval carries NULL.
+#:
+#: ── RETRIEVAL EVENTS: BOTH sides are WIRED ────────────────────────────
+#: Both live ``admit_view`` call sites (the context-block seam and
+#: the ari seam) now pass ``on_retrieval=make_retrieval_recorder(...)``,
+#: so an injected row lands a ledger RETRIEVAL row with
+#: ``source="injection"`` (Phase 10, T10.13). The READ side is wired
+#: too (Phase 12): ``POKService.query`` appends one
+#: ``source="query"`` RETRIEVAL row per returned row — the ``source``
+#: column is the query-vs-injection disambiguator the librarian's
+#: J-metric chain reads.
+POK_LEDGER_SOURCES: tuple[str, ...] = ("injection", "query")
+
+#: The RULED ARCHIVE BASES — the ONLY grounds on which a row may be
+#: archived (design-amendments-v2 §9: "Consolidation ONLY under ruled
+#: archive bases — covered-by-surviving-row · relocated-to-routed-home
+#: · NOW-FALSE — NEVER age, NEVER access_count alone"). The fourth
+#: member (``gate-rejection``) is the curator's citation of a gate
+#: rejection as archive basis (design-amendments-v2 §1: "``pok_curate``
+#: stays curator-authority (leader/PM) and may cite a gate rejection as
+#: archive basis").
+#:
+#: The token spellings are the PLAN's literal tokens (phase10-plan.md
+#: row 7 / plan-overview.md task-map row 10 / design-amendments-v2
+#: §9 all agree) — ``NOW-FALSE`` is upper-case in the plan and is
+#: reproduced verbatim here so the librarian and the curator cite the
+#: SAME token.
+POK_ARCHIVE_BASES: tuple[str, ...] = (
+    "covered-by-surviving-row",
+    "relocated-to-routed-home",
+    "NOW-FALSE",
+    "gate-rejection",
+)
 
 
 class ProjectOperatingKnowledge(SQLModel, table=True):
@@ -306,6 +434,212 @@ class ProjectOperatingKnowledgeEmbedding(SQLModel, table=True):
     # JSON array of floats (JSONBType → JSON on SQLite / JSONB on PG) —
     # the house embeddings shape, never BYTEA/numpy/pickle.
     embedding: list = Field(sa_column=Column("embedding", JSONBType, nullable=False))
+    created_at: str = Field(
+        default_factory=_utc_now_iso,
+        sa_column=Column("created_at", Text, nullable=False),
+    )
+
+
+class POKWriteGateLedger(SQLModel, table=True):
+    """The WRITE-GATE LEDGER — one APPEND-ONLY row per gate event.
+
+    The decision substrate for the POK write gate (pok-write-gate
+    Phase 1, T1.1). It records, for every gate event:
+
+    * the ADMISSION decision (the gate's verdict + the reason excerpt
+      + the judge explanation),
+    * the RETRIEVAL events (a stored row was retrieved/injected),
+    * the TOOL's EXECUTION (what was actually written, by whom),
+    * the BASIS on which anything was archived.
+
+    AUTHORITY SPLIT (design-amendments-v2 §8, BINDING): the gate NEVER
+    writes — it returns a verdict; the TOOL executes. The audit
+    records BOTH: the gate's verdict row and the tool's execution row.
+    A plain ACCEPT/MERGE/REJECT chain therefore keeps TWO rows
+    (``ADMISSION`` → ``EXECUTION``); an ASK chain keeps THREE
+    (``ASK_MINTED`` → ``ASK_ANSWERED`` → ``ASK_EXECUTED``), keyed by
+    ``gate_id`` + ``phase``.
+
+    THE LEDGER ALONE ANSWERS "why was this row accepted?" (plan
+    success criterion #30): gate_id, verdict, reason excerpt, judge
+    explanation, phase, and execution are all here — NO cross-store
+    join is required.
+
+    MERGE-PROPOSAL FIELDS land UP FRONT (design-amendments-v2 §13.5
+    "no-pick-foreclosed rule"): a schema that cannot represent a
+    proposal forces a migration at P1. ``target_slug`` +
+    ``merge_kind`` + ``proposed_body`` + the three sha256 columns +
+    ``executed_by`` let the librarian measure edit-distance between
+    what the judge PROPOSED and what the tool EXECUTED.
+
+    NO FOREIGN KEY anywhere (house posture, matching the sibling POK
+    tables): ``project_id`` / ``entry_id`` / ``gate_id`` are plain
+    TEXT. Combined with the additive-only .sql file this makes the
+    table ROLLBACK-INERT.
+
+    APPEND-ONLY: rows are never updated and never deleted by the
+    substrate. The repository exposes an append + read-only query
+    surface; there is deliberately NO update/delete method.
+    """
+
+    __tablename__ = "pok_write_gate_ledger"
+    __table_args__ = (
+        CheckConstraint(
+            "phase IN ("
+            "'ADMISSION','RETRIEVAL','EXECUTION','ASK_MINTED',"
+            "'ASK_ANSWERED','ASK_EXECUTED','ASK_EXPIRED','ASK_SHADOW')",
+            name="ck_pok_ledger_phase",
+        ),
+        CheckConstraint(
+            "verdict IN ('ACCEPT','MERGE','ASK','REJECT')",
+            name="ck_pok_ledger_verdict",
+        ),
+        CheckConstraint(
+            "merge_kind IN ('no_delta','delta')",
+            name="ck_pok_ledger_merge_kind",
+        ),
+        CheckConstraint(
+            "basis IN ("
+            "'covered-by-surviving-row','relocated-to-routed-home',"
+            "'NOW-FALSE','gate-rejection')",
+            name="ck_pok_ledger_basis",
+        ),
+        CheckConstraint(
+            "source IN ('injection','query')",
+            name="ck_pok_ledger_source",
+        ),
+        Index("idx_pok_ledger_project_id", "project_id"),
+        Index("idx_pok_ledger_project_phase", "project_id", "phase"),
+        Index("idx_pok_ledger_project_created", "project_id", "created_at"),
+        Index("idx_pok_ledger_gate_id", "gate_id"),
+        Index("idx_pok_ledger_entry_id", "entry_id"),
+        # DB-LEVEL GATE-CHAIN IDEMPOTENCY (pok-write-gate Phase 8,
+        # T8.16): at most ONE row per (project_id, gate_id, phase).
+        # The appender used to be app-level read-then-append only, so
+        # two concurrent callers could write the SAME chain step
+        # twice — the DB uniqueness is the Wave-2 backstop (the
+        # single-writer discipline is documentation, not enforcement).
+        #
+        # PARTIAL on ``gate_id IS NOT NULL``: a RETRIEVAL row (and any
+        # other gate-less row) belongs to no chain and must never be
+        # constrained.
+        #
+        # 3-SITE PIN (byte-identical name + predicate):
+        #   * this declaration (fresh databases via ``create_all``),
+        #   * ``daemon/migrations/versions/20261124_093000_add_pok_
+        #     ledger_gate_chain_unique_index.sql`` (SQLite),
+        #   * ``daemon/manager.py::_ensure_postgres_columns`` (the
+        #     PostgreSQL mirror — the .sql runner is a NO-OP on PG).
+        Index(
+            "uq_pok_ledger_gate_chain",
+            "project_id",
+            "gate_id",
+            "phase",
+            unique=True,
+            sqlite_where=text("gate_id IS NOT NULL"),
+            postgresql_where=text("gate_id IS NOT NULL"),
+        ),
+    )
+
+    id: str = Field(
+        default_factory=_new_uuid,
+        sa_column=Column("id", Text, primary_key=True),
+    )
+    # NO FK — plain TEXT (house posture; rollback-inert).
+    project_id: str = Field(sa_column=Column("project_id", Text, nullable=False))
+    #: The chain key. Rows of one gate event share it; a RETRIEVAL
+    #: event that belongs to no gate carries NULL.
+    gate_id: Optional[str] = Field(
+        default=None, sa_column=Column("gate_id", Text, nullable=True)
+    )
+    #: The chain-step discriminator — see :data:`POK_LEDGER_PHASES`.
+    phase: str = Field(sa_column=Column("phase", Text, nullable=False))
+    #: The POK row this event concerns (the landed row, the candidate
+    #: row, the merge target, or the retrieved row).
+    entry_id: Optional[str] = Field(
+        default=None, sa_column=Column("entry_id", Text, nullable=True)
+    )
+    #: The slug under consideration (the candidate's slug).
+    candidate_slug: Optional[str] = Field(
+        default=None, sa_column=Column("candidate_slug", Text, nullable=True)
+    )
+    #: The gate's outcome — see :data:`POK_LEDGER_VERDICTS`. NULL on a
+    #: RETRIEVAL row (a retrieval is not a decision).
+    verdict: Optional[str] = Field(
+        default=None, sa_column=Column("verdict", Text, nullable=True)
+    )
+    #: The caller's OPERATIONAL CLAIM (the reason) — the excerpt an
+    #: operator reads to answer "why was this row accepted?".
+    reason: Optional[str] = Field(
+        default=None, sa_column=Column("reason", Text, nullable=True)
+    )
+    #: The judge's explanation of the verdict.
+    judge_explanation: Optional[str] = Field(
+        default=None, sa_column=Column("judge_explanation", Text, nullable=True)
+    )
+    #: The judge's confidence (0..1). A confidence <= 0.667 (≈ 2/3)
+    #: routes to ASK (never auto-reject).
+    confidence: Optional[float] = Field(
+        default=None, sa_column=Column("confidence", Float, nullable=True)
+    )
+    #: The RULED BASIS on which anything was archived — see
+    #: :data:`POK_ARCHIVE_BASES`. NULL on rows that archived nothing.
+    basis: Optional[str] = Field(
+        default=None, sa_column=Column("basis", Text, nullable=True)
+    )
+    #: WHERE a retrieval came from — ``injection`` or ``query`` (see
+    #: :data:`POK_LEDGER_SOURCES`). NULL on rows that are not
+    #: retrievals. This is the column that makes the ledger's
+    #: retrieval counts disambiguate query-vs-injection.
+    source: Optional[str] = Field(
+        default=None, sa_column=Column("source", Text, nullable=True)
+    )
+    #: The ASK round-trip: the answer excerpt and who answered.
+    answer_excerpt: Optional[str] = Field(
+        default=None, sa_column=Column("answer_excerpt", Text, nullable=True)
+    )
+    answered_by: Optional[str] = Field(
+        default=None, sa_column=Column("answered_by", Text, nullable=True)
+    )
+    #: The tool's execution: who executed, and whether a write
+    #: actually happened. A NO-delta merge and an expired ASK are
+    #: EXECUTED=FALSE — the audit says so explicitly.
+    executed_by: Optional[str] = Field(
+        default=None, sa_column=Column("executed_by", Text, nullable=True)
+    )
+    executed: bool = Field(
+        default=False,
+        sa_column=Column("executed", Boolean, nullable=False, server_default=false()),
+    )
+    # ── merge-proposal fields (design-amendments-v2 §13.5) ──────────
+    #: The MERGE target slug.
+    target_slug: Optional[str] = Field(
+        default=None, sa_column=Column("target_slug", Text, nullable=True)
+    )
+    #: ``no_delta`` (no write — a verification stamp only) or ``delta``
+    #: (the only case a merged body is authored).
+    merge_kind: Optional[str] = Field(
+        default=None, sa_column=Column("merge_kind", Text, nullable=True)
+    )
+    #: The body the judge/caller PROPOSED.
+    proposed_body: Optional[str] = Field(
+        default=None, sa_column=Column("proposed_body", Text, nullable=True)
+    )
+    proposed_body_sha256: Optional[str] = Field(
+        default=None, sa_column=Column("proposed_body_sha256", Text, nullable=True)
+    )
+    target_body_sha256: Optional[str] = Field(
+        default=None, sa_column=Column("target_body_sha256", Text, nullable=True)
+    )
+    #: The body the tool EXECUTED — the edit-distance anchor against
+    #: ``proposed_body_sha256`` (rubber-stamp detection).
+    executed_body_sha256: Optional[str] = Field(
+        default=None, sa_column=Column("executed_body_sha256", Text, nullable=True)
+    )
+    #: The acting agent (attribution — never authorization).
+    agent_id: Optional[str] = Field(
+        default=None, sa_column=Column("agent_id", Text, nullable=True)
+    )
     created_at: str = Field(
         default_factory=_utc_now_iso,
         sa_column=Column("created_at", Text, nullable=False),

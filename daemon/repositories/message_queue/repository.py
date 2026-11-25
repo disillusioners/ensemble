@@ -25,6 +25,85 @@ from sqlalchemy.engine import Engine
 from sqlmodel import Session, select, col
 
 from daemon.constants import TERMINAL_INSTANCE_STATUSES
+
+def _receipt_preserve_arms_sql(engine: Engine) -> tuple[str, str]:
+    """F3 receipt arms, gated on their backing tables being present.
+
+    Production (SQLModel ``create_all`` / migrations) always carries both
+    ``job_queue_items`` and ``event``. Minimal SQLite harnesses (and any
+    legacy deployment whose schema predates them) may not — an
+    unconditional join would turn the boot wipe into a hard
+    ``OperationalError`` and wedge the boot (the very defect this lane
+    exists to prevent). Degrade LOUDLY to the legacy predicate when a
+    table is absent; the FP1/Event preserve arms are simply unavailable
+    in that shape.
+    """
+    # Raw dialect SQL — NO ``sqlalchemy.inspect`` import: some hermetic
+    # harnesses stub the sqlalchemy namespace module, and a lazy import
+    # under that stub would break the boot wipe (the exact wedge class
+    # this lane exists to prevent).
+    try:
+        dialect_name = getattr(getattr(engine, "dialect", None), "name", "")
+        if dialect_name == "sqlite":
+            probe_sql = (
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type = 'table' AND name = :tname LIMIT 1"
+            )
+        else:
+            probe_sql = (
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_name = :tname LIMIT 1"
+            )
+        with engine.connect() as probe_conn:
+            has_jobs = probe_conn.exec_driver_sql(
+                probe_sql, {"tname": "job_queue_items"}
+            ).first() is not None
+            has_events = probe_conn.exec_driver_sql(
+                probe_sql, {"tname": "event"}
+            ).first() is not None
+    except Exception as inspect_err:  # noqa: BLE001 — never wedge the wipe
+        logger.warning(
+            "JOURNAL: receipt-arm table probe failed (%s) — the mq wipe "
+            "degrades to the legacy running/paused predicate",
+            inspect_err,
+        )
+        return ("", "")
+    if not has_jobs:
+        logger.warning(
+            "JOURNAL: job_queue_items table absent — the MQ wipe's FP1 "
+            "preserve arm is unavailable (legacy predicate in force)"
+        )
+    if not has_events:
+        logger.warning(
+            "JOURNAL: event table absent — the MQ wipe's message_received "
+            "receipt arm is unavailable (legacy predicate in force)"
+        )
+    fp1_arm = (
+        " OR EXISTS ("
+        "SELECT 1 FROM job_queue_items jqi "
+        "JOIN task t_fp1 ON t_fp1.work_id = jqi.job_id "
+        "WHERE t_fp1.message_id = message_queue.message_id "
+        f"AND jqi.admission_state IN {active_admission_states_sql()} "
+        "AND jqi.deleted_at IS NULL"
+        ")"
+    ) if has_jobs else ""
+    event_arm = (
+        " OR EXISTS ("
+        "SELECT 1 FROM task t_ev "
+        "WHERE t_ev.message_id = message_queue.message_id "
+        "AND t_ev.status = 'pending' "
+        "AND EXISTS ("
+        "SELECT 1 FROM event e "
+        "WHERE e.message_id = t_ev.message_id "
+        "AND e.kind = 'message_received'"
+        ")"
+        ")"
+    ) if has_events else ""
+    return (fp1_arm, event_arm)
+
+from daemon.repositories.job_queue.models import (
+    active_admission_states_sql,
+)
 from daemon.services.timestamps import coerce_to_aware_utc, now_utc, now_utc_naive
 
 from .models import MessageQueue, MessageStatus
@@ -1305,13 +1384,32 @@ class SQLModelMessageQueueRepository:
                         "(arm 1 only).",
                         MESSAGE_QUEUE_BOOT_AUTO_CONTINUED_PRESERVE_KILL_SWITCH_ENV,
                     )
+                _fp1_arm_sql, _event_arm_sql = _receipt_preserve_arms_sql(
+                    self.engine
+                )
                 # Capture doomed ids BEFORE the wipe.
+                #
+                # F3 (fix/post-outage-recovery b2) — the mq wipe ALIGNS
+                # with the task wipe's keep arms (the asymmetry defect:
+                # a task could be preserved by FP1 while its message row
+                # was deleted). Two preserve arms beyond the legacy
+                # running/paused task-status IN:
+                #   * FP1 alignment — the row's task anchors a
+                #     non-terminal JobItem (same admission vocabulary as
+                #     the task wipe's FP1 arm);
+                #   * Event receipt — the row's task is PENDING and its
+                #     message has a surviving ``message_received`` Event
+                #     (the receipt-of-truth; the enqueue committed and is
+                #     not doomed). Scoped to PENDING tasks in lockstep
+                #     with the task wipe's Event arm so terminal-backlog
+                #     rows stay doomed (pruner role intact).
                 doomed_rows = session.exec(
                     text(
                         "SELECT message_id FROM message_queue "
                         "WHERE message_id NOT IN "
                         "(SELECT message_id FROM task "
                         "WHERE status IN ('running', 'paused')"
+                        f"{_fp1_arm_sql}{_event_arm_sql}"
                         f"{_arm3_keep_sql}"
                         ")"
                     )
@@ -1414,9 +1512,17 @@ class SQLModelMessageQueueRepository:
             terminal_sql = (
                 "(" + ",".join(f"'{s}'" for s in sorted(TERMINAL_INSTANCE_STATUSES)) + ")"
             )
+            # F3 (fix/post-outage-recovery b2): the DELETE re-check
+            # predicate mirrors the CAPTURE predicate EXACTLY (the F-1
+            # contract: audit and DELETE agree) — running/paused task
+            # status + the FP1-alignment arm + the Event receipt arm.
+            _fp1_arm_sql, _event_arm_sql = _receipt_preserve_arms_sql(
+                self.engine
+            )
             preserve_sql = (
                 " AND message_id NOT IN (SELECT message_id FROM task "
                 "WHERE status IN ('running', 'paused')"
+                f"{_fp1_arm_sql}{_event_arm_sql}"
             )
             if arm3_active:
                 preserve_sql += (
@@ -1532,13 +1638,32 @@ class SQLModelMessageQueueRepository:
                         "(arm 1 only).",
                         MESSAGE_QUEUE_BOOT_AUTO_CONTINUED_PRESERVE_KILL_SWITCH_ENV,
                     )
+                _fp1_arm_sql, _event_arm_sql = _receipt_preserve_arms_sql(
+                    self.engine
+                )
                 # Capture doomed ids BEFORE the wipe.
+                #
+                # F3 (fix/post-outage-recovery b2) — the mq wipe ALIGNS
+                # with the task wipe's keep arms (the asymmetry defect:
+                # a task could be preserved by FP1 while its message row
+                # was deleted). Two preserve arms beyond the legacy
+                # running/paused task-status IN:
+                #   * FP1 alignment — the row's task anchors a
+                #     non-terminal JobItem (same admission vocabulary as
+                #     the task wipe's FP1 arm);
+                #   * Event receipt — the row's task is PENDING and its
+                #     message has a surviving ``message_received`` Event
+                #     (the receipt-of-truth; the enqueue committed and is
+                #     not doomed). Scoped to PENDING tasks in lockstep
+                #     with the task wipe's Event arm so terminal-backlog
+                #     rows stay doomed (pruner role intact).
                 doomed_rows = session.exec(
                     text(
                         "SELECT message_id FROM message_queue "
                         "WHERE message_id NOT IN "
                         "(SELECT message_id FROM task "
                         "WHERE status IN ('running', 'paused')"
+                        f"{_fp1_arm_sql}{_event_arm_sql}"
                         f"{_arm3_keep_sql}"
                         ")"
                     )

@@ -168,6 +168,12 @@ GLOBAL_OVERVIEW_TOKEN_CAP = 600
 # context window. Breach → condense OLDEST sections first, never GLOBAL.
 # Hard cap → degrade to GLOBAL + ARCHIVED line (B-shape).
 COMPACTION_DOC_CEILING_FRACTION = 0.15
+# Body text substituted for a section that the ceiling rule condenses
+# (architect §6.4). Hoisted to a constant so the ceiling rule can
+# measure the marker's token cost ONCE and accumulate the per-section
+# saving incrementally (O(S) instead of O(S²)) — the marker text is
+# byte-identical to the literal it replaced.
+GLOBAL_DOC_CONDENSED_MARKER = "(condensed for budget — see GLOBAL OVERVIEW)"
 # Bounded best-effort GLOBAL call on the truncation path (§6.3).
 TRUNCATION_GLOBAL_TIMEOUT_S = 20.0
 TRUNCATION_GLOBAL_INPUT_CAP_CHARS = 40_000
@@ -318,6 +324,7 @@ def build_sentinel_replacement(
     result: "CompactionResult",
     current_messages: list[BaseMessage],
     compacted_ids: set[str] | None = None,
+    hoist_injected: bool = True,
 ) -> list[BaseMessage]:
     """W1 fix: land the intended order verbatim via the REMOVE_ALL sentinel.
 
@@ -371,6 +378,12 @@ def build_sentinel_replacement(
             strictest mode). When provided, the guard excludes these
             ids from the "must survive" check. This is the production
             path — the engine knows exactly which ids it dropped.
+        hoist_injected: When False, NO hoist split is performed —
+            ``injected=[]`` and ``doc_and_tail`` keeps the keepables
+            verbatim (fresh-swap path, Emperor ruling 2026-11-20, lands
+            a spec-bound order). Default True preserves the
+            house-auto-compaction hoisting behaviour. The pre-write
+            guard is unchanged either way.
 
     Returns:
         The replacement list, with the ``REMOVE_ALL_MESSAGES`` sentinel
@@ -438,12 +451,19 @@ def build_sentinel_replacement(
         m for m in result.replacement_messages
         if not isinstance(m, RemoveMessage)
     ]
-    injected: list[BaseMessage] = [
-        m for m in keepables if _is_hoisted_injected(m, answered_note_ids)
-    ]
-    doc_and_tail: list[BaseMessage] = [
-        m for m in keepables if not _is_hoisted_injected(m, answered_note_ids)
-    ]
+    if hoist_injected:
+        injected: list[BaseMessage] = [
+            m for m in keepables if _is_hoisted_injected(m, answered_note_ids)
+        ]
+        doc_and_tail: list[BaseMessage] = [
+            m for m in keepables if not _is_hoisted_injected(m, answered_note_ids)
+        ]
+    else:
+        # Fresh-swap path (Emperor ruling 2026-11-20): spec-bound order,
+        # NO hoist. Hoisting is a house-auto-compaction concern, disabled
+        # for this path only. keepables order is preserved verbatim.
+        injected = []
+        doc_and_tail = list(keepables)
 
     # Step 2: PRE-WRITE GUARD — the sentinel recipe is
     # write-the-entire-new-channel-value. The load-bearing safety
@@ -805,12 +825,24 @@ def _apply_ceiling_rule(
     cap_tokens = int(context_window * COMPACTION_DOC_CEILING_FRACTION)
     # Approximate via estimate_messages_tokens (the loader's tiktoken
     # path; cheap and bounded). Cap is in TOKENS, not chars.
-    current_tokens = estimate_messages_tokens(
+    #
+    # TIER-A DE-DUP (row2-2a) — O(S) instead of O(S²): the GLOBAL
+    # estimate and every section estimate are measured ONCE. The
+    # per-section loop then accumulates the SAVING of each condensed
+    # section instead of re-summing every section on every iteration.
+    # The final ``current_tokens`` is byte-identical to the re-sum
+    # version: a condensed body is the fixed marker whose token cost is
+    # measured once, and every DECISION (the ``<= cap_tokens`` break and
+    # the hard-cap degrade branch below) reads exactly the value the
+    # re-sum version produced at the same point.
+    global_tokens = estimate_messages_tokens(
         [SystemMessage(content=global_overview or GLOBAL_DOC_PLACEHOLDER_GLOBAL)]
-    ) + sum(
+    )
+    section_tokens = [
         estimate_messages_tokens([SystemMessage(content=s["body"])])
         for s in sections
-    )
+    ]
+    current_tokens = global_tokens + sum(section_tokens)
     if current_tokens <= cap_tokens:
         return sections, None, 0
 
@@ -819,24 +851,22 @@ def _apply_ceiling_rule(
     # within cap, then mark archived_count.
     archived = 0
     condensed = list(sections)
+    marker_tokens = estimate_messages_tokens(
+        [SystemMessage(content=GLOBAL_DOC_CONDENSED_MARKER)]
+    )
     for i in range(len(condensed)):
         if current_tokens <= cap_tokens:
             break
         old_body = condensed[i]["body"]
         # Replace body with a short reference marker. Token savings
-        # depend on body length; ``current_tokens`` is recomputed only
-        # at the end of the loop body to keep the iteration cheap.
+        # depend on body length; the saving is accumulated
+        # incrementally (``current_tokens`` is NOT re-summed).
         condensed[i] = {
             **condensed[i],
-            "body": "(condensed for budget — see GLOBAL OVERVIEW)",
+            "body": GLOBAL_DOC_CONDENSED_MARKER,
         }
         archived += 1
-        current_tokens = estimate_messages_tokens(
-            [SystemMessage(content=global_overview or GLOBAL_DOC_PLACEHOLDER_GLOBAL)]
-        ) + sum(
-            estimate_messages_tokens([SystemMessage(content=s["body"])])
-            for s in condensed
-        )
+        current_tokens -= (section_tokens[i] - marker_tokens)
 
     if current_tokens > cap_tokens:
         # Hard cap → B-shape: GLOBAL + ARCHIVED line only, drop
@@ -1079,7 +1109,7 @@ def build_compact_note_request(
 
     The note is INLINED; the compacted span and the size instruction
     are the two ruled additions. There is NO separate keyword channel —
-    the keyword params were withdrawn by the Emperor ("the words were
+    the keyword params were withdrawn by the user ("the words were
     always enough; the parameter was not").
 
     The request is appended as a ``HumanMessage`` carrying
@@ -1095,6 +1125,39 @@ def build_compact_note_request(
         f"(compacted span: messages #{compacted_span_start}–"
         f"#{compacted_span_end}; produce a compaction within "
         f"{token_cap} tokens)"
+    )
+
+
+# ── Compact-note post-swap note (fresh-swap contract) ──────────────────────
+# The post-compaction TAIL SPLICE is REPLACED by a FRESH message list:
+# steady-state post-swap channel = [RemoveMessage(REMOVE_ALL), doc, note,
+# *arrivals]. ``note`` is the NEW HumanMessage below — the agent's
+# "ready for the next task" ack prompt. ZERO pre-compaction messages
+# survive the swap except the post-exchange ``arrivals``.
+COMPACT_NOTE_POST_SWAP_NOTE_TEXT = (
+    "You just compacted the previous conversation into the 'Compacted "
+    "context' summary above. You are ready for the next task. Do not run "
+    "anything and do not call any tools. End your turn now and wait for "
+    "the next message from the user."
+)
+COMPACT_NOTE_POST_SWAP_CONTEXT_KIND = "compacted_context"
+COMPACT_NOTE_POST_SWAP_NOTE_ID_PREFIX = "compacted-context-note-"
+
+
+def build_compact_note_post_swap_note() -> "HumanMessage":
+    """Build the post-swap note HumanMessage (fresh-swap contract).
+
+    Content, id prefix and additional_kwargs are PINNED by the contract;
+    the id carries a fresh uuid4 hex so repeated swaps never collide.
+    """
+    return HumanMessage(
+        content="[SYSTEM CONTEXT: Compacted Context]\n"
+        + COMPACT_NOTE_POST_SWAP_NOTE_TEXT,
+        id=COMPACT_NOTE_POST_SWAP_NOTE_ID_PREFIX + uuid.uuid4().hex,
+        additional_kwargs={
+            "injected_message": True,
+            "context_kind": COMPACT_NOTE_POST_SWAP_CONTEXT_KIND,
+        },
     )
 
 
@@ -1698,6 +1761,15 @@ def emergency_truncate(
     Pass 1: Truncate tool responses to max_tool_response_chars
     Pass 2: Truncate human messages to max_human_message_chars
     Pass 3: Progressive halving of content > 500 chars until under limit
+
+    The two loops (the Pass-3 halving loop and the oldest-drop pop
+    loop) maintain the token total INCREMENTALLY instead of re-counting
+    the whole message list on every iteration (TIER-A de-dup). Every loop
+    predicate therefore reads the IDENTICAL value the whole-list re-count
+    produced, and the counting work drops from O(H·N) + O(P·N) to
+    O(N + H + P). The incremental regime requires a provably additive
+    estimator; any other estimator falls back to the original whole-list
+    re-count.
     
     Args:
         messages: Messages to truncate.
@@ -1739,14 +1811,46 @@ def emergency_truncate(
             else:
                 msg.content = content  # Ensure string
     
-    if estimate_fn(truncated) <= max_tokens:
+    total_after_pass2 = estimate_fn(truncated)
+    if total_after_pass2 <= max_tokens:
         return truncated
     
+    # ── TIER-A DE-DUP (row2-2a) — running count for the two LOOPS ──
+    #
+    # Pass 3 (the halving loop) and the C1 pop loop each re-counted the
+    # WHOLE message list on EVERY iteration → O(H·N) + O(P·N) counting
+    # work (H = halvings, P = pops, N = list length) — a daemon-level
+    # quadratic that fires exactly in the over-budget regime.
+    #
+    # Here the total is maintained INCREMENTALLY: every mutation adjusts
+    # the running total by the delta of the ONE message that changed, so
+    # every loop predicate evaluates on the IDENTICAL value the whole-list
+    # re-count produced (the token estimator is a per-message sum, so the
+    # delta arithmetic is exact).
+    #
+    # The incremental regime is entered ONLY when the estimator
+    # PROVABLY decomposes — ``sum(estimate_fn([m])) == estimate_fn(list)``
+    # (verified once, against the count measured above). ANY other
+    # estimator (a stub, a mock, a future non-additive estimator) falls
+    # back to the ORIGINAL whole-list re-count, so this function's
+    # behavior stays byte-identical for EVERY estimator.
+    _parts: list | None = None
+    _running = total_after_pass2
+    try:
+        _probe = [estimate_fn([m]) for m in truncated]
+        if sum(_probe) == total_after_pass2:
+            _parts = _probe
+    except Exception:  # pragma: no cover — non-additive / raising estimator
+        _parts = None
+
     # Pass 3: Progressive halving of large content
-    for msg in truncated:
+    for _idx, msg in enumerate(truncated):
         content = _extract_text_from_content(msg.content)
         if len(content) > 500:
-            while len(content) > 500 and estimate_fn(truncated) > max_tokens:
+            _part = _parts[_idx] if _parts is not None else None
+            while len(content) > 500 and (
+                _running if _parts is not None else estimate_fn(truncated)
+            ) > max_tokens:
                 half_len = len(content) // 2
                 # Find a good break point (end of sentence or line)
                 break_point = content.rfind('. ', 0, half_len)
@@ -1756,8 +1860,14 @@ def emergency_truncate(
                     break_point = half_len
                 content = content[:break_point + 1] + "\n[...truncated]"
                 msg.content = content
+                if _parts is not None:
+                    _new_part = estimate_fn([msg])
+                    _running += _new_part - _part
+                    _part = _new_part
             
-            if estimate_fn(truncated) <= max_tokens:
+            if (
+                _running if _parts is not None else estimate_fn(truncated)
+            ) <= max_tokens:
                 return truncated
     
     # C1: After Pass 3, if still over limit, drop oldest messages as last resort.
@@ -1765,8 +1875,13 @@ def emergency_truncate(
     # ``AIMessage(tool_calls)`` whose results are about to be
     # orphaned, or an orphaned ``ToolMessage`` whose call-site is
     # about to be removed). The pop loop drops the bare head.
-    while len(truncated) > 1 and estimate_fn(truncated) > max_tokens:
-        truncated.pop(0)
+    while len(truncated) > 1 and (
+        _running if _parts is not None else estimate_fn(truncated)
+    ) > max_tokens:
+        _head = truncated.pop(0)
+        if _parts is not None:
+            # The popped head's contribution leaves the running total.
+            _running -= estimate_fn([_head])
 
     # W3 (post-pop-loop ORDER-BASED snap): the pop(0) loop may have
     # severed call→result pairs (left an AIMessage(tc) without an
@@ -3301,6 +3416,16 @@ class ContextCompactor:
             if hoisted_injected else 0
         )
 
+        # TIER-A DE-DUP (row2-2a) — ONE measurement of the SELECTABLE
+        # pool, reused by every consumer below: the anti-refire skip
+        # result (which measured the same list twice), both
+        # over-budget predicates and the canonical history-token figure.
+        # The list is not mutated between the partition above and its
+        # last reader, so the shared value is byte-identical to the five
+        # separate measurements it replaces (and the skip paths now pay
+        # ONE count instead of two).
+        selectable_tokens = estimate_messages_tokens(selectable_messages)
+
         # Helper: build the anti-refire stamp-only result so every
         # skip path closes the dedup window. Callers stamp the
         # ``compacted_at`` via the shared seam; the engine signals
@@ -3308,19 +3433,17 @@ class ContextCompactor:
         # replacement_messages. The proactive call site uses this to
         # engage the dedup at ``compaction.py:1771-1774`` on the next
         # dispatch.
-        anti_refire_skip = (
-            lambda *, skip_reason: CompactionResult(
+        def anti_refire_skip(*, skip_reason: str) -> CompactionResult:
+            """Stamp-only skip result (measured ONCE — see above)."""
+            _tokens = int(
+                selectable_tokens
+                + injected_tokens
+                + context.system_prompt_tokens
+            )
+            return CompactionResult(
                 replacement_messages=[],
-                tokens_before=int(
-                    estimate_messages_tokens(selectable_messages)
-                    + injected_tokens
-                    + context.system_prompt_tokens
-                ),
-                tokens_after=int(
-                    estimate_messages_tokens(selectable_messages)
-                    + injected_tokens
-                    + context.system_prompt_tokens
-                ),
+                tokens_before=_tokens,
+                tokens_after=_tokens,
                 tokens_saved=0,
                 messages_before=len(context.messages),
                 messages_after=len(context.messages),
@@ -3329,7 +3452,6 @@ class ContextCompactor:
                 injected_preserved=len(hoisted_injected),
                 injected_absorbed=0,
             )
-        )
 
         # COMPACTION NEVER-BLOCKED (Verdict A) — iteration 3 budget
         # predicate (REVIEWER C1): the all-injected skip used to
@@ -3355,7 +3477,7 @@ class ContextCompactor:
         if not selectable_messages:
             over_budget = (
                 int(
-                    estimate_messages_tokens(selectable_messages)
+                    selectable_tokens
                     + injected_tokens
                     + context.system_prompt_tokens
                 )
@@ -3400,7 +3522,7 @@ class ContextCompactor:
         if len(selectable_messages) < context.config.min_messages_before_compaction:
             over_budget = (
                 int(
-                    estimate_messages_tokens(selectable_messages)
+                    selectable_tokens
                     + injected_tokens
                     + context.system_prompt_tokens
                 )
@@ -3437,7 +3559,7 @@ class ContextCompactor:
         # messages). Answered notes are inside the selectable estimate,
         # so the unified numerator is unchanged in total.
         history_tokens = (
-            estimate_messages_tokens(selectable_messages)
+            selectable_tokens
             + injected_tokens
         )
         total_tokens = history_tokens + context.system_prompt_tokens
@@ -3513,8 +3635,12 @@ class ContextCompactor:
         if not compactable:
             # Emergency path: even preserved groups exceed threshold
             preserved_msgs = [msg for g in preserved for msg in g.messages]
+            # TIER-A DE-DUP (row2-2a): measure the preserved pool ONCE
+            # — the log line below re-used the very same argument and
+            # re-counted it (identical value, identical log output).
+            preserved_msgs_tokens = estimate_messages_tokens(preserved_msgs)
             preserved_tokens = (
-                estimate_messages_tokens(preserved_msgs)
+                preserved_msgs_tokens
                 + injected_tokens  # L3 honesty: surviving injected
                 + context.system_prompt_tokens
             )
@@ -3536,7 +3662,7 @@ class ContextCompactor:
                     "injected_tokens=%d + system=%d still within "
                     "threshold; falling through to last-effort floor "
                     "(50%%-tail truncation) per never-blocked spec",
-                    estimate_messages_tokens(preserved_msgs),
+                    preserved_msgs_tokens,
                     injected_tokens,
                     context.system_prompt_tokens,
                 )

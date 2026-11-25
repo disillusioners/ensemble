@@ -1,5 +1,7 @@
 """Mission-strand healer — watcher-loss terminal strand (2026-10-14).
 
+Module-size rationale (band 1000-3000): cohesive single module; not split.
+
 Closes the wedge class the live RCA adjudicated (mission b6e24d78 /
 receipt 6fc156f3): a spawned-but-never-dispatched grandchild worker
 persisted NON-TERMINAL (idle, never-dispatched ghost, terminal direct
@@ -558,8 +560,12 @@ class MissionStrandHealer:
         bus = get_dependency_bus()
         if bus is not None:
             try:
+                # S3 (wake-path-carrier-fix): the QUALIFIED count —
+                # the healer refuses only on a FULFILLABLE backlog
+                # (an unfulfillable backlog — terminal child or
+                # self-referential — must not hold the heal).
                 bus_pending = await asyncio.to_thread(
-                    bus.count_pending_for_target_sync, root_id
+                    bus.count_fulfillable_pending_for_target_sync, root_id
                 )
             except Exception:
                 # Fail-open here (transient bus errors): the DRIVE's
@@ -1236,8 +1242,13 @@ class MissionStrandHealer:
                 "pending-children authority is unprovable",
             )
         try:
+            # S3 (wake-path-carrier-fix): the QUALIFIED count — the
+            # reconcile-zone probe skips only on a FULFILLABLE
+            # backlog (terminal-child / self-referential rows no
+            # longer hold the skip). Fail-closed on probe failure
+            # (unchanged posture below).
             bus_pending = await asyncio.to_thread(
-                bus.count_pending_for_target_sync, root_id
+                bus.count_fulfillable_pending_for_target_sync, root_id
             )
         except Exception as exc:  # noqa: BLE001 — fail-closed
             return self._rz_skip(

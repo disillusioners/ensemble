@@ -281,7 +281,15 @@ EOF
     }
 
     ################################################################################
-    section "G4-BASE-1 — the BASE-arm: a SERVING-GREEN stale flipped txn is WRONGLY rolled back"
+    section "G4-BASE-1 — the BASE arm can NO LONGER wrongfully roll back a serving-green txn (D5 Wave 3)"
+    # self-service-promote Wave 3 UPDATE: the BASE arm's documented defect
+    # (a serving-green stale flipped txn WRONGLY rolled back under
+    # SWEEP_SERVING_GREEN_ENABLED=0) is CLOSED by the chain head's
+    # verify-before-rollback block (V1/V2) — the kill-switch still disables
+    # the LADDER's green commit-close arm, but the CHAIN itself refuses to
+    # execute a rollback of a serving-green release. The BASE expectation
+    # flips from "wrongly rolled back" to "protected: committed via the
+    # chain-head green path" (AC-D5-8's protection holds on EVERY path).
     seed
     BPORT="$(free_port)"
     start_green_listener "$BPORT" "${TARGET#v}"
@@ -289,30 +297,20 @@ EOF
     BJ="$(cat "$INSTALL_DIR/releases/state.json")"
     stop_listener
     printf '%s\n' "$BOUT" | tail -4
-    assert_contains "G4-BASE-1 the wrongful rollback FIRED (sweep_rollback row)" '"event":"sweep_rollback"' "$BJ"
-    assert_contains "G4-BASE-1 the disposition names the serving-green-disabled arm" "disposition=serving_green_disabled" "$BJ"
-    assert_re    "G4-BASE-1 the target is QUARANTINED" "\"quarantined\": ?\[\"$TARGET\"\]" "$BJ"
-    assert_re    "G4-BASE-1 the current was REPOINTED to prev" "\"current\": ?\"$PREV\"" "$BJ"
-    assert_eq    "G4-BASE-1 the 24h rollback counter was INCREMENTED" '"24h": 1' "$(printf '%s' "$BJ" | grep -oE '"24h": ?[0-9]+' | head -1)"
+    assert_not_contains "G4-BASE-1 NO wrongful rollback (the chain head protects serving-green)" '"event":"sweep_rollback"' "$BJ"
+    assert_contains "G4-BASE-1 the chain-head GREEN PATH committed the txn" '"event":"serving_green_commit"' "$BJ"
+    assert_not_re "G4-BASE-1 the target is NOT QUARANTINED" "\"quarantined\": ?\[\"$TARGET\"\]" "$BJ"
+    assert_re    "G4-BASE-1 the current STAYS at the target" "\"current\": ?\"$TARGET\"" "$BJ"
+    assert_eq    "G4-BASE-1 the 24h rollback counter was NOT incremented" '"24h":0' "$(printf '%s' "$BJ" | grep -oE '"24h": ?[0-9]+' | head -1)"
     assert_re    "G4-BASE-1 the txn was CLOSED" '"in_flight": ?null' "$BJ"
-    assert_not_contains "G4-BASE-1 the quarantine is SILENT (no 'quarantine' history row)" '"event":"quarantine"' "$BJ"
+    assert_not_contains "G4-BASE-1 no quarantine history row" '"event":"quarantine"' "$BJ"
 
-    section "G4-BASE-2 — the re-promote is REFUSED at the REAL gate (cooldown still armed)"
+    section "G4-BASE-2 — the re-promote is ACCEPTED (no cooldown, no quarantine — the punishment never fired)"
     G="$(drive_gate "$TARGET")"; RC="$(printf '%s' "$G" | sed -n 's/^__RC__=//p')"; OUT="$(printf '%s' "$G" | grep -v '^__RC__=')"
     printf '%s\n' "$OUT" | tail -3
-    assert_eq "G4-BASE-2 the gate REFUSES (rc=78)" "78" "$RC"
-    assert_contains "G4-BASE-2 the FIRST refusal is the armed cooldown (gate ordering)" "rollback cooldown active" "$OUT"
-
-    section "G4-BASE-3 — the re-promote is REFUSED with the VERBATIM quarantine message (cooldown elapsed)"
-    python3 - "$INSTALL_DIR/releases/state.json" <<'PY'
-import json,sys
-p=sys.argv[1]; d=json.load(open(p)); d["cooldown_until"]=None
-json.dump(d, open(p,"w"), separators=(",",":"))
-PY
-    G="$(drive_gate "$TARGET")"; RC="$(printf '%s' "$G" | sed -n 's/^__RC__=//p')"; OUT="$(printf '%s' "$G" | grep -v '^__RC__=')"
-    printf '%s\n' "$OUT" | tail -3
-    assert_eq "G4-BASE-3 the gate REFUSES (rc=78)" "78" "$RC"
-    assert_contains "G4-BASE-3 the refusal is the VERBATIM quarantine message" "promote refused: version '$TARGET' is QUARANTINED (prior gate failure) — quarantine is cleared only by re-staging the version" "$OUT"
+    assert_eq "G4-BASE-2 the gate ACCEPTS (rc=0 — nothing was armed against the promote)" "0" "$RC"
+    assert_not_contains "G4-BASE-2 NO cooldown refusal" "rollback cooldown active" "$OUT"
+    assert_not_contains "G4-BASE-2 NO quarantine refusal" "is QUARANTINED (prior gate failure)" "$OUT"
 
     ################################################################################
     section "G4-HEAD-1 — the HEAD-arm: the SAME serving-green txn is COMMITTED, not punished"
@@ -463,6 +461,410 @@ EOF
     exit $?
     fi
 
+    if [ "$LEG" = "d6" ]; then
+    # ===========================================================================
+    # LEG D6 — TRUTH & OBSERVABILITY (self-service-promote Wave 1; changes NO
+    # verdict). Three ACs in one leg, because they share ONE fixture (the
+    # real unit hand-back with stubbed systemctl/lsof/curl):
+    #
+    #   AC-D6-1 / AC-D6-2  the is-active probe ANSWERED rc=3 ("not active" —
+    #       the EXPECTED pre-start value: the unit is deliberately stopped
+    #       pre-flip) ⇒ NO `subprocess_wait_timeout` row with
+    #       `site=handback_is_active`, and the OBSERVED STATE WORD is
+    #       journaled. The old shape journalled rc=3 as a TIMEOUT (a lie:
+    #       _run_bounded maps ONLY 137|143 → 124), which misdirected triage
+    #       for ~10h.
+    #   AC-D6-6  the halt row carries the VERIFIER-PATH reason — the
+    #       attribution refusal detail (attribution arm) or the observed
+    #       /livez version (version arms). The launchd HB_ERR channel stays
+    #       launchd-only (C-9: the systemd path never writes it) — the
+    #       reason rides its OWN channel. "none captured" can never recur
+    #       on the systemd path.
+    #   AC-OBS-3 / P-6  the VERIFY-PHASE narrative reaches the executor's
+    #       PAYLOAD log (the unit's stdio) — not only the shell's narrative
+    #       file. F16/C-8: both surviving runs ended at the verify budget
+    #       line, because `_warn` routes to the narrative sink while the
+    #       payload log is a DIFFERENT file (the unit's stderr). The flush
+    #       MECHANISM is asserted (unbuffered stderr + an explicit _warn
+    #       before EACH fail-fast arm), not "exactly N lines".
+    #
+    # The halt row is composed by promote.sh's OWN template — the leg
+    # EXTRACTS that template from the shipped script and EXECUTES it
+    # against the channel the real hand-back left behind (no grep, no
+    # re-implementation: removing the substitution turns the leg RED).
+    # ===========================================================================
+    leg_sandbox d6
+
+    # The journal SPLICE helper refuses a journal path under
+    # "$HOME/agents-ensemble" (the live-install guard —
+    # journal_splice.py _is_under_live) unless the pipeline lock is held.
+    # leg_sandbox's HOME fence makes that path exactly the sandbox's own
+    # install root ⇒ the shell-side journal writer would refuse EVERY row
+    # (the g2/g4/g5 legs are unaffected: they drive the LAUNCHER's writer).
+    # The sandbox install root therefore takes a different name under the
+    # SAME FAKE_HOME — the pack's escape guard (INSTALL_DIR under
+    # FAKE_HOME, FAKE_HOME not the live install path) still holds.
+    INSTALL_DIR="$FAKE_HOME/installs/agents-ensemble"
+    mkdir -p "$INSTALL_DIR/releases"
+    D6STUB="$(mktemp -d "/home/nea/.phh-d6-stub.XXXXXX")"
+    chmod 700 "$D6STUB"
+    trap 'rm -rf "$FAKE_HOME" "$D6STUB"; [ -n "$LISTENER_PID" ] && kill "$LISTENER_PID" 2>/dev/null' EXIT
+
+    # The systemctl stub — `is-active` answers with an INJECTABLE rc (P-3:
+    # the stub used to answer rc=0 ALWAYS, so the whole non-timeout rc
+    # space was unpinned) and prints the STATE WORD on stdout (as real
+    # systemctl does).
+    cat > "$D6STUB/systemctl" <<'D6STUBEOF'
+#!/bin/bash
+echo "$*" >> "${SC_LOG:-/dev/null}"
+sub="$1"; shift
+case "$sub" in
+    is-active)
+        echo "${SC_IS_ACTIVE:-inactive}"
+        exit "${SC_IS_ACTIVE_RC:-0}" ;;
+    show)
+        prop=""; props=""
+        while [ $# -gt 0 ]; do
+            case "$1" in -p) prop="$2"; props="${props} $2"; shift 2 ;; --value) shift ;; *) shift ;; esac
+        done
+        # D6 (self-service-promote Wave 2): the verify's bounded 3-field
+        # state probe answers in the ASSIGNMENT form.
+        case "$props" in
+            *" ActiveState "*)
+                echo "ActiveState=${SC_ACTIVESTATE:-active}"
+                echo "SubState=${SC_SUBSTATE:-running}"
+                echo "MainPID=${SC_MAINPID:-0}"
+                exit 0 ;;
+        esac
+        case "$prop" in
+            MainPID) echo "${SC_MAINPID:-0}" ;;
+            *) echo "" ;;
+        esac
+        exit 0 ;;
+    start) exit "${SC_START_RC:-0}" ;;
+    *) exit 0 ;;
+esac
+D6STUBEOF
+    chmod +x "$D6STUB/systemctl"
+
+    # The lsof stub — the LISTEN holder of the probe port. Two modes:
+    # OWNED (424242 — the fixture IS the daemon) and FOREIGN (999999 — the
+    # attribution-refusal cell).
+    cat > "$D6STUB/lsof" <<'D6STUBEOF'
+#!/bin/bash
+printf '%s\n' "${D6_HOLDER:-424242}"
+exit 0
+D6STUBEOF
+    chmod +x "$D6STUB/lsof"
+
+    # The curl stub — /livez answers 2xx with a VERSION.
+    cat > "$D6STUB/curl" <<'D6STUBEOF'
+#!/bin/bash
+out=""
+while [ $# -gt 0 ]; do
+    case "$1" in -o) out="$2"; shift 2 ;; -w) shift ;; --max-time) shift ;; -sS|-s|-S) shift ;; *) shift ;; esac
+done
+[ -n "$out" ] && printf '{"status":"alive","version":"%s"}\n' "${D6_VERSION:-0.28.5}" > "$out"
+printf '200'
+D6STUBEOF
+    chmod +x "$D6STUB/curl"
+
+    DPATH="$D6STUB:$PATH"
+    DPORT="$(absent_port)"
+    SC_LOG="$INSTALL_DIR/sc.log"
+
+    # seed_journal — the sandbox journal (the shape the splice helper edits).
+    d6_seed() {
+        cat > "$INSTALL_DIR/releases/state.json" <<'JSON'
+{"current":null,"previous":null,"in_flight":null,"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}
+JSON
+    }
+    d6_seed
+
+    # d6_run <extra-shell-setup> — the REAL unit hand-back (the same call
+    # the ceremony makes: restart_via_launcher) in a scrubbed shell.
+    d6_run() {
+        PATH="$DPATH" INSTALL_DIR="$INSTALL_DIR" SYSTEMCTL_BIN="$D6STUB/systemctl" \
+        SC_LOG="$SC_LOG" PORT="$DPORT" \
+        PROMOTE_EXPECTED_VERSION=0.28.5 HANDBACK_VERIFY_BUDGET_S=4 \
+        D6_HOLDER="${D6_HOLDER:-424242}" D6_VERSION="${D6_VERSION:-0.28.5}" \
+        bash -c '
+            unset ENSEMBLE_SUPERVISION ENSEMBLE_RESTART_UNIT 2>/dev/null || true
+            . "'"$LIBSH"'" >/dev/null 2>&1
+            _supervision_owned_pids() { printf "%s\n" 424242; }
+            SUPERVISION_MODE=unit; SUPERVISION_STATE=UNIT_MANAGED
+            SUPERVISION_UNIT=ensemble-d6.service; SUPERVISION_PRESTOP_MAINPID=777
+            '"$1"'
+            restart_via_launcher
+            echo "rvl-rc=$?"
+            echo "REASON=[$(_handback_verify_reason_text)]"
+        ' 2>&1
+    }
+
+    # ── D6-A — the is-active probe ANSWERED rc=3 (AC-D6-1 / AC-D6-2) ─────
+    section "D6-A — the is-active answer rc=3 is NOT a timeout (AC-D6-1 / AC-D6-2)"
+    d6_seed
+    D6A_OUT="$(d6_run 'export SC_IS_ACTIVE=inactive SC_IS_ACTIVE_RC=3')"
+    D6A_J="$(cat "$INSTALL_DIR/releases/state.json")"
+    assert_eq "D6-A1 the hand-back continues into the start attempt (rc=1: the verify, not the probe, decides)" \
+        "rvl-rc=1" "$(printf '%s' "$D6A_OUT" | grep -o 'rvl-rc=[0-9]*' | head -1)"
+    assert_eq "D6-A2 NO subprocess_wait_timeout row with site=handback_is_active (rc=3 is not a timeout)" \
+        "0" "$(printf '%s' "$D6A_J" | grep -F 'subprocess_wait_timeout' | grep -c 'site=handback_is_active' || true)"
+    assert_contains "D6-A3 the OBSERVED state word is journaled" "state=inactive" "$D6A_J"
+    assert_contains "D6-A4 the row is the STATE kind (a new, additive, non-terminal kind)" "handback_is_active_state" "$D6A_J"
+    assert_contains "D6-A5 the observed rc is journaled" "rc=3" "$D6A_J"
+
+    # ── D6-B — the halt row carries the verifier-path reason (AC-D6-6) ────
+    section "D6-B — the halt row carries the reason (AC-D6-6, version arm)"
+    # The REAL promote.sh halt template — extracted verbatim and EXECUTED.
+    # The extraction takes the FIRST `if ! restart_via_launcher; then` block
+    # only (promote.sh has a SECOND one in its rollback section — the
+    # awk stops at the first `fi` so the body is exactly the promote
+    # halt block, with no stray `fi` left to break the shell parse).
+    D6_HALT_BODY="$(awk '
+        /^if ! restart_via_launcher; then$/ && !seen { inblock=1; seen=1; next }
+        inblock && /^fi$/ { exit }
+        inblock { print }
+    ' "$REPO_ROOT/scripts/upgrade/promote.sh")"
+    if [ -z "$D6_HALT_BODY" ]; then
+        _fail "D6-B0 the promote.sh halt template is extractable" "non-empty" "empty"
+    else
+        _pass "D6-B0 the promote.sh halt template is extractable"
+    fi
+    d6_seed
+    # The hand-back MUST reach the SERVING probe for the version arm to
+    # fire: the stub reports a NEW MainPID (≠ the pre-stop pid) so the
+    # verify proceeds to the /livez conjunct (MainPID=0 would only ever
+    # produce the "not confirmed" verdict).
+    D6B_OUT="$(PATH="$DPATH" INSTALL_DIR="$INSTALL_DIR" SYSTEMCTL_BIN="$D6STUB/systemctl" \
+        SC_LOG="$SC_LOG" PORT="$DPORT" PROMOTE_EXPECTED_VERSION=0.28.5 \
+        HANDBACK_VERIFY_BUDGET_S=4 D6_HOLDER=424242 D6_VERSION=0.0.0 SC_MAINPID=9999 \
+        bash -c '
+            unset ENSEMBLE_SUPERVISION ENSEMBLE_RESTART_UNIT 2>/dev/null || true
+            . "'"$LIBSH"'" >/dev/null 2>&1
+            _supervision_owned_pids() { printf "%s\n" 424242; }
+            SUPERVISION_MODE=unit; SUPERVISION_STATE=UNIT_MANAGED
+            SUPERVISION_UNIT=ensemble-d6.service; SUPERVISION_PRESTOP_MAINPID=777
+            VERSION=v9.9.9-d6
+            restart_via_launcher >/dev/null; echo "rvl-rc=$?"
+            '"$D6_HALT_BODY"'
+        ' 2>&1)"
+    D6B_J="$(cat "$INSTALL_DIR/releases/state.json")"
+    assert_contains "D6-B1 the hand-back FAILED (the version-mismatch fail-fast)" "rvl-rc=1" "$D6B_OUT"
+    assert_contains "D6-B2 the halt row carries the OBSERVED /livez version" "observed=0.0.0" "$D6B_J"
+    assert_contains "D6-B3 the halt row names the EXPECTED version too" "expected=0.28.5" "$D6B_J"
+    assert_not_contains "D6-B4 the halt row NEVER reads 'none captured' on the systemd path" \
+        "none captured" "$D6B_J"
+    assert_contains "D6-B5 the halt row is still a halt-for-human (the vocabulary is unchanged)" \
+        "halt-for-human, txn left open" "$D6B_J"
+
+    # ── D6-C — the verify-phase narrative reaches the PAYLOAD log ─────────
+    # (AC-OBS-3 / P-6). The executor unit's stdio is
+    # StandardOutput/StandardError=append:<run_id>.payload.log — emulated
+    # here by redirecting the shell's stderr into the payload file, with
+    # the narrative sink set exactly as spawn_executor threads it
+    # (ENSEMBLE_UPGRADE_LOG_FILE). The two files are DIFFERENT sinks; the
+    # bug (F16) was that the verify-phase diagnostics only ever reached the
+    # narrative one, so the payload log ended at the budget line.
+    section "D6-C — the verify-phase narrative reaches the payload log (AC-OBS-3 / P-6)"
+    d6_seed
+    D6NARR="$INSTALL_DIR/data/upgrade/demo/d6.log"
+    D6PAY="$INSTALL_DIR/data/upgrade/demo/d6.payload.log"
+    mkdir -p "$(dirname "$D6NARR")"
+    PATH="$DPATH" INSTALL_DIR="$INSTALL_DIR" SYSTEMCTL_BIN="$D6STUB/systemctl" \
+    SC_LOG="$SC_LOG" PORT="$DPORT" PROMOTE_EXPECTED_VERSION=0.28.5 \
+    HANDBACK_VERIFY_BUDGET_S=4 D6_HOLDER=424242 D6_VERSION=0.0.0 \
+    ENSEMBLE_UPGRADE_LOG_FILE="$D6NARR" \
+    bash -c '
+        unset ENSEMBLE_SUPERVISION ENSEMBLE_RESTART_UNIT 2>/dev/null || true
+        . "'"$LIBSH"'" >/dev/null 2>&1
+        _supervision_owned_pids() { printf "%s\n" 424242; }
+        SUPERVISION_MODE=unit; SUPERVISION_STATE=UNIT_MANAGED
+        SUPERVISION_UNIT=ensemble-d6.service; SUPERVISION_PRESTOP_MAINPID=777
+        restart_via_launcher >/dev/null || true
+    ' >"$D6PAY" 2>&1
+    assert_contains "D6-C1 the payload log carries the verify BUDGET line" \
+        "hand-back verify: budget effective=" "$(cat "$D6PAY")"
+    assert_contains "D6-C2 the payload log carries a verify-phase DIAGNOSTIC (the F16 flush mechanism)" \
+        "WARN: hand-back verify:" "$(cat "$D6PAY")"
+    # The truncation repro (C-8): the payload log used to END at the budget
+    # line. The diagnostic must come AFTER it.
+    D6_BUDGET_LINE="$(grep -n 'hand-back verify: budget effective=' "$D6PAY" | head -1 | cut -d: -f1)"
+    D6_DIAG_LINE="$(grep -n 'WARN: hand-back verify:' "$D6PAY" | head -1 | cut -d: -f1)"
+    if [ -n "$D6_BUDGET_LINE" ] && [ -n "$D6_DIAG_LINE" ] && [ "$D6_DIAG_LINE" -gt "$D6_BUDGET_LINE" ]; then
+        _pass "D6-C3 the payload log does NOT truncate at the budget line (the diagnostic follows it)"
+    else
+        _fail "D6-C3 the payload log does NOT truncate at the budget line (the diagnostic follows it)" \
+            "diag line > budget line" "budget=${D6_BUDGET_LINE:-none} diag=${D6_DIAG_LINE:-none}"
+    fi
+    assert_contains "D6-C4 the narrative sink still carries the same diagnostic (the _warn twin)" \
+        "WARN: hand-back verify:" "$(cat "$D6NARR")"
+
+    leg_summary
+    exit $?
+    fi
+
+    # ---------------------------------------------------------------------------
+    if [ "$LEG" = "d5" ]; then
+    # ===========================================================================
+    # LEG D5 (self-service-promote Wave 3) — the 4-DISTINCT pack seed variant
+    # (P-2's second half, AC-D5-3) + the resolved-target assertions + the
+    # credits (AC-D5-10) + the green-evidence protection (AC-D5-8).
+    # ===========================================================================
+    leg_sandbox d5
+    TARGET="v9.9.9-d5p-target"
+    VA="v9.9.9-d5p-prevA"     # journal.previous    (R4)
+    VB="v9.9.9-d5p-dispB"     # displaced_version  (R3)
+    VC="v9.9.9-d5p-curC"      # journal.current    (R2)
+    VD="v9.9.9-d5p-capD"      # captured_previous  (R0) — MUST win
+
+    # seed4 — the FOUR-DISTINCT variant: every rollback-target source is a
+    # DIFFERENT release, so a wrong-target rollback is VISIBLE (every
+    # legacy pack seed set previous == displaced == current, which is why
+    # the C-4 wrong-rollback defect was invisible — blind pin P-2).
+    seed4() {
+      mkdir -p "$INSTALL_DIR/releases/$TARGET" "$INSTALL_DIR/releases/$VA" \
+               "$INSTALL_DIR/releases/$VB" "$INSTALL_DIR/releases/$VC" \
+               "$INSTALL_DIR/releases/$VD" "$INSTALL_DIR/data"
+      local v
+      for v in "$TARGET" "$VA" "$VB" "$VC" "$VD"; do
+        printf '{"manifest_version":"1.0.0","binary_version":"%s","rollback_safe":true}\n' "$v" \
+          > "$INSTALL_DIR/releases/$v/manifest.json"
+      done
+      ln -sfn "releases/$TARGET" "$INSTALL_DIR/current"
+      cat > "$INSTALL_DIR/releases/state.json" <<EOF
+{"current":"$VC","previous":"$VA","in_flight":{"kind":"promote","target":"$TARGET","started_at":"2026-10-07T09:00:00Z","flipped":true,"owner_pid":99999,"last_heartbeat":1728000000,"displaced_version":"$VB","captured_previous":"$VD"},"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[{"ts":"2026-10-07T09:00:00Z","event":"open_txn","detail":"d5p seeded"},{"ts":"2026-10-07T10:00:00Z","event":"intent_flip","detail":"preflight: intentional promote target $TARGET — integrity verified; operator-initiated"}]}
+EOF
+    }
+
+    run_sweep4() {   # <install> <port> [ceiling]
+      local fix="$1" port="$2" ceil="${3:-1}"
+      INSTALL_DIR="$fix" PORT="$port" SWEEP_DEFER_CEILING="$ceil" \
+      SWEEP_STALE_S=0 HEARTBEAT_STALE_S=0 LOCK_HEARTBEAT_S=30 LOCK_STALE_S=300 \
+      SWEEP_SERVING_GREEN_ENABLED="${SWEEP_SERVING_GREEN_ENABLED:-1}" \
+      bash -c '
+        . "'"$LAUNCHER"'" >/dev/null 2>&1
+        _journal_sweep "$INSTALL_DIR"
+        echo "sweep-rc=$?"
+      ' 2>&1
+    }
+
+    section "D5-A — 4 DISTINCT sources ⇒ repoint to the CAPTURE (vD), source=captured (AC-D5-3, P-2)"
+    seed4
+    AOUT="$(run_sweep4 "$INSTALL_DIR" 19999 1)"
+    AJ="$(cat "$INSTALL_DIR/releases/state.json")"
+    printf '%s\n' "$AOUT" | tail -3
+    assert_eq "D5-A the repoint went to the CAPTURE vD — NOT previous/displaced/current" \
+        "releases/$VD" "$(readlink "$INSTALL_DIR/current")"
+    assert_contains "D5-A the sweep_rollback detail names the resolved target + source=captured" \
+        "rolled back to $VD source=captured" "$AJ"
+    assert_eq "D5-A journal current = the capture (not vA/vB/vC)" "$VD" \
+        "$(printf '%s' "$AJ" | grep -oE '"current": ?"[^"]+"' | head -1 | sed 's/.*"current": *"//;s/"//')"
+    assert_re "D5-A the txn was CLOSED" '"in_flight": ?null' "$AJ"
+    assert_eq "D5-A the 24h counter = 1 (ONE credit for the executed repoint — AC-D5-10 Tier-B)" \
+        '"24h": 1' "$(printf '%s' "$AJ" | grep -oE '"24h": ?[0-9]+' | head -1)"
+    assert_contains "D5-A the evidence tier is journaled distinctly (tierB — ceiling-executed)" \
+        "evidence=tierB" "$AJ"
+    assert_not_contains "D5-A the FAILED target is quarantined only, never the capture" \
+        "\"quarantined\": ?\[\"$VD\"" "$AJ"
+    assert_re "D5-A the failed target IS quarantined" "\"quarantined\": ?\[.*\"$TARGET\"" "$AJ"
+
+    section "D5-B — halt / resolution-failure ⇒ rollback_window_count stays 0 (AC-D5-10)"
+    seed4
+    # force the AMBIGUITY halt: drop the capture, leave current ≠ displaced
+    python3 - "$INSTALL_DIR/releases/state.json" <<'PY'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p))
+d["in_flight"].pop("captured_previous", None)
+json.dump(d, open(p,"w"), separators=(",",":"))
+PY
+    BOUT="$(run_sweep4 "$INSTALL_DIR" 19999 1)"
+    BJ="$(cat "$INSTALL_DIR/releases/state.json")"
+    printf '%s\n' "$BOUT" | tail -3
+    assert_contains "D5-B the ambiguity halt fired (no capture + current≠displaced)" "rollback_target_ambiguous" "$BJ"
+    assert_eq "D5-B rollback_window_count == 0 (a halt consumes NO credit)" \
+        '"24h":0' "$(printf '%s' "$BJ" | grep -oE '"24h": ?[0-9]+' | head -1)"
+    assert_not_re "D5-B txn OPEN" '"in_flight": ?null' "$BJ"
+
+    section "D5-C — green-evidence + a rollback_requested ⇒ the GREEN PATH (AC-D5-8)"
+    seed4
+    # a serving_green_commit row for the target + a rollback_requested row:
+    # V1 must take the green path — no sweep_rollback, no quarantine entry,
+    # no counter increment.
+    python3 - "$INSTALL_DIR/releases/state.json" "$TARGET" <<'PY'
+import json,sys
+p=sys.argv[1]; t=sys.argv[2]; d=json.load(open(p))
+d["history"].append({"ts":"2026-10-07T11:00:00Z","event":"serving_green_commit",
+    "detail":f"target {t} run_id {t}@2026-10-07T09:00:00Z prev v9.9.9-x — serving green"})
+d["history"].append({"ts":"2026-10-07T11:01:00Z","event":"rollback_requested",
+    "detail":f"target {t} run_id {t}@2026-10-07T09:00:00Z reason not-ready to none to_source none"})
+json.dump(d, open(p,"w"), separators=(",",":"))
+PY
+    CPORT="$(free_port)"
+    start_green_listener "$CPORT" "${TARGET#v}"
+    COUT="$(run_sweep4 "$INSTALL_DIR" "$CPORT" 1)"
+    CJ="$(cat "$INSTALL_DIR/releases/state.json")"
+    stop_listener
+    printf '%s\n' "$COUT" | tail -3
+    assert_not_contains "D5-C NO sweep_rollback (the green path is taken)" '"event":"sweep_rollback"' "$CJ"
+    assert_not_re "D5-C NO quarantine entry (the target was never punished)" "\"quarantined\": ?\[.*\"$TARGET\"" "$CJ"
+    assert_eq "D5-C the counter NOT incremented" '"24h":0' "$(printf '%s' "$CJ" | grep -oE '"24h": ?[0-9]+' | head -1)"
+    assert_re "D5-C the txn was COMMIT-CLOSED (the green disposition)" '"in_flight": ?null' "$CJ"
+    assert_re "D5-C the current stays at the target" "\"current\": ?\"$TARGET\"" "$CJ"
+
+    leg_summary
+    exit $?
+    fi
+
+    if [ "$LEG" = "d7" ]; then
+    # ===========================================================================
+    # LEG D7 — AC-D2-5 (self-service-promote Wave 4): the version FAST-FAIL
+    # is ARMED on the rollback/restart paths. The blind pin (design §2.3
+    # "Blind pins found (D2)"): rollback.sh / restart.sh never set
+    # PROMOTE_EXPECTED_VERSION ⇒ the serving conjunct degraded to "2xx, no
+    # version comparison" ⇒ a WRONG-VERSION daemon was accepted as
+    # SUCCESS on both recovery paths.
+    #   D7-A (source):    both scripts set the expected version;
+    #   D7-B (behaviour): with the expected version KNOWN, a wrong-version
+    #                     answer is NOT success — the fast-fail fires.
+    # ===========================================================================
+    leg_sandbox d7
+    ROLLBACK_SRC="$(cat "$REPO_ROOT/scripts/upgrade/rollback.sh")"
+    RESTART_SRC="$(cat "$REPO_ROOT/scripts/upgrade/restart.sh")"
+    assert_re "D7-A rollback.sh sets PROMOTE_EXPECTED_VERSION" 'PROMOTE_EXPECTED_VERSION=' "$ROLLBACK_SRC"
+    assert_re "D7-A restart.sh sets PROMOTE_EXPECTED_VERSION" 'PROMOTE_EXPECTED_VERSION=' "$RESTART_SRC"
+    # D7-B — drive the REAL serving conjunct: a green answer carrying the
+    # wrong version must NOT be a success once the expected version is known.
+    D7_OUT="$(INSTALL_DIR="$INSTALL_DIR" bash -c '
+        . "'"$LIBSH"'" >/dev/null 2>&1
+        export PROMOTE_EXPECTED_VERSION=0.28.5
+        export PORT=19997
+        # the green answer with the WRONG version (the ATTRIBUTION conjunct
+        # is stubbed — it is a DIFFERENT gate, pinned by its own legs; this
+        # leg is about the VERSION conjunct)
+        _gate_serving_attribution() { return 0; }
+        _probe_once_classified() { _PROBE_BODY="{\"status\":\"alive\",\"version\":\"0.0.0\"}"; return 0; }
+        _handback_serving_probe
+        echo "probe-rc=$?"
+    ' 2>&1)"
+    assert_re "D7-B a wrong-version answer is NOT success (the fast-fail fires)" 'probe-rc=1' "$D7_OUT"
+    assert_re "D7-B the observed wrong version is named" 'version=0.0.0' "$D7_OUT"
+    # and the degraded posture is unchanged: with NO expected version the
+    # 2xx alone confirms serving (the documented pre-existing contract).
+    D7B_OUT="$(INSTALL_DIR="$INSTALL_DIR" bash -c '
+        . "'"$LIBSH"'" >/dev/null 2>&1
+        export PORT=19997
+        _gate_serving_attribution() { return 0; }
+        _probe_once_classified() { _PROBE_BODY="{\"status\":\"alive\",\"version\":\"0.0.0\"}"; return 0; }
+        _handback_serving_probe
+        echo "probe-rc=$?"
+    ' 2>&1)"
+    assert_re "D7-B with NO expected version the check degrades to 2xx (documented posture)" 'probe-rc=0' "$D7B_OUT"
+
+    leg_summary
+    exit $?
+    fi
+
     printf 'unknown leg: %s\n' "$LEG" >&2
     exit 64
 fi
@@ -475,10 +877,21 @@ LEG_LOGDIR="$(mktemp -d /tmp/phh-gate-legs-logs.XXXXXX)"
 trap 'rm -rf "$LEG_LOGDIR"' EXIT
 
 EXPECTED_ASSERTS_G2=10
-EXPECTED_ASSERTS_G4=20
+EXPECTED_ASSERTS_G4=19
 # G5: the verbatim fold carries 20 asserts + 1 ADDED fixture-guard assert
 # (the absent-probe port is never a reserved service port) = 21.
 EXPECTED_ASSERTS_G5=21
+# D5 (self-service-promote Wave 3): 17 asserts — D5-A (8: the 4-distinct
+# seed repoints to the CAPTURE with source=captured + tierB credit), D5-B
+# (3: the ambiguity halt consumes NO credit), D5-C (5: green evidence +
+# a request take the green path).
+EXPECTED_ASSERTS_D5=16
+# D6 (self-service-promote Wave 1): 15 asserts — D6-A (5: the rc=3 answer
+# is not a timeout, the state word is journaled), D6-B (6: the halt row
+# carries the verifier-path reason and never reads "none captured"), D6-C
+# (4: the verify-phase narrative reaches the payload log).
+EXPECTED_ASSERTS_D6=15
+EXPECTED_ASSERTS_D7=5
 
 FENCE=(env -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_USER -u POSTGRES_PASSWORD
        -u DATABASE_URL -u PGHOST -u PGPORT -u PGDATABASE -u PGUSER -u PGPASSWORD)
@@ -521,6 +934,9 @@ run_one_leg() {
 run_one_leg g2 "$EXPECTED_ASSERTS_G2" || true
 run_one_leg g4 "$EXPECTED_ASSERTS_G4" || true
 run_one_leg g5 "$EXPECTED_ASSERTS_G5" || true
+run_one_leg d5 "$EXPECTED_ASSERTS_D5" || true
+run_one_leg d6 "$EXPECTED_ASSERTS_D6" || true
+run_one_leg d7 "$EXPECTED_ASSERTS_D7" || true
 
 RESULT_RC=0
 if [ "$TIMED_OUT" -gt 0 ]; then
@@ -530,8 +946,8 @@ elif [ "$LEGS_FAILED" -gt 0 ]; then
 fi
 
 printf '\n'
-printf 'RESULT pack=promote_handback_halt_gate_legs_test legs=3 legs_failed=%s timed_out=%s asserts=%s asserts_failed=%s expected_asserts=%s rc=%s\n' \
+printf 'RESULT pack=promote_handback_halt_gate_legs_test legs=6 legs_failed=%s timed_out=%s asserts=%s asserts_failed=%s expected_asserts=%s rc=%s\n' \
     "$LEGS_FAILED" "$TIMED_OUT" "$TOTAL_ASSERTS" "$TOTAL_FAILED_ASSERTS" \
-    "$((EXPECTED_ASSERTS_G2 + EXPECTED_ASSERTS_G4 + EXPECTED_ASSERTS_G5))" "$RESULT_RC"
+    "$((EXPECTED_ASSERTS_G2 + EXPECTED_ASSERTS_G4 + EXPECTED_ASSERTS_G5 + EXPECTED_ASSERTS_D5 + EXPECTED_ASSERTS_D6 + EXPECTED_ASSERTS_D7))" "$RESULT_RC"
 printf 'logs: %s\n' "$LEG_LOGDIR"
 exit "$RESULT_RC"

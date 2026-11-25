@@ -659,7 +659,20 @@ class TestP11BootNoBehaviorChange:
     """
 
     NOT_TOUCHED_PATHS = [
-        "daemon/sources/registry.py",
+        # post-outage-recovery commission, leader decision, 2026-11-24:
+        # daemon/sources/registry.py is REMOVED from the blanket no-drift
+        # path list. The b3 Addendum A execution-receipt write side is
+        # sanctioned drift: the closed receipt-vocabulary acceptance
+        # (``executed`` / ``dispatched`` / ``never-started`` /
+        # ``failed-to-dispatch`` / ``suppressed``) is LOAD-BEARING b3
+        # semantics — reverting it to satisfy this pin would break the
+        # receipt write side. Leaving the merge-relative span is NOT
+        # available: the b3 commits ARE the sanctioned drift, and the
+        # merge-base advance is a future drift-sync outside this branch's
+        # control. cleanup.py and scheduling_service.py STAY in this list
+        # (empty-diff enforced) — only registry.py is exempted. The two-way
+        # pins below prove enforcement is retained on those two paths and
+        # dropped on registry.py.
         "daemon/sources/cleanup.py",
         "daemon/constants.py",
         "daemon/manager.py",
@@ -768,7 +781,23 @@ class TestP11BootNoBehaviorChange:
     # "room"/"chat" there would let a manager.py hunk that merely
     # mentions room types slip past the manager.py pins.
     FRONTEND_UI_LANE_SANCTIONED_PATH = "frontend/"
-    FRONTEND_UI_LANE_MARKERS = ("room", "chat")
+    # ── CENTRAL-MAINTENANCE-P4 lane (2026-11-22) — one more marker ──────
+    # "report" (the maintenance-report slice's own noun) joins the
+    # group-chat lane's "room"/"chat" and the tool-usage lane's
+    # "tool"/"tab" — one token per sanctioned FE slice, in the same
+    # ANY-of shape, and NOT folded into the manager.py marker set (that
+    # tuple is the manager.py-hunk carve-out source; admitting a
+    # generic FE token there would let a manager.py hunk slip past).
+    # Measured over the post-merge span: the CENTRAL-MAINTENANCE-P4
+    # report slice carries "report" NATIVELY in 11 of its 12 frontend/
+    # hunks (the route line, the barrel export, the model header, the
+    # page/component/service/spec bodies); the 12th — the models barrel's
+    # line-count comment hunk — carries it via a minimal non-behavioral
+    # marker comment added in the same change (the house precedent:
+    # app.component.spec.ts / chat.component.spec.ts). The FE markers
+    # stay scoped to the PATH allowlist (F-1): a foreign frontend/ path
+    # is an offender whatever its wording says.
+    FRONTEND_UI_LANE_MARKERS = ("room", "chat", "tool", "tab", "expect", "report")
 
     # F-1 — the FE-UI sanction is PATH-BOUND, not marker-bound. The
     # marker vocabulary ("room" / "chat") is GENERIC: a foreign
@@ -787,6 +816,22 @@ class TestP11BootNoBehaviorChange:
         "frontend/src/app/components/room-dialog/room-dialog.component.scss",
         "frontend/src/app/components/room-dialog/room-dialog.component.spec.ts",
         "frontend/src/app/components/room-dialog/room-dialog.component.ts",
+        # gc-fe-surfaces P3 (surfaces (b)+(c)): instance-list row button +
+        # conditional visibility — three modified + the new spec (AM-7/W-2).
+        "frontend/src/app/components/instance-list/instance-list.component.ts",
+        "frontend/src/app/components/instance-list/instance-list.html",
+        "frontend/src/app/components/instance-list/instance-list.scss",
+        "frontend/src/app/components/instance-list/instance-list.rooms-btn.spec.ts",
+        # gc-fe-surfaces P4 (W-14): committed rooms-gate e2e spec + dedicated config.
+        "frontend/e2e/group-chat-rooms-gate.spec.ts",
+        "frontend/playwright.rooms-gate.config.ts",
+        # gc-fe-surfaces G2 (daemon-fenced rooms gate): the committed daemon
+        # spec + its dedicated daemon config + its proxy conf — sanctioned in
+        # the SAME change that touches them (F-1's maintenance rule: extend
+        # the sanctioned surface in the same change that adds the path).
+        "frontend/e2e/group-chat-rooms-gate.daemon.spec.ts",
+        "frontend/playwright.rooms-gate.daemon.config.ts",
+        "frontend/proxy.gcfe-e2e.conf.json",
         "frontend/src/app/models/index.ts",
         "frontend/src/app/models/room.model.ts",
         # P6 tidier T1 created this suite (the chatrooms describe moved
@@ -801,6 +846,49 @@ class TestP11BootNoBehaviorChange:
         "frontend/src/app/services/room.service.spec.ts",
         "frontend/src/app/services/room.service.ts",
         "frontend/src/styles.scss",
+        # tool-usage metrics P1 (council C2): 13 new FE paths — 9th tab,
+        # lazy host, domain client, wire models, spec pack, bundle
+        # artifacts, e2e pixel item. Sanctioned here per F-1's
+        # maintenance rule (extend the surface in the same change that
+        # touches it); the 13 pre-existing foreign base offenders
+        # (job-queue-indicator, home, mcps-gateway, live-tab,
+        # poll-visibility, command-state, instance.service) are
+        # deliberately NOT sanctioned — out of scope, someone else's
+        # debt, present at base 858a85e31.
+        "frontend/e2e/tool-usage-metrics-gate.spec.ts",
+        "frontend/src/app/models/tool-usage.models.spec.ts",
+        "frontend/src/app/models/tool-usage.models.ts",
+        "frontend/src/app/pages/metrics/metrics.bundle-guard.spec.ts",
+        "frontend/src/app/pages/metrics/metrics.component.spec.ts",
+        "frontend/src/app/pages/metrics/metrics.tool-usage.spec.ts",
+        "frontend/src/app/pages/metrics/tabs.manifest.spec.ts",
+        "frontend/src/app/pages/metrics/tabs.manifest.ts",
+        "frontend/src/app/pages/metrics/tabs/tabs.components.ts",
+        "frontend/src/app/pages/metrics/tabs/tool-usage-tab-host.component.ts",
+        "frontend/src/app/pages/metrics/tabs/tool-usage-tab.component.ts",
+        "frontend/src/app/services/tool-usage.service.spec.ts",
+        "frontend/src/app/services/tool-usage.service.ts",
+        # ── CENTRAL-MAINTENANCE-P4 lane (2026-11-22): the Report slice ──
+        # The plan-ratified P4 report slice (phase4-plan.md PD-2 — the FE
+        # wire decision — plus BR-19's gear-menu row): the lazy /report
+        # route, its read-only page + service + wire model, the gear-menu
+        # entry, and the sibling-page non-displacement pins. 13 paths in
+        # all — 11 NEW here, 2 ALREADY sanctioned by an earlier lane
+        # (app.component.spec.ts from group-chat P6; models/index.ts from
+        # tool-usage P1, whose barrel this lane also grew). Sanctioned per
+        # F-1's maintenance rule: the path is added here in the same
+        # change that touches it.
+        "frontend/src/app/app.routes.ts",
+        "frontend/src/app/app.ts",
+        "frontend/src/app/models/report.model.ts",
+        "frontend/src/app/pages/mcps-gateway/mcps-gateway.pins.spec.ts",
+        "frontend/src/app/pages/metrics/metrics-gear-menu.spec.ts",
+        "frontend/src/app/pages/report/report.component.html",
+        "frontend/src/app/pages/report/report.component.scss",
+        "frontend/src/app/pages/report/report.component.spec.ts",
+        "frontend/src/app/pages/report/report.component.ts",
+        "frontend/src/app/pages/report/report.pins.spec.ts",
+        "frontend/src/app/pages/report/report.service.ts",
     )
 
     # F-2 — the FIXED committed-tree reference for the compensator: the
@@ -848,7 +936,104 @@ class TestP11BootNoBehaviorChange:
     COMPACT_NOTE_LANE_SANCTIONED_PATH = "daemon/constants.py"
     COMPACT_NOTE_LANE_MARKER = "compact-note"
 
-    SANCTIONED_LANE_MARKERS = ("decision", "memoir", "group chat", "compact-note")
+    SANCTIONED_LANE_MARKERS = (
+        "decision",
+        "memoir",
+        "group chat",
+        "compact-note",
+        # cycle-3 (2026-11-20): the SELF-SERVICE-PROMOTE lane's sanctioned
+        # changes to daemon/manager.py — the executor unit-identity stamper
+        # (D3-E3), the spawn-mode-derived reaper unit (M2), and the legacy
+        # owner_pid_kind fixup, commits 068cad67a / 2c2df283f / 4cb69120b
+        # (+92 lines over the span). Mirrors the decision-lane precedent
+        # (c81dd0dea, "scoped source-gc sanction") and the memoir /
+        # group-chat blocks above. Every hunk of that drift now carries
+        # "self-service-promote" (hunk 1 natively — the D3-E3 wiring
+        # comment; the three others via a minimal non-behavioral marker
+        # comment added in the same change). The token is disjoint from
+        # the other markers over the span.
+        "self-service-promote",
+        # ── CHECKPOINT-RETENTION lane (post-outage-recovery SCOPE (c), 2026-11-24;
+        #    token renamed leader-approved 2026-11-24) ──
+        # The lane's sanctioned daemon/manager.py drift: the backstop job
+        # registration (UN_GATED, its own maintenance_runs section) and
+        # the `backstop_registration_params()` seam. Mirrors the decision /
+        # memoir / group-chat / self-service-promote / tool-usage blocks
+        # above. Every hunk of the drift carries the
+        # "checkpoint-retention-lane" marker (the registration block and
+        # the seam import each via a minimal non-behavioral marker comment
+        # added in the same change). RENAMED from the old "retention" token:
+        # "retention" was too generic — it collided with unrelated prose
+        # and could sanction a foreign hunk; the hyphenated lane name is
+        # disjoint from every other marker over the span (verified
+        # counterfactually: it sanctions exactly this lane's own 2 hunks).
+        "checkpoint-retention-lane",
+        # ── BOOT-RECOVERY lane (post-outage-recovery commission, LEADER
+        #    DECISION, 2026-11-24) — SANCTION VERBATIM ─────────────────
+        # The b/b3 lane's sanctioned daemon/manager.py drift: the
+        # boot-consistency reconciler DDL (instances.boot_re_drive_at,
+        # SCOPE b) and the Addendum A schedule_executions receipt handles
+        # (SCOPE b3) in the migration hunk, plus the F2 PENDING re-drive
+        # repair leg in the resume path. Mirrors the decision / memoir /
+        # group-chat / checkpoint-retention-lane blocks above. Every hunk
+        # of the drift carries the "boot-recovery" marker via a minimal
+        # non-behavioral marker comment added in the same change (the
+        # house precedent: the checkpoint-retention-lane comments). The
+        # token is disjoint from the other markers over the span — it
+        # sanctions exactly this lane's own 2 hunks and no other lane's.
+        "boot-recovery",
+        # ── TOOL-USAGE-METRICS-P1 lane (2026-11-21) — the single marker ──
+        # The lane's sanctioned daemon/manager.py drift: the aggregated
+        # ledger model registration before create_all + the off-loop
+        # flusher (phase 1, 49f5e9c1d) and the boot-time digest seeder
+        # (phase 3, 71273d7e3). Mirrors the decision / memoir /
+        # group-chat / self-service-promote blocks above.
+        #
+        # NORMALIZED TO ONE TOKEN — "tool-usage" (hyphen form). Measured
+        # at HEAD 0b02931b7 over 0b5624dc9..HEAD: the lane's manager.py
+        # drift is 3 hunks and 3/3 carry "tool-usage" in their added
+        # lines (the "tool-usage P1"/"tool-usage P3" section headers), so
+        # the marker is PER-HUNK-COMPLETE with no marker comment added.
+        # The lane's other spellings ("tool_usage" in identifiers,
+        # "toolusage" in log prefixes) are deliberately NOT markers: a
+        # token that matches every spelling stops discriminating.
+        #
+        # DISCLOSED, NOT CURED HERE: the same 3 hunks also carry
+        # "decision" (the plan's "(decision-support)" prose), so all four
+        # manager.py/constants.py pins above are satisfied on them by the
+        # DECISION token — a courtesy cross-mention, the exact shape the
+        # memoir block forbids. Registering "tool-usage" makes the hunks
+        # attributable to their OWNING lane; making a pin select the
+        # owning token instead of any-of is a mechanism change (the
+        # carve-out is a flat ANY-of set) and is left as a follow-up.
+        "tool-usage",
+        # ── CENTRAL-MAINTENANCE-P1 lane (2026-11-22) — the single marker ──
+        # The lane's sanctioned daemon/manager.py drift: the "Central
+        # Maintenance System (P1): weekly trigger chain" boot block (+31
+        # lines — the chain's archive-aware survival net, seeded before
+        # any adapter exists). Mirrors the decision / memoir / group-chat /
+        # compact-note / self-service-promote / tool-usage blocks above.
+        #
+        # NORMALIZED TO ONE TOKEN — "central maintenance" (space form).
+        # Measured over the post-merge span: the lane's manager.py drift
+        # is 1 hunk and 1/1 carries "central maintenance" in its added
+        # lines (the section header "Central Maintenance System (P1):
+        # weekly trigger chain"), so the marker is PER-HUNK-COMPLETE with
+        # NO marker comment added to daemon/manager.py — the same posture
+        # the tool-usage block takes. The token is disjoint from the other
+        # markers over the span, so no other lane's hunk is carried by it.
+        "central maintenance",
+    )
+
+    # ── THE HUNK-MARKER CHECK'S BLIND SPOT (disclosed, not fixed) ────────
+    # This mechanism judges ONLY daemon/manager.py + daemon/constants.py.
+    # The tool-usage lane's other daemon surfaces — notably
+    # daemon/graph.py, where the observation wrapper is inserted between
+    # compact_note and wrapped_tools_node — are NOT covered: a markerless
+    # graph.py hunk passes every pin here. They are covered instead by a
+    # PATH-level allowlist (the metrics family pack's
+    # TestNoProducerInstrumentation), never per hunk. Extending this
+    # mechanism to graph.py is a named follow-up, not a silent gap.
 
     # The EXACT added lines of the leader-sanctioned None guard (content
     # pin, indentation preserved; diff '+' prefixes stripped). The file
@@ -877,33 +1062,28 @@ class TestP11BootNoBehaviorChange:
             ["git", *args], capture_output=True, text=True, check=False
         ).stdout
 
-    def _manager_hunks_missing_sanctioned_marker(self, span, path=None):
-        """Hunks of the daemon/manager.py drift in ``span`` that carry
+    def _manager_hunks_missing_sanctioned_marker_from_diff(self, diff_text):
+        """Pure marker check over diff TEXT - the SHARED body of the span
+        pins and the two-way simulation pins. Returns the hunks carrying
         NO sanctioned-lane marker. ``SANCTIONED_LANE_MARKERS`` is the
-        single source (the cross-lane carve-out lives there — never
-        here). This is the SHARED body of the three lane pins below:
-        the diff, the hunk parse and the marker check are identical
-        across them (all three lane path constants alias the same
-        file — daemon/manager.py); only each pin's docstring narrates
-        its own lane's claim. A span with no manager.py diff is
-        vacuously clean ([]). A degenerate diff (content lines but no
-        hunk headers) yields a pseudo-hunk so the caller's ``== []``
-        assert still fails — the old explicit "no content lines"
-        assert, preserved.
+        single source (the cross-lane carve-out lives there - never
+        here). Taking text (not a git span) is load-bearing: it lets the
+        two-way pins feed a synthetic diff and prove BOTH legs - an
+        unmarked hunk is flagged (pin A), a ``boot-recovery``-marked hunk
+        is accepted (pin B) - without needing a TEMP COMMIT + soft reset.
+        An empty diff is vacuously clean ([]); a degenerate diff (content
+        lines but no hunk headers) yields a pseudo-hunk so the caller's
+        ``== []`` assert still fails.
         """
-        diff = self._git(
-            "diff", "--unified=0", span, "--",
-            path or self.DECISION_LANE_SANCTIONED_PATH,
-        )
-        if not diff.strip():
-            return []  # nothing sanctioned in this span — vacuously clean
+        if not diff_text.strip():
+            return []  # nothing sanctioned - vacuously clean
         hunks: list[list[str]] = []
         current: list[str] = []
-        for line in diff.splitlines():
+        for line in diff_text.splitlines():
             if line.startswith("@@"):
                 if current:
                     hunks.append(current)
-                current = []
+                    current = []
                 continue
             if line.startswith(("+", "-")) and not line.startswith(("+++", "---")):
                 current.append(line)
@@ -922,6 +1102,22 @@ class TestP11BootNoBehaviorChange:
                 for marker in self.SANCTIONED_LANE_MARKERS
             )
         ]
+
+    def _manager_hunks_missing_sanctioned_marker(self, span, path=None):
+        """Hunks of the daemon/manager.py drift in ``span`` that carry
+        NO sanctioned-lane marker. This is the git-span wrapper over the
+        pure ``_manager_hunks_missing_sanctioned_marker_from_diff`` body:
+        the diff, the hunk parse and the marker check are identical
+        across all the lane pins (all their path constants alias the same
+        file - daemon/manager.py); only each pin's docstring narrates its
+        own lane's claim. A span with no manager.py diff is vacuously
+        clean ([]).
+        """
+        diff = self._git(
+            "diff", "--unified=0", span, "--",
+            path or self.DECISION_LANE_SANCTIONED_PATH,
+        )
+        return self._manager_hunks_missing_sanctioned_marker_from_diff(diff)
 
     def _frontend_ui_offending_hunks(self, diff_text):
         """Offending frontend/ hunks in ``diff_text`` — the SHARED body
@@ -992,6 +1188,40 @@ class TestP11BootNoBehaviorChange:
                 offenders.append((path, hunk))
         return offenders
 
+    def _blanket_checked_paths(self):
+        """The exact path set the blanket no-drift check enforces:
+        NOT_TOUCHED_PATHS minus the lane-exempted surfaces (each exempted
+        path is checked by its own scoped lane pin instead). Single source
+        of truth for both the blanket check and its two-way pins — a
+        path present here means drift in it REDs the blanket check; a
+        path absent here is exempt. post-outage-recovery commission,
+        leader decision, 2026-11-24: registry.py was removed here (b3
+        receipt-vocabulary acceptance is load-bearing), cleanup.py and
+        scheduling_service.py were deliberately kept.
+        """
+        return [p for p in self.NOT_TOUCHED_PATHS
+                if p not in (self.SANCTIONED_PATH,
+                             self.DECISION_LANE_SANCTIONED_PATH,
+                             self.MEMOIR_LANE_SANCTIONED_PATH,
+                             self.GROUP_CHAT_LANE_SANCTIONED_PATH,
+                             self.COMPACT_NOTE_LANE_SANCTIONED_PATH,
+                             self.FRONTEND_UI_LANE_SANCTIONED_PATH)]
+
+    @staticmethod
+    def _blanket_drift_offense(stat_text, checked_paths):
+        """True when a `git diff --stat` output shows drift in a path the
+        blanket check enforces. The check asserts the stat output over
+        EXACTLY ``checked_paths`` is empty, so any stat line whose path is
+        in that set is an offense; a stat line for an exempt path is not.
+        Taking text + paths (not a git span) is what lets the two-way pins
+        simulate drift without touching history.
+        """
+        for line in stat_text.splitlines():
+            path = line.strip().split(" | ")[0].strip()
+            if path in checked_paths:
+                return True
+        return False
+
     def test_sanctioned_guard_present_in_file(self):
         # File-state pin: the sanctioned hunk must be present, contiguous,
         # and exact. Removing/altering a line REDs. This survives a future
@@ -1015,18 +1245,7 @@ class TestP11BootNoBehaviorChange:
         ).strip()
         assert merge, "no first-parent merge found"
         span = f"{merge}..HEAD"
-        # daemon/manager.py is excluded from the blanket no-drift check
-        # (the DECISION, MEMOIR and GROUP-CHAT lanes legitimately changed
-        # it); their drift is checked by the scoped lane sanctions below.
-        # frontend/ is excluded the same way (the GROUP-CHAT P6 FE-UI
-        # lane legitimately changed it).
-        others = [p for p in self.NOT_TOUCHED_PATHS
-                  if p not in (self.SANCTIONED_PATH,
-                               self.DECISION_LANE_SANCTIONED_PATH,
-                               self.MEMOIR_LANE_SANCTIONED_PATH,
-                               self.GROUP_CHAT_LANE_SANCTIONED_PATH,
-                               self.COMPACT_NOTE_LANE_SANCTIONED_PATH,
-                               self.FRONTEND_UI_LANE_SANCTIONED_PATH)]
+        others = self._blanket_checked_paths()
         out_others = self._git("diff", "--stat", span, "--", *others)
         assert out_others.strip() == "", (
             f"unexpected post-merge drift in NOT-TOUCHED paths:\n{out_others}"
@@ -1051,6 +1270,84 @@ class TestP11BootNoBehaviorChange:
         assert added == self.SANCTIONED_HUNK_LINES, (
             "daemon/routers/sources.py diff is not EXACTLY the sanctioned "
             f"None-guard hunk.\nadded={added!r}"
+        )
+
+    # ── TWO-WAY PINS (post-outage-recovery commission, leader decision,
+    #    2026-11-24) ────────────────────────────────────────────────────
+    # Each pin feeds a SYNTHETIC diff/stat to the pure checker and proves
+    # BOTH legs: the guard still REDs an unsanctioned hunk (A / C) and it
+    # ACCEPTS the newly-sanctioned surface (B / D). The mutation legs are
+    # fail-honest: drop the token / path and the matching pin REDs. Because
+    # these use diff TEXT they need no TEMP COMMIT + soft reset (unlike the
+    # history pins, which read committed spans).
+
+    def test_pin_a_unmarked_manager_hunk_is_flagged(self):
+        """Two-way pin A: a manager.py hunk with NO sanctioned token is an
+        offender — the guard still REDs unmarked drift. Synthetic diff, so
+        no history mutation is needed. MUTATION LEG: make the checker accept
+        unmarked hunks (e.g. always return []) and this pin REDs.
+        """
+        sim = (
+            "diff --git a/daemon/manager.py b/daemon/manager.py\n"
+            "@@ -100,0 +101,2 @@ class InstanceManager:\n"
+            "+        # an unrelated lane's wiring, no sanctioned marker\n"
+            "+        self._unrelated_wiring()\n"
+        )
+        flagged = self._manager_hunks_missing_sanctioned_marker_from_diff(sim)
+        assert len(flagged) == 1, (
+            "an unmarked manager.py hunk was NOT flagged - the guard lost "
+            "its teeth; an unsanctioned lane could now drift manager.py"
+        )
+
+    def test_pin_b_boot_recovery_marked_manager_hunk_is_accepted(self):
+        """Two-way pin B: a manager.py hunk carrying ``boot-recovery`` is
+        sanctioned — the guard ACCEPTS it. MUTATION LEG: drop
+        ``boot-recovery`` from SANCTIONED_LANE_MARKERS and this pin REDs.
+        """
+        sim = (
+            "diff --git a/daemon/manager.py b/daemon/manager.py\n"
+            "@@ -100,0 +101,2 @@ class InstanceManager:\n"
+            "+        # boot-recovery lane — the boot-consistency DDL\n"
+            "+        self._boot_re_drive()\n"
+        )
+        assert self._manager_hunks_missing_sanctioned_marker_from_diff(sim) == [], (
+            "a boot-recovery-marked manager.py hunk was flagged - the "
+            "post-outage-recovery commission's sanction is not in force"
+        )
+
+    def test_pin_c_blanket_check_still_reds_cleanup_and_scheduling_service(self):
+        """Two-way pin C: the blanket no-drift check STILL enforces
+        daemon/sources/cleanup.py and daemon/services/scheduling_service.py
+        — reintroducing drift in either REDs. MUTATION LEG: drop either path
+        from the checked set (or neuter the offense helper) and this pin
+        REDs.
+        """
+        checked = self._blanket_checked_paths()
+        for path in ("daemon/sources/cleanup.py",
+                     "daemon/services/scheduling_service.py"):
+            assert path in checked, (
+                f"blanket check no longer enforces {path} - drift there "
+                "would silently pass"
+            )
+            stat = f" {path} | 3 +++\n"
+            assert self._blanket_drift_offense(stat, checked), (
+                f"blanket check failed to RED synthetic drift in {path}"
+            )
+
+    def test_pin_d_blanket_check_no_longer_reds_registry_drift(self):
+        """Two-way pin D: registry.py is EXEMPT from the blanket no-drift
+        check — its b3 receipt-vocabulary drift no longer REDs. MUTATION
+        LEG: re-add registry.py to the checked set and this pin REDs.
+        """
+        checked = self._blanket_checked_paths()
+        assert "daemon/sources/registry.py" not in checked, (
+            "registry.py was re-added to the blanket check - the b3 "
+            "receipt-vocabulary acceptance would break again"
+        )
+        stat = " daemon/sources/registry.py | 10 +++++++++-\n"
+        assert not self._blanket_drift_offense(stat, checked), (
+            "a registry.py-only drift was flagged - the exemption is not "
+            "in force"
         )
 
     def test_the_compact_note_lane_constants_drift_is_confined_to_sanctioned_hunks(

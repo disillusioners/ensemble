@@ -139,7 +139,6 @@ def _manager_config():
         ),
         persistence=PersistenceConfig(
             db_path="/tmp/mission-review-unused.db",
-            checkpoint_interval=1,
             checkpoint_ttl_hours=168,
             checkpoint_cleanup_interval=24,
             max_instance_history=300,

@@ -130,7 +130,7 @@ counter**; it increments the counter and **revokes the live token at threshold 5
 
 > **RULE (ARCHITECT §6.2 — THE 4f SPLIT).** The 4f site (`daemon/tools/prompt_assent.py:2021`)
 > calls `_record_mismatch` **unconditionally today** — *before* the code's class is examined.
-> As specified, five approve-side new-code refusals would **revoke the Emperor's live token**,
+> As specified, five approve-side new-code refusals would **revoke the user's live token**,
 > which contradicts A-9/A-10 ("Token burn? no") and AC7. **The 4f site MUST split:**
 >
 > * the **mismatch-class branch** (the existing `token-channel-mismatch`) keeps
@@ -148,7 +148,7 @@ counter**; it increments the counter and **revokes the live token at threshold 5
 (`daemon/tools/prompt_assent.py:274-326`). A mint-side refusal presents **no token**, so there
 is nothing to guess — and burning the budget there would be a **DoS primitive**: a stranger who
 simply typed in the designated channel would exhaust the relay instance's hourly budget and lock
-out the **legitimate** Emperor with `mismatch-budget-exceeded`. Both new codes are therefore
+out the **legitimate** user with `mismatch-budget-exceeded`. Both new codes are therefore
 **outside `MISMATCH_CODES`** and outside the placed-codes set that consumes the budget.
 
 **Stronger fact (architect §6.1 — state it so no future change adds a mint-side budget leg).**

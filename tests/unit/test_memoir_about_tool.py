@@ -21,7 +21,7 @@ What this suite pins:
   heat is NOT incremented (ND-23: an empty lookup is not a hit);
 * **the populated dossier**: canonical name / star type / description /
   recent connected episodes / 1-hop neighbor stars render, the alias
-  "the Emperor" resolves to the canonical card, and the stored heat
+  "the user" resolves to the canonical card, and the stored heat
   moves +1.0 (the ONLY explicit-recall writer);
 * **V2-D 3.3 — the two-part heat model**: the render-time decay is
   ``round(stored_heat * exp(-MEMOIR_HEAT_DECAY_LAMBDA * days_idle), 2)``
@@ -166,20 +166,20 @@ def _stored_heat(engine, star_id: str) -> float:
 
 
 def _seed_populated_constellation(repo, constellation_repo):
-    """Two episodes; "The Emperor" + a neighbor "agents-ensemble"."""
+    """Two episodes; "The user" + a neighbor "agents-ensemble"."""
     ep1 = repo.insert_episode(
         agent_id=AGENT,
         title="joint design session on the memoir store",
         body="we designed the constellation layer together",
-        stars=["The Emperor", "agents-ensemble"],
+        stars=["The user", "agents-ensemble"],
         created_at=NOW - timedelta(days=2),
         event_at=NOW - timedelta(days=2),
     )
     ep2 = repo.insert_episode(
         agent_id=AGENT,
         title="the constitutional ruling",
-        body="the emperor ratified the reflection cadence",
-        stars=["The Emperor"],
+        body="the user ratified the reflection cadence",
+        stars=["The user"],
         created_at=NOW - timedelta(days=1),
         event_at=NOW - timedelta(days=1),
     )
@@ -190,14 +190,14 @@ def _seed_populated_constellation(repo, constellation_repo):
         [
             _stand_in(
                 ep1,
-                stars=["The Emperor", "agents-ensemble"],
+                stars=["The user", "agents-ensemble"],
                 body="we designed the constellation layer together",
                 event_at=NOW - timedelta(days=2),
             ),
             _stand_in(
                 ep2,
-                stars=["The Emperor"],
-                body="the emperor ratified the reflection cadence",
+                stars=["The user"],
+                body="the user ratified the reflection cadence",
                 event_at=NOW - timedelta(days=1),
             ),
         ],
@@ -223,7 +223,7 @@ class TestTheGateOrder:
         }
         mgr.knob_reads = 0  # measure the INVOCATION window (post-factory)
         mgr.engine_touches = 0
-        result = await denied["memoir_about"].ainvoke({"star": "The Emperor"})
+        result = await denied["memoir_about"].ainvoke({"star": "The user"})
         assert _reason(result) == "memoir_not_authorized"
         # AUTH-FIRST: the knob was never read and the DB was never touched
         # (the factory's own D0.7 help-embedding read is excluded — the
@@ -239,7 +239,7 @@ class TestTheGateOrder:
             )
         }
         mgr.knob_reads = 0  # measure the INVOCATION window (post-factory)
-        result = await blank["memoir_about"].ainvoke({"star": "The Emperor"})
+        result = await blank["memoir_about"].ainvoke({"star": "The user"})
         assert _reason(result) == "memoir_agent_unknown"
         assert mgr.knob_reads == 0
 
@@ -254,7 +254,7 @@ class TestTheGateOrder:
                 mgr, current_instance_id="inst-1", agent_id=AGENT
             )
         }
-        result = await tools["memoir_about"].ainvoke({"star": "The Emperor"})
+        result = await tools["memoir_about"].ainvoke({"star": "The user"})
         assert _reason(result) == "memoir_disabled"
         assert mgr.knob_reads >= 1
         # The kill-switch precedes ANY DB touch.
@@ -327,13 +327,13 @@ class TestThePopulatedDossier:
         self, repo, constellation_repo, tools
     ):
         _seed_populated_constellation(repo, constellation_repo)
-        star = constellation_repo.resolve_star(AGENT, "The Emperor")
+        star = constellation_repo.resolve_star(AGENT, "The user")
         assert _stored_heat(constellation_repo.engine, star.id) == 0.0
 
-        result = await tools["memoir_about"].ainvoke({"star": "The Emperor"})
+        result = await tools["memoir_about"].ainvoke({"star": "The user"})
         assert "REFUSED" not in result
         # Canonical identity + type + description.
-        assert "=== STAR: The Emperor" in result
+        assert "=== STAR: The user" in result
         assert "(type: concept" in result  # the write path stores names only
         assert "Description:" in result
         # Recent connected episodes (the canonical episode titles).
@@ -348,8 +348,8 @@ class TestThePopulatedDossier:
         self, repo, constellation_repo, tools
     ):
         _seed_populated_constellation(repo, constellation_repo)
-        canonical = await tools["memoir_about"].ainvoke({"star": "The Emperor"})
-        via_alias = await tools["memoir_about"].ainvoke({"star": "the Emperor"})
+        canonical = await tools["memoir_about"].ainvoke({"star": "The user"})
+        via_alias = await tools["memoir_about"].ainvoke({"star": "the user"})
         assert "REFUSED" not in via_alias
         # The alias lands on the SAME canonical card (the identity header
         # modulo the heat segment — the first call legitimately bumped it).
@@ -362,9 +362,9 @@ class TestThePopulatedDossier:
         self, repo, constellation_repo, tools
     ):
         _seed_populated_constellation(repo, constellation_repo)
-        star = constellation_repo.resolve_star(AGENT, "The Emperor")
-        await tools["memoir_about"].ainvoke({"star": "The Emperor"})
-        await tools["memoir_about"].ainvoke({"star": "the Emperor"})
+        star = constellation_repo.resolve_star(AGENT, "The user")
+        await tools["memoir_about"].ainvoke({"star": "The user"})
+        await tools["memoir_about"].ainvoke({"star": "the user"})
         assert _stored_heat(constellation_repo.engine, star.id) == 2.0
 
 
@@ -423,8 +423,8 @@ class TestTheFrozenVocabulary:
 
 
 class TestRegistration:
-    def test_the_tool_name_set_holds_six_tools(self):
-        assert len(MEMOIR_TOOL_NAMES) == 6
+    def test_the_tool_name_set_holds_eight_tools(self):
+        assert len(MEMOIR_TOOL_NAMES) == 8
         assert "memoir_about" in MEMOIR_TOOL_NAMES
 
     def test_source_discovery_includes_memoir_about(self):
@@ -453,7 +453,7 @@ class TestRegistration:
             )
         }
         assert "memoir_about" in denied  # PRESENT and refusing (D4.6)
-        result = await denied["memoir_about"].ainvoke({"star": "The Emperor"})
+        result = await denied["memoir_about"].ainvoke({"star": "The user"})
         assert _reason(result) == "memoir_not_authorized"
 
     def test_the_layer1_category_admission_is_ari_only(self):

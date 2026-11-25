@@ -1,6 +1,6 @@
 # Guidelines for agents-ensemble — the feature proposal
 
-**Status:** CANONICAL — homed 2026-11-13; placement Emperor-ratified at
+**Status:** CANONICAL — homed 2026-11-13; placement user-ratified at
 docs/guidelines/ (versioned with the system, promoted with each release);
 lifecycle now live.
 
@@ -12,7 +12,7 @@ A **Guideline** is the knowledge document owed by any feature that ships in a
 state an operator or agent cannot see from the code alone:
 
 - **dormant** — merged and deployed but OFF by default (e.g. prompt-assent:
-  `ENSEMBLE_PROMPT_ASSENT_ENABLED` default OFF, arming is the Emperor's act);
+  `ENSEMBLE_PROMPT_ASSENT_ENABLED` default OFF, arming is the user's act);
 - **config-armed** — behavior flips on env keys the boot never surfaces in a
   UI (e.g. the memoir reflection lane's `ENSEMBLE_MEMOIR_REFLECTION_*`
   family, which is ENV-ONLY: a hand-added `config.yaml` block is silently
@@ -30,7 +30,7 @@ verification contract* of a shipped feature, and POINTS at the runbook,
 critical note, and board item as its sources of truth.
 
 The template (see `TEMPLATE.md`) is the distilled shape of ENSEMBLE-30
-("prompt-assent enablement", hand-crafted by Emperor + Ari, 2026-11-12) —
+("prompt-assent enablement", hand-crafted by the user + Ari, 2026-11-12) —
 the first guideline, written before this feature existed. That is the
 pattern this feature systematizes.
 
@@ -72,7 +72,7 @@ entry is the record.
 - **Risk:** none structural. `docs/` is already the home of runbooks; this
   is the same pattern one level up in abstraction.
 
-### Option (ii): the empyrea repo
+### Option (ii): the constellation repo
 
 - **For:** cross-project doctrine (if guidelines ever span several daemons
   or the harness), and it sits next to the operator's other standing docs.
@@ -119,7 +119,7 @@ draft ──► reviewed ──► canonical ──► updated-when-the-feature-
   │            │             │                       touches the feature's knobs/
   │            │             │                       gates/refusals updates the
   │            │             │                       guideline IN THE SAME LANE
-  │            │             └─ a human (Emperor or delegate) ratifies the
+  │            │             └─ a human (the user or delegate) ratifies the
   │            │                file; it becomes the entry point operators read
   │            └─ a second reader verifies every factual claim against the
   │               tree (env keys, commands, versions) — an unverified claim is

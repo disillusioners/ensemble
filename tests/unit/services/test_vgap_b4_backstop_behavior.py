@@ -188,6 +188,27 @@ DEFER_OUTCOMES_THAT_DO_NOT_EMIT = frozenset(
 
 ALL_CANONICAL_outcomes = frozenset(EMITTING_outcomes | NON_EMITTING_outcomes)
 
+# S1 (wake-path-carrier-fix) — the outcomes whose branch now FIRES the
+# watcher through the S1 SUPPLEMENT (the target-agnostic child-keyed
+# fire), as opposed to the BACKSTOP force-emit (which stays unreachable
+# for every outcome in ``DEFER_OUTCOMES_THAT_DO_NOT_EMIT``).
+#
+# ``root_completed`` and ``tool_invocation_completed`` are the two
+# terminal branches that emit NO bus terminal of their own — before S1
+# they had NO fire anywhere on their lane, so a watcher armed for such
+# a child could never be fired. The plan's per-outcome placement
+# (plan-overview §(a.2) step 3 — approver B1; acceptance T1c + T1f)
+# puts the S1 fire at the END of each of those branches. The
+# structural parent is NOT delivered to (the ``DELIVER(w)`` filter),
+# so the row transitions to FIRED while the report lane keeps owning
+# that waiter's delivery.
+S1_SUPPLEMENT_FIRED_OUTCOMES = frozenset(
+    {
+        "root_completed",
+        "tool_invocation_completed",
+    }
+)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Fixtures — file-backed SQLite + real DependencyBus + manager mock
@@ -691,11 +712,46 @@ class TestDeferOutcomesNotForceEmitted:
         # in this set) was unreachable for this outcome (early-
         # return at the outcome-specific guard OR the obligation
         # criteria not met).
+        #
+        # S1 (wake-path-carrier-fix) — EXCEPTION for the two lanes
+        # whose branches emit NO bus terminal of their own: the S1
+        # SUPPLEMENT (the target-agnostic child-keyed fire) now fires
+        # the watcher there. The plan's per-outcome placement
+        # (``.agents/shared/planning/wake-path-carrier-fix/
+        # plan-overview.md`` §(a.2) step 3 — approver B1; acceptance
+        # T1c + T1f) makes ``root_completed`` and
+        # ``tool_invocation_completed`` FIRE the child-keyed watcher:
+        # the old "a canonical outcome never fires the watcher"
+        # premise of this class IS the defect S1 closes. What this
+        # class still pins — and what is unchanged — is that the
+        # BACKSTOP (the method-tail force-emit) stays unreachable for
+        # every outcome in the set: the S1 fire is a DIFFERENT
+        # mechanism, placed INSIDE the terminal branch, and the
+        # structural parent is not delivered to (the S1 delivery
+        # filter ``DELIVER(w)`` skips it — the report lane owns that
+        # waiter), so the row is FIRED but never delivered.
         with Session(engine) as session:
             row = session.query(DependencyWatcher).filter(
                 DependencyWatcher.target_instance_id == parent_id
             ).first()
             assert row is not None, "watcher row missing"
+            if outcome in S1_SUPPLEMENT_FIRED_OUTCOMES:
+                assert row.state == DependencyWatcherState.FIRED.value, (
+                    f"outcome={outcome!r}: the S1 supplement fires the "
+                    f"child-keyed watcher on this lane; got "
+                    f"row.state={row.state!r}."
+                )
+                assert row.fired_at is not None, (
+                    f"outcome={outcome!r}: the S1-fired watcher must "
+                    f"carry a fired_at timestamp."
+                )
+                assert row.enqueued_at is None, (
+                    f"outcome={outcome!r}: the S1 fire must NOT deliver "
+                    f"to the structural parent (DELIVER(w) is false — "
+                    f"the report lane owns that waiter); the row is "
+                    f"transitioned but never enqueued."
+                )
+                return
             assert row.state == DependencyWatcherState.PENDING.value, (
                 f"outcome={outcome!r}: backstop must not FIRE the "
                 f"watcher; got row.state={row.state!r}. (Per the "

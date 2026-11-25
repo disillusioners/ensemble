@@ -33,14 +33,53 @@ Phase-5 tests ``TestDstSemantics`` parameterize over BOTH paths (cron
 See ``.agents/shared/planning/scheduled-tasks/decisions.md`` ADR-008 and
 ``architecture-recommendation.md`` §4 for the full rationale.
 
-## Phase-1 D4 idempotency contract (ADR-004)
+## Phase-1 D4 idempotency contract (ADR-004) — slot-stable key
 
-One-time schedules emit ``idempotency_key=f"scheduler:{source_id}:{self._run_at.isoformat()}"``
-to ``enqueue_message_job`` (gated to ``SCHEDULE_TYPE_ONE_TIME`` so cron
-fires keep minting fresh JobItems). The key MUST be derived from
-``self._run_at`` (the configured run_at parsed once in ``__init__``),
-NOT from ``next_trigger`` — the latter returns ``now`` for past-due
-one-shots and would mutate the key on every cycle.
+A ONE-TIME fire (a chain row is a one-time fire with a ``chain`` block)
+emits the SLOT-STABLE key
+``scheduler:{source_id}:slot:{run_at.isoformat()}`` to
+``enqueue_message_job``.  The slot is the instant the fire is
+SUPPOSED to occupy — never the per-fire ``execution_id``.
+
+At-most-once for a one-shot/chain fire is enforced by THREE cooperating
+mechanisms, and the key is only the first of them:
+
+  * the SLOT-STABLE KEY collapses a RE-FIRE of the same slot onto the
+    PRIOR JobItem while that row is still LIVE — a post-outage restart,
+    the boot guard's deliberate past-due auto-fire
+    (``past_run_at_left_for_auto_fire``), an adapter reconstruction on a
+    schedule update.  The substrate's partial UNIQUE index turns the
+    second submit into a GENUINE dedup hit, so the second delivery
+    never happens;
+  * the F1(b) COMPENSATION (``classify_dedup_outcome`` +
+    ``compensate_dedup_hit``) reconciles the TERMINAL/masquerade case:
+    when the prior JobItem is already DONE/DEAD the substrate's terminal
+    fallback re-inserts a FRESH row under a synthetic key suffix.  The
+    widened classifier sees that masquerade and the compensation cancels
+    the phantom prelude (Task + MessageQueue) AND the orphan fallback
+    JobItem — so the net result is ONE delivered chain, not the
+    adjudicated wedge (6105e198: the prelude pair sat for 11m19s);
+  * the D3 lateness cap (``one_shot_max_lateness_seconds``) is an
+    OPTIONAL operator backstop for a past-due one-shot — it is NOT the
+    at-most-once authority (the cap is unset/None by default).
+
+The ``execution_id`` is still minted per fire: it is the TELEMETRY /
+RECEIPT correlation id (the ``schedule_executions`` audit rows, the
+callbacks, the logs).  It is deliberately NOT part of the key — the
+chain re-arm / source-disable write commits AFTER the delivery, so a
+crash in that window replays the SAME slot on the next boot, and a
+PER-EXECUTION key would mint a FRESH key for that replay — a fresh key
+means a fresh JobItem, i.e. a SECOND delivery of the same one-shot.
+
+RECURRING fires (cron / interval) have no stable slot and emit NO key:
+each fire legitimately mints a fresh JobItem (a constant key across
+recurring fires would collapse the whole schedule into one row —
+silent schedule death).
+
+The deferred twin is generation-scoped and namespaced
+(``scheduler:{sid}:deferred[:{run_at}]:v{gen}``) — never colliding with
+the direct key; its within-generation stability is the DEC-18 marker-miss
+latch.
 
 ## Phase-1 D3 lateness cap (ADR-003)
 
@@ -50,16 +89,41 @@ When a one-shot's ``run_at`` is past-due beyond
 ``error_message='past_lateness_cap: lateness={X}s, cap={Y}s'`` and does
 NOT dispatch a JobItem. The schedule remains armed (NOT disabled) so the
 operator can update ``run_at`` and re-fire.
+
+MODULE-BAND RATIONALE (tidier fix pass 2026-11-22, 3220 lines at the tip;
+the band was crossed IN-RANGE at 2992 → 3208):
+this adapter crossed the >3000 band IN-RANGE with no
+rationale on record.  It hosts THREE concerns.  (1) The DST / ADR
+semantics — the croniter-delegated cron path and the naive one-shot
+anchor, which MUST share one DST rule (the module docstring above IS
+that contract).  (2) The one-shot IDEMPOTENCY + LATENESS-CAP contract
+(ADR-004 / ADR-003) — the idempotency key is the SLOT key derived from
+``self._run_at`` (``scheduler:{source_id}:slot:{run_at.isoformat()}``),
+NEVER from ``next_trigger`` and NEVER from the per-fire
+``execution_id``, and a past-due one-shot beyond the lateness cap is
+SKIPPED, not dispatched.  (3) The CENTRAL MAINTENANCE chain re-arm
+seam (BR-4) — the consuming fire mints the next week's instant and
+rewrites the row's config.
+
+Concern (3) IS EXTRACTABLE: the chain re-arm is ONE method
+(``_rearm_chain_row``) plus its marker, and since this pass it delegates
+the config construction to the seeder
+(``daemon.repositories.source.maintenance_seed.refresh_chain_keys``) —
+so it can move to its own adapter module without touching the DST
+semantics or the idempotency/lateness contracts.  Concerns (1) and (2)
+are NOT separable from the adapter's core — they ARE the adapter's
+contract.  The (3) extraction is DEFERRED to a post-staging refactor;
+this pass records the rationale only.
 """
 
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Callable, Awaitable
-from zoneinfo import ZoneInfo
 from croniter import croniter
 from croniter import CroniterBadCronError
 
@@ -82,6 +146,7 @@ from daemon.constants import (
 from daemon.models import SchedulerInstanceMode
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.message_queue.models import MessageStatus
+from daemon.repositories.source.maintenance_seed import refresh_chain_keys
 from daemon.repositories.source.models import ExecutionStatus
 from daemon.repositories.task.models import TaskStatus
 from daemon.registry import get_registry
@@ -91,6 +156,7 @@ from daemon.services.mission_record_service import (
     resolve_or_mint_fail_open,
     scheduler_mint_extension_enabled,
 )
+from daemon.services import schedule_fire_notify as _schedule_fire_notify_mod
 
 if TYPE_CHECKING:
     from daemon.manager import InstanceManager
@@ -118,6 +184,79 @@ _LIVENESS_UNKNOWN = object()
 #: ``_deferred_metadata`` W4 contract: the metadata carries THIS minted id,
 #: never the busy fire's own).
 _DEFERRED_EXECUTION_ID_PREFIX = "deferred-"
+
+
+def _scheduler_direct_idempotency_key(source_id: str, run_at_iso: str) -> str:
+    """R1 (fix/post-outage-recovery b2): the SLOT-STABLE dedup key.
+
+    The key names the SLOT the fire is supposed to occupy — the scheduled
+    instant — and NEVER the per-fire ``execution_id``:
+
+        scheduler:{source_id}:slot:{run_at.isoformat()}
+
+    WHY SLOT-STABLE (the crash window this closes): the chain re-arm /
+    source-disable write commits AFTER the delivery (the fire emits, the
+    consumption check runs, the re-arm rewrites the row), so a crash in
+    that window replays the SAME slot on the next boot — the boot guard
+    deliberately leaves a past-due ``run_at`` alone for auto-fire
+    (``past_run_at_left_for_auto_fire``).  A PER-EXECUTION key mints a
+    FRESH key for that replay, and a fresh key means a fresh JobItem,
+    i.e. a SECOND delivery of the same one-shot.  The slot-stable key
+    collapses the replay onto the PRIOR JobItem while that row is still
+    LIVE (the substrate's partial UNIQUE index turns the second submit
+    into a genuine dedup hit → no second delivery).
+
+    WHY THE KEY ALONE IS NOT ENOUGH (F1(b) owns the terminal case): when
+    the prior JobItem is already DONE/DEAD the substrate's terminal/TTL
+    fallback re-inserts a FRESH row under a synthetic key suffix and
+    returns it carrying the caller's own minted ``job_id`` (the
+    "masquerade").  That shape is classified by
+    ``instance_messaging.classify_dedup_outcome`` and reconciled by
+    ``compensate_dedup_hit`` — the phantom prelude is cancelled and the
+    orphan fallback JobItem is cancelled, so the net result is ONE
+    delivered chain.  The slot key is what makes the SECOND FIRE
+    addressable at all; the compensation is what makes the terminal case
+    reconcile.
+
+    THE MASQUERADE ARM'S RECEIPT (accepted, but read it with care): the
+    compensation CANCELS the orphan fallback JobItem, so the
+    delivery-completed callback closes the receipt keyed by THAT row with
+    ``outcome='cancelled'`` — the receipt therefore points at the
+    CANCELLED PHANTOM, not at the prior live delivery.  That is
+    ACCEPTABLE (the net delivery is ONE, and the receipt is loud about
+    the cancellation rather than silent), but it must not be read as
+    "the prior fire was cancelled".
+
+    The D3 lateness cap is an OPTIONAL operator backstop (off by
+    default) — it is NOT the at-most-once authority.
+    """
+    return f"scheduler:{source_id}:slot:{run_at_iso}"
+
+
+def _deferred_idempotency_key(
+    source_id: str, run_at_iso: str | None, key_gen: int
+) -> str:
+    """The deferred delivery's idempotency key (the deferred twin).
+
+    The deferred path is a GENERATION-scoped latch by design (DEC-18):
+    the marker-miss fallback re-enqueues under the SAME generation key to
+    dedup into the kept delivery, so the key MUST stay stable within a
+    generation — it deliberately does NOT carry the fire's execution_id.
+
+    The key is NAMESPACED away from the direct-fire key and the ONE-SHOT
+    branch carries its ``run_at`` + generation explicitly
+    (``scheduler:{sid}:deferred:{run_at}:v{gen}``). Before the namespace
+    existed the one-shot branch returned the bare direct key shape
+    ``scheduler:{sid}:{run_at}`` — the SAME string the direct path used,
+    so a direct fire and a deferred delivery of one schedule shared one
+    latch (a collision killed the second delivery as a "phantom", or —
+    post-terminal — masqueraded). The two paths can never collide: the
+    direct path is now ``scheduler:{sid}:slot:{run_at}`` and the deferred
+    twin is ``scheduler:{sid}:deferred[:{run_at}]:v{gen}``.
+    """
+    if run_at_iso:
+        return f"scheduler:{source_id}:deferred:{run_at_iso}:v{key_gen}"
+    return f"scheduler:{source_id}:deferred:v{key_gen}"
 
 #: Outcome vocabulary of ``_coalesce_into`` (the in-place coalescing
 #: write): the delivery was rewritten / the guard matched no row (the
@@ -361,6 +500,14 @@ class SchedulerAdapter(MessageSourceAdapter):
         self._cron_expression: str | None = None
         self._interval_seconds: int | None = None
         self._run_at: datetime | None = None
+        # The CHAIN marker (Central Maintenance System, P1): a config
+        # that carries a ``chain`` block describes a SELF-RESCHEDULING
+        # one-shot — the adapter rewrites its own ``run_at`` at each
+        # consuming fire instead of disabling the row.  The marker is
+        # the ONE concept shared by the re-arm seam (here), the boot
+        # guard and the archive-aware revive (BR-3) — there is NO
+        # hardcoded schedule name anywhere in this file.
+        self._chain_config: dict | None = None
         
         # Message configuration
         self._agent: str | None = scheduler_config.get("agent")
@@ -568,7 +715,19 @@ class SchedulerAdapter(MessageSourceAdapter):
             logger.warning("No 'agent' specified in scheduler config")
         if not self._message_content:
             logger.warning("No 'message' specified in scheduler config")
-    
+
+        # The CHAIN marker (Central Maintenance System, P1) — exposed
+        # here so the re-arm seam can key on the config's ``chain``
+        # block (one concept, one marker) instead of a schedule name.
+        # An EMPTY / non-dict ``chain`` is NOT a chain row.
+        chain = scheduler_config.get("chain")
+        self._chain_config = dict(chain) if isinstance(chain, dict) and chain else None
+        if self._chain_config is not None:
+            logger.info(
+                f"Chain schedule detected for {self.source_id}: "
+                f"mode={self._chain_config.get('mode')}"
+            )
+
     async def start(self) -> None:
         """Start the scheduler loop."""
         if self._status == SourceStatus.RUNNING:
@@ -811,14 +970,12 @@ class SchedulerAdapter(MessageSourceAdapter):
                     # ``rearmed`` / ``failed`` NEVER do — the intent
                     # survives and the schedule re-arms on the 5s cadence.
                     if self._fire_outcome in self._CONSUMING_FIRE_OUTCOMES:
-                        self._is_one_time_executed = True
-                        logger.info(f"One-time schedule executed: {self.source_id}")
-                        # NEW: Notify completion so adapter can disable itself
-                        if self._on_complete_callback:
-                            try:
-                                self._on_complete_callback(self.source_id, completed=True)
-                            except Exception as e:
-                                logger.warning(f"on_complete_callback failed: {e}")
+                        if await self._handle_consumed_one_time():
+                            # The CHAIN row was re-armed: the next trigger
+                            # is the freshly minted next-week instant, so
+                            # the loop stays alive (the chain is
+                            # self-rescheduling).
+                            continue
                         break
                     # NOT consumed — re-arm on the mandated cadence (the
                     # branch that already took the sleep does not sleep
@@ -842,7 +999,197 @@ class SchedulerAdapter(MessageSourceAdapter):
                 await asyncio.sleep(SCHEDULER_ERROR_RETRY_S)
 
         logger.info(f"Scheduler loop ended: {self.source_id}")
-    
+
+    async def _handle_consumed_one_time(self) -> bool:
+        """Handle a CONSUMING one-shot outcome (the re-arm authority).
+
+        Returns:
+            ``True`` when the row was RE-ARMED (a chain row) — the
+            caller MUST then CONTINUE the loop, because the next
+            trigger is the freshly minted next-week instant.
+            ``False`` when the one-shot is FINISHED — the caller breaks
+            the loop.
+
+        A CHAIN row (a config that carries a ``chain`` block) is the
+        self-rescheduling weekly trigger of the Central Maintenance
+        System: the completion callback that DISABLES a one-shot
+        (``daemon/sources/registry.py:608-620``) is SKIPPED for it and
+        the row's ``run_at`` is rewritten to the next week's instant
+        instead.  The rewrite is a READ-MODIFY-WRITE of the COMPLETE
+        config — ``update_source_config`` FULL-REPLACES the config
+        column (``daemon/repositories/source/repository.py:178-201``),
+        so every other key (agent / message / timezone / recurrence /
+        instance_mode / project_id / chain) is carried over verbatim.
+
+        THIS IS NOT the 5s same-episode re-arm (R-P1-2): the ``rearmed``
+        fire outcome (a deferred delivery that re-armed inside the same
+        episode) is NOT a consuming outcome, so it never reaches this
+        method — the one-shot is not consumed and the loop takes the 5s
+        cadence branch instead.
+        """
+        if self._chain_config is not None:
+            status = await self._rearm_chain_row()
+            if status == "rearmed":
+                # The next trigger is the new instant — the chain lives.
+                self._is_one_time_executed = False
+                return True
+            # Not re-armed.  The one-shot IS consumed here (the executed
+            # flag is NOT reset: a reset with a stale ``run_at`` would
+            # spin the 5s cadence instead of waiting for the next slot).
+            self._is_one_time_executed = True
+            if status == "skipped_operator":
+                logger.info(
+                    "Scheduler %s: the chain row is cancelled/paused — the "
+                    "operator's intent wins; the chain stays halted",
+                    self.source_id,
+                )
+            else:
+                logger.error(
+                    "Scheduler %s: the chain row could NOT be re-armed — the "
+                    "row stays armed and the boot guard retries at the next "
+                    "boot",
+                    self.source_id,
+                )
+            return False
+
+        self._is_one_time_executed = True
+        logger.info(f"One-time schedule executed: {self.source_id}")
+        # NEW: Notify completion so adapter can disable itself
+        if self._on_complete_callback:
+            try:
+                self._on_complete_callback(self.source_id, completed=True)
+            except Exception as e:
+                logger.warning(f"on_complete_callback failed: {e}")
+        return False
+
+    async def _rearm_chain_row(self) -> str:
+        """Rewrite the chain row's ``run_at`` for the next week.
+
+        The write is a READ-MODIFY-WRITE of the COMPLETE config (the
+        config column is full-replaced).  Because the idempotency key
+        is the SLOT key derived from ``self._run_at``
+        (``scheduler:{source_id}:slot:{run_at.isoformat()}``), the new
+        week mints a NEW key automatically — the re-arm moves the fire
+        to a DIFFERENT slot, so it is a new delivery and not a
+        duplicate of the slot that just fired.
+
+        The next slot is the next weekday-D occurrence counted from the
+        re-arm (``allow_today=False``) — the re-arm must never land on
+        the same day it just fired, and the effective interval is
+        therefore 5–13 days rather than exactly 7 (BR-1 sub-semantics).
+
+        Returns:
+            ``"rearmed"`` — the row now carries the next week's instant;
+            ``"skipped_operator"`` — the row is cancelled or paused (the
+            operator's intent wins; NOTHING is written);
+            ``"failed"`` — the re-arm could not be performed (invalid
+            knobs, an unreadable row, or a failed persistence write).
+            The row is left ARMED in that case so the boot guard (or the
+            adapter's past-due auto-fire) can deliver the run later.
+        """
+        if self._source_repo is None:
+            logger.error(
+                "Scheduler %s: cannot re-arm the chain row — no source repo",
+                self.source_id,
+            )
+            return "failed"
+        try:
+            live = self._source_repo.get_source_config(self.source_id)
+        except Exception as exc:  # noqa: BLE001 — the re-arm never raises
+            logger.error(
+                "Scheduler %s: cannot read the chain row for the re-arm: %s",
+                self.source_id,
+                exc,
+            )
+            return "failed"
+        if live is None:
+            logger.error(
+                "Scheduler %s: cannot re-arm the chain row — the row is gone",
+                self.source_id,
+            )
+            return "failed"
+
+        status = str(getattr(live, "status", "") or "").strip().lower()
+        if status == SourceStatus.CANCELLED.value:
+            return "skipped_operator"
+        if not getattr(live, "enabled", True):
+            return "skipped_operator"
+
+        config = dict(getattr(live, "config", None) or {})
+        try:
+            from daemon.services.maintenance_schedule_knobs import (
+                pick_next_fire_instant,
+                read_maintenance_knobs,
+            )
+
+            knobs = read_maintenance_knobs()
+            picked = pick_next_fire_instant(
+                knobs,
+                now=datetime.now(timezone.utc),
+                allow_today=False,
+            )
+        except Exception as exc:  # noqa: BLE001 — the knobs are fail-closed
+            logger.error(
+                "Scheduler %s: the maintenance knobs are invalid — no re-arm "
+                "(fail-closed): %s",
+                self.source_id,
+                exc,
+            )
+            return "failed"
+
+        # The chain-key refresh is the SEEDER's (BR-3 — one concept, one
+        # marker): the seeder force-sets the chain marker, so the adapter
+        # can never re-introduce a divergent mode literal of its own.
+        new_config = refresh_chain_keys(config, picked=picked, knobs=knobs)
+
+        try:
+            updated = self._source_repo.update_source_config(
+                self.source_id,
+                config=new_config,
+                enabled=True,
+            )
+        except Exception as exc:  # noqa: BLE001 — the re-arm never raises
+            logger.error(
+                "Scheduler %s: the chain re-arm write failed: %s",
+                self.source_id,
+                exc,
+            )
+            return "failed"
+        if updated is None:
+            logger.error(
+                "Scheduler %s: the chain re-arm write found no row",
+                self.source_id,
+            )
+            return "failed"
+
+        # The completion callback is SKIPPED for chain rows, so the status
+        # is explicitly promoted to RUNNING here (a stopped/cancelled row
+        # is skipped by the registry's boot filter).
+        try:
+            self._source_repo.update_source_status(
+                self.source_id, SourceStatus.RUNNING.value
+            )
+        except Exception as exc:  # noqa: BLE001 — the status is best-effort
+            logger.warning(
+                "Scheduler %s: could not promote the chain row to running: %s",
+                self.source_id,
+                exc,
+            )
+
+        # The in-memory state follows the persisted one: the next trigger
+        # is the new instant, and the idempotency key (derived from
+        # ``self._run_at``) is therefore a NEW key for the new week.
+        self._run_at = picked.instant_utc
+        self._last_skipped_run_at = None
+        logger.info(
+            "Scheduler %s: chain re-armed for %s (local %s %s)",
+            self.source_id,
+            picked.run_at_iso,
+            picked.local_time,
+            knobs.timezone,
+        )
+        return "rearmed"
+
     def _get_next_trigger_time(self):
         """Calculate next trigger time based on schedule type.
 
@@ -1310,18 +1657,20 @@ Original scheduled task:
     def _deferred_idempotency_key(self, key_gen: int) -> str:
         """The idempotency key of a deferred delivery.
 
-        ADR-2 (decisions.md DEC-7): a ONE-SHOT keeps the EXISTING
-        ``run_at`` key; a RECURRING fire uses the generation key
-        ``scheduler:{source_id}:deferred:v{gen}``.  The key is the dedup
-        latch ONLY — the authoritative coalescing state is the
+        Delegates to the module function (F1(a): the one-shot branch is
+        namespaced + generation-scoped — see its docstring). The key is
+        the dedup latch ONLY — the authoritative coalescing state is the
         forward-carried ``_defer_message_id`` (never a key lookup).
         """
-        if (
-            self._schedule_type == self.SCHEDULE_TYPE_ONE_TIME
-            and self._run_at is not None
-        ):
-            return f"scheduler:{self.source_id}:{self._run_at.isoformat()}"
-        return f"scheduler:{self.source_id}:deferred:v{key_gen}"
+        run_at_iso = (
+            self._run_at.isoformat()
+            if (
+                self._schedule_type == self.SCHEDULE_TYPE_ONE_TIME
+                and self._run_at is not None
+            )
+            else None
+        )
+        return _deferred_idempotency_key(self.source_id, run_at_iso, key_gen)
 
     def _task_for_message(self, message_id: str) -> Any:
         """The Task row for a delivery id — the PER-DELIVERY predicate.
@@ -1457,6 +1806,82 @@ Original scheduled task:
                 self.source_id,
                 execution_id,
                 exc,
+            )
+
+    # ── Addendum A receipt writes (fail-soft, never wedges the fire) ───────
+    # The adapter OBSERVES the durable dispatch and records the truthful
+    # receipt. These helpers NEVER raise into the fire path — a receipt write
+    # failure is logged, not fatal (the delivery itself already committed).
+
+    async def _call_repo(self, method: Any, *args: Any, **kwargs: Any) -> Any:
+        """Call a repo method off-loop, tolerating AsyncMock test doubles."""
+        if method is None:
+            return None
+        if inspect.iscoroutinefunction(method):
+            return await method(*args, **kwargs)
+        return await asyncio.to_thread(method, *args, **kwargs)
+
+    async def _write_receipt_dispatched(
+        self, execution_id: str, instance_id: str, job_item_id: str | None
+    ) -> None:
+        """Open/advance the receipt to ``dispatched`` with durable handles."""
+        repo = self._source_repo
+        if repo is None or not hasattr(repo, "upsert_execution_dispatched"):
+            return
+        try:
+            task_id: str | None = None
+            task_repo = getattr(self._manager, "_task_repo", None)
+            if task_repo is not None and job_item_id:
+                task = await self._call_repo(
+                    getattr(task_repo, "get_by_work_id", None), job_item_id
+                )
+                tid = getattr(task, "id", None)
+                if isinstance(tid, str):
+                    task_id = tid
+            await self._call_repo(
+                repo.upsert_execution_dispatched,
+                self.source_id, execution_id, instance_id, task_id, job_item_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — fail-soft
+            logger.warning(
+                "Scheduler %s: dispatched receipt write failed for %s: %s",
+                self.source_id, execution_id, exc,
+            )
+
+    async def _write_receipt_never_started(
+        self, execution_id: str, reason: str
+    ) -> None:
+        """Terminalize a fire that began no turn (NULL instance_id)."""
+        repo = self._source_repo
+        if repo is None or not hasattr(repo, "record_execution_never_started"):
+            return
+        try:
+            await self._call_repo(
+                repo.record_execution_never_started,
+                self.source_id, execution_id, reason,
+            )
+        except Exception as exc:  # noqa: BLE001 — fail-soft
+            logger.warning(
+                "Scheduler %s: never-started receipt write failed for %s: %s",
+                self.source_id, execution_id, exc,
+            )
+
+    async def _write_receipt_failed_to_dispatch(
+        self, execution_id: str, reason: str
+    ) -> None:
+        """Terminalize a fire whose enqueue/claim path failed."""
+        repo = self._source_repo
+        if repo is None or not hasattr(repo, "record_execution_failed_to_dispatch"):
+            return
+        try:
+            await self._call_repo(
+                repo.record_execution_failed_to_dispatch,
+                execution_id, reason, schedule_id=self.source_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — fail-soft
+            logger.warning(
+                "Scheduler %s: failed-to-dispatch receipt write failed for %s: %s",
+                self.source_id, execution_id, exc,
             )
 
     def _display_run_number(self, state: dict[str, Any]) -> int:
@@ -1948,6 +2373,35 @@ Original scheduled task:
         )
         return _COALESCE_COALESCED
 
+    async def _notify_fire_notice(
+        self,
+        *,
+        metadata: dict,
+        recipient_instance_id: str,
+        job_id: str | None,
+        message_id: str | None,
+    ) -> None:
+        """Best-effort creator notice at a successful dispatch site.
+
+        Single never-raise call into the notify module — ALL field
+        extraction happens inside its guarded body (F2: nothing in the
+        wedge regions may raise). Both dispatch sites (direct + deferred
+        durable finalization) funnel through here so the two cannot drift.
+        """
+        await _schedule_fire_notify_mod.notify_schedule_fire(
+            self._manager,
+            schedule_config=getattr(self.config, "config", None),
+            metadata=metadata,
+            recipient_instance_id=recipient_instance_id,
+            label=getattr(self.config, "name", None),
+            target_agent=self._agent,
+            instance_mode=self._instance_mode,
+            recurrence=self._schedule_type,
+            job_id=job_id,
+            message_id=message_id,
+            target_instance_id=recipient_instance_id,
+        )
+
     async def _defer_delivery(
         self,
         execution_id: str,
@@ -2234,6 +2688,16 @@ Original scheduled task:
             reason,
         )
         self._fire_outcome = self.FIRE_OUTCOME_DEFERRED_DURABLE
+
+        # schedule-fire-notify (T4): single never-raise call at the deferred
+        # durable finalization (after the durable-evidence check).
+        await self._notify_fire_notice(
+            metadata=metadata,
+            recipient_instance_id=instance_id,
+            job_id=getattr(result, "job_id", None),
+            message_id=message_id,
+        )
+
         return self._fire_outcome
 
     async def _open_episode(self) -> bool:
@@ -2396,6 +2860,11 @@ Original scheduled task:
         """
         rearm_id = f"{_DEFERRED_EXECUTION_ID_PREFIX}{uuid.uuid4()}"
         reason = "semaphore_timeout: max concurrent executions reached; re-armed"
+        # Addendum A: the REAL fire began no turn — leave a truthful
+        # ``never-started`` receipt on its execution_id (NULL instance_id is
+        # permitted ONLY with an explicit never-started/failed-to-dispatch
+        # status). The re-arm's synthetic row below is a separate audit row.
+        await self._write_receipt_never_started(execution_id, reason)
         # W2: the audit-row write failure must not make the fire INVISIBLE
         # (DEC-4 row traceability) — it is recorded as a gap.
         if not self._record_execution_start(rearm_id, None):
@@ -2466,16 +2935,68 @@ Original scheduled task:
             return None
         return instance_id, getattr(instance, "status", None)
     
-    async def _execute_run(self, execution_id: str, trigger_type: str) -> None:
+    async def _execute_run(
+        self,
+        execution_id: str,
+        trigger_type: str,
+        *,
+        semaphore_held: bool = False,
+    ) -> dict[str, Any]:
         """Shared execution logic for scheduled and manual triggers.
         
         Args:
             execution_id: Unique execution identifier
             trigger_type: "scheduled" or "manual"
+            semaphore_held: True when the CALLER already holds the
+                execution slot (the fire path: ``_emit_scheduled_message``
+                / ``_execute_trigger`` acquire it through
+                ``_acquire_execution_slot``). False means the caller does
+                NOT hold it — the slot is acquired HERE so the release in
+                the ``finally`` stays BALANCED.
+
+                The supervisor's re-dispatch used to call this method
+                directly (no acquire) while the ``finally`` released the
+                slot anyway: an ``asyncio.Semaphore`` over-release does
+                not raise, so the adapter's concurrency cap was inflated
+                by one per re-drive, forever (the verifier measured
+                1 → 2). Acquiring here makes acquire/release symmetric
+                for EVERY caller.
+
+        Returns:
+            A truthful outcome dict — ``{"status": "dispatched",
+            "instance_id": ..., "job_item_id": ...}`` when the durable
+            dispatch landed, ``{"status": "no_dispatch"/"failed", ...}``
+            otherwise. The re-drive path needs the handles to write a
+            truthful receipt.
         
         Queue routing is ONLY for "scheduled" triggers with project_id configured.
         Manual triggers always use immediate execution (deliberate design).
         """
+        # The slot discipline — symmetric acquire/release for EVERY caller.
+        acquired_here = False
+        if not semaphore_held:
+            if self._execution_semaphore is None:
+                logger.warning(
+                    "Scheduler %s: no execution semaphore — the run %s is "
+                    "NOT started (the adapter is not initialized)",
+                    self.source_id, execution_id,
+                )
+                return {"status": "no_dispatch", "error": "no_semaphore"}
+            try:
+                await asyncio.wait_for(
+                    self._execution_semaphore.acquire(),
+                    timeout=SCHEDULER_SEMAPHORE_TIMEOUT_S,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Scheduler %s: execution %s could not take an execution "
+                    "slot within %ss — the run is NOT started",
+                    self.source_id, execution_id, SCHEDULER_SEMAPHORE_TIMEOUT_S,
+                )
+                return {"status": "no_dispatch", "error": "semaphore_timeout"}
+            acquired_here = True
+
+        dispatch_info: dict[str, Any] = {}
         self._running_executions += 1
         logger.debug(f"Starting execution {execution_id}, running={self._running_executions}")
         
@@ -2540,31 +3061,37 @@ Original scheduled task:
             
             # Route through inline message-Job dispatch (scheduled only).
             # Phase 5 (cutover): the inline path is the only path; the
-            # legacy TASK-job poll-loop was removed. ``_project_id`` is
-            # still required (it scopes the InstanceMapper lookup).
+            # legacy TASK-job poll-loop was removed.
             #
-            # The job-queue route is the ONLY route that produces a DURABLE
-            # delivery (MessageQueue + Task + JobItem).  A reuse-mode
-            # schedule ALWAYS has a pinned caller to wake, so it takes the
-            # job-queue route even without a ``project_id`` — routing it
-            # through the immediate path (the registry's ``on_message``
-            # handler) hands the alarm to a handler that may never enqueue
-            # it.  The MANUAL twin keeps its immediate-execution semantics
-            # (DEC-3's disclosed non-goal).
-            if (
-                trigger_type == "scheduled"
-                and self._manager is not None
-                and (
-                    self._project_id
-                    or self._instance_mode == SchedulerInstanceMode.REUSE_INSTANCE
-                )
-            ):
-                await self._route_via_job_queue(execution_id, formatted_message, metadata)
+            # b3 PROJECT-HOLE FIX (v4 §7(b)): the durable job-queue route
+            # is the ONLY route that produces a supervised delivery
+            # (MessageQueue + Task + JobItem + execution receipt). It used
+            # to be gated on ``_project_id`` or REUSE_INSTANCE, so an
+            # unscoped NEW_INSTANCE fire silently fell through to
+            # ``_execute_immediate`` (the registry ``on_message`` handler)
+            # with NO job-queue and NO receipt linkage — the unsupervised
+            # spawn class. ``InstanceMapper.get_or_create_instance`` does
+            # NOT take a project id; it scopes by ``source_id`` and takes
+            # ``force_new`` for NEW_INSTANCE. So NO project id is needed to
+            # take the durable route, and we do NOT fabricate one (the
+            # SEED's project choice is the architect's §4.3 / leader's
+            # adjudication — never the adapter's). The ONLY precondition
+            # is a live ``_manager`` (without one there is no dispatch
+            # substrate at all — the legacy immediate path remains for
+            # manager-less harnesses and MANUAL triggers).
+            if trigger_type == "scheduled" and self._manager is not None:
+                dispatch_info = await self._route_via_job_queue(
+                    execution_id, formatted_message, metadata
+                ) or {}
             else:
                 await self._execute_immediate(execution_id, formatted_message, metadata)
 
         except asyncio.CancelledError:
             logger.info(f"Execution cancelled: {execution_id}")
+            # The receipt write is SKIPPED here (the fire never reached its
+            # dispatch): the row rests at the legacy ``triggered`` state —
+            # an OPEN state the supervisor now selects (the stale class),
+            # so the fire is repairable instead of invisible.
             raise  # finally still runs, semaphore released
         except BoundCallerRefusal as refusal:
             # CRIT-1 (decisions.md DEC-9): the mapper's TYPED refusal is
@@ -2584,6 +3111,10 @@ Original scheduled task:
                 self.FIRE_OUTCOME_REFUSED_PERMANENT,
             )
             self._fire_outcome = self.FIRE_OUTCOME_REFUSED_PERMANENT
+            dispatch_info = {
+                "status": "failed",
+                "error": str(getattr(refusal, "reason", refusal)),
+            }
             if self._execution_callback:
                 try:
                     self._execution_callback(
@@ -2602,6 +3133,7 @@ Original scheduled task:
         except Exception as e:
             logger.error(f"Failed to execute {trigger_type} message: {execution_id}, error={e}", exc_info=True)
             self._fire_outcome = self.FIRE_OUTCOME_FAILED
+            dispatch_info = {"status": "failed", "error": str(e)}
             if self._execution_callback:
                 try:
                     self._execution_callback(
@@ -2616,10 +3148,151 @@ Original scheduled task:
         finally:
             self._running_executions -= 1
             logger.debug(f"Execution {execution_id} finished, running={self._running_executions}")
-            if self._execution_semaphore:
+            if self._execution_semaphore and (semaphore_held or acquired_here):
+                # BALANCED release: the slot is released exactly once —
+                # by whoever acquired it (the caller's slot when
+                # ``semaphore_held`` is True, ours when we acquired it).
                 self._execution_semaphore.release()
+        if dispatch_info.get("instance_id"):
+            return {
+                "status": "dispatched",
+                "instance_id": dispatch_info.get("instance_id"),
+                "job_item_id": dispatch_info.get("job_item_id"),
+            }
+        return {
+            "status": dispatch_info.get("status") or "no_dispatch",
+            "error": dispatch_info.get("error"),
+        }
 
-    async def _route_via_job_queue(self, execution_id: str, formatted_message: str, metadata: dict) -> None:
+    async def redrive_execution(self, execution_id: str) -> dict[str, Any]:
+        """Guarded re-dispatch entrypoint (the supervisor's instance-less leg).
+
+        The fire path's guard chain, in the SAME order as
+        ``_emit_scheduled_message``:
+
+          1. the age-cap coverage (READ-ONLY — see the note below),
+          2. the deferrable-target resolution (read-only): a BUSY pinned
+             caller is never double-driven,
+          3. the SEMAPHORE ACQUIRE — the fire path's slot discipline. The
+             concurrency cap is NEVER inflated by a re-drive (the old
+             direct ``_execute_run`` call released a slot it never
+             acquired; an ``asyncio.Semaphore`` over-release does not
+             raise, so the cap grew by one per re-drive, forever),
+          4. ``_execute_run`` — the real dispatch.
+
+        Returns a truthful outcome dict:
+
+          * ``{"status": "redriven", "instance_id": ..., "job_item_id":
+            ...}`` — the fire was dispatched (a turn started);
+          * ``{"status": "refused", "error": ...}`` — NOTHING was
+            dispatched (the caller keeps the row's prior truthful status
+            and the cap bounds the retries).
+        """
+        if self._execution_semaphore is None:
+            return {"status": "refused", "error": "adapter_not_initialized"}
+
+        # (1) The age-cap coverage — READ-ONLY.
+        #     The age-cap BREACH handler is evaluated at EXACTLY ONE site
+        #     (the fire path — DEC-19's single-evaluation-site rule): a
+        #     second evaluation site would duplicate the work and risk a
+        #     double consumption of the occurrence. The re-drive therefore
+        #     only READS the carrier's age and refuses to resurrect an
+        #     episode that is already past its cap; the VISIBLE terminal
+        #     disposition stays with the fire path's breach handler.
+        try:
+            _cap, max_age = self._defer_bounds()
+        except Exception:  # noqa: BLE001 — bootstrap-safety
+            _cap, max_age = 16, 86400
+        since = None
+        try:
+            state = self._defer_state()
+            since = state.get("_defer_since") or self._defer_since_in_memory
+        except Exception:  # noqa: BLE001 — the read is best-effort
+            since = None
+        if since:
+            try:
+                since_dt = datetime.fromisoformat(str(since))
+            except (TypeError, ValueError):
+                since_dt = None
+            if since_dt is not None:
+                if since_dt.tzinfo is None:
+                    since_dt = since_dt.replace(tzinfo=timezone.utc)
+                age = (datetime.now(timezone.utc) - since_dt).total_seconds()
+                if age >= max_age:
+                    logger.warning(
+                        "Scheduler %s: the re-drive of %s is REFUSED — the "
+                        "non-delivery episode is already past its %ss cap "
+                        "(age=%.0fs); the fire path owns the visible "
+                        "terminal disposition",
+                        self.source_id, execution_id, max_age, age,
+                    )
+                    return {
+                        "status": "refused",
+                        "error": f"age_cap_exceeded:{int(age)}s",
+                    }
+
+        # (2) The deferrable-target resolution (READ-ONLY — the mapper is
+        #     never re-entered). A BUSY pinned caller is never
+        #     double-driven: the re-drive refuses and the row keeps its
+        #     truthful status (the cap bounds the retries).
+        defer_target = self._resolve_deferrable_target()
+        if defer_target is not None:
+            target_instance_id, target_status = defer_target
+            if target_status in (
+                InstanceStatus.RUNNING.value,
+                InstanceStatus.WAITING.value,
+                InstanceStatus.WAITING_CHILDREN.value,
+            ):
+                logger.info(
+                    "Scheduler %s: the re-drive of %s is REFUSED — the "
+                    "pinned caller %s is %s (never double-driven)",
+                    self.source_id, execution_id, target_instance_id,
+                    target_status,
+                )
+                return {
+                    "status": "refused",
+                    "error": f"pinned_caller_busy:{target_status}",
+                }
+
+        # (3) The execution slot — the SAME discipline as the fire path.
+        try:
+            await asyncio.wait_for(
+                self._execution_semaphore.acquire(),
+                timeout=SCHEDULER_SEMAPHORE_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Scheduler %s: the re-drive of %s could not take an "
+                "execution slot within %ss — nothing was dispatched",
+                self.source_id, execution_id, SCHEDULER_SEMAPHORE_TIMEOUT_S,
+            )
+            return {"status": "refused", "error": "semaphore_timeout"}
+
+        # (4) The dispatch. ``semaphore_held=True`` — WE hold the slot and
+        #     ``_execute_run``'s finally releases it exactly once.
+        try:
+            run_outcome = await self._execute_run(
+                execution_id, "scheduled", semaphore_held=True,
+            )
+        except asyncio.CancelledError:
+            return {"status": "refused", "error": "cancelled"}
+        if (
+            isinstance(run_outcome, dict)
+            and run_outcome.get("status") == "dispatched"
+            and run_outcome.get("instance_id")
+        ):
+            return {
+                "status": "redriven",
+                "instance_id": run_outcome.get("instance_id"),
+                "job_item_id": run_outcome.get("job_item_id"),
+                "execution_id": execution_id,
+            }
+        return {
+            "status": "refused",
+            "error": (run_outcome or {}).get("error") or "no_dispatch",
+        }
+
+    async def _route_via_job_queue(self, execution_id: str, formatted_message: str, metadata: dict) -> dict[str, Any]:
         """Route scheduled execution through the inline message-Job path.
 
         Phase 5 (cutover): the inline path is the ONLY path. Get/create
@@ -2630,6 +3303,12 @@ Original scheduled task:
         poll-loop path through :meth:`JobQueueService.enqueue` was
         removed in Phase 5 — messages must always carry a JobItem now
         so the public facade can read both sides of the union.
+
+        Returns:
+            The durable dispatch handles — ``{"instance_id": ...,
+            "job_item_id": ...}`` — so the caller (and the supervisor's
+            re-drive leg) can write a TRUTHFUL receipt: a ``dispatched``
+            receipt always carries the instance handle (A.1).
         """
         try:
             agent_id = self._agent
@@ -2665,29 +3344,45 @@ Original scheduled task:
                 force_new=force_new,
             )
 
-            # D4 idempotency (architecture §1.2/§1.3): derive a deterministic
-            # key from ``self._run_at`` (the configured run_at parsed once in
-            # ``__init__`` and re-parsed identically every boot at
-            # ``_parse_schedule_config``), and pass it through to
-            # ``enqueue_message_job`` so the JobQueueService's partial UNIQUE
-            # index collapses any cross-restart or 5s-retry duplicate
-            # enqueues into one JobItem. The key MUST be derived from
-            # ``self._run_at``, NOT from ``next_trigger`` — the latter
-            # returns ``now`` for past-due one-shots
-            # (``_get_next_trigger_time`` line ~486–487), which would mutate
-            # the key on every adapter cycle AND every boot, defeating the
-            # at-most-once guarantee.
+            # D4 idempotency — R1 (fix/post-outage-recovery b2): the
+            # SLOT-STABLE key for a ONE-TIME fire (a chain row is a
+            # one-time fire with a ``chain`` block).
             #
-            # Cron-path guard: ``_route_via_job_queue`` is shared by cron
-            # AND one-shot paths (only gated by ``trigger_type ==
-            # "scheduled"``). Recurring fires intentionally mint fresh
-            # JobItems — emitting the key unconditionally would collapse
-            # all future cron fires into one JobItem → silent schedule
-            # death. Gate to one-time only (architecture §1.3).
+            # The slot is the fire's scheduled instant
+            # (``self._run_at``), NOT the per-fire ``execution_id``: a
+            # per-execution key mints a FRESH key for every re-fire, and
+            # the crash window (the chain re-arm / source-disable write
+            # commits AFTER the delivery) replays the SAME slot on the
+            # next boot — a fresh key there means a SECOND delivery.
+            #
+            # Semantics:
+            #   * the SAME slot re-fired while the prior JobItem is LIVE
+            #     → the SAME key → a GENUINE dedup hit → the substrate
+            #     collapses onto the prior row → at-most-once holds
+            #     across the restart (the crash-window guard);
+            #   * the SAME slot re-fired when the prior JobItem is
+            #     already DONE/DEAD → the substrate's terminal fallback
+            #     re-inserts under a synthetic suffix (the masquerade) →
+            #     F1(b) classifies and compensates → the phantom prelude
+            #     and the orphan fallback JobItem are cancelled → ONE
+            #     net delivery;
+            #   * a CHAIN row's re-arm rewrites ``self._run_at`` to the
+            #     next week's instant → a NEW slot → a NEW key (the
+            #     weekly fire is a different slot, not a duplicate).
+            #
+            # RECURRING fires (cron / interval) emit NO key: they have
+            # no stable slot, and a constant key across recurring fires
+            # would collapse the whole schedule into one JobItem →
+            # silent schedule death (architecture §1.3).
             enqueue_kwargs: dict = {}
-            if self._schedule_type == self.SCHEDULE_TYPE_ONE_TIME and self._run_at is not None:
+            if (
+                self._schedule_type == self.SCHEDULE_TYPE_ONE_TIME
+                and self._run_at is not None
+            ):
                 enqueue_kwargs["idempotency_key"] = (
-                    f"scheduler:{self.source_id}:{self._run_at.isoformat()}"
+                    _scheduler_direct_idempotency_key(
+                        self.source_id, self._run_at.isoformat()
+                    )
                 )
 
             # ── Proposal B PR1 — scheduler lane mint (lane 9) ──────────────
@@ -2736,19 +3431,34 @@ Original scheduled task:
                 f"job_id={result.job_id}, message_id={result.message_id[:8] if result.message_id else None}"
             )
 
-            if self._execution_callback:
-                try:
-                    self._execution_callback(
-                        execution_id=execution_id,
-                        schedule_id=self.source_id,
-                        status=ExecutionStatus.QUEUED.value,
-                        instance_id=instance_id,
-                        error_message=None,
-                    )
-                except Exception as e:
-                    logger.warning(f"Execution callback error: {e}")
+            # schedule-fire-notify (T4): single never-raise call at the
+            # direct dispatch site (F2: nothing in the wedge region raises).
+            await self._notify_fire_notice(
+                metadata=metadata,
+                recipient_instance_id=instance_id,
+                job_id=getattr(result, "job_id", None),
+                message_id=getattr(result, "message_id", None),
+            )
+
+            # Addendum A: the durable dispatch leaves a truthful OPEN
+            # receipt with the Task/JobItem handles. This REPLACES the old
+            # ``queued`` callback — ``queued`` is a transient dispatch-phase
+            # state that must never be the resting state an operator reads;
+            # ``dispatched`` (with handles) is the open state.
+            await self._write_receipt_dispatched(
+                execution_id,
+                instance_id,
+                getattr(result, "job_id", None),
+            )
+            return {
+                "instance_id": instance_id,
+                "job_item_id": getattr(result, "job_id", None),
+            }
         except Exception as e:
             logger.error(f"Failed to queue scheduled job: {execution_id}, error={e}", exc_info=True)
+            # Addendum A: an enqueue/claim failure terminalizes the receipt
+            # truthfully (NULL instance_id is permitted WITH this status).
+            await self._write_receipt_failed_to_dispatch(execution_id, str(e))
             # Don't call callback here - let _execute_run's outer exception handler
             # call it to avoid double-callback for the same execution_id
             raise
@@ -2882,7 +3592,7 @@ Original scheduled task:
                     return  # finally still runs, releases semaphore
 
             # Execute the scheduled run (its finally handles semaphore release)
-            await self._execute_run(execution_id, "scheduled")
+            await self._execute_run(execution_id, "scheduled", semaphore_held=True)
             semaphore_held = False  # _execute_run's finally releases it
             if self._fire_outcome == self.FIRE_OUTCOME_DIRECT:
                 # A DELIVERED occurrence closes the non-delivery episode
@@ -2936,7 +3646,7 @@ Original scheduled task:
                     return  # finally still runs, releases semaphore
             
             # Execute the manual trigger (its finally handles semaphore release)
-            await self._execute_run(execution_id, "manual")
+            await self._execute_run(execution_id, "manual", semaphore_held=True)
             semaphore_held = False  # _execute_run's finally releases it
         finally:
             if semaphore_held and self._execution_semaphore:

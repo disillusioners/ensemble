@@ -27,9 +27,9 @@ import asyncio
 import logging
 from typing import Annotated, Any
 
-from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
+from ._schema_registry import tool
 from ._tool_registry import register_tool_category
 from ._truncate import truncate_dict_result
 
@@ -69,6 +69,66 @@ def _error(msg: str) -> str:
     return f"ERROR: {msg}"
 
 
+# --------------------------------------------------------------------------
+# Module-level input models — HOISTED from the factory body.
+#
+# WHY (c2r-hoist-a): a ``class X(BaseModel)`` statement INSIDE a tool
+# factory executes on EVERY factory call, so every graph assembly
+# rebuilt this pydantic class from scratch. The process-level schema
+# registry (``daemon/tools/_schema_registry.py``) memoises the
+# DECORATOR's schema but CANNOT prevent the factory-local class
+# statement — that class is the CALLER-supplied ``args_schema``, not a
+# decorator-inferred one. At module level the class is built ONCE at
+# import, the registry then serves it from cache on every assembly,
+# and the agent-visible schema is byte-identical (pinned against the
+# BASE fixture ``tests/unit/tools/fixtures/module_level_inputs_a_base.json``
+# by ``tests/unit/tools/test_module_level_inputs_a.py``).
+# --------------------------------------------------------------------------
+
+class TaskScheduleInput(BaseModel):
+    """Input schema for task_schedule."""
+
+    label: Annotated[str, Field(description="Unique human-readable name for the schedule (1-128 chars)")]
+    message: Annotated[str, Field(description="The message sent to the agent when the schedule fires")]
+    when: Annotated[str, Field(description="User-stated local time: ISO 8601 ('2026-10-15 06:00' or '2026-10-15T06:00:00+07:00') for recurrence=once; 'HH:MM' for daily/weekly")]
+    recurrence: Annotated[str, Field(description="once | daily | weekly | cron")]
+    timezone: Annotated[str | None, Field(default=None, description="IANA timezone for `when` (e.g. 'Asia/Ho_Chi_Minh'); omit for the tz chain (user timezone setting -> default -> host-local -> UTC with a warning)")]
+    weekday: Annotated[int | None, Field(default=None, ge=0, le=6, description="Day of week for recurrence=weekly: 0=Sunday..6=Saturday")]
+    cron_expression: Annotated[str | None, Field(default=None, description="Raw cron expression; required when recurrence='cron'")]
+    agent_id: Annotated[str | None, Field(default=None, description="Agent to invoke when the schedule fires; omit for yourself (the calling agent)")]
+    project_id: Annotated[str | None, Field(default=None, description="Project ID for job routing and list filtering")]
+    priority: Annotated[int, Field(default=5, ge=1, le=10, description="Job priority 1-10 (1=lowest, 10=highest)")]
+    instance_mode: Annotated[str, Field(default="new_instance", description="new_instance (default) | reuse_instance")]
+
+
+class TaskScheduleListInput(BaseModel):
+    """Input schema for task_schedule_list."""
+
+    status: Annotated[str | None, Field(default=None, description="Filter by status: running | stopped | cancelled")]
+    project_id: Annotated[str | None, Field(default=None, description="Filter by project ID")]
+    include_cancelled: Annotated[bool, Field(default=False, description="Include cancelled schedules (hidden by default)")]
+    agent_id: Annotated[str | None, Field(default=None, description="Filter by invoked agent; omit for yourself (the calling agent)")]
+
+
+class TaskScheduleCancelInput(BaseModel):
+    """Input schema for task_schedule_cancel."""
+
+    source_id: Annotated[str | None, Field(default=None, description="Schedule ID (from task_schedule / task_schedule_list)")]
+    label: Annotated[str | None, Field(default=None, description="Schedule label — alternative to source_id (exact match; first match wins on collision)")]
+
+
+class TaskScheduleUpdateInput(BaseModel):
+    """Input schema for task_schedule_update."""
+
+    source_id: Annotated[str, Field(description="Schedule ID to update")]
+    label: Annotated[str | None, Field(default=None, description="Rename the schedule (must stay unique)")]
+    message: Annotated[str | None, Field(default=None, description="Replace the fired message")]
+    when: Annotated[str | None, Field(default=None, description="New trigger time (ISO 8601 for once; 'HH:MM' for daily/weekly)")]
+    timezone: Annotated[str | None, Field(default=None, description="IANA timezone; re-interprets wall-clock times in this timezone")]
+    paused: Annotated[bool | None, Field(default=None, description="true = " + _GC_DISCLOSURE + "; false = resume")]
+    priority: Annotated[int | None, Field(default=None, ge=1, le=10, description="Job priority 1-10")]
+
+
 def create_scheduling_tools(
     scheduling_service: Any,
     *,
@@ -101,21 +161,6 @@ def create_scheduling_tools(
     """
     caller_agent_id = agent_id
     caller_instance_id = current_instance_id
-
-    class TaskScheduleInput(BaseModel):
-        """Input schema for task_schedule."""
-
-        label: Annotated[str, Field(description="Unique human-readable name for the schedule (1-128 chars)")]
-        message: Annotated[str, Field(description="The message sent to the agent when the schedule fires")]
-        when: Annotated[str, Field(description="User-stated local time: ISO 8601 ('2026-10-15 06:00' or '2026-10-15T06:00:00+07:00') for recurrence=once; 'HH:MM' for daily/weekly")]
-        recurrence: Annotated[str, Field(description="once | daily | weekly | cron")]
-        timezone: Annotated[str | None, Field(default=None, description="IANA timezone for `when` (e.g. 'Asia/Ho_Chi_Minh'); omit for the tz chain (user timezone setting -> default -> host-local -> UTC with a warning)")]
-        weekday: Annotated[int | None, Field(default=None, ge=0, le=6, description="Day of week for recurrence=weekly: 0=Sunday..6=Saturday")]
-        cron_expression: Annotated[str | None, Field(default=None, description="Raw cron expression; required when recurrence='cron'")]
-        agent_id: Annotated[str | None, Field(default=None, description="Agent to invoke when the schedule fires; omit for yourself (the calling agent)")]
-        project_id: Annotated[str | None, Field(default=None, description="Project ID for job routing and list filtering")]
-        priority: Annotated[int, Field(default=5, ge=1, le=10, description="Job priority 1-10 (1=lowest, 10=highest)")]
-        instance_mode: Annotated[str, Field(default="new_instance", description="new_instance (default) | reuse_instance")]
 
     @register_tool_category("scheduling")
     @tool(args_schema=TaskScheduleInput)
@@ -158,14 +203,6 @@ def create_scheduling_tools(
         except Exception as exc:  # noqa: BLE001 — house pattern: error string, never raise
             return _error(str(exc))
 
-    class TaskScheduleListInput(BaseModel):
-        """Input schema for task_schedule_list."""
-
-        status: Annotated[str | None, Field(default=None, description="Filter by status: running | stopped | cancelled")]
-        project_id: Annotated[str | None, Field(default=None, description="Filter by project ID")]
-        include_cancelled: Annotated[bool, Field(default=False, description="Include cancelled schedules (hidden by default)")]
-        agent_id: Annotated[str | None, Field(default=None, description="Filter by invoked agent; omit for yourself (the calling agent)")]
-
     @register_tool_category("scheduling")
     @tool(args_schema=TaskScheduleListInput)
     async def task_schedule_list(
@@ -189,12 +226,6 @@ def create_scheduling_tools(
             return truncate_dict_result(result, "schedules")
         except Exception as exc:  # noqa: BLE001 — house pattern: error string, never raise
             return _error(str(exc))
-
-    class TaskScheduleCancelInput(BaseModel):
-        """Input schema for task_schedule_cancel."""
-
-        source_id: Annotated[str | None, Field(default=None, description="Schedule ID (from task_schedule / task_schedule_list)")]
-        label: Annotated[str | None, Field(default=None, description="Schedule label — alternative to source_id (exact match; first match wins on collision)")]
 
     @register_tool_category("scheduling")
     @tool(args_schema=TaskScheduleCancelInput)
@@ -234,17 +265,6 @@ def create_scheduling_tools(
             return echo
         except Exception as exc:  # noqa: BLE001 — house pattern: error string, never raise
             return _error(str(exc))
-
-    class TaskScheduleUpdateInput(BaseModel):
-        """Input schema for task_schedule_update."""
-
-        source_id: Annotated[str, Field(description="Schedule ID to update")]
-        label: Annotated[str | None, Field(default=None, description="Rename the schedule (must stay unique)")]
-        message: Annotated[str | None, Field(default=None, description="Replace the fired message")]
-        when: Annotated[str | None, Field(default=None, description="New trigger time (ISO 8601 for once; 'HH:MM' for daily/weekly)")]
-        timezone: Annotated[str | None, Field(default=None, description="IANA timezone; re-interprets wall-clock times in this timezone")]
-        paused: Annotated[bool | None, Field(default=None, description="true = " + _GC_DISCLOSURE + "; false = resume")]
-        priority: Annotated[int | None, Field(default=None, ge=1, le=10, description="Job priority 1-10")]
 
     @register_tool_category("scheduling")
     @tool(args_schema=TaskScheduleUpdateInput)

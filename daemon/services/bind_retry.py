@@ -410,9 +410,27 @@ def bind_socket_with_retry(
             backoff = min(backoff * 2, max_backoff_s)
             continue
 
-        # uvicorn's bind_socket() marks the socket inheritable
-        # (uvicorn/config.py:546) — mirrored for fidelity.
-        sock.set_inheritable(True)
+        # B1 (self-service-promote Wave 2, D1 root cause (a), 2026-11-19):
+        # the LISTEN fd is EXPLICITLY non-inheritable (CLOEXEC). The old
+        # shape mirrored uvicorn's bind_socket() set_inheritable(True)
+        # (uvicorn/config.py:546) "for fidelity" — but that fidelity
+        # protects NOTHING in this topology: the socket is handed to
+        # uvicorn IN-PROCESS (``Server.run(sockets=[sock])``,
+        # daemon/__main__.py:600), and a repo-wide audit finds ZERO
+        # os.fork / multiprocessing / close_fds=False / pass_fds /
+        # socket-activation paths that would need an exec-surviving fd.
+        # What the mirror DID do: the daemon's LISTEN fd leaked into
+        # EVERY spawned child (MCP servers, code-server, transitively any
+        # descendant — e.g. a tool-shell head/grep), and the promote
+        # pipeline's serving-attribution gate (lib.sh
+        # _supervision_owned_pids / _gate_serving_attribution) then saw
+        # port holders "NOT in the supervision-owned pid set" and
+        # false-refused a healthy ceremony (13:31:24Z class). Setting the
+        # flag EXPLICITLY (not relying on Python's PEP-446 default)
+        # means a future default change cannot silently re-open the leak.
+        # We deliberately differ from uvicorn here: our LISTEN fd must
+        # not cross an exec.
+        sock.set_inheritable(False)
         elapsed = monotonic() - started
         if attempt > 1:
             # The wait actually absorbed a contention — worth a WARNING

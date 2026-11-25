@@ -1,7 +1,7 @@
 # POK (Project Operating Knowledge) — FUNCTIONAL GATE REPORT
 
 **Date:** 2026-11-07
-**Commission:** POK implementation lane functional gate (Emperor GO 2026-11-07)
+**Commission:** POK implementation lane functional gate (the user GO 2026-11-07)
 **Lane:** `feature/project-operating-knowledge` @ `c4c2293fa` (frozen tip), worktree `/home/nea/ensemble-src-wt-pok`, TRUE BASE `6b571771d` (32 lane commits)
 **Gate executor:** tester (dispatch-only); 8 worker instances (recon, views, cap, seed, supersede, packs, boot, regression)
 **Design set (frozen):** `.agents/shared/planning/project-operating-knowledge/` (plan-overview v3.4, architecture-recommendation §4.5.1/§4.6 amended, decisions v3.4 ER-1, trust-tier-addendum, implementation-readiness, seed-payload-llmproxy)
@@ -64,7 +64,7 @@ Worktree venv `.venv/bin/python` with `import daemon` proven INSIDE the worktree
 **Minimal fix direction (report only — not applied):**
 (a) raise `floor_count` (or bypass the fusion threshold) for the POK injection path so the per-view admitted set reaches the full visible set under budget (8/2,900 already sized for it) — one config/branch, no schema change; or
 (b) amend AC1/AC22 to the delivered reality (5 empty-query / ≤7 with query) and rely on `pok_query` + the F5 omitted-tail line for coverage.
-Decision owner: leader/Emperor (design-doc amendment vs code change).
+Decision owner: leader/the user (design-doc amendment vs code change).
 
 ## L2 — audience filtering + budget — **PASS**
 
@@ -194,7 +194,7 @@ Final state: `git status --porcelain` empty; `git diff --stat` empty; HEAD `c4c2
 
 ## Consolidated disclosures & routed follow-ups
 
-1. **AC1/AC2 8-entry promise vs selector reality (L1, gate FAIL)** — fix direction (a) floor/threshold for the POK path or (b) AC amendment; leader/Emperor decision.
+1. **AC1/AC2 8-entry promise vs selector reality (L1, gate FAIL)** — fix direction (a) floor/threshold for the POK path or (b) AC amendment; leader/user decision.
 2. **14 deterministic net-new reds (L10, gate FAIL)** — 12 × B4 `"pok"`-grant pin-not-re-pinned + wedge-capture count + VOCAB pin; single pin-ceremony commit fixes all 14 (test-only).
 3. **6-node attestation hang family (L10)** — graceful-fail at base → process-wedge at HEAD; unresolved; needs its own diagnosis commission (candidate seam: instance_messaging/injection landing).
 4. **49 integration reds base-unclassified (L10)** — disclosed gap; optional follow-up (verdict unaffected).

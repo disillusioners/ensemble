@@ -1,0 +1,66 @@
+[identity] current_database() = ensemble_prod   current_user = ensemble
+
+=== PENDING WATCHERS TARGETING THE PARENT (extended census) ===
++------------+----------+-------------+----------------+-------------+---------------+
+| kind       | id       | task/worker | child/lane     | state       | scope         |
++------------+----------+-------------+----------------+-------------+---------------+
+| watcher    | 8a1f60d7 | 39320       | 542b49a6       | PENDING     | in_target_set |
+| watcher    | 999efa71 | 39424       | 17efd2ef       | PENDING     | in_target_set |
+| watcher    | 5602e91d | 39564       | 82551f59       | PENDING     | in_target_set |
+| watcher    | c83e12a2 | 39564       | 82551f59       | PENDING     | in_target_set |
+| commission | 0cdc0b31 | 542b49a6    | instance_nudge | outstanding | in_target_set |
+| commission | 90493206 | 17efd2ef    | instance_nudge | outstanding | in_target_set |
+| commission | 06001f88 | 82551f59    | instance_nudge | outstanding | in_target_set |
+| commission | a1561f19 | 82551f59    | instance_nudge | outstanding | in_target_set |
++------------+----------+-------------+----------------+-------------+---------------+
+
+=== PER-ROW DISPOSITION (8-row target set) ===
++-------+------------+----------+-------------+----------------+------------------------------------------------+
+| label | kind       | id       | state       | disposition    | reason/note                                    |
++-------+------------+----------+-------------+----------------+------------------------------------------------+
+| W1    | watcher    | 8a1f60d7 | PENDING     | in_scope_stale |                                                |
+| W2    | watcher    | 999efa71 | PENDING     | in_scope_stale |                                                |
+| W3    | watcher    | 5602e91d | PENDING     | in_scope_stale |                                                |
+| W4    | watcher    | c83e12a2 | PENDING     | in_scope_stale |                                                |
+| M1    | commission | 0cdc0b31 | outstanding | in_scope_stale | worker_terminal_no_report / worker completed   |
+| M2    | commission | 90493206 | outstanding | in_scope_stale | ttl_expired_not_live / worker waiting_children |
+| M3    | commission | 06001f88 | outstanding | in_scope_stale | ttl_expired_not_live / worker waiting_children |
+| M4    | commission | a1561f19 | outstanding | in_scope_stale | ttl_expired_not_live / worker waiting_children |
++-------+------------+----------+-------------+----------------+------------------------------------------------+
+
+=== ASSERTIONS A1-A14 ===
++-----+------------------------------------------------------------------------+--------------------------------------------------------------------------------------------+----------------------------------------------------+---------+
+| id  | assertion                                                              | observed                                                                                   | expected                                           | verdict |
++-----+------------------------------------------------------------------------+--------------------------------------------------------------------------------------------+----------------------------------------------------+---------+
+| A1  | parent exists AND status == waiting_children                           | exists=True, status=waiting_children                                                       | exists=True, status=waiting_children               | PASS    |
+| A2  | watcher 8a1f60d7 resolves uniquely; target==parent; source_task==39320 | matches=1, state=PENDING, disposition=in_scope_stale, target=17efd2ef-9f98-46d4-b41b-60e3e | matches=1, identity matches, state=PENDING|resolve | PASS    |
+| A3  | task 39320 exists and is in a terminal status                          | exists=True, status=completed, completed_at=2026-11-17 18:08:26.230850                     | exists=True, status in {completed,failed,cancelled | PASS    |
+| A4  | watched worker 542b49a6 exists and is terminal                         | exists=True, status=completed, updated_at=2026-11-17T19:04:27.795218+00:00                 | exists=True, status in {completed,terminated,error | PASS    |
+| A5  | watcher 999efa71 unique; target==parent; source_task==39424; child_id= | matches=1, state=PENDING, disposition=in_scope_stale, target=17efd2ef-9f98-46d4-b41b-60e3e | matches=1, identity matches, state=PENDING|resolve | PASS    |
+| A6  | task 39424 exists and is terminal                                      | exists=True, status=completed                                                              | exists=True, status in {completed,failed,cancelled | PASS    |
+| A7  | all 4 commissions resolve uniquely; commissioner==parent; worker bindi | M1=outstanding/in_scope_stale; M2=outstanding/in_scope_stale; M3=outstanding/in_scope_stal | 4/4 identity matches, state outstanding|resolved   | PASS    |
+| A8  | DRIFT GUARD: every PENDING watcher / outstanding commission of the par | pending_for_parent=4 (unknown=0), outstanding_for_parent=4 (unknown=0)                     | unknown=0 and unknown=0                            | PASS    |
+| A9  | parent status IS waiting_children (a re-run never clobbers an unknown  | status=waiting_children                                                                    | status=waiting_children                            | PASS    |
+| A10 | watcher 5602e91d resolves uniquely; target==parent; source_task==39564 | matches=1, state=PENDING, disposition=in_scope_stale, target=17efd2ef-9f98-46d4-b41b-60e3e | matches=1, identity matches, state=PENDING|resolve | PASS    |
+| A11 | watcher c83e12a2 resolves uniquely; target==parent; source_task==39564 | matches=1, state=PENDING, disposition=in_scope_stale, target=17efd2ef-9f98-46d4-b41b-60e3e | matches=1, identity matches, state=PENDING|resolve | PASS    |
+| A12 | commission 06001f88 resolves uniquely; commissioner==parent; worker==8 | matches=1, state=outstanding, disposition=in_scope_stale, commissioner=17efd2ef-9f98-46d4- | matches=1, identity matches, state=outstanding|res | PASS    |
+| A13 | commission a1561f19 resolves uniquely; commissioner==parent; worker==8 | matches=1, state=outstanding, disposition=in_scope_stale, commissioner=17efd2ef-9f98-46d4- | matches=1, identity matches, state=outstanding|res | PASS    |
+| A14 | task 39564 (source of W3/W4) exists and is terminal                    | exists=True, status=completed                                                              | exists=True, status in {completed,failed,cancelled | PASS    |
++-----+------------------------------------------------------------------------+--------------------------------------------------------------------------------------------+----------------------------------------------------+---------+
+
+classification = not_yet
+
+count_pending_for_target(parent)        = 4
+count_outstanding_commissions(parent)   = 4
+inventory parent_scoped_sha256          = f457bcb339f7f860bbd700f2acb54f35e307a07273afc9c9c9a90cba1bd8cfcd
+  (0 other parent watchers, 0 other parent commissions)
+inventory global_sha256                 = 964bb3f368abdacf3e4076660da82e5b7234b20fb54965de9a216289620e57bd
+  (12167 watcher rows, 4770 commission rows)
+
+=== OUT-OF-SCOPE (observational only — NEVER in a repair statement) ===
+  9c2094ac commissioner=4e261d34 worker=804085bf lane=instance_nudge state=satisfied created=2026-11-11T13:55:08.579001+00:00
+  98d963c9 commissioner=4e261d34 worker=a16dc01c lane=instance_nudge state=abandoned created=2026-11-11T15:05:26.492063+00:00
+  b081856e commissioner=4e261d34 worker=a16dc01c lane=instance_nudge state=abandoned created=2026-11-11T23:31:55.727034+00:00
+  f4abf712 commissioner=4e261d34 worker=a16dc01c lane=instance_nudge state=outstanding created=2026-11-12T06:57:50.935273+00:00
+  2fc563f9 commissioner=4e261d34 worker=a16dc01c lane=instance_nudge state=outstanding created=2026-11-12T06:57:50.986032+00:00
+  6f529835 commissioner=4e261d34 worker=804085bf lane=instance_nudge state=outstanding created=2026-11-12T07:43:17.995909+00:00

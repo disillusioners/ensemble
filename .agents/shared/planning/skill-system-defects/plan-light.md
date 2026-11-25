@@ -1,6 +1,6 @@
 # Skill-System Defects — Light Plan (C-lane implementation)
 
-Commissioner: leader (Emperor-authorized C-lane). Implementer: coder.
+Commissioner: leader (user-authorized C-lane). Implementer: coder.
 Worktree: `/home/nea/ensemble-src-wt-skillfix` @ branch `feature/skill-system-defects`, base `0181dadbf` (= origin/latest).
 Scope: defects 1, 2+C2, 3(C1), 5, 7 + supplement items (a)–(f) + decision-package defect D.
 Out of scope: 4, 6, 8, 9.

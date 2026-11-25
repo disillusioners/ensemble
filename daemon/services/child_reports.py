@@ -16,6 +16,7 @@ from sqlmodel import select as sqlmodel_select
 
 from ..graph import ThinkingChatOpenAI, clean_llm_config
 from ..persistence import get_instance_messages
+from .event_registry import record as _event_registry_record
 from ..repositories.instance.models import Instance, InstanceStatus
 from ..repositories.message_queue.models import MessageQueue, MessageStatus, MessageType
 from ..repositories.report_injection.repository import (
@@ -61,7 +62,7 @@ from .context_messages import _resolve_tree_root_id
 # ``_resolve_tree_root_id`` remains used by ``_dispatch_post_commit_side_effects`` for lifecycle-hook context_key resolution.
 from .lifecycle_hooks import LifecycleHookContext, dispatch_lifecycle_hooks
 from .llm_failover import wrap_langchain_failover
-from .job_queue_service import TERMINAL_STATUSES
+from daemon.constants import TERMINAL_INSTANCE_STATUSES
 from .main_loop_bridge import MainLoopBridge
 from .pool_orchestrator import safe_notify_all_pools
 
@@ -311,6 +312,30 @@ class ChildReportsService:
         """Access config through manager for test mockability."""
         return self._manager.config
 
+    def _bus_count_for_target_sync(
+        self, bus_method_name: str, target_instance_id: str
+    ) -> int:
+        """Shared sync bus-count helper (dedup of the raw + qualified
+        wrappers). ``bus_method_name`` selects which
+        ``DependencyBus`` method to invoke. Bus singleton missing → 0;
+        any exception → 0 (fail-OPEN) with a warning.
+        """
+        from .dependency_bus import get_dependency_bus
+
+        bus = get_dependency_bus()
+        if bus is None:
+            return 0
+
+        try:
+            return getattr(bus, bus_method_name)(target_instance_id)
+        except Exception as e:  # noqa: BLE001 — FAIL-OPEN envelope
+            logger.warning(
+                f"{bus_method_name} failed for "
+                f"{target_instance_id[:8]}...: {e} — treating as 0 "
+                f"(FAIL-OPEN: bus pending-children check skipped)"
+            )
+            return 0
+
     def _bus_count_pending_for_target_sync(
         self, target_instance_id: str
     ) -> int:
@@ -368,30 +393,33 @@ class ChildReportsService:
             the given target. Returns 0 when the bus singleton is
             not wired or the DB query fails.
         """
-        from .dependency_bus import get_dependency_bus
+        return self._bus_count_for_target_sync(
+            "count_pending_for_target_sync", target_instance_id
+        )
 
-        bus = get_dependency_bus()
-        if bus is None:
-            return 0
+    def _bus_count_fulfillable_pending_for_target_sync(
+        self, target_instance_id: str
+    ) -> int:
+        """S3 (wake-path-carrier-fix): the QUALIFIED park count.
 
-        try:
-            return bus.count_pending_for_target_sync(target_instance_id)
-        except Exception as e:
-            # FAIL-OPEN (see method docstring): a DB failure here
-            # returns 0 and PASSES the gate. Callers that use this
-            # helper at the completion decision point MUST have a
-            # separate safety net (typically the in-session bus
-            # gate inline query that shares a transaction with the
-            # UPDATE). Logged at warning level so persistent
-            # failures surface in observability without taking
-            # down the completion path.
-            logger.warning(
-                f"bus.count_pending_for_target_sync failed for "
-                f"{target_instance_id[:8]}...: {e} — treating as 0 "
-                f"(FAIL-OPEN: bus pending-children check skipped, "
-                f"may cause premature completion if persistent)"
-            )
-            return 0
+        Identical envelope to
+        :meth:`_bus_count_pending_for_target_sync` (fail-OPEN wrapper,
+        bus-singleton-missing → 0) but the count is the S3 QUALIFIED
+        count: only FULFILLABLE PENDING watchers (child_id null /
+        missing-row / ghost / read-failure all count — the park holds;
+        a TERMINAL child or a self-referential row does NOT).
+
+        Used by the D-1 emission-time ``_root_completion_gate`` bus
+        leg: without the qualified read there, S3 qualifies R2/R3/R4,
+        stamps the root COMPLETED, and this gate reads raw>0 (backlog)
+        and downgrades the root back to WAITING_CHILDREN — the park
+        persists through the gate. The load-bearing same-tx authority
+        remains R4's in-transaction gate; this leg is the
+        defense-in-depth re-check (same split as the raw sibling).
+        """
+        return self._bus_count_for_target_sync(
+            "count_fulfillable_pending_for_target_sync", target_instance_id
+        )
 
     async def _emit_terminal_via_bus(
         self,
@@ -595,12 +623,12 @@ class ChildReportsService:
                     f"_emit_terminal_via_bus: parent-status gate "
                     f"lookup failed (non-fatal, fail-open — "
                     f"proceeding with stamp) for "
-                    f"{fu.target_instance_id[:8]}...: {gate_err}"
+                    f"{str(fu.target_instance_id or "")[:8]}...: {gate_err}"
                 )
             if _parent_status == "paused":
                 logger.debug(
                     f"_emit_terminal_via_bus: skipping C1 stamp — "
-                    f"parent {fu.target_instance_id[:8]}... is "
+                    f"parent {str(fu.target_instance_id or "")[:8]}... is "
                     f"PAUSED (resume's Pass 1 will deliver the "
                     f"FollowUp + stamp; per Blocker 1 fix)"
                 )
@@ -616,7 +644,7 @@ class ChildReportsService:
                 logger.debug(
                     f"bus follow-up stamp failed (non-fatal): "
                     f"source_task={str(task_id)[:8]}..., "
-                    f"target={fu.target_instance_id[:8]}...: {stamp_err}"
+                    f"target={str(fu.target_instance_id or "")[:8]}...: {stamp_err}"
                 )
 
         return fired
@@ -710,6 +738,344 @@ class ChildReportsService:
         # task-keyed helper's stamp loop in ``_emit_terminal_via_bus``
         # preserves.
         return fired
+
+    async def _fire_terminal_child_and_deliver(
+        self,
+        child_instance_id: str,
+        outcome_status: str,
+    ) -> None:
+        """**S1** — fire the target-agnostic child-keyed watchers and deliver.
+
+        The COMPLETED / TOOL-INVOCATION / ERROR lanes had NO
+        target-agnostic child-keyed fire: the bus's three primitives
+        were keyed on the child's FINAL task (``emit_terminal``), on
+        the STRUCTURAL parent + child PAIR (``emit_terminal_for_child_instance``)
+        or were reachable only from TERMINATE (``fire_for_terminated_target``).
+        A watcher armed by a NUDGER — or by any waiter that is not the
+        child's structural parent — could therefore NEVER be fired on
+        those lanes, and the parent's ``count_pending_for_target``
+        gate held the park forever (the live wedge: a PENDING watcher
+        on a child that had already reached a terminal state).
+
+        This method is the terminal-lane entry point for the S1 fire
+        and its delivery. It is deliberately a SUPPLEMENT: on the
+        healthy spawn lane the task-keyed emit (F1) and the pair-keyed
+        corrective emit (F2) fire FIRST, so the S1 fire sees
+        ``rowcount == 0`` on the already-fired row and is a **no-op**
+        (exactly-once, proved by the bus's guarded
+        ``transition_state`` UPDATE).
+
+        The delivery order mirrors the FULL TERMINATE precedent
+        (``daemon/services/instance_lifecycle.py:412-540``):
+
+        1. dead-letter skip — a target whose instance is already
+           terminal gets NO enqueue (the cause is logged);
+        2. **DELIVERY-ONCE marker claim** — committed in its OWN
+           transaction BEFORE the enqueue (a same-transaction write
+           spanning the claim and the enqueue is unimplementable:
+           ``manager.enqueue_message`` owns its own session). **B1
+           correction:** the marker prevents only SAME-PATH re-claims
+           (this loop re-running after its own failure); the delivery
+           posture is AT-LEAST-ONCE with a NAMED duplicate window —
+           a crash between the enqueue's commit and the
+           ``enqueued_at`` stamp leaves ``FIRED`` ∧
+           ``enqueued_at IS NULL`` ∧ marker set ∧ the message already
+           queued ⇒ resume Pass-1 re-enqueues (it does not consult
+           ``delivered_watch_id``) ⇒ ONE duplicate delivery. Never a
+           permanent park (S3 does not count FIRED rows).
+        3. ``manager.enqueue_message`` (JAFP-preserved — creates NO
+           JobItem);
+        4. ``bus.mark_enqueued_by_source_target`` — the C1 dedup stamp,
+           keyed on the row's ``source_task_id`` (the ``ENRICH(w)``
+           enrichment the nudge arm path does not stamp itself);
+        5. the post-fire re-purge — in a ``finally``, so it also runs
+           when the enqueue raises.
+
+        The terminate-only DOWN-side drain (``cancel_for_target``) is
+        NOT copied here — it belongs to the terminate path alone.
+
+        **``DELIVER(w)`` — the per-row delivery filter:** a fired
+        FollowUp whose target IS the watched child's STRUCTURAL parent
+        is NOT delivered by the bus: that waiter is served by the
+        report lane (``internal_report:`` message + PROCESS_REPORT
+        task), and a bus delivery would double-notify the parent. The
+        structural parent is read with ONE batched query
+        (``get_parent_ids`` — the ``get_statuses`` sibling), never an
+        N+1 loop.
+
+        Args:
+            child_instance_id: The instance that just reached a
+                terminal transition.
+            outcome_status: The terminal status (``"completed"`` /
+                ``"error"``) — used for the bus outcome + the log lines.
+        """
+        from .dependency_bus import (
+            Outcome,
+            get_dependency_bus,
+        )
+
+        bus = get_dependency_bus()
+        if bus is None:
+            # Bus singleton missing — a wiring failure. Fail-soft:
+            # the completion path must not break because the S1 fire
+            # could not run (same posture as the sibling bus helpers).
+            logger.warning(
+                "_fire_terminal_child_and_deliver: bus singleton is None "
+                "— wiring failure, S1 fire skipped (no fallback)"
+            )
+            return
+
+        try:
+            fired = await bus.fire_for_terminal_child(
+                child_instance_id,
+                Outcome(status=outcome_status),
+            )
+        except Exception as fire_err:
+            # A bus failure must NEVER fail the completion path.
+            logger.warning(
+                "_fire_terminal_child_and_deliver: bus fire failed for "
+                "child %s... (non-fatal): %s: %s",
+                child_instance_id[:8],
+                type(fire_err).__name__,
+                fire_err,
+            )
+            return
+
+        # Phase 5 event registry — class-1 bridge (T5.3): observe the S1
+        # terminalization AFTER the bus fire's CAS commit, never inside it
+        # (F-19: no second fire, no second CAS, no parallel probe — the
+        # dims come from the fire's return value alone).
+        _event_registry_record(
+            "instance_terminalized",
+            instance_id=child_instance_id,
+            outcome=outcome_status,
+            fired_count=len(fired),
+        )
+
+        if not fired:
+            return
+
+        _enqueued_targets: list[tuple[str, str]] = []
+        try:
+            # ── DELIVER(w): the structural parent of the watched child,
+            # read with ONE batched query (no N+1 over the fired rows).
+            child_ids = sorted(
+                {
+                    cid
+                    for fu in fired
+                    for cid in [((fu.metadata if isinstance(fu.metadata, dict) else {}).get("child_id"))]
+                    if isinstance(cid, str) and cid
+                }
+            )
+            try:
+                parent_map = await asyncio.to_thread(
+                    self._instance_repository.get_parent_ids, child_ids
+                )
+            except Exception as parent_err:
+                # Fail-OPEN on the read failure: better to deliver a
+                # message to a possibly-structural parent (a duplicate
+                # wake) than to strand a waiter's obligation.
+                logger.warning(
+                    "_fire_terminal_child_and_deliver: structural-parent read "
+                    "failed (non-fatal, proceeding with delivery) for child "
+                    "%s...: %s: %s",
+                    child_instance_id[:8],
+                    type(parent_err).__name__,
+                    parent_err,
+                )
+                parent_map = {}
+            if not isinstance(parent_map, dict):
+                # A non-dict read (a mocked repository) must not make the
+                # DELIVER(w) filter silently pass — treat the structural
+                # parent as unknown (fail-OPEN on the delivery, as above).
+                parent_map = {}
+
+            # Dead-letter check — one batched status read for every target.
+            target_ids = sorted(
+                {fu.target_instance_id for fu in fired if fu.target_instance_id}
+            )
+            try:
+                target_statuses = await asyncio.to_thread(
+                    self._instance_repository.get_statuses, target_ids
+                )
+            except Exception as status_err:
+                # FAIL-OPEN on lookup failure — same posture as the
+                # terminate precedent's dead-letter check.
+                logger.warning(
+                    "_fire_terminal_child_and_deliver: target-status read "
+                    "failed (non-fatal, proceeding with delivery): %s: %s",
+                    type(status_err).__name__,
+                    status_err,
+                )
+                target_statuses = {}
+
+            for fu in fired:
+                _fu_meta = fu.metadata if isinstance(fu.metadata, dict) else {}
+                watch_id = _fu_meta.get("watch_id")
+                if not watch_id:
+                    # The fire stamps the row identity on every fired
+                    # FollowUp; a missing one means the row cannot be
+                    # keyed for the DELIVERY-ONCE marker ⇒ skip.
+                    logger.warning(
+                        "_fire_terminal_child_and_deliver: fired FollowUp "
+                        "has no watch_id (cannot key the delivery marker) "
+                        "— delivery skipped for target %s...",
+                        str(fu.target_instance_id or "")[:8],
+                    )
+                    continue
+
+                # DELIVER(w): the structural parent is served by the
+                # report lane — the bus must NOT deliver to it.
+                watched_child = _fu_meta.get("child_id")
+                structural_parent = parent_map.get(watched_child)
+                if (
+                    structural_parent is not None
+                    and fu.target_instance_id == structural_parent
+                ):
+                    logger.debug(
+                        "_fire_terminal_child_and_deliver: target %s... "
+                        "IS the structural parent of child %s... — the "
+                        "report lane owns that delivery (DELIVER(w) is "
+                        "false); the row stays FIRED",
+                        str(fu.target_instance_id or "")[:8],
+                        str(watched_child)[:8],
+                    )
+                    continue
+
+                # Dead-letter skip (the terminate precedent's step 2):
+                # enqueueing onto an already-terminal parent creates a
+                # MessageQueue/Task whose turn never runs.
+                target_status = target_statuses.get(fu.target_instance_id)
+                if target_status is not None and target_status in (
+                    TERMINAL_INSTANCE_STATUSES
+                ):
+                    logger.info(
+                        "_fire_terminal_child_and_deliver: dead-lettering "
+                        "fired watcher — target %s... is already terminal "
+                        "(status=%s); the enqueue is skipped",
+                        str(fu.target_instance_id or "")[:8],
+                        target_status,
+                    )
+                    continue
+
+                # DELIVERY-ONCE: claim the marker BEFORE the enqueue.
+                # The claim commits in its own transaction; a second
+                # attempt for the same watch_id observes the marker and
+                # no-ops (at-most-once).
+                try:
+                    claimed = await bus.claim_delivery(watch_id)
+                except Exception as claim_err:
+                    # A marker failure must NOT fail the completion
+                    # path — the row is already FIRED (the fire is the
+                    # state transition; the delivery is best-effort).
+                    logger.warning(
+                        "_fire_terminal_child_and_deliver: delivery marker "
+                        "claim failed (non-fatal) for watch_id=%s... — the "
+                        "delivery is skipped: %s: %s",
+                        str(watch_id)[:8],
+                        type(claim_err).__name__,
+                        claim_err,
+                    )
+                    continue
+                if not claimed:
+                    logger.info(
+                        "_fire_terminal_child_and_deliver: delivery marker "
+                        "already present for watch_id=%s... — the re-enqueue "
+                        "attempt is a no-op",
+                        str(watch_id)[:8],
+                    )
+                    continue
+
+                # JAFP: manager.enqueue_message creates NO JobItem — the
+                # internal MessageQueue + Task seam is the bus's delivery
+                # contract.
+                try:
+                    _enq_result = await self._manager.enqueue_message(
+                        instance_id=fu.target_instance_id,
+                        message=fu.message,
+                        source=fu.source,
+                        metadata=dict(fu.metadata) if isinstance(fu.metadata, dict) else {},
+                    )
+                except Exception as enq_err:
+                    # An enqueue failure must NEVER fail the completion
+                    # path (same posture as the terminate precedent's
+                    # dead-letter / stamp handling).
+                    #
+                    # R2: the honest wording — the row stays FIRED and
+                    # UNSTAMPED (``enqueued_at IS NULL``), so the wake
+                    # is **DEFERRED**, not lost: the restart recovery
+                    # (Pass 1) re-enqueues it on the next boot, and the
+                    # delivery marker does NOT block that path (it
+                    # prevents only same-path re-claims). The old text
+                    # ("the wake is lost — the at-most-once residual")
+                    # pointed at a claim the B1 stance WITHDREW and was
+                    # factually wrong.
+                    logger.warning(
+                        "_fire_terminal_child_and_deliver: enqueue "
+                        "failed (non-fatal) for target=%s... — the row "
+                        "stays FIRED and unstamped, so the wake is "
+                        "DEFERRED to the next Pass-1 recovery (the "
+                        "marker does not block it): %s: %s",
+                        str(fu.target_instance_id or "")[:8],
+                        type(enq_err).__name__,
+                        enq_err,
+                    )
+                    continue
+                if _enq_result is not None and getattr(
+                    _enq_result, "message_id", None
+                ):
+                    _enqueued_targets.append(
+                        (fu.target_instance_id, _enq_result.message_id)
+                    )
+                # Per-FollowUp stamp, keyed on the row's source_task_id.
+                # The ``ENRICH(w)`` enrichment set it on the fired
+                # FollowUp (the nudge arm path does not stamp it into
+                # the payload itself).
+                source_task_id = _fu_meta.get("source_task_id")
+                if source_task_id:
+                    try:
+                        await bus.mark_enqueued_by_source_target(
+                            source_task_id, fu.target_instance_id
+                        )
+                    except Exception as stamp_err:
+                        logger.debug(
+                            "_fire_terminal_child_and_deliver: stamp failed "
+                            "(non-fatal) for source_task=%s..., "
+                            "target=%s...: %s",
+                            str(source_task_id)[:8],
+                            str(fu.target_instance_id or "")[:8],
+                            stamp_err,
+                        )
+        except Exception as _deliver_err:  # noqa: BLE001 — fail-soft
+            logger.warning(
+                "_fire_terminal_child_and_deliver: delivery loop failed "
+                "(non-fatal): %s: %s",
+                type(_deliver_err).__name__,
+                _deliver_err,
+            )
+        finally:
+            # The post-fire re-purge lives in a ``finally`` so it also
+            # runs when ``enqueue_message`` raises mid-loop (the
+            # terminate precedent's shape). It deletes just-enqueued
+            # MessageQueue + Task rows whose target went terminal.
+            if _enqueued_targets:
+                try:
+                    from .instance_lifecycle import _repurge_fired_follow_ups
+
+                    _repurge_fired_follow_ups(
+                        manager=self._manager,
+                        op="terminal_child_fire",
+                        fired_items=_enqueued_targets,
+                    )
+                except Exception as repurge_err:
+                    logger.warning(
+                        "_fire_terminal_child_and_deliver: post-fire "
+                        "re-purge failed (non-fatal) — affected_fired_count="
+                        "%d: %s: %s",
+                        len(_enqueued_targets),
+                        type(repurge_err).__name__,
+                        repurge_err,
+                    )
 
     @property
     def _instance_repository(self) -> "SQLModelInstanceRepository":
@@ -991,11 +1357,53 @@ Provide a concise summary:"""
             logger.info(f"Instance {instance_id[:8]}... has no parent_id, skipping completion report")
             return False, "no_parent_id"
             
-        # Use message_id in source so each completion generates a unique report
+        # Idempotency: one obligation per CHILD (the per-child PREFIX
+        # invariant), NOT one per anchor.
+        #
+        # NIT-MEDIUM (fix/post-outage-recovery SCOPE (c) rider): the
+        # guard used to be ANCHOR-EXACT
+        # (``source == internal_report:{child}:{message_id}``) while the
+        # INVARIANT the rest of the subsystem enforces is PER-CHILD
+        # PREFIX (``source LIKE 'internal_report:' || child || ':%'`` —
+        # see ``daemon/repositories/report_injection/repository.py``
+        # ``find_completed_children_without_delivery``). A b4
+        # stale-running candidate whose PRIOR report is still pending
+        # under a DIFFERENT anchor therefore slipped past the mint
+        # guard: a SECOND report row was minted AND a SECOND delivery
+        # obligation was created for the same child (the probe: 2
+        # obligations for 1 child, the parent receives 2 reports).
+        #
+        # The fix is at the MINT SITE (not a hold in the sweep): the
+        # guard now matches the child's report PREFIX, so ANY pending
+        # report for the child suppresses a second mint.
+        #
+        # TWO properties preserved deliberately:
+        #
+        # * The COLON terminator keeps the EXACT BOUNDARY — a sibling
+        #   child whose id EXTENDS this child's id (``...:{child}2:``)
+        #   does NOT match (``internal_report:{child}:`` is not a prefix
+        #   of ``internal_report:{child}2:``). The boundary pin lives in
+        #   ``tests/repositories/test_report_injection_prefix_boundary.py``.
+        # * ``autoescape=True`` escapes ``%`` / ``_`` inside the child
+        #   id so a wildcard in an id can never widen the match
+        #   (instance ids are uuids today, but the guard must not
+        #   depend on that).
+        #
+        # The RECIPIENT predicate is DROPPED (child-keyed, like the
+        # delivery-side D1 correction): the obligation belongs to the
+        # CHILD, so a report already minted for it — including one
+        # addressed to the commissioner rather than the structural
+        # parent — discharges the obligation. Keeping the recipient
+        # predicate is what let the backstop read a
+        # commissioner-addressed report as UNDELIVERED and mint a second
+        # obligation for the structural parent (the D1 defect).
         existing_report = session.exec(
             select(MessageQueue)
-            .where(MessageQueue.instance_id == instance.parent_id)
-            .where(MessageQueue.source == f"internal_report:{instance_id}:{completed_message_id}")
+            .where(
+                MessageQueue.source.startswith(
+                    f"internal_report:{instance_id}:", autoescape=True
+                )
+            )
             .where(MessageQueue.status.in_([
                 MessageStatus.READY.value,
                 MessageStatus.PROCESSING.value,
@@ -1006,7 +1414,7 @@ Provide a concise summary:"""
         if existing_report is not None:
             logger.debug(
                 f"Completion report already queued for child {instance_id[:8]}... "
-                f"message {completed_message_id[:8]}..., skipping duplicate"
+                f"(per-child prefix), skipping duplicate"
             )
             return False, "idempotency_skip"
         
@@ -2162,6 +2570,13 @@ Provide a concise summary:"""
                     instance_id[:8], _inc_exc,
                 )
                 _denied_count = None
+            # Phase 5 event registry — class-4 bridge (T5.6): observe the
+            # COMMITTED deny-epoch increment (the ledger stays untouched;
+            # fail-open posture is labeled, never changed).
+            if _denied_count is not None:
+                _event_registry_record("attestation_epoch", instance_id=instance_id,
+                                       epoch_action="deny_increment",
+                                       path="fp4_l6", denied_count=_denied_count)
         else:
             # No instance repo wired (test double / partial init).
             # Proceed with the bind check using the in-memory
@@ -2287,11 +2702,16 @@ Provide a concise summary:"""
         )
         if isinstance(ledger, SQLModelInstanceRepository):
             try:
-                safe_set_escalated_and_reset(
+                _esc_result = safe_set_escalated_and_reset(
                     ledger,
                     instance_id,
                     log_context={"path": "fp4_l6_release"},
                 )
+                # Phase 5 event registry — class-4 bridge (T5.6): the
+                # committed escalation epoch, ledger behavior unchanged.
+                _event_registry_record("attestation_epoch", instance_id=instance_id,
+                                       epoch_action="escalated_and_reset",
+                                       path="fp4_l6_release", ok=bool(_esc_result))
             except Exception as _esc_exc:  # noqa: BLE001
                 logger.warning(
                     "FP4 L6: safe_set_escalated_and_reset raised "
@@ -2634,7 +3054,9 @@ Provide a concise summary:"""
             # path; the caller wrap at child_reports.py:4133-4143 catches any
             # unexpected exception and fails the gate open too, so a missing
             # bus or DB hiccup cannot block the publish permanently.
-            bus_pending = self._bus_count_pending_for_target_sync(instance_id)
+            bus_pending = self._bus_count_fulfillable_pending_for_target_sync(
+                instance_id
+            )
             if bus_pending > 0:
                 return False, f"bus_pending={bus_pending}", False
 
@@ -3508,7 +3930,11 @@ Provide a concise summary:"""
                     # ``_sync`` variant runs the COUNT(*) directly on
                     # the helper's session (no event-loop hop, safe to
                     # call from this worker-thread sync function).
-                    pending_children = bus.count_pending_for_target_sync(instance_id)
+                    # S3 (wake-path-carrier-fix): the QUALIFIED count —
+                    # PARK counts FULFILLABLE PENDING rows only.
+                    pending_children = bus.count_fulfillable_pending_for_target_sync(
+                        instance_id
+                    )
                 else:
                     # ─── A8: HARD ERROR (not graceful degradation) ─────────
                     # Bus is None is an INVALID state. Mirrors the
@@ -3575,7 +4001,12 @@ Provide a concise summary:"""
                 # (it remains in scope after the ``return`` guard at
                 # the end of the previous block).
                 if bus is not None:
-                    all_children_done = bus.count_pending_for_target_sync(instance_id) == 0
+                    # S3 (wake-path-carrier-fix): the qualified twin —
+                    # all-children-done means zero FULFILLABLE PENDING
+                    # watchers (an unfulfillable backlog must not defer).
+                    all_children_done = bus.count_fulfillable_pending_for_target_sync(
+                        instance_id
+                    ) == 0
                     if not all_children_done:
                         # Bus still has pending watchers for this root.
                         #
@@ -3661,16 +4092,59 @@ Provide a concise summary:"""
                     # (fail-OPEN, LAST — B.S.6/B.S.7). The (b) LOG attach
                     # at the COMPLETED stamp below runs ONLY when this
                     # gate and the tasks gate both reported zero.
-                    _bus_pending_stmt = (
-                        select(func.count())
-                        .select_from(DependencyWatcher)
-                        .where(DependencyWatcher.target_instance_id == instance_id)
+                    #
+                    # S3 (wake-path-carrier-fix): the RAW COUNT(*) is
+                    # now a ROW FETCH on this same session — the park
+                    # decision is computed INSIDE this existing
+                    # transaction (the C2 same-tx discipline is
+                    # preserved for the watcher rows and the status
+                    # UPDATE below, which share one transaction). The
+                    # child-status leg of the qualification is a
+                    # SEPARATE batched by-id ``get_statuses`` read
+                    # (never a per-row session N+1, never the
+                    # parent-linkage tree-children form — nudge
+                    # watchers are not tree-linked). Fail-CLOSED
+                    # posture preserved: a status-read failure inside
+                    # the qualify counts every row as fulfillable (the
+                    # park holds). C2 serialization is held by the
+                    # per-parent lock, not by sharing this transaction
+                    # with the status read.
+                    #
+                    # ── S3 PHASE NOTE — the RAW boundary stays RAW ──
+                    # These reader sites deliberately keep the RAW
+                    # count_pending_for_target (they are NOT park
+                    # doors; switching changes their meaning). Line
+                    # anchors are as-measured at this commit:
+                    #   * the child-LIVENESS door (terminal-row
+                    #     reactivation / ghost dedup — counts
+                    #     child-instance rows, not watchers;
+                    #     child_reports.py:3737);
+                    #   * the completion doors — the post-R4
+                    #     live-children cross-check (:4122), the
+                    #     own-queue MessageQueue count (:4499/:4511)
+                    #     and the active-children count (:4714):
+                    #     completion defers, they cannot create or
+                    #     hold a park;
+                    #   * job_feedback_observer ×5 (:470/:1173/:2786/
+                    #     :2942/:3838) + job_recovery_service:1319;
+                    #   * the ``_bus_count_pending_for_target_sync``
+                    #     helper (:314-:394) and its 5 callers;
+                    #   * error_reporting:263; manager:13852.
+                    _bus_pending_rows = session.exec(
+                        sqlmodel_select(DependencyWatcher)
+                        .where(
+                            DependencyWatcher.target_instance_id == instance_id
+                        )
                         .where(
                             DependencyWatcher.state
                             == DependencyWatcherState.PENDING.value
                         )
+                    ).all()
+                    bus_pending = (
+                        _get_bus().count_fulfillable_pending_for_target_sync(
+                            instance_id, pending_rows=_bus_pending_rows
+                        )
                     )
-                    bus_pending = int(session.scalar(_bus_pending_stmt) or 0)
                     if bus_pending > 0:
                         # Bug fix (2026-06-22): transition
                         # ``instance.status`` to ``WAITING_CHILDREN``
@@ -4177,13 +4651,37 @@ Provide a concise summary:"""
                         should_send = False
                         skip_reason = "no_parent_id"
                     else:
+                        # NIT-MEDIUM (fix/post-outage-recovery SCOPE (c)
+                        # rider) — the MINT-SITE guard is PER-CHILD
+                        # PREFIX, not anchor-exact. The invariant the
+                        # whole subsystem enforces is "one obligation
+                        # per child" (``source LIKE 'internal_report:'
+                        # || child || ':%'`` — the delivery-side D1
+                        # correction in
+                        # ``daemon/repositories/report_injection/
+                        # repository.py``). The anchor-exact form let a
+                        # b4 stale-running candidate whose prior report
+                        # was still PENDING under a different anchor
+                        # mint a SECOND report + a SECOND obligation.
+                        #
+                        # Same three deliberate properties as the
+                        # sibling guard in ``_should_send_completion_
+                        # report``: the COLON terminator keeps the exact
+                        # boundary (a sibling whose id EXTENDS this
+                        # child's id does not match), ``autoescape=True``
+                        # neutralises ``%`` / ``_`` inside the id, and
+                        # the RECIPIENT predicate is dropped because the
+                        # obligation belongs to the CHILD (a report
+                        # already minted for it — addressed to the
+                        # commissioner or to the parent — discharges it).
                         existing_report = session.exec(
                             select(MessageQueue)
                             .where(
-                                MessageQueue.instance_id
-                                == (report_recipient_id or inst_check.parent_id)
+                                MessageQueue.source.startswith(
+                                    f"internal_report:{instance_id}:",
+                                    autoescape=True,
+                                )
                             )
-                            .where(MessageQueue.source == f"internal_report:{instance_id}:{completed_message_id}")
                             .where(MessageQueue.status.in_([
                                 MessageStatus.READY.value,
                                 MessageStatus.PROCESSING.value,
@@ -4304,7 +4802,7 @@ Provide a concise summary:"""
             #
             # Status filter: ``status NOT IN (COMPLETED, ERROR,
             # TERMINATED, FAILED)`` — the canonical terminal set
-            # (``daemon.services.job_queue_service.TERMINAL_STATUSES``).
+            # (``daemon.constants.TERMINAL_INSTANCE_STATUSES``).
             # Without TERMINATED / FAILED here, a single TERMINATED or
             # FAILED sibling would be counted as active and permanently
             # wedge the parent (it would never emit a completion_report).
@@ -4324,7 +4822,7 @@ Provide a concise summary:"""
                 .where(Instance.parent_id == instance_id)
                 .where(Instance.instance_id != instance_id)
                 .where(
-                    Instance.status.not_in(TERMINAL_STATUSES)
+                    Instance.status.not_in(TERMINAL_INSTANCE_STATUSES)
                 )
                 .where(~self._ghost_child_filter())
             ).scalar_one()
@@ -5262,6 +5760,17 @@ Provide a concise summary:"""
                     parent_agent_id = parent_for_event.agent_id
             
             session.commit()
+            # Phase 5 event registry — class-2 bridge (T5.4): observe the
+            # two durable completion rows AFTER the transaction commits
+            # (the row is the truth; the staged-rows helper twin
+            # ``_create_completion_events`` is a caller-commits surface
+            # with no in-daemon production caller — this inline block is
+            # the LIVE producer).
+            _event_registry_record("event_bus:instance_completed",
+                                   instance_id=instance_id)
+            _event_registry_record("event_bus:child_completed",
+                                   instance_id=instance.parent_id,
+                                   child_instance_id=instance_id)
             # Post-commit side effects are dispatched by the async caller.
             return _ChildCompletionDbResult(
                 outcome="regular_child_completed",
@@ -6011,6 +6520,32 @@ Provide a concise summary:"""
                     parent_instance_id=result.instance_id,
                     context_tag="child_reports.root_completion",
                 )
+
+            # ─── S1 (wake-path-carrier-fix): the target-agnostic
+            # child-keyed fire, on the ROOT-CHILD lane.
+            #
+            # The root lane emits NO bus terminal of its own: the
+            # producer stamps ``parent_id=None`` for a root child
+            # (``_process_child_completion_db_sync``), so neither the
+            # task-keyed emit (F1) nor the pair-keyed corrective emit
+            # (F2) has a parent to key on. A nudge-armed watcher on a
+            # ROOT child therefore had NO fire anywhere on this lane —
+            # the watcher's target's pending count never dropped and
+            # the waiter stayed parked forever.
+            #
+            # PLACEMENT: at the END of the terminal branch, before its
+            # return — NOT at the top of the method (a top placement
+            # would pre-empt the pair-emit and deliver a synthetic
+            # message to the structural parent on EVERY healthy
+            # completion). NOT before the ``:6014`` / ``:6086`` early
+            # returns (the tree-liveness demote and the L6-hold
+            # demote): those demote a NON-terminal instance to
+            # WAITING_CHILDREN (an early exit, not a completion) — the
+            # instance is not terminal there, so no fire is due.
+            await self._fire_terminal_child_and_deliver(
+                instance_id,
+                "completed",
+            )
             return
 
         # B4 cycle-2 (W5 obligation re-mint; incident pointer:
@@ -6189,6 +6724,27 @@ Provide a concise summary:"""
                         f"Failed to publish lifecycle event for tool invocation {instance_id[:8]}...: {e}"
                     )
             self._trigger_title_generation(instance_id, completed_message_id)
+
+            # ─── S1 (wake-path-carrier-fix): the target-agnostic
+            # child-keyed fire, on the TOOL-INVOCATION lane.
+            #
+            # THE CENSUS GAP: this branch emits NO bus terminal of its
+            # own — neither the task-keyed emit (F1) nor the pair-keyed
+            # corrective emit (F2) runs here (the tool lane skips the
+            # parent report entirely). A watcher waiting on a
+            # tool-invocation child therefore had NO fire anywhere on
+            # this lane, and its target's pending count never dropped.
+            #
+            # PLACEMENT: at the END of the terminal branch, before its
+            # return. The S1 fire is a SUPPLEMENT — on the healthy
+            # spawn lane F1/F2 fire first, so the S1 fire sees
+            # ``rowcount == 0`` on the already-fired row and is a
+            # no-op (exactly-once, proved by the bus's guarded
+            # ``transition_state`` UPDATE).
+            await self._fire_terminal_child_and_deliver(
+                instance_id,
+                "completed",
+            )
             return
 
         # Regular child completed: commit + bus hook + SSE + CompletionRegistry + lifecycle + title
@@ -6461,6 +7017,36 @@ Provide a concise summary:"""
             except Exception as e:
                 logger.warning(f"lifecycle hook dispatch setup failed: {e}")
 
+            # ─── S1 (wake-path-carrier-fix): the target-agnostic
+            # child-keyed fire, on the COMPLETED (regular child) lane.
+            #
+            # PLACEMENT: at the END of the terminal branch, before its
+            # return — AFTER the pair-emit (the corrective
+            # ``_emit_terminal_for_child_instance_via_bus`` above) and
+            # after the task-keyed emit. That order IS the
+            # exactly-once proof: F1 (task-keyed) and F2 (pair-keyed)
+            # fire the healthy spawn lane's watcher FIRST, so this
+            # supplementary fire sees ``rowcount == 0`` on the
+            # already-fired row and is a NO-OP (the bus's guarded
+            # ``transition_state`` UPDATE — same primitive the
+            # ``child_still_running_defer`` branch documents at
+            # ``:5415-5440``).
+            #
+            # A fire at the TOP of the method would pre-empt that pair
+            # -emit and deliver a synthetic "[dependency_bus] child X
+            # completed" message to the structural parent on EVERY
+            # healthy completion — forbidden by the healthy-path fence
+            # (``DELIVER(w)`` would additionally filter it out, but the
+            # ordering contract is the primary guard).
+            #
+            # The delivery itself is per-row filtered by ``DELIVER(w)``:
+            # a fired FollowUp whose target IS the child's structural
+            # parent is NOT delivered by the bus — the report lane owns
+            # that waiter. The row is still transitioned to FIRED.
+            await self._fire_terminal_child_and_deliver(
+                instance_id,
+                "completed",
+            )
             return
 
         # instance_not_found: no obligation (no parent reachable,

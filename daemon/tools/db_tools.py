@@ -40,7 +40,6 @@ import logging
 import re
 from typing import TYPE_CHECKING, Any
 
-from langchain_core.tools import tool
 from sqlalchemy.exc import IntegrityError
 
 from daemon.services.db_sql_utils import (
@@ -51,6 +50,7 @@ from daemon.services.db_sql_utils import (
     _RE_STRING_LITERAL,
 )
 
+from ._schema_registry import tool
 from ._tool_registry import register_tool_category
 
 if TYPE_CHECKING:

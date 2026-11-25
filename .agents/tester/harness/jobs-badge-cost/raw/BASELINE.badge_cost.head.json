@@ -1,0 +1,208 @@
+{
+  "mode": "head",
+  "base_sha": "213ea6c1e",
+  "seed_stats": {
+    "instances": 30,
+    "jobs_terminal": 420,
+    "jobs_queued": 10,
+    "jobs_active": 5,
+    "orphans": 5,
+    "tasks": 20,
+    "watches": 60
+  },
+  "rounds": 8,
+  "legs": {
+    "jobs_active_badge": {
+      "latency_ms": {
+        "p50": 39.05398695496842,
+        "max": 85.1575629785657,
+        "min": 35.687847062945366,
+        "mean": 51.77377939980943,
+        "n": 8
+      },
+      "statements_per_round": {
+        "instances": 2.0,
+        "job_queue_items": 2.0,
+        "task": 1.0,
+        "total": 5.0
+      },
+      "statements_total": {
+        "instances": 16,
+        "job_queue_items": 16,
+        "task": 8,
+        "total": 40
+      },
+      "rows": {
+        "p50": 435.0,
+        "max": 435,
+        "min": 435,
+        "mean": 435.0,
+        "n": 8
+      },
+      "rounds": 8
+    },
+    "jobs_terminal_page": {
+      "latency_ms": {
+        "p50": 24.5768980239518,
+        "max": 29.919366003014147,
+        "min": 24.088097037747502,
+        "mean": 25.391537259565666,
+        "n": 8
+      },
+      "statements_per_round": {
+        "instances": 2.0,
+        "job_queue_items": 3.0,
+        "task": 1.0,
+        "total": 6.0
+      },
+      "statements_total": {
+        "instances": 16,
+        "job_queue_items": 24,
+        "task": 8,
+        "total": 48
+      },
+      "rows": {
+        "p50": 10.0,
+        "max": 10,
+        "min": 10,
+        "mean": 10.0,
+        "n": 8
+      },
+      "rounds": 8
+    },
+    "missions": {
+      "latency_ms": {
+        "p50": 8.797132992185652,
+        "max": 10.58274891693145,
+        "min": 8.730217930860817,
+        "mean": 9.034885340952314,
+        "n": 8
+      },
+      "statements_per_round": {
+        "instances": 2.0,
+        "job_queue_items": 1.0,
+        "task": 0.0,
+        "total": 3.0
+      },
+      "statements_total": {
+        "instances": 16,
+        "job_queue_items": 8,
+        "task": 0,
+        "total": 24
+      },
+      "rows": {
+        "p50": 20.0,
+        "max": 20,
+        "min": 20,
+        "mean": 20.0,
+        "n": 8
+      },
+      "rounds": 8
+    },
+    "instances": {
+      "latency_ms": {
+        "p50": 4.53463097801432,
+        "max": 6.9580270210281014,
+        "min": 4.426867002621293,
+        "mean": 4.873277255683206,
+        "n": 8
+      },
+      "statements_per_round": {
+        "instances": 2.0,
+        "job_queue_items": 0.0,
+        "task": 0.0,
+        "total": 2.0
+      },
+      "statements_total": {
+        "instances": 16,
+        "job_queue_items": 0,
+        "task": 0,
+        "total": 16
+      },
+      "rows": {
+        "p50": 10.0,
+        "max": 10,
+        "min": 10,
+        "mean": 10.0,
+        "n": 8
+      },
+      "rounds": 8
+    },
+    "defer_blocked_watch_read": {
+      "latency_ms": {
+        "p50": 3.652920015156269,
+        "max": 5.185064976103604,
+        "min": 3.5493469331413507,
+        "mean": 3.835416748188436,
+        "n": 8
+      },
+      "statements_per_round": {
+        "instances": 0.0,
+        "job_queue_items": 0.0,
+        "task": 0.0,
+        "total": 1.0
+      },
+      "statements_total": {
+        "instances": 0,
+        "job_queue_items": 0,
+        "task": 0,
+        "total": 8
+      },
+      "rows": {
+        "p50": 60.0,
+        "max": 60,
+        "min": 60,
+        "mean": 60.0,
+        "n": 8
+      },
+      "rounds": 8
+    }
+  },
+  "watch_reconcile": {
+    "repeats": 5,
+    "reconcile_terminal_watches_ms": {
+      "median": 526.7050180118531,
+      "min": 509.16240201331675,
+      "max": 733.6132460040972,
+      "samples": [
+        509.16240201331675,
+        733.6132460040972,
+        526.7050180118531,
+        553.7105490220711,
+        519.8871350148693
+      ]
+    },
+    "reconcile_terminal_watches_statements": {
+      "instances": 0,
+      "job_queue_items": 60,
+      "task": 60,
+      "total": 121
+    },
+    "reconcile_held_watches_for_instance_ms": {
+      "median": 1611.3739080028608,
+      "min": 1521.5598529903218,
+      "max": 1763.6413609143347,
+      "samples": [
+        1611.3739080028608,
+        1562.7706539817154,
+        1521.5598529903218,
+        1644.1551099997014,
+        1763.6413609143347
+      ]
+    },
+    "reconcile_held_watches_for_instance_statements": {
+      "instances": 0,
+      "job_queue_items": 60,
+      "task": 60,
+      "total": 121
+    }
+  },
+  "loop_lag_raw": null,
+  "loop_lag_note": "ensemble_loop_lag_seconds not reachable in this in-process harness (no daemon LoopLagProbe). Analysis reads lag-1.0s floor.",
+  "causal_split_hooks": {
+    "enrichment_count": "jobs_active_badge statements_per_round (no-LIMIT fetch + batch lookups) \u2014 M1a bounds this",
+    "router_per_row": "jobs_active_badge rows x DLQ/queue-position enrichment \u2014 M1b batches these",
+    "watch_read": "defer_blocked_watch_read statements (get_all_active_watches unbounded) \u2014 M1b adds active-state WHERE + to_thread bridge",
+    "pool_queueing": "NOT visible in-process: no connection pool contention / queueing. Requires a multi-process or threaded load with a real pool. Stated honestly."
+  }
+}

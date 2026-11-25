@@ -15,7 +15,7 @@ validation semantics), **D-5** (no schema change), **D-9** (threads).
 ## 1. Objective
 
 > **SCOPE FENCE (B5/#10): NO live promotion, NO arming, NO live-install mutation in this lane —
-> v0.29.20 staging only; the ceremony is a separate, post-lane Emperor act.**
+> v0.29.20 staging only; the ceremony is a separate, post-lane user act.**
 
 Deliver the **designation map** as a pure, dependency-free artefact: a strict parser that turns
 an operator's env value into **either** a valid map **or** a typed-invalid outcome naming every

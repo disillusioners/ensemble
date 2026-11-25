@@ -1,0 +1,21 @@
+########## STAGE2 BOOT LEG START 20261122T215904Z ##########
+DELETE 261
+DELETE 12
+[setup] engine tables cleared before Boot A
+===== A_ENGINE_WIDE_TRIP SUMMARY =====
+transcript=.agents/coder/RESULTS/2026-11-22-flipprep-mutations/stage2-merged-tip/bootA_engine_wide_trip_20261122T215904Z.txt
+posture=21:59:35 - daemon.api - INFO - engine boot posture: enabled=False shadow=True registrations=12 observer specs (execute_fn withheld); use_engine_flags=all unset (0/12); block_elapsed_ms_gated=416.935 block_elapsed_ms_total=442.096
+teardown alive=NO listeners=0
+DELETE 12
+DELETE 12
+[setup] engine tables cleared before Boot B
+===== B_PER_JOB_ISOLATION SUMMARY =====
+transcript=.agents/coder/RESULTS/2026-11-22-flipprep-mutations/stage2-merged-tip/bootB_per_job_isolation_20261122T215904Z.txt
+posture=22:00:23 - daemon.api - INFO - engine boot posture: enabled=True shadow=True registrations=12 observer specs (execute_fn withheld); use_engine_flags=SERVICES_ORPHAN_WATCHER_SWEEP_USE_ENGINE=0 (1/12); block_elapsed_ms_gated=499.918 block_elapsed_ms_total=522.734
+teardown alive=NO listeners=0
+[setup] NO clear before Boot C (carries Boot B state for restore proof)
+===== C_RESTORE SUMMARY =====
+transcript=.agents/coder/RESULTS/2026-11-22-flipprep-mutations/stage2-merged-tip/bootC_restore_20261122T215904Z.txt
+posture=22:01:14 - daemon.api - INFO - engine boot posture: enabled=True shadow=True registrations=12 observer specs (execute_fn withheld); use_engine_flags=all unset (0/12); block_elapsed_ms_gated=222.635 block_elapsed_ms_total=241.451
+teardown alive=NO listeners=0
+########## STAGE2 BOOT LEG END ##########

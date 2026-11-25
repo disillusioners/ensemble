@@ -607,6 +607,139 @@ describe('CommandStateService — REST poll loop (Task 8 / SC15)', () => {
   });
 });
 
+// ── The visibility gate (hidden tab stops the REST fallback poll) ──────
+//
+// The house gate (jobs page #3 / nest-reports #7 / room #12): a HIDDEN
+// browser tab issues NO request, a REFOCUS produces EXACTLY ONE immediate
+// poll (debounced 2 s — never a catch-up burst), and the teardown
+// detaches the listener.
+//
+// jsdom's ``document.visibilityState`` is a prototype getter — the test
+// shadows it with an own property so the production code reads the
+// simulated value.
+function setVisibility(state: 'visible' | 'hidden'): void {
+  Object.defineProperty(document, 'visibilityState', {
+    configurable: true,
+    get: () => state,
+  });
+}
+
+function fireVisibilityChange(): void {
+  document.dispatchEvent(new Event('visibilitychange'));
+}
+
+describe('CommandStateService — the visibility gate (hidden tab stops the poll)', () => {
+  beforeEach(() => jest.useFakeTimers());
+  afterEach(() => {
+    setVisibility('visible');
+    jest.useRealTimers();
+  });
+
+  function harness(responder: Fetch) {
+    const service = new CommandStateService();
+    const fetch = jest.fn<Promise<GetActiveResponse | null>, [string]>(responder);
+    service.wireFetch(fetch);
+    return { service, fetch };
+  }
+
+  /** A NON-terminal poll response — the card stays active, the poll stays armed. */
+  const activeResponse = async (): Promise<GetActiveResponse> => ({
+    exists: true,
+    command: makeEvent({ phase: 'in_progress', phase_seq: 2, elapsed_ms: 15000 }),
+  });
+
+  it('a HIDDEN tab issues NO request — the poll tick is gated', async () => {
+    const { service, fetch } = harness(activeResponse);
+    service.startCommand('inst-1', makeAck());
+    // Hidden BEFORE the poll arms → the gate is seeded from the document.
+    setVisibility('hidden');
+    service.syncPolling('inst-1', false);
+    jest.advanceTimersByTime(POLL_INTERVAL_MS * 3);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('a HIDDEN tab stops the ALREADY-ARMED poll', async () => {
+    const { service, fetch } = harness(activeResponse);
+    service.startCommand('inst-1', makeAck());
+    service.syncPolling('inst-1', false);
+    jest.advanceTimersByTime(POLL_INTERVAL_MS);
+    expect(fetch).toHaveBeenCalledTimes(1);
+
+    setVisibility('hidden');
+    fireVisibilityChange();
+    jest.advanceTimersByTime(POLL_INTERVAL_MS * 3);
+    expect(fetch).toHaveBeenCalledTimes(1); // no poll while hidden
+  });
+
+  it('a REFOCUS issues EXACTLY ONE poll (no catch-up burst)', async () => {
+    const { service, fetch } = harness(activeResponse);
+    service.startCommand('inst-1', makeAck());
+    service.syncPolling('inst-1', false);
+    setVisibility('hidden');
+    fireVisibilityChange();
+    jest.advanceTimersByTime(POLL_INTERVAL_MS * 2);
+    expect(fetch).not.toHaveBeenCalled();
+
+    setVisibility('visible');
+    fireVisibilityChange();
+    // The poll is DEBOUNCED (2 s) — before the window elapses, none.
+    jest.advanceTimersByTime(1999);
+    expect(fetch).not.toHaveBeenCalled();
+    jest.advanceTimersByTime(1);
+    expect(fetch).toHaveBeenCalledTimes(1); // EXACTLY ONE catch-up poll
+  });
+
+  it('a rapid hide/show storm collapses into ONE poll', async () => {
+    const { service, fetch } = harness(activeResponse);
+    service.startCommand('inst-1', makeAck());
+    service.syncPolling('inst-1', false);
+
+    setVisibility('hidden');
+    fireVisibilityChange();
+    setVisibility('visible');
+    fireVisibilityChange();
+    setVisibility('hidden');
+    fireVisibilityChange();
+    setVisibility('visible');
+    fireVisibilityChange();
+
+    jest.advanceTimersByTime(2000);
+    expect(fetch).toHaveBeenCalledTimes(1); // ONE catch-up poll, not four
+  });
+
+  it('stopAllTimers detaches the visibility listener and stops the poll', async () => {
+    const { service, fetch } = harness(activeResponse);
+    service.startCommand('inst-1', makeAck());
+    service.syncPolling('inst-1', false);
+
+    const removeSpy = jest.spyOn(document, 'removeEventListener');
+    service.stopAllTimers();
+    expect(removeSpy).toHaveBeenCalledWith('visibilitychange', expect.any(Function));
+    removeSpy.mockRestore();
+
+    jest.advanceTimersByTime(POLL_INTERVAL_MS * 4);
+    expect(fetch).not.toHaveBeenCalled();
+
+    // A visibilitychange after the teardown issues NO request either.
+    setVisibility('hidden');
+    fireVisibilityChange();
+    setVisibility('visible');
+    fireVisibilityChange();
+    jest.advanceTimersByTime(2000);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('the 5 s cadence is UNCHANGED — the gate suppresses ticks, it does not slow them', async () => {
+    const { service, fetch } = harness(activeResponse);
+    service.startCommand('inst-1', makeAck());
+    service.syncPolling('inst-1', false);
+    jest.advanceTimersByTime(POLL_INTERVAL_MS);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    jest.advanceTimersByTime(POLL_INTERVAL_MS);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe('CommandStateService — refetch trigger exactly-once (Task 7 / SC8)', () => {
   it('duplicate terminal events (reconcile + SSE) bump the refetch ONCE per command', async () => {
     const service = new CommandStateService();

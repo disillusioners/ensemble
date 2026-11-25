@@ -1,0 +1,44 @@
+-- Migration: add instances.boot_re_drive_at (boot-consistency reconciler CAS marker)
+-- Created: 2026-11-23
+-- Commission: fix/post-outage-recovery SCOPE (b) — adjudicated boot-consistency
+--   reconciler. Post-outage RCA: the boot-window queue recovery/GC leg deletes
+--   durable mq/task rows that RUNNING instance rows depend on, while no
+--   instance-side boot seam reconciles the row state — leaving status='running'
+--   with nothing to consume and no durable trace of the turn.
+--
+-- What this column is:
+--   A nullable naive-UTC TIMESTAMP — the boot epoch of the last boot-consistency
+--   reconciliation that successfully DISPATCHED or RETIRED this instance. It is
+--   the CAS marker for the new lane, mirroring ``task.auto_continued_at``
+--   (daemon/repositories/task/models.py:294) exactly:
+--
+--     UPDATE instances SET boot_re_drive_at = :boot_epoch
+--     WHERE instance_id = :iid AND status = 'running'
+--       AND (boot_re_drive_at IS NULL OR boot_re_drive_at < :boot_epoch)
+--
+--   The ``< :boot_epoch`` arm re-arms per boot generation (a still-RUNNING
+--   instance after a stamp is re-considered on the NEXT boot); the CAS is
+--   stamped ONLY AFTER the schedule/disposition succeeds, so there is no
+--   marked-but-never-re-driven window. The residual gap (crash between
+--   schedule-return and stamp) re-arms next boot — safe.
+--
+-- DUAL-DRIVER NOTES
+--   - SQLite (this file): applied by the .sql runner on every startup
+--     (ADD COLUMN is guarded by the runner's applied-version ledger).
+--   - PostgreSQL: the schema comes from SQLModel create_all (the Instance
+--     SQLModel in daemon/repositories/instance/models.py carries the field)
+--     plus the probe/idempotent ALTER in
+--     daemon/manager.py::_ensure_postgres_columns. The .sql runner is a NO-OP
+--     on PG.
+--   - Naive-UTC digits frame (DC-A): TIMESTAMP WITHOUT TIME ZONE on PG, TEXT
+--     on SQLite — same frame as ``task.auto_continued_at`` / ``boot_epoch``.
+--
+-- ROLLBACK POSTURE: additive only. DOWN leaves the column in place (SQLite
+-- cannot DROP COLUMN easily); the code ignores it when the lane is fenced off.
+
+-- UP
+
+ALTER TABLE instances ADD COLUMN boot_re_drive_at TIMESTAMP;
+
+-- DOWN
+-- SQLite cannot DROP COLUMN easily; leave the column in place (additive-only).

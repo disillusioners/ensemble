@@ -101,6 +101,14 @@ Both are named here for the operator; the launcher-side switch is the second
 enumerated hard **ceremony pre-step** — its value must be stated in the
 ceremony notes. `=0` is an escape hatch, **never** a permanent state.
 
+**The LD-1(e) reversion family is a TRIO** (review-fix m7, 2026-11-20): the
+two switches above **plus** `WATCHDOG_HOLD_ENABLED` (default **1**; `=0`
+runs the ceremony without the watchdog hold — prevention off, containment
+(c) the only defence). Together these three add-only kill-switches revert
+the LD-1 envelope's protections (async serving-green observation, the
+closer lane, watchdog prevention) to the base halt-for-human / unconditional
+dispositions — the complete revert surface, named once here.
+
 A third knob exists for the daemon's boot-grace horizon:
 `UPGRADE_CLOSER_BOOT_GRACE_S` (default **300**, **env-overridable, RAISE-only**
 — it may never be lowered below the hand-back budget's 300 s floor, because

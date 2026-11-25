@@ -21,6 +21,7 @@ from sqlmodel import SQLModel
 
 import daemon.repositories.pok.models  # noqa: F401 — register the tables
 from daemon.repositories.pok.models import (
+    POKWriteGateLedger,
     ProjectOperatingKnowledge,
     ProjectOperatingKnowledgeEmbedding,
 )
@@ -41,6 +42,7 @@ def svc():
         tables=[
             ProjectOperatingKnowledge.__table__,
             ProjectOperatingKnowledgeEmbedding.__table__,
+            POKWriteGateLedger.__table__,
         ],
     )
     return POKService(engine)
@@ -291,7 +293,7 @@ class TestAc16DisputeAndArchive:
 
 
 class TestAc19TerminalityCured:
-    def test_active_cap_constant_is_512(self) -> None:
+    def test_active_cap_constant_is_1024(self) -> None:
         """The shipped active-entry cap is PINNED.
 
         The refusal leg below seeds the active counter (it never
@@ -300,7 +302,7 @@ class TestAc19TerminalityCured:
         """
         from daemon.services.pok_service import POK_ACTIVE_CAP_PER_PROJECT
 
-        assert POK_ACTIVE_CAP_PER_PROJECT == 512
+        assert POK_ACTIVE_CAP_PER_PROJECT == 1024
 
     def test_active_cap_refuse_then_archive_cure_then_succeed(
         self, svc: POKService, monkeypatch: pytest.MonkeyPatch
@@ -319,7 +321,7 @@ class TestAc19TerminalityCured:
         # The refusal mechanics below are cap-agnostic (the counter is
         # seeded), so THIS pin is what makes the refusal leg itself
         # red when the cap regresses to an older value.
-        assert cap == 512
+        assert cap == 1024
 
         seeded = 3
         for i in range(seeded):
@@ -378,6 +380,17 @@ class TestAc19TerminalityCured:
         assert out.action == "created"
 
     def test_family_full_refusal_names_the_cure(self, svc: POKService) -> None:
+        """PREMISE CORRECTION (fix iteration 1, F1): the refusal must
+        advertise a WORKABLE cure.
+
+        A same-slug supersede is COUNT-PRESERVING by construction (the
+        prior active row leaves ``active`` in the same transaction the
+        successor enters it — both carry the same slug, hence the same
+        family) — it does NOT free a slot; only ARCHIVING one via
+        pok_curate does. The old message offered the supersede as a
+        slot-freeing cure, which is the unworkable-cure defect. This
+        test now pins the WORKABLE cure and, if a supersede is
+        mentioned at all, pins its non-slot-freeing qualifier."""
         from daemon.services.pok_service import POK_FAMILY_MAX
 
         for i in range(POK_FAMILY_MAX):
@@ -395,6 +408,84 @@ class TestAc19TerminalityCured:
                 agent_id="developer",
             )
         assert ei.value.code == "pok_family_full"
+        msg = ei.value.message
+        # the family, its LIVE size, and the ACTIVE member slugs
+        assert "'dep'" in msg
+        assert f"holds {POK_FAMILY_MAX} active entries" in msg
+        for i in range(POK_FAMILY_MAX):
+            assert f"dep-{i + 1:02d}-m" in msg
+        # the ONLY slot-freeing cure is ARCHIVE-via-pok_curate …
+        assert "archive one via pok_curate to free a slot" in msg
+        # … and the supersede, WHICH THE MESSAGE ALWAYS OFFERS, must be
+        # qualified as NOT slot-freeing (a bare supersede claim = the F1
+        # defect). UNCONDITIONAL (fix iteration 2, W6): the old
+        # ``if "supersede" in msg:`` guard proved NOTHING — a message
+        # that silently dropped the supersede stayed green.
+        assert "supersede" in msg
+        assert "does not free a slot" in msg.lower()
+        # the members are the family's OWN rows (strict family-key
+        # equality — the old ``startswith`` superset is GONE).
+        assert "active family members" in msg
+        # the archive count is DERIVED from the live count (CRITICAL 1).
+        assert ei.value.details["archive_needed"] == 1
+
+    def test_over_cap_refusal_reports_live_count_and_archive_need(
+        self, svc: POKService
+    ) -> None:
+        """CRITICAL 2 (fix iteration 2): the refusal must report the LIVE
+        count and the ARCHIVE COUNT — not echo the bound.
+
+        The at-cap case (live == bound) is satisfied by a service that
+        reports the constant forever, so this test seeds the family
+        OVER CAP directly through the REPOSITORY (the service gate is
+        bypassed): 4 seeded members against a bound of 3. A
+        bound-echoing message (3) therefore FAILS here, and so does the
+        singular "archive one … to free a slot" cure — archiving one
+        would still leave 3 (>= the bound), so the real cure is 2.
+        """
+        from daemon.services.pok_service import POK_FAMILY_MAX
+
+        for i in range(POK_FAMILY_MAX + 1):
+            svc._repo.insert(
+                ProjectOperatingKnowledge(
+                    project_id="p5",
+                    slug=f"over-cap-{i + 1:02d}-m",
+                    body=f"seeded member {i}",
+                    content_sha256=content_hash(f"seeded member {i}"),
+                    created_by_agent="developer",
+                )
+            )
+        # the seeding bypassed the gate — the family is already OVER cap
+        assert svc._repo.count_active_in_family("p5", "over-cap") == POK_FAMILY_MAX + 1
+        with pytest.raises(POKError) as ei:
+            svc.upsert(
+                project_id="p5",
+                slug="over-cap-05-m",
+                body="the 5th member",
+                agent_id="developer",
+            )
+        assert ei.value.code == "pok_family_full"
+        msg = ei.value.message
+        # the LIVE count (4) — NOT the bound (3)
+        assert f"holds {POK_FAMILY_MAX + 1} active entries" in msg
+        assert f"holds {POK_FAMILY_MAX} active entries" not in msg
+        # the OVER-BY amount and the bound are both named
+        assert "over the bound by 1" in msg
+        assert f"the bound of {POK_FAMILY_MAX}" in msg
+        # the ARCHIVE COUNT (need = live - bound + 1 = 2) — message AND details
+        need = POK_FAMILY_MAX + 1 - POK_FAMILY_MAX + 1
+        assert need == 2
+        assert "archive (at least) 2 members" in msg
+        assert ei.value.details["archive_needed"] == need
+        assert ei.value.details["active_count"] == POK_FAMILY_MAX + 1
+        assert ei.value.details["family"] == "over-cap"
+        # the seeded members are listed as the family's OWN rows
+        assert "active family members" in msg
+        for i in range(POK_FAMILY_MAX + 1):
+            assert f"over-cap-{i + 1:02d}-m" in msg
+        # the supersede stays offered, qualified as slot-neutral
+        assert "supersede" in msg
+        assert "does not free a slot" in msg.lower()
 
     def test_pin_cap_refusal_names_the_current_pins(self, svc: POKService) -> None:
         from daemon.services.pok_service import POK_PIN_CAP_PER_PROJECT
@@ -638,19 +729,126 @@ class TestAc3Ac23UniversalRead:
         second = svc._repo.get(out.entry.id).last_verified
         assert second is not None and second > first
 
+
+class TestQueryRetrievalLedger:
+    """pok-write-gate Phase 12 — the QUERY-side retrieval wiring (the
+    last unwired retrieval leg): ``POKService.query`` appends one
+    ledger RETRIEVAL row per returned row with ``source="query"``.
+
+    The ledger's retrieval counts SUPERSEDE ``access_count`` for the
+    librarian because they disambiguate query-vs-injection
+    (design-amendments-v2 §13.2 fork J, amendment 1) — ``access_count``
+    stays the LEGACY corroborator (query-only semantics, its sole
+    increment remains ``bump_access`` on this path). Fence discipline:
+    throwaway in-memory SQLite, scratch fixtures only, no live store.
+    """
+
+    def _seed(self, svc: POKService) -> None:
+        svc.upsert(
+            project_id="p1", slug="qret-01-alpha",
+            body="alpha retrieval fact", agent_id="devops",
+        )
+        svc.upsert(
+            project_id="p1", slug="qret-02-beta",
+            body="beta retrieval fact", agent_id="devops",
+        )
+
+    def test_query_appends_retrieval_rows_source_query(
+        self, svc: POKService
+    ) -> None:
+        """THE wiring leg: one ``source="query"`` RETRIEVAL ledger row
+        per row the query RETURNED, stamped with entry_id, slug and
+        the reading agent."""
+        self._seed(svc)
+        q = svc.query(project_id="p1", query="retrieval fact", agent_id="worker")
+        assert len(q.entries) == 2
+
+        rows = svc._repo.query_ledger("p1", phase="RETRIEVAL")
+        assert len(rows) == 2
+        assert all(r.source == "query" for r in rows)
+        assert all(r.phase == "RETRIEVAL" for r in rows)
+        assert {r.candidate_slug for r in rows} == {"qret-01-alpha", "qret-02-beta"}
+        assert all(r.entry_id for r in rows)
+        assert all(r.agent_id == "worker" for r in rows)
+
+    def test_source_column_disambiguates_query_from_injection(
+        self, svc: POKService
+    ) -> None:
+        """The J-metric chain: the ``source`` filter separates the
+        query side from the injection side — the whole point of the
+        ledger's retrieval counts."""
+        self._seed(svc)
+        svc.query(project_id="p1", query="retrieval fact", agent_id="worker")
+        assert len(svc._repo.query_ledger("p1", source="query")) == 2
+        assert svc._repo.query_ledger("p1", source="injection") == []
+        assert svc._repo.count_ledger_phase("p1", "RETRIEVAL") == 2
+
+    def test_empty_result_logs_nothing(self, svc: POKService) -> None:
+        """A query that returns no entries appends no ledger row —
+        nothing was retrieved."""
+        q = svc.query(project_id="p-empty", query="anything", agent_id="worker")
+        assert q.entries == []
+        assert svc._repo.query_ledger("p-empty", phase="RETRIEVAL") == []
+
+    def test_ledger_append_failure_never_breaks_the_read(
+        self, svc: POKService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """§4.9 never-raise (double containment): a ledger append that
+        fails costs the retrieval metric, NEVER the read."""
+        self._seed(svc)
+        real_append = svc._repo.append_ledger
+
+        def _boom(_entry):  # noqa: ANN001
+            raise RuntimeError("ledger append exploded")
+
+        monkeypatch.setattr(svc._repo, "append_ledger", _boom)
+        q = svc.query(project_id="p1", query="retrieval fact", agent_id="worker")
+        assert len(q.entries) == 2  # the read is unaffected
+        monkeypatch.setattr(svc._repo, "append_ledger", real_append)
+
+    def test_access_count_and_ledger_coexist_not_double_counted(
+        self, svc: POKService
+    ) -> None:
+        """Amendment-1 alignment: ``access_count`` (the legacy
+        corroborator, query-only semantics — its sole increment is
+        ``bump_access`` on this path) and the ledger RETRIEVAL row
+        (the durable record) each increment exactly ONCE per row per
+        query — the wiring adds the ledger leg without double-counting
+        the access counter."""
+        self._seed(svc)
+        out_a = svc.upsert(  # no-op dup: seeds are already written
+            project_id="p1", slug="qret-01-alpha",
+            body="alpha retrieval fact", agent_id="devops",
+        )
+        assert out_a.action == "no-op"
+        svc.query(project_id="p1", query="retrieval fact", agent_id="worker")
+        row = svc._repo.get(out_a.entry.id)
+        assert row.access_count == 1  # bumped exactly once
+        assert row.last_accessed_at is not None
+        assert len(svc._repo.query_ledger("p1", phase="RETRIEVAL")) == 2
+        svc.query(project_id="p1", query="retrieval fact", agent_id="worker")
+        row = svc._repo.get(out_a.entry.id)
+        assert row.access_count == 2  # still exactly one bump per query
+        assert len(svc._repo.query_ledger("p1", phase="RETRIEVAL")) == 4
+
 class TestCountActiveInFamilyBoundary:
     """Item 7 (council micro-fold): count_active_in_family regex verdict.
 
-    VERDICT: CORRECT for the family-key semantics. Family keys come
-    from ``_slug_family`` = regex group 1 = ``[a-z][a-z0-9]*`` (no
-    hyphens), and ``count_active_in_family`` matches
-    ``slug.startswith(f"{family}-")``. A hyphenated tail cannot create
-    a false family match because the family itself never contains a
-    hyphen; a family that is a string-prefix of another (e.g. "dep"
-    vs "deploy") cannot collide because both are followed by "-" and
-    "dep-" != "deploy-". Non-matching slugs (no NN ordinal) are
-    excluded upstream (``_slug_family`` returns None). Cases below
-    pin this.
+    VERDICT (STRICT family-key membership — the prefix-superset is GONE).
+    Family keys come from ``_slug_family`` = regex group 1 = a
+    (possibly hyphenated) run of letter-led tokens
+    (``[a-z][a-z0-9]*(?:-[a-z][a-z0-9]*)*``), and
+    ``count_active_in_family`` now counts EXACT family-key equality:
+    ``pok_family_key(slug) == family``. A hyphenated family head (e.g.
+    ``prompt-assent``) is a real family key, not collapsed to its first
+    token. Non-matching slugs (no NN ordinal) are excluded upstream
+    (``_slug_family`` returns None).
+
+    Family membership is EXACT family-key equality: a longer family
+    never inflates a shorter one. The old one-directional leak
+    (long family -> short family via ``startswith``) is GONE: ``skill``
+    counts only ``skill`` rows and ``skill-e6`` counts only
+    ``skill-e6`` rows.
     """
 
     def test_hyphenated_tails_counted_in_same_family(self, svc: POKService) -> None:
@@ -665,6 +863,18 @@ class TestCountActiveInFamilyBoundary:
         svc.upsert(project_id="p1", slug="deploy-01-b", body="b", agent_id="d")
         assert svc._repo.count_active_in_family("p1", "dep") == 1
         assert svc._repo.count_active_in_family("p1", "deploy") == 1
+
+    def test_prefix_sharing_no_longer_leaks_across_families(self, svc: POKService) -> None:
+        """Under strict semantics there is NO leak: ``skill-01-a`` is
+        family ``skill``, ``skill-e6-01-x`` is family ``skill-e6``.
+        The OLD one-directional leak (long family -> short family) is
+        FIXED.
+        """
+        svc.upsert(project_id="p1", slug="skill-01-a", body="a", agent_id="d")
+        svc.upsert(project_id="p1", slug="skill-e6-01-x", body="b", agent_id="d")
+        # strict: each family counts only its own true members
+        assert svc._repo.count_active_in_family("p1", "skill") == 1
+        assert svc._repo.count_active_in_family("p1", "skill-e6") == 1
 
     def test_non_matching_slug_excluded(self, svc: POKService) -> None:
         # no NN ordinal → _slug_family returns None → the service skips
@@ -692,6 +902,162 @@ class TestCountActiveInFamilyBoundary:
         assert normalize_body("A\nB") == "a b"
         assert content_hash("x") == content_hash("x")
         assert content_hash("x") != content_hash("y")
+
+
+# ── Multi-token family key (corrected pattern) ────────────────────────────
+
+
+class TestMultiTokenFamilyKey:
+    """The CORRECTED (multi-token) family key — fix iteration 2.
+
+    The family key is the maximal run of letter-led tokens before the
+    leftmost ``-NN-`` ordinal: ``prompt-assent-01-x`` → family
+    ``prompt-assent`` (NOT ``prompt``), ``snapshot-l3-02-y`` →
+    ``snapshot-l3``. A slug with no ``-NN-`` ordinal has NO family and
+    is exempt from the family gate.
+
+    Pinned here: the family-key helper (direct), the LITERAL pattern
+    constant (the single source in ``daemon/repositories/pok/models.py``),
+    the at-cap refusal, STRICT membership (no prefix-superset leak),
+    and the supersede exemption.
+    """
+
+    def test_family_key_pattern_literal_pin(self) -> None:
+        """LITERAL pin on the canonical pattern constant (fix iteration
+        2, suggestion 1). The helper is DERIVED from it, so any change
+        to the constant must show up as a DELIBERATE, visible diff
+        here — not as a silent behaviour change."""
+        from daemon.repositories.pok.models import POK_FAMILY_SLUG_PATTERN
+
+        assert POK_FAMILY_SLUG_PATTERN == (
+            r"^([a-z][a-z0-9]*(?:-[a-z][a-z0-9]*)*)-(\d{2})-(.+)$"
+        )
+
+    def test_multi_token_gate_refuses_fourth_member(self, svc: POKService) -> None:
+        from daemon.services.pok_service import POK_FAMILY_MAX
+
+        for i in range(POK_FAMILY_MAX):
+            svc.upsert(
+                project_id="pm1",
+                slug=f"prompt-assent-{i + 1:02d}-x",
+                body=f"member {i}",
+                agent_id="developer",
+            )
+        with pytest.raises(POKError) as ei:
+            svc.upsert(
+                project_id="pm1",
+                slug="prompt-assent-04-y",
+                body="the 4th member",
+                agent_id="developer",
+            )
+        assert ei.value.code == "pok_family_full"
+        msg = str(ei.value)
+        assert "prompt-assent" in msg
+        # COUNT PIN (fix iteration 1, F2): a bare `"3" in msg` is
+        # satisfiable by the BOUND digit alone (3 appears in the bound
+        # text too) — it proved nothing about the LIVE count. Pin the
+        # phrase that carries the live count AND the structured value
+        # the service passes (POKError.details).
+        assert f"holds {POK_FAMILY_MAX} active entries" in msg
+        assert ei.value.details["active_count"] == POK_FAMILY_MAX
+        assert ei.value.details["family"] == "prompt-assent"
+        for i in range(POK_FAMILY_MAX):
+            assert f"prompt-assent-{i + 1:02d}-x" in msg
+
+    def test_family_key_regex_pins_direct(self) -> None:
+        """DIRECT pins on the corrected family key (fix iteration 1,
+        F3).
+
+        The corrected regex was otherwise pinned only TRANSITIVELY:
+        under the OLD single-token pattern this class still reported
+        3 passes — the other tests were pattern-insensitive. These
+        pins are on the helper itself: a multi-token head IS a family
+        key (group 1 = the whole letter-led token run), and a slug
+        with no ``-NN-`` ordinal is NOT family-ordered."""
+        from daemon.services.pok_service import _slug_family
+
+        # positives — the hyphenated head is the family key
+        assert _slug_family("prompt-assent-01-x") == "prompt-assent"
+        assert _slug_family("snapshot-l3-02-y") == "snapshot-l3"
+        assert _slug_family("skill-e6-04-a4-gauge") == "skill-e6"
+        # negatives — no NN ordinal → no family (None → the service
+        # skips the family-count check entirely)
+        assert _slug_family("daoduc-helm-release-v28-kubectl-patch") is None
+        assert _slug_family("artifact-is-container-image") is None
+
+    def test_unnumbered_slug_excluded_from_strict_count(self, svc: POKService) -> None:
+        """Strict count: ``verify-03-a`` is family ``verify``;
+        ``verify-something-unnumbered`` has NO family (no ``-NN-``
+        ordinal). The unnumbered row is EXCLUDED, so the strict count
+        is 1.
+        """
+        svc.upsert(project_id="pu", slug="verify-03-a", body="a", agent_id="d")
+        svc.upsert(
+            project_id="pu", slug="verify-something-unnumbered", body="b", agent_id="d"
+        )
+        assert svc._repo.count_active_in_family("pu", "verify") == 1
+
+    def test_unnumbered_row_no_longer_pushes_over_cap(self, svc: POKService) -> None:
+        """The unnumbered row no longer occupies a slot, so
+        ``verify-03-d`` is ADMITTED, not refused.
+        """
+        svc.upsert(project_id="pu2", slug="verify-01-a", body="a", agent_id="d")
+        svc.upsert(project_id="pu2", slug="verify-02-b", body="b", agent_id="d")
+        svc.upsert(
+            project_id="pu2", slug="verify-something-unnumbered", body="c", agent_id="d"
+        )
+        out = svc.upsert(project_id="pu2", slug="verify-03-d", body="d", agent_id="d")
+        assert out.action == "created"
+
+    def test_supersede_exemption_multi_token(self, svc: POKService) -> None:
+        for i in range(3):
+            svc.upsert(
+                project_id="ps",
+                slug=f"prompt-assent-{i + 1:02d}-m",
+                body=f"member {i}",
+                agent_id="developer",
+            )
+        swapped = svc.upsert(
+            project_id="ps",
+            slug="prompt-assent-01-m",
+            body="member 0 v2",
+            agent_id="developer",
+        )
+        assert swapped.action == "superseded"
+
+    def test_other_family_rows_do_not_refuse_a_different_family(
+        self, svc: POKService
+    ) -> None:
+        """W2 (fix iteration 2, pin a): another family's rows must NOT
+        refuse a DIFFERENT family's admission.
+
+        ``skill-e6``'s own prefix count is 1 (its own rows only) — the
+        ``skill`` family's rows do NOT leak INTO the long family (the
+        leak runs long → short, one way), so the admission succeeds.
+        """
+        svc.upsert(project_id="pw", slug="skill-01-a", body="a", agent_id="d")
+        svc.upsert(project_id="pw", slug="skill-02-b", body="b", agent_id="d")
+        svc.upsert(project_id="pw", slug="skill-e6-01-x", body="c", agent_id="d")
+        # the long family's own count is 1 — the short family's rows do
+        # NOT leak into it
+        assert svc._repo.count_active_in_family("pw", "skill-e6") == 1
+        out = svc.upsert(
+            project_id="pw", slug="skill-e6-02-y", body="d", agent_id="d"
+        )
+        assert out.action == "created"
+
+    def test_no_prefix_leak_admits_third_member(
+        self, svc: POKService
+    ) -> None:
+        """Under strict semantics ``skill-01-a`` + ``skill-02-b`` are the
+        only true members of ``skill``, so ``skill-03-z`` is ADMITTED
+        (the prefix leak no longer refuses the short family).
+        """
+        svc.upsert(project_id="px", slug="skill-01-a", body="a", agent_id="d")
+        svc.upsert(project_id="px", slug="skill-02-b", body="b", agent_id="d")
+        svc.upsert(project_id="px", slug="skill-e6-01-x", body="c", agent_id="d")
+        out = svc.upsert(project_id="px", slug="skill-03-z", body="d", agent_id="d")
+        assert out.action == "created"
 
 
 # ── TASK-2: the slug→row resolver — curation must reach the OWNER ───────

@@ -922,6 +922,7 @@ class TestObserverJobLinkage:
 
         bus_mock = MagicMock()
         bus_mock.count_pending_for_target_sync = lambda _iid: 0
+        bus_mock.count_fulfillable_pending_for_target_sync = lambda _iid, **kw: 0
         set_dependency_bus(bus_mock)
         try:
             observer = _bare_observer(engine)

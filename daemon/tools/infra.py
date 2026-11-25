@@ -46,8 +46,8 @@ import logging
 import os
 from typing import TYPE_CHECKING, Any
 
-from langchain_core.tools import tool
 
+from ._schema_registry import tool
 from ._tool_registry import register_tool_category
 from daemon.services.env_key_policy import (
     env_key_is_secret_shaped,

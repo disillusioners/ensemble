@@ -75,6 +75,7 @@ def _make_bus_mock(
     """
     bus_mock = MagicMock()
     bus_mock.count_pending_for_target = AsyncMock(return_value=count_pending)
+    bus_mock.count_fulfillable_pending_for_target = AsyncMock(return_value=count_pending)
     bus_mock.had_parent_error = MagicMock(return_value=had_parent_error)
     bus_mock.clear_parent_error = MagicMock()
     return bus_mock

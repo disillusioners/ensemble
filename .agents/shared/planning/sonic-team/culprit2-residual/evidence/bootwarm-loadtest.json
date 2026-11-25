@@ -1,0 +1,2431 @@
+{
+  "schema": "bootwarm-loadtest/v1",
+  "generated_at_iso": "2026-11-20T08:13:11Z",
+  "worktree": "/home/nea/ensemble-src-wt-c2r-loadtest",
+  "scratch": "/tmp/bootwarm-final",
+  "daemon_entrypoint": "/home/nea/ensemble-src-wt-c2r-loadtest/.venv/bin/python -m daemon",
+  "env_file": "/home/nea/ensemble-src-wt-c2r-loadtest/.env",
+  "fences": {
+    "port": 18079,
+    "database": "ensemble_dev_scratch",
+    "ens_self_env": "dev",
+    "boot_sweep_stale_subprocesses": "0",
+    "db_ambient_allow": "1",
+    "data_dir": "/tmp/bootwarm-final/data",
+    "forbidden_ports_not_contacted": [
+      9797,
+      8079
+    ],
+    "ambient_env_inherited": [
+      "PATH",
+      "HOME",
+      "LANG",
+      "LC_ALL",
+      "TZ",
+      "TERM",
+      "USER",
+      "LOGNAME",
+      "SHELL",
+      "TMPDIR"
+    ],
+    "note_db_ambient_allow": "ENSEMBLE_DB_AMBIENT_ALLOW=1 is the daemon's OWN sanctioned escape hatch for the tier-2 (ambient POSTGRES_*) first boot (daemon/ensemble_config.py:138); without it the daemon exits 78 BEFORE any TCP connection."
+  },
+  "host": {
+    "cpu_count": 16,
+    "loadavg_at_start": {
+      "1m": 4.48,
+      "5m": 5.25,
+      "15m": 4.58
+    }
+  },
+  "verdict_rule": "regression iff median(time_to_readyz(A)) - median(time_to_readyz(B)) > 1.0 s",
+  "legs": {
+    "A": {
+      "label": "warm ON (shipped shape)",
+      "warm_enabled": true,
+      "contention_processes": 0,
+      "pinned_to_cpu": null,
+      "summary": {
+        "n_boots": 3,
+        "time_to_readyz_s": {
+          "n": 3,
+          "values": [
+            17.983,
+            18.8402,
+            19.2544
+          ],
+          "median": 18.8402,
+          "min": 17.983,
+          "max": 19.2544,
+          "mean": 18.6925,
+          "stdev": 0.5294,
+          "spread_s": 1.2714,
+          "median_abs_dev_s": 0.4142
+        },
+        "app_banner_to_readyz_s": {
+          "n": 3,
+          "values": [
+            9.6379,
+            10.0592,
+            10.117
+          ],
+          "median": 10.0592,
+          "min": 9.6379,
+          "max": 10.117,
+          "mean": 9.938,
+          "stdev": 0.2135,
+          "spread_s": 0.4791,
+          "median_abs_dev_s": 0.0578
+        },
+        "prebind_to_readyz_s": {
+          "n": 3,
+          "values": [
+            14.083,
+            14.6566,
+            14.7971
+          ],
+          "median": 14.6566,
+          "min": 14.083,
+          "max": 14.7971,
+          "mean": 14.5122,
+          "stdev": 0.3089,
+          "spread_s": 0.7141,
+          "median_abs_dev_s": 0.1405
+        },
+        "launch_to_lifespan_start_s": {
+          "n": 3,
+          "values": [
+            10.2026,
+            10.7556,
+            11.2564
+          ],
+          "median": 10.7556,
+          "min": 10.2026,
+          "max": 11.2564,
+          "mean": 10.7382,
+          "stdev": 0.4304,
+          "spread_s": 1.0538,
+          "median_abs_dev_s": 0.5008
+        },
+        "lifespan_duration_s": {
+          "n": 3,
+          "values": [
+            7.7656,
+            7.9807,
+            8.0692
+          ],
+          "median": 7.9807,
+          "min": 7.7656,
+          "max": 8.0692,
+          "mean": 7.9385,
+          "stdev": 0.1275,
+          "spread_s": 0.3036,
+          "median_abs_dev_s": 0.0885
+        },
+        "warm_duration_s": {
+          "n": 3,
+          "values": [
+            4.1302,
+            4.2792,
+            4.3342
+          ],
+          "median": 4.2792,
+          "min": 4.1302,
+          "max": 4.3342,
+          "mean": 4.2479,
+          "stdev": 0.0862,
+          "spread_s": 0.204,
+          "median_abs_dev_s": 0.055
+        },
+        "warm_overlap_lifespan_s": {
+          "n": 3,
+          "values": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "median": 0.0,
+          "min": 0.0,
+          "max": 0.0,
+          "mean": 0.0,
+          "stdev": 0.0,
+          "spread_s": 0.0,
+          "median_abs_dev_s": 0.0
+        },
+        "warm_overlap_pre_lifespan_s": {
+          "n": 3,
+          "values": [
+            4.1302,
+            4.2792,
+            4.3342
+          ],
+          "median": 4.2792,
+          "min": 4.1302,
+          "max": 4.3342,
+          "mean": 4.2479,
+          "stdev": 0.0862,
+          "spread_s": 0.204,
+          "median_abs_dev_s": 0.055
+        },
+        "warm_start_after_launch_s": {
+          "n": 3,
+          "values": [
+            3.7725,
+            3.9132,
+            4.4285
+          ],
+          "median": 3.9132,
+          "min": 3.7725,
+          "max": 4.4285,
+          "mean": 4.0381,
+          "stdev": 0.282,
+          "spread_s": 0.656,
+          "median_abs_dev_s": 0.1407
+        },
+        "warm_end_after_launch_s": {
+          "n": 3,
+          "values": [
+            7.9027,
+            8.2474,
+            8.7077
+          ],
+          "median": 8.2474,
+          "min": 7.9027,
+          "max": 8.7077,
+          "mean": 8.2859,
+          "stdev": 0.3298,
+          "spread_s": 0.805,
+          "median_abs_dev_s": 0.3447
+        },
+        "warm_schemas_memoised": [
+          237,
+          237,
+          237
+        ],
+        "all_boots_ready": true,
+        "forced_kills": 0,
+        "crashed_boots": 0
+      },
+      "boot_indices": [
+        0,
+        1,
+        2
+      ]
+    },
+    "B": {
+      "label": "warm OFF (ENSEMBLE_SCHEMA_REGISTRY_WARM=0)",
+      "warm_enabled": false,
+      "contention_processes": 0,
+      "pinned_to_cpu": null,
+      "summary": {
+        "n_boots": 3,
+        "time_to_readyz_s": {
+          "n": 3,
+          "values": [
+            15.9878,
+            16.1409,
+            17.5526
+          ],
+          "median": 16.1409,
+          "min": 15.9878,
+          "max": 17.5526,
+          "mean": 16.5604,
+          "stdev": 0.7043,
+          "spread_s": 1.5648,
+          "median_abs_dev_s": 0.1531
+        },
+        "app_banner_to_readyz_s": {
+          "n": 3,
+          "values": [
+            10.6264,
+            10.9282,
+            11.676
+          ],
+          "median": 10.9282,
+          "min": 10.6264,
+          "max": 11.676,
+          "mean": 11.0769,
+          "stdev": 0.4412,
+          "spread_s": 1.0496,
+          "median_abs_dev_s": 0.3018
+        },
+        "prebind_to_readyz_s": {
+          "n": 3,
+          "values": [
+            11.9672,
+            12.2196,
+            13.2243
+          ],
+          "median": 12.2196,
+          "min": 11.9672,
+          "max": 13.2243,
+          "mean": 12.4704,
+          "stdev": 0.543,
+          "spread_s": 1.2571,
+          "median_abs_dev_s": 0.2524
+        },
+        "launch_to_lifespan_start_s": {
+          "n": 3,
+          "values": [
+            6.6283,
+            6.8764,
+            7.918
+          ],
+          "median": 6.8764,
+          "min": 6.6283,
+          "max": 7.918,
+          "mean": 7.1409,
+          "stdev": 0.5587,
+          "spread_s": 1.2897,
+          "median_abs_dev_s": 0.2481
+        },
+        "lifespan_duration_s": {
+          "n": 3,
+          "values": [
+            9.0988,
+            9.4958,
+            9.6598
+          ],
+          "median": 9.4958,
+          "min": 9.0988,
+          "max": 9.6598,
+          "mean": 9.4181,
+          "stdev": 0.2355,
+          "spread_s": 0.561,
+          "median_abs_dev_s": 0.164
+        },
+        "warm_duration_s": {
+          "n": 0,
+          "values": []
+        },
+        "warm_overlap_lifespan_s": {
+          "n": 0,
+          "values": []
+        },
+        "warm_overlap_pre_lifespan_s": {
+          "n": 0,
+          "values": []
+        },
+        "warm_start_after_launch_s": {
+          "n": 0,
+          "values": []
+        },
+        "warm_end_after_launch_s": {
+          "n": 0,
+          "values": []
+        },
+        "warm_schemas_memoised": [
+          null,
+          null,
+          null
+        ],
+        "all_boots_ready": true,
+        "forced_kills": 0,
+        "crashed_boots": 0
+      },
+      "boot_indices": [
+        0,
+        1,
+        2
+      ]
+    },
+    "C": {
+      "label": "warm ON + 2 busy-loop processes",
+      "warm_enabled": true,
+      "contention_processes": 2,
+      "pinned_to_cpu": null,
+      "summary": {
+        "n_boots": 3,
+        "time_to_readyz_s": {
+          "n": 3,
+          "values": [
+            17.5585,
+            18.2374,
+            18.2663
+          ],
+          "median": 18.2374,
+          "min": 17.5585,
+          "max": 18.2663,
+          "mean": 18.0207,
+          "stdev": 0.3271,
+          "spread_s": 0.7078,
+          "median_abs_dev_s": 0.0289
+        },
+        "app_banner_to_readyz_s": {
+          "n": 3,
+          "values": [
+            9.4674,
+            9.781,
+            9.8128
+          ],
+          "median": 9.781,
+          "min": 9.4674,
+          "max": 9.8128,
+          "mean": 9.6871,
+          "stdev": 0.1559,
+          "spread_s": 0.3454,
+          "median_abs_dev_s": 0.0318
+        },
+        "prebind_to_readyz_s": {
+          "n": 3,
+          "values": [
+            13.9614,
+            14.015,
+            14.1113
+          ],
+          "median": 14.015,
+          "min": 13.9614,
+          "max": 14.1113,
+          "mean": 14.0292,
+          "stdev": 0.062,
+          "spread_s": 0.1499,
+          "median_abs_dev_s": 0.0536
+        },
+        "launch_to_lifespan_start_s": {
+          "n": 3,
+          "values": [
+            9.9691,
+            10.4385,
+            10.4672
+          ],
+          "median": 10.4385,
+          "min": 9.9691,
+          "max": 10.4672,
+          "mean": 10.2916,
+          "stdev": 0.2283,
+          "spread_s": 0.4981,
+          "median_abs_dev_s": 0.0287
+        },
+        "lifespan_duration_s": {
+          "n": 3,
+          "values": [
+            7.5799,
+            7.7827,
+            7.7849
+          ],
+          "median": 7.7827,
+          "min": 7.5799,
+          "max": 7.7849,
+          "mean": 7.7158,
+          "stdev": 0.0961,
+          "spread_s": 0.205,
+          "median_abs_dev_s": 0.0022
+        },
+        "warm_duration_s": {
+          "n": 3,
+          "values": [
+            3.8978,
+            3.9999,
+            4.0746
+          ],
+          "median": 3.9999,
+          "min": 3.8978,
+          "max": 4.0746,
+          "mean": 3.9908,
+          "stdev": 0.0725,
+          "spread_s": 0.1768,
+          "median_abs_dev_s": 0.0747
+        },
+        "warm_overlap_lifespan_s": {
+          "n": 3,
+          "values": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "median": 0.0,
+          "min": 0.0,
+          "max": 0.0,
+          "mean": 0.0,
+          "stdev": 0.0,
+          "spread_s": 0.0,
+          "median_abs_dev_s": 0.0
+        },
+        "warm_overlap_pre_lifespan_s": {
+          "n": 3,
+          "values": [
+            3.8978,
+            3.9999,
+            4.0746
+          ],
+          "median": 3.9999,
+          "min": 3.8978,
+          "max": 4.0746,
+          "mean": 3.9908,
+          "stdev": 0.0725,
+          "spread_s": 0.1768,
+          "median_abs_dev_s": 0.0747
+        },
+        "warm_start_after_launch_s": {
+          "n": 3,
+          "values": [
+            3.4964,
+            4.006,
+            4.1193
+          ],
+          "median": 4.006,
+          "min": 3.4964,
+          "max": 4.1193,
+          "mean": 3.8739,
+          "stdev": 0.2709,
+          "spread_s": 0.6229,
+          "median_abs_dev_s": 0.1133
+        },
+        "warm_end_after_launch_s": {
+          "n": 3,
+          "values": [
+            7.571,
+            8.0059,
+            8.0171
+          ],
+          "median": 8.0059,
+          "min": 7.571,
+          "max": 8.0171,
+          "mean": 7.8647,
+          "stdev": 0.2077,
+          "spread_s": 0.4461,
+          "median_abs_dev_s": 0.0112
+        },
+        "warm_schemas_memoised": [
+          237,
+          237,
+          237
+        ],
+        "all_boots_ready": true,
+        "forced_kills": 0,
+        "crashed_boots": 0
+      },
+      "boot_indices": [
+        0,
+        1,
+        2
+      ]
+    },
+    "Ap": {
+      "label": "warm ON, daemon pinned to ONE cpu",
+      "warm_enabled": true,
+      "contention_processes": 0,
+      "pinned_to_cpu": 10,
+      "summary": {
+        "n_boots": 3,
+        "time_to_readyz_s": {
+          "n": 3,
+          "values": [
+            16.3326,
+            17.7144,
+            18.0901
+          ],
+          "median": 17.7144,
+          "min": 16.3326,
+          "max": 18.0901,
+          "mean": 17.379,
+          "stdev": 0.7557,
+          "spread_s": 1.7575,
+          "median_abs_dev_s": 0.3757
+        },
+        "app_banner_to_readyz_s": {
+          "n": 3,
+          "values": [
+            10.2898,
+            11.298,
+            11.4662
+          ],
+          "median": 11.298,
+          "min": 10.2898,
+          "max": 11.4662,
+          "mean": 11.018,
+          "stdev": 0.5195,
+          "spread_s": 1.1764,
+          "median_abs_dev_s": 0.1682
+        },
+        "prebind_to_readyz_s": {
+          "n": 3,
+          "values": [
+            12.7312,
+            14.1911,
+            14.2377
+          ],
+          "median": 14.1911,
+          "min": 12.7312,
+          "max": 14.2377,
+          "mean": 13.72,
+          "stdev": 0.6994,
+          "spread_s": 1.5065,
+          "median_abs_dev_s": 0.0466
+        },
+        "launch_to_lifespan_start_s": {
+          "n": 3,
+          "values": [
+            7.9195,
+            8.3541,
+            9.0148
+          ],
+          "median": 8.3541,
+          "min": 7.9195,
+          "max": 9.0148,
+          "mean": 8.4295,
+          "stdev": 0.4503,
+          "spread_s": 1.0953,
+          "median_abs_dev_s": 0.4346
+        },
+        "lifespan_duration_s": {
+          "n": 3,
+          "values": [
+            8.4056,
+            9.0675,
+            9.3512
+          ],
+          "median": 9.0675,
+          "min": 8.4056,
+          "max": 9.3512,
+          "mean": 8.9414,
+          "stdev": 0.3962,
+          "spread_s": 0.9456,
+          "median_abs_dev_s": 0.2837
+        },
+        "warm_duration_s": {
+          "n": 3,
+          "values": [
+            2.6881,
+            3.0509,
+            3.2539
+          ],
+          "median": 3.0509,
+          "min": 2.6881,
+          "max": 3.2539,
+          "mean": 2.9976,
+          "stdev": 0.234,
+          "spread_s": 0.5658,
+          "median_abs_dev_s": 0.203
+        },
+        "warm_overlap_lifespan_s": {
+          "n": 3,
+          "values": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "median": 0.0,
+          "min": 0.0,
+          "max": 0.0,
+          "mean": 0.0,
+          "stdev": 0.0,
+          "spread_s": 0.0,
+          "median_abs_dev_s": 0.0
+        },
+        "warm_overlap_pre_lifespan_s": {
+          "n": 3,
+          "values": [
+            2.6881,
+            3.0509,
+            3.2539
+          ],
+          "median": 3.0509,
+          "min": 2.6881,
+          "max": 3.2539,
+          "mean": 2.9976,
+          "stdev": 0.234,
+          "spread_s": 0.5658,
+          "median_abs_dev_s": 0.203
+        },
+        "warm_start_after_launch_s": {
+          "n": 3,
+          "values": [
+            3.3861,
+            3.5376,
+            3.8565
+          ],
+          "median": 3.5376,
+          "min": 3.3861,
+          "max": 3.8565,
+          "mean": 3.5934,
+          "stdev": 0.1961,
+          "spread_s": 0.4704,
+          "median_abs_dev_s": 0.1515
+        },
+        "warm_end_after_launch_s": {
+          "n": 3,
+          "values": [
+            6.2256,
+            6.64,
+            6.9073
+          ],
+          "median": 6.64,
+          "min": 6.2256,
+          "max": 6.9073,
+          "mean": 6.591,
+          "stdev": 0.2805,
+          "spread_s": 0.6817,
+          "median_abs_dev_s": 0.2673
+        },
+        "warm_schemas_memoised": [
+          237,
+          237,
+          237
+        ],
+        "all_boots_ready": true,
+        "forced_kills": 0,
+        "crashed_boots": 0
+      },
+      "boot_indices": [
+        0,
+        1,
+        2
+      ]
+    },
+    "Bp": {
+      "label": "warm OFF, daemon pinned to ONE cpu",
+      "warm_enabled": false,
+      "contention_processes": 0,
+      "pinned_to_cpu": 10,
+      "summary": {
+        "n_boots": 3,
+        "time_to_readyz_s": {
+          "n": 3,
+          "values": [
+            17.4855,
+            17.7081,
+            17.9022
+          ],
+          "median": 17.7081,
+          "min": 17.4855,
+          "max": 17.9022,
+          "mean": 17.6986,
+          "stdev": 0.1702,
+          "spread_s": 0.4167,
+          "median_abs_dev_s": 0.1941
+        },
+        "app_banner_to_readyz_s": {
+          "n": 3,
+          "values": [
+            12.0398,
+            12.1819,
+            12.4948
+          ],
+          "median": 12.1819,
+          "min": 12.0398,
+          "max": 12.4948,
+          "mean": 12.2388,
+          "stdev": 0.1901,
+          "spread_s": 0.455,
+          "median_abs_dev_s": 0.1421
+        },
+        "prebind_to_readyz_s": {
+          "n": 3,
+          "values": [
+            13.6866,
+            13.6991,
+            13.8554
+          ],
+          "median": 13.6991,
+          "min": 13.6866,
+          "max": 13.8554,
+          "mean": 13.747,
+          "stdev": 0.0768,
+          "spread_s": 0.1688,
+          "median_abs_dev_s": 0.0125
+        },
+        "launch_to_lifespan_start_s": {
+          "n": 3,
+          "values": [
+            7.0547,
+            7.078,
+            7.0784
+          ],
+          "median": 7.078,
+          "min": 7.0547,
+          "max": 7.0784,
+          "mean": 7.0704,
+          "stdev": 0.0111,
+          "spread_s": 0.0237,
+          "median_abs_dev_s": 0.0004
+        },
+        "lifespan_duration_s": {
+          "n": 3,
+          "values": [
+            10.4232,
+            10.6227,
+            10.8164
+          ],
+          "median": 10.6227,
+          "min": 10.4232,
+          "max": 10.8164,
+          "mean": 10.6208,
+          "stdev": 0.1605,
+          "spread_s": 0.3932,
+          "median_abs_dev_s": 0.1937
+        },
+        "warm_duration_s": {
+          "n": 0,
+          "values": []
+        },
+        "warm_overlap_lifespan_s": {
+          "n": 0,
+          "values": []
+        },
+        "warm_overlap_pre_lifespan_s": {
+          "n": 0,
+          "values": []
+        },
+        "warm_start_after_launch_s": {
+          "n": 0,
+          "values": []
+        },
+        "warm_end_after_launch_s": {
+          "n": 0,
+          "values": []
+        },
+        "warm_schemas_memoised": [
+          null,
+          null,
+          null
+        ],
+        "all_boots_ready": true,
+        "forced_kills": 0,
+        "crashed_boots": 0
+      },
+      "boot_indices": [
+        0,
+        1,
+        2
+      ]
+    },
+    "Cp": {
+      "label": "warm ON + 2 busy loops, all pinned to ONE cpu",
+      "warm_enabled": true,
+      "contention_processes": 2,
+      "pinned_to_cpu": 10,
+      "summary": {
+        "n_boots": 3,
+        "time_to_readyz_s": {
+          "n": 3,
+          "values": [
+            37.2734,
+            37.7181,
+            40.1497
+          ],
+          "median": 37.7181,
+          "min": 37.2734,
+          "max": 40.1497,
+          "mean": 38.3804,
+          "stdev": 1.2642,
+          "spread_s": 2.8763,
+          "median_abs_dev_s": 0.4447
+        },
+        "app_banner_to_readyz_s": {
+          "n": 3,
+          "values": [
+            19.6222,
+            20.3141,
+            22.0161
+          ],
+          "median": 20.3141,
+          "min": 19.6222,
+          "max": 22.0161,
+          "mean": 20.6508,
+          "stdev": 1.0059,
+          "spread_s": 2.3939,
+          "median_abs_dev_s": 0.6919
+        },
+        "prebind_to_readyz_s": {
+          "n": 3,
+          "values": [
+            25.9378,
+            26.7037,
+            29.5296
+          ],
+          "median": 26.7037,
+          "min": 25.9378,
+          "max": 29.5296,
+          "mean": 27.3904,
+          "stdev": 1.5446,
+          "spread_s": 3.5918,
+          "median_abs_dev_s": 0.7659
+        },
+        "launch_to_lifespan_start_s": {
+          "n": 3,
+          "values": [
+            23.6105,
+            23.8811,
+            25.1365
+          ],
+          "median": 23.8811,
+          "min": 23.6105,
+          "max": 25.1365,
+          "mean": 24.2094,
+          "stdev": 0.6648,
+          "spread_s": 1.526,
+          "median_abs_dev_s": 0.2706
+        },
+        "lifespan_duration_s": {
+          "n": 3,
+          "values": [
+            13.3762,
+            14.0916,
+            14.9909
+          ],
+          "median": 14.0916,
+          "min": 13.3762,
+          "max": 14.9909,
+          "mean": 14.1529,
+          "stdev": 0.6606,
+          "spread_s": 1.6147,
+          "median_abs_dev_s": 0.7154
+        },
+        "warm_duration_s": {
+          "n": 3,
+          "values": [
+            7.4724,
+            7.4781,
+            8.5075
+          ],
+          "median": 7.4781,
+          "min": 7.4724,
+          "max": 8.5075,
+          "mean": 7.8193,
+          "stdev": 0.4866,
+          "spread_s": 1.0351,
+          "median_abs_dev_s": 0.0057
+        },
+        "warm_overlap_lifespan_s": {
+          "n": 3,
+          "values": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "median": 0.0,
+          "min": 0.0,
+          "max": 0.0,
+          "mean": 0.0,
+          "stdev": 0.0,
+          "spread_s": 0.0,
+          "median_abs_dev_s": 0.0
+        },
+        "warm_overlap_pre_lifespan_s": {
+          "n": 3,
+          "values": [
+            7.4724,
+            7.4781,
+            8.5075
+          ],
+          "median": 7.4781,
+          "min": 7.4724,
+          "max": 8.5075,
+          "mean": 7.8193,
+          "stdev": 0.4866,
+          "spread_s": 1.0351,
+          "median_abs_dev_s": 0.0057
+        },
+        "warm_start_after_launch_s": {
+          "n": 3,
+          "values": [
+            10.5404,
+            10.9307,
+            11.2345
+          ],
+          "median": 10.9307,
+          "min": 10.5404,
+          "max": 11.2345,
+          "mean": 10.9019,
+          "stdev": 0.2841,
+          "spread_s": 0.6941,
+          "median_abs_dev_s": 0.3038
+        },
+        "warm_end_after_launch_s": {
+          "n": 3,
+          "values": [
+            18.4031,
+            18.7127,
+            19.0479
+          ],
+          "median": 18.7127,
+          "min": 18.4031,
+          "max": 19.0479,
+          "mean": 18.7212,
+          "stdev": 0.2633,
+          "spread_s": 0.6448,
+          "median_abs_dev_s": 0.3096
+        },
+        "warm_schemas_memoised": [
+          237,
+          237,
+          237
+        ],
+        "all_boots_ready": true,
+        "forced_kills": 0,
+        "crashed_boots": 0
+      },
+      "boot_indices": [
+        0,
+        1,
+        2
+      ]
+    }
+  },
+  "boots": {
+    "A_0": {
+      "leg": "A",
+      "index": 0,
+      "warm_enabled": true,
+      "contention_processes": 0,
+      "pin_cpu": null,
+      "started_at": 1795162410.15023,
+      "started_at_iso": "2026-11-20T08:13:30Z",
+      "loadavg_at_start": {
+        "1m": 4.19,
+        "5m": 5.13,
+        "15m": 4.55
+      },
+      "cpu_count": 16,
+      "pid": 2664984,
+      "t_launch": 1795162410.1507254,
+      "cmd": "/home/nea/ensemble-src-wt-c2r-loadtest/.venv/bin/python -m daemon",
+      "warm_schemas_memoised": 237,
+      "exited_early": null,
+      "exit_code": -15,
+      "teardown_seconds": 0.716914176940918,
+      "forced_kill": false,
+      "port_free_after_teardown": true,
+      "t_warm_start": 1795162414.0639324,
+      "t_warm_end": 1795162418.3981218,
+      "warm_duration_s": 4.3342,
+      "markers": {
+        "prebind": 1795162414.1938,
+        "warm_log_first": 1795162418.4092,
+        "warm_log_complete": 1795162418.4092,
+        "app_banner": 1795162418.8739,
+        "lifespan_start": 1795162420.9063,
+        "lifespan_end": 1795162428.9755,
+        "serving": 1795162428.9755
+      },
+      "banner_count": 2,
+      "t_readyz": 1795162428.9909124,
+      "time_to_readyz_s": 18.8402,
+      "app_banner_to_readyz_s": 10.117,
+      "prebind_to_readyz_s": 14.7971,
+      "lifespan_start_to_readyz_s": 8.0846,
+      "launch_to_lifespan_start_s": 10.7556,
+      "lifespan_duration_s": 8.0692,
+      "lifespan_end_to_readyz_s": 0.0154,
+      "warm_overlap_lifespan_s": 0.0,
+      "warm_windows_lifespan": true,
+      "warm_finished_before_lifespan_end": true,
+      "warm_finished_before_lifespan_start": true,
+      "warm_overlap_pre_lifespan_s": 4.3342,
+      "warm_start_after_launch_s": 3.9132,
+      "warm_end_after_launch_s": 8.2474,
+      "warm_start_minus_prebind_s": -0.1299,
+      "log_tail": [
+        "08:13:49 - daemon.manager - INFO - Cleaning up resources...",
+        "08:13:49 - daemon.manager - INFO - Database engine disposed",
+        "08:13:49 - daemon.manager - INFO - Graceful shutdown complete",
+        "INFO:     Application shutdown complete.",
+        "INFO:     Finished server process [2664984]"
+      ],
+      "log_path": "/tmp/bootwarm-final/logs/A_0/daemon.out",
+      "log_line_count": 295,
+      "loadavg_at_end": {
+        "1m": 4.12,
+        "5m": 5.06,
+        "15m": 4.54
+      },
+      "finished_at_iso": "2026-11-20T08:13:49Z"
+    },
+    "A_1": {
+      "leg": "A",
+      "index": 1,
+      "warm_enabled": true,
+      "contention_processes": 0,
+      "pin_cpu": null,
+      "started_at": 1795162429.7356846,
+      "started_at_iso": "2026-11-20T08:13:49Z",
+      "loadavg_at_start": {
+        "1m": 4.12,
+        "5m": 5.06,
+        "15m": 4.54
+      },
+      "cpu_count": 16,
+      "pid": 2665297,
+      "t_launch": 1795162429.7361653,
+      "cmd": "/home/nea/ensemble-src-wt-c2r-loadtest/.venv/bin/python -m daemon",
+      "warm_schemas_memoised": 237,
+      "exited_early": null,
+      "exit_code": -15,
+      "teardown_seconds": 0.6163873672485352,
+      "forced_kill": false,
+      "port_free_after_teardown": true,
+      "t_warm_start": 1795162434.164705,
+      "t_warm_end": 1795162438.4438636,
+      "warm_duration_s": 4.2792,
+      "markers": {
+        "prebind": 1795162434.3339,
+        "warm_log_first": 1795162438.467,
+        "warm_log_complete": 1795162438.467,
+        "app_banner": 1795162438.9313,
+        "lifespan_start": 1795162440.9926,
+        "lifespan_end": 1795162448.9733,
+        "serving": 1795162448.9733
+      },
+      "banner_count": 2,
+      "t_readyz": 1795162448.9905577,
+      "time_to_readyz_s": 19.2544,
+      "app_banner_to_readyz_s": 10.0592,
+      "prebind_to_readyz_s": 14.6566,
+      "lifespan_start_to_readyz_s": 7.998,
+      "launch_to_lifespan_start_s": 11.2564,
+      "lifespan_duration_s": 7.9807,
+      "lifespan_end_to_readyz_s": 0.0173,
+      "warm_overlap_lifespan_s": 0.0,
+      "warm_windows_lifespan": true,
+      "warm_finished_before_lifespan_end": true,
+      "warm_finished_before_lifespan_start": true,
+      "warm_overlap_pre_lifespan_s": 4.2792,
+      "warm_start_after_launch_s": 4.4285,
+      "warm_end_after_launch_s": 8.7077,
+      "warm_start_minus_prebind_s": -0.1692,
+      "log_tail": [
+        "08:14:09 - daemon.manager - INFO - Cleaning up resources...",
+        "08:14:09 - daemon.manager - INFO - Database engine disposed",
+        "08:14:09 - daemon.manager - INFO - Graceful shutdown complete",
+        "INFO:     Application shutdown complete.",
+        "INFO:     Finished server process [2665297]"
+      ],
+      "log_path": "/tmp/bootwarm-final/logs/A_1/daemon.out",
+      "log_line_count": 295,
+      "loadavg_at_end": {
+        "1m": 4.58,
+        "5m": 5.1,
+        "15m": 4.57
+      },
+      "finished_at_iso": "2026-11-20T08:14:09Z"
+    },
+    "A_2": {
+      "leg": "A",
+      "index": 2,
+      "warm_enabled": true,
+      "contention_processes": 0,
+      "pin_cpu": null,
+      "started_at": 1795162449.6351252,
+      "started_at_iso": "2026-11-20T08:14:09Z",
+      "loadavg_at_start": {
+        "1m": 4.58,
+        "5m": 5.1,
+        "15m": 4.57
+      },
+      "cpu_count": 16,
+      "pid": 2667053,
+      "t_launch": 1795162449.635479,
+      "cmd": "/home/nea/ensemble-src-wt-c2r-loadtest/.venv/bin/python -m daemon",
+      "warm_schemas_memoised": 237,
+      "exited_early": null,
+      "exit_code": -15,
+      "teardown_seconds": 0.7165253162384033,
+      "forced_kill": false,
+      "port_free_after_teardown": true,
+      "t_warm_start": 1795162453.4079823,
+      "t_warm_end": 1795162457.5381536,
+      "warm_duration_s": 4.1302,
+      "markers": {
+        "prebind": 1795162453.5355,
+        "warm_log_first": 1795162457.5601,
+        "warm_log_complete": 1795162457.5601,
+        "app_banner": 1795162457.9806,
+        "lifespan_start": 1795162459.8381,
+        "lifespan_end": 1795162467.6036,
+        "serving": 1795162467.6037
+      },
+      "banner_count": 2,
+      "t_readyz": 1795162467.6185267,
+      "time_to_readyz_s": 17.983,
+      "app_banner_to_readyz_s": 9.6379,
+      "prebind_to_readyz_s": 14.083,
+      "lifespan_start_to_readyz_s": 7.7805,
+      "launch_to_lifespan_start_s": 10.2026,
+      "lifespan_duration_s": 7.7656,
+      "lifespan_end_to_readyz_s": 0.0149,
+      "warm_overlap_lifespan_s": 0.0,
+      "warm_windows_lifespan": true,
+      "warm_finished_before_lifespan_end": true,
+      "warm_finished_before_lifespan_start": true,
+      "warm_overlap_pre_lifespan_s": 4.1302,
+      "warm_start_after_launch_s": 3.7725,
+      "warm_end_after_launch_s": 7.9027,
+      "warm_start_minus_prebind_s": -0.1275,
+      "log_tail": [
+        "08:14:28 - daemon.manager - INFO - Cleaning up resources...",
+        "08:14:28 - daemon.manager - INFO - Database engine disposed",
+        "08:14:28 - daemon.manager - INFO - Graceful shutdown complete",
+        "INFO:     Application shutdown complete.",
+        "INFO:     Finished server process [2667053]"
+      ],
+      "log_path": "/tmp/bootwarm-final/logs/A_2/daemon.out",
+      "log_line_count": 295,
+      "loadavg_at_end": {
+        "1m": 4.86,
+        "5m": 5.13,
+        "15m": 4.59
+      },
+      "finished_at_iso": "2026-11-20T08:14:28Z"
+    },
+    "B_0": {
+      "leg": "B",
+      "index": 0,
+      "warm_enabled": false,
+      "contention_processes": 0,
+      "pin_cpu": null,
+      "started_at": 1795162468.3662326,
+      "started_at_iso": "2026-11-20T08:14:28Z",
+      "loadavg_at_start": {
+        "1m": 4.86,
+        "5m": 5.13,
+        "15m": 4.59
+      },
+      "cpu_count": 16,
+      "pid": 2668752,
+      "t_launch": 1795162468.366599,
+      "cmd": "/home/nea/ensemble-src-wt-c2r-loadtest/.venv/bin/python -m daemon",
+      "exited_early": null,
+      "exit_code": -15,
+      "teardown_seconds": 0.7170267105102539,
+      "forced_kill": false,
+      "port_free_after_teardown": true,
+      "t_warm_start": null,
+      "t_warm_end": null,
+      "warm_duration_s": null,
+      "markers": {
+        "prebind": 1795162472.6949,
+        "app_banner": 1795162474.2433,
+        "lifespan_start": 1795162476.2846,
+        "lifespan_end": 1795162485.9444,
+        "serving": 1795162485.9445
+      },
+      "banner_count": 2,
+      "t_readyz": 1795162485.919247,
+      "time_to_readyz_s": 17.5526,
+      "app_banner_to_readyz_s": 11.676,
+      "prebind_to_readyz_s": 13.2243,
+      "lifespan_start_to_readyz_s": 9.6346,
+      "launch_to_lifespan_start_s": 7.918,
+      "lifespan_duration_s": 9.6598,
+      "lifespan_end_to_readyz_s": -0.0252,
+      "log_tail": [
+        "08:14:46 - daemon.manager - INFO - Cleaning up resources...",
+        "08:14:46 - daemon.manager - INFO - Database engine disposed",
+        "08:14:46 - daemon.manager - INFO - Graceful shutdown complete",
+        "INFO:     Application shutdown complete.",
+        "INFO:     Finished server process [2668752]"
+      ],
+      "log_path": "/tmp/bootwarm-final/logs/B_0/daemon.out",
+      "log_line_count": 293,
+      "loadavg_at_end": {
+        "1m": 5.32,
+        "5m": 5.22,
+        "15m": 4.63
+      },
+      "finished_at_iso": "2026-11-20T08:14:46Z"
+    },
+    "B_1": {
+      "leg": "B",
+      "index": 1,
+      "warm_enabled": false,
+      "contention_processes": 0,
+      "pin_cpu": null,
+      "started_at": 1795162486.6662905,
+      "started_at_iso": "2026-11-20T08:14:46Z",
+      "loadavg_at_start": {
+        "1m": 5.32,
+        "5m": 5.22,
+        "15m": 4.63
+      },
+      "cpu_count": 16,
+      "pid": 2670499,
+      "t_launch": 1795162486.6668417,
+      "cmd": "/home/nea/ensemble-src-wt-c2r-loadtest/.venv/bin/python -m daemon",
+      "exited_early": null,
+      "exit_code": -15,
+      "teardown_seconds": 0.8168106079101562,
+      "forced_kill": false,
+      "port_free_after_teardown": true,
+      "t_warm_start": null,
+      "t_warm_end": null,
+      "warm_duration_s": null,
+      "markers": {
+        "prebind": 1795162490.5881,
+        "app_banner": 1795162491.8795,
+        "lifespan_start": 1795162493.2952,
+        "lifespan_end": 1795162502.7909,
+        "serving": 1795162502.7909
+      },
+      "banner_count": 2,
+      "t_readyz": 1795162502.8077066,
+      "time_to_readyz_s": 16.1409,
+      "app_banner_to_readyz_s": 10.9282,
+      "prebind_to_readyz_s": 12.2196,
+      "lifespan_start_to_readyz_s": 9.5125,
+      "launch_to_lifespan_start_s": 6.6283,
+      "lifespan_duration_s": 9.4958,
+      "lifespan_end_to_readyz_s": 0.0168,
+      "log_tail": [
+        "08:15:03 - daemon.manager - INFO - Cleaning up resources...",
+        "08:15:03 - daemon.manager - INFO - Database engine disposed",
+        "08:15:03 - daemon.manager - INFO - Graceful shutdown complete",
+        "INFO:     Application shutdown complete.",
+        "INFO:     Finished server process [2670499]"
+      ],
+      "log_path": "/tmp/bootwarm-final/logs/B_1/daemon.out",
+      "log_line_count": 293,
+      "loadavg_at_end": {
+        "1m": 5.39,
+        "5m": 5.24,
+        "15m": 4.65
+      },
+      "finished_at_iso": "2026-11-20T08:15:03Z"
+    },
+    "B_2": {
+      "leg": "B",
+      "index": 2,
+      "warm_enabled": false,
+      "contention_processes": 0,
+      "pin_cpu": null,
+      "started_at": 1795162503.6524944,
+      "started_at_iso": "2026-11-20T08:15:03Z",
+      "loadavg_at_start": {
+        "1m": 5.39,
+        "5m": 5.24,
+        "15m": 4.65
+      },
+      "cpu_count": 16,
+      "pid": 2672436,
+      "t_launch": 1795162503.6531227,
+      "cmd": "/home/nea/ensemble-src-wt-c2r-loadtest/.venv/bin/python -m daemon",
+      "exited_early": null,
+      "exit_code": -15,
+      "teardown_seconds": 0.6160221099853516,
+      "forced_kill": false,
+      "port_free_after_teardown": true,
+      "t_warm_start": null,
+      "t_warm_end": null,
+      "warm_duration_s": null,
+      "markers": {
+        "prebind": 1795162507.6737,
+        "app_banner": 1795162509.0146,
+        "lifespan_start": 1795162510.5295,
+        "lifespan_end": 1795162519.6283,
+        "serving": 1795162519.6283
+      },
+      "banner_count": 2,
+      "t_readyz": 1795162519.6409469,
+      "time_to_readyz_s": 15.9878,
+      "app_banner_to_readyz_s": 10.6264,
+      "prebind_to_readyz_s": 11.9672,
+      "lifespan_start_to_readyz_s": 9.1115,
+      "launch_to_lifespan_start_s": 6.8764,
+      "lifespan_duration_s": 9.0988,
+      "lifespan_end_to_readyz_s": 0.0126,
+      "log_tail": [
+        "08:15:20 - daemon.manager - INFO - Cleaning up resources...",
+        "08:15:20 - daemon.manager - INFO - Database engine disposed",
+        "08:15:20 - daemon.manager - INFO - Graceful shutdown complete",
+        "INFO:     Application shutdown complete.",
+        "INFO:     Finished server process [2672436]"
+      ],
+      "log_path": "/tmp/bootwarm-final/logs/B_2/daemon.out",
+      "log_line_count": 293,
+      "loadavg_at_end": {
+        "1m": 5.23,
+        "5m": 5.21,
+        "15m": 4.65
+      },
+      "finished_at_iso": "2026-11-20T08:15:20Z"
+    },
+    "C_0": {
+      "leg": "C",
+      "index": 0,
+      "warm_enabled": true,
+      "contention_processes": 2,
+      "pin_cpu": null,
+      "started_at": 1795162520.2858226,
+      "started_at_iso": "2026-11-20T08:15:20Z",
+      "loadavg_at_start": {
+        "1m": 5.23,
+        "5m": 5.21,
+        "15m": 4.65
+      },
+      "cpu_count": 16,
+      "contention_pids": [
+        2672793,
+        2672794
+      ],
+      "pid": 2672799,
+      "t_launch": 1795162520.7890854,
+      "cmd": "/home/nea/ensemble-src-wt-c2r-loadtest/.venv/bin/python -m daemon",
+      "warm_schemas_memoised": 237,
+      "exited_early": null,
+      "exit_code": -15,
+      "teardown_seconds": 0.6158819198608398,
+      "forced_kill": false,
+      "port_free_after_teardown": true,
+      "t_warm_start": 1795162524.7951038,
+      "t_warm_end": 1795162528.794954,
+      "warm_duration_s": 3.9999,
+      "markers": {
+        "prebind": 1795162524.9151,
+        "warm_log_first": 1795162528.8096,
+        "warm_log_complete": 1795162528.8096,
+        "app_banner": 1795162529.2454,
+        "lifespan_start": 1795162531.2276,
+        "lifespan_end": 1795162539.0103,
+        "serving": 1795162539.0103
+      },
+      "banner_count": 2,
+      "t_readyz": 1795162539.0264728,
+      "time_to_readyz_s": 18.2374,
+      "app_banner_to_readyz_s": 9.781,
+      "prebind_to_readyz_s": 14.1113,
+      "lifespan_start_to_readyz_s": 7.7988,
+      "launch_to_lifespan_start_s": 10.4385,
+      "lifespan_duration_s": 7.7827,
+      "lifespan_end_to_readyz_s": 0.0161,
+      "warm_overlap_lifespan_s": 0.0,
+      "warm_windows_lifespan": true,
+      "warm_finished_before_lifespan_end": true,
+      "warm_finished_before_lifespan_start": true,
+      "warm_overlap_pre_lifespan_s": 3.9999,
+      "warm_start_after_launch_s": 4.006,
+      "warm_end_after_launch_s": 8.0059,
+      "warm_start_minus_prebind_s": -0.12,
+      "log_tail": [
+        "08:15:39 - daemon.manager - INFO - Cleaning up resources...",
+        "08:15:39 - daemon.manager - INFO - Database engine disposed",
+        "08:15:39 - daemon.manager - INFO - Graceful shutdown complete",
+        "INFO:     Application shutdown complete.",
+        "INFO:     Finished server process [2672799]"
+      ],
+      "log_path": "/tmp/bootwarm-final/logs/C_0/daemon.out",
+      "log_line_count": 299,
+      "loadavg_at_end": {
+        "1m": 5.78,
+        "5m": 5.34,
+        "15m": 4.7
+      },
+      "finished_at_iso": "2026-11-20T08:15:39Z"
+    },
+    "C_1": {
+      "leg": "C",
+      "index": 1,
+      "warm_enabled": true,
+      "contention_processes": 2,
+      "pin_cpu": null,
+      "started_at": 1795162539.7229471,
+      "started_at_iso": "2026-11-20T08:15:39Z",
+      "loadavg_at_start": {
+        "1m": 5.78,
+        "5m": 5.34,
+        "15m": 4.7
+      },
+      "cpu_count": 16,
+      "contention_pids": [
+        2673413,
+        2673414
+      ],
+      "pid": 2673453,
+      "t_launch": 1795162540.225254,
+      "cmd": "/home/nea/ensemble-src-wt-c2r-loadtest/.venv/bin/python -m daemon",
+      "warm_schemas_memoised": 237,
+      "exited_early": null,
+      "exit_code": -15,
+      "teardown_seconds": 0.7162461280822754,
+      "forced_kill": false,
+      "port_free_after_teardown": true,
+      "t_warm_start": 1795162543.7216845,
+      "t_warm_end": 1795162547.7962718,
+      "warm_duration_s": 4.0746,
+      "markers": {
+        "prebind": 1795162543.8223,
+        "warm_log_first": 1795162547.8037,
+        "warm_log_complete": 1795162547.8037,
+        "app_banner": 1795162548.3163,
+        "lifespan_start": 1795162550.1944,
+        "lifespan_end": 1795162557.7743,
+        "serving": 1795162557.7743
+      },
+      "banner_count": 2,
+      "t_readyz": 1795162557.7837253,
+      "time_to_readyz_s": 17.5585,
+      "app_banner_to_readyz_s": 9.4674,
+      "prebind_to_readyz_s": 13.9614,
+      "lifespan_start_to_readyz_s": 7.5894,
+      "launch_to_lifespan_start_s": 9.9691,
+      "lifespan_duration_s": 7.5799,
+      "lifespan_end_to_readyz_s": 0.0095,
+      "warm_overlap_lifespan_s": 0.0,
+      "warm_windows_lifespan": true,
+      "warm_finished_before_lifespan_end": true,
+      "warm_finished_before_lifespan_start": true,
+      "warm_overlap_pre_lifespan_s": 4.0746,
+      "warm_start_after_launch_s": 3.4964,
+      "warm_end_after_launch_s": 7.571,
+      "warm_start_minus_prebind_s": -0.1007,
+      "log_tail": [
+        "08:15:58 - daemon.manager - INFO - Cleaning up resources...",
+        "08:15:58 - daemon.manager - INFO - Database engine disposed",
+        "08:15:58 - daemon.manager - INFO - Graceful shutdown complete",
+        "INFO:     Application shutdown complete.",
+        "INFO:     Finished server process [2673453]"
+      ],
+      "log_path": "/tmp/bootwarm-final/logs/C_1/daemon.out",
+      "log_line_count": 295,
+      "loadavg_at_end": {
+        "1m": 6.41,
+        "5m": 5.52,
+        "15m": 4.77
+      },
+      "finished_at_iso": "2026-11-20T08:15:58Z"
+    },
+    "C_2": {
+      "leg": "C",
+      "index": 2,
+      "warm_enabled": true,
+      "contention_processes": 2,
+      "pin_cpu": null,
+      "started_at": 1795162558.578059,
+      "started_at_iso": "2026-11-20T08:15:58Z",
+      "loadavg_at_start": {
+        "1m": 6.41,
+        "5m": 5.52,
+        "15m": 4.77
+      },
+      "cpu_count": 16,
+      "contention_pids": [
+        2674733,
+        2674734
+      ],
+      "pid": 2674779,
+      "t_launch": 1795162559.0804482,
+      "cmd": "/home/nea/ensemble-src-wt-c2r-loadtest/.venv/bin/python -m daemon",
+      "warm_schemas_memoised": 237,
+      "exited_early": null,
+      "exit_code": -15,
+      "teardown_seconds": 0.6657967567443848,
+      "forced_kill": false,
+      "port_free_after_teardown": true,
+      "t_warm_start": 1795162563.199721,
+      "t_warm_end": 1795162567.0975266,
+      "warm_duration_s": 3.8978,
+      "markers": {
+        "prebind": 1795162563.3317,
+        "warm_log_first": 1795162567.1217,
+        "warm_log_complete": 1795162567.1217,
+        "app_banner": 1795162567.5339,
+        "lifespan_start": 1795162569.5477,
+        "lifespan_end": 1795162577.3326,
+        "serving": 1795162577.3326
+      },
+      "banner_count": 2,
+      "t_readyz": 1795162577.3467054,
+      "time_to_readyz_s": 18.2663,
+      "app_banner_to_readyz_s": 9.8128,
+      "prebind_to_readyz_s": 14.015,
+      "lifespan_start_to_readyz_s": 7.799,
+      "launch_to_lifespan_start_s": 10.4672,
+      "lifespan_duration_s": 7.7849,
+      "lifespan_end_to_readyz_s": 0.0141,
+      "warm_overlap_lifespan_s": 0.0,
+      "warm_windows_lifespan": true,
+      "warm_finished_before_lifespan_end": true,
+      "warm_finished_before_lifespan_start": true,
+      "warm_overlap_pre_lifespan_s": 3.8978,
+      "warm_start_after_launch_s": 4.1193,
+      "warm_end_after_launch_s": 8.0171,
+      "warm_start_minus_prebind_s": -0.132,
+      "log_tail": [
+        "08:16:17 - daemon.manager - INFO - Cleaning up resources...",
+        "08:16:17 - daemon.manager - INFO - Database engine disposed",
+        "08:16:17 - daemon.manager - INFO - Graceful shutdown complete",
+        "INFO:     Application shutdown complete.",
+        "INFO:     Finished server process [2674779]"
+      ],
+      "log_path": "/tmp/bootwarm-final/logs/C_2/daemon.out",
+      "log_line_count": 295,
+      "loadavg_at_end": {
+        "1m": 7.23,
+        "5m": 5.76,
+        "15m": 4.87
+      },
+      "finished_at_iso": "2026-11-20T08:16:18Z"
+    },
+    "Ap_0": {
+      "leg": "Ap",
+      "index": 0,
+      "warm_enabled": true,
+      "contention_processes": 0,
+      "pin_cpu": 10,
+      "started_at": 1795162578.0916483,
+      "started_at_iso": "2026-11-20T08:16:18Z",
+      "loadavg_at_start": {
+        "1m": 7.23,
+        "5m": 5.76,
+        "15m": 4.87
+      },
+      "cpu_count": 16,
+      "pid": 2676605,
+      "t_launch": 1795162578.093209,
+      "cmd": "taskset -c 10 /home/nea/ensemble-src-wt-c2r-loadtest/.venv/bin/python -m daemon",
+      "warm_schemas_memoised": 237,
+      "exited_early": null,
+      "exit_code": -15,
+      "teardown_seconds": 0.816735029220581,
+      "forced_kill": false,
+      "port_free_after_teardown": true,
+      "t_warm_start": 1795162581.47926,
+      "t_warm_end": 1795162584.7331598,
+      "warm_duration_s": 3.2539,
+      "markers": {
+        "prebind": 1795162581.5699,
+        "app_banner": 1795162584.5096,
+        "warm_log_first": 1795162584.7419,
+        "warm_log_complete": 1795162584.7419,
+        "lifespan_start": 1795162586.4473,
+        "lifespan_end": 1795162595.7985,
+        "serving": 1795162595.7985
+      },
+      "banner_count": 2,
+      "t_readyz": 1795162595.8075821,
+      "time_to_readyz_s": 17.7144,
+      "app_banner_to_readyz_s": 11.298,
+      "prebind_to_readyz_s": 14.2377,
+      "lifespan_start_to_readyz_s": 9.3603,
+      "launch_to_lifespan_start_s": 8.3541,
+      "lifespan_duration_s": 9.3512,
+      "lifespan_end_to_readyz_s": 0.0091,
+      "warm_overlap_lifespan_s": 0.0,
+      "warm_windows_lifespan": true,
+      "warm_finished_before_lifespan_end": true,
+      "warm_finished_before_lifespan_start": true,
+      "warm_overlap_pre_lifespan_s": 3.2539,
+      "warm_start_after_launch_s": 3.3861,
+      "warm_end_after_launch_s": 6.64,
+      "warm_start_minus_prebind_s": -0.0906,
+      "log_tail": [
+        "08:16:36 - daemon.manager - INFO - Cleaning up resources...",
+        "08:16:36 - daemon.manager - INFO - Database engine disposed",
+        "08:16:36 - daemon.manager - INFO - Graceful shutdown complete",
+        "INFO:     Application shutdown complete.",
+        "INFO:     Finished server process [2676605]"
+      ],
+      "log_path": "/tmp/bootwarm-final/logs/Ap_0/daemon.out",
+      "log_line_count": 297,
+      "loadavg_at_end": {
+        "1m": 7.25,
+        "5m": 5.84,
+        "15m": 4.91
+      },
+      "finished_at_iso": "2026-11-20T08:16:36Z"
+    },
+    "Ap_1": {
+      "leg": "Ap",
+      "index": 1,
+      "warm_enabled": true,
+      "contention_processes": 0,
+      "pin_cpu": 10,
+      "started_at": 1795162596.6521728,
+      "started_at_iso": "2026-11-20T08:16:36Z",
+      "loadavg_at_start": {
+        "1m": 7.25,
+        "5m": 5.84,
+        "15m": 4.91
+      },
+      "cpu_count": 16,
+      "pid": 2678540,
+      "t_launch": 1795162596.652515,
+      "cmd": "taskset -c 10 /home/nea/ensemble-src-wt-c2r-loadtest/.venv/bin/python -m daemon",
+      "warm_schemas_memoised": 237,
+      "exited_early": null,
+      "exit_code": -15,
+      "teardown_seconds": 0.7166862487792969,
+      "forced_kill": false,
+      "port_free_after_teardown": true,
+      "t_warm_start": 1795162600.19008,
+      "t_warm_end": 1795162602.8781605,
+      "warm_duration_s": 2.6881,
+      "markers": {
+        "prebind": 1795162600.2539,
+        "app_banner": 1795162602.6953,
+        "warm_log_first": 1795162602.8759,
+        "warm_log_complete": 1795162602.8759,
+        "lifespan_start": 1795162604.572,
+        "lifespan_end": 1795162612.9776,
+        "serving": 1795162612.9776
+      },
+      "banner_count": 2,
+      "t_readyz": 1795162612.98507,
+      "time_to_readyz_s": 16.3326,
+      "app_banner_to_readyz_s": 10.2898,
+      "prebind_to_readyz_s": 12.7312,
+      "lifespan_start_to_readyz_s": 8.4131,
+      "launch_to_lifespan_start_s": 7.9195,
+      "lifespan_duration_s": 8.4056,
+      "lifespan_end_to_readyz_s": 0.0075,
+      "warm_overlap_lifespan_s": 0.0,
+      "warm_windows_lifespan": true,
+      "warm_finished_before_lifespan_end": true,
+      "warm_finished_before_lifespan_start": true,
+      "warm_overlap_pre_lifespan_s": 2.6881,
+      "warm_start_after_launch_s": 3.5376,
+      "warm_end_after_launch_s": 6.2256,
+      "warm_start_minus_prebind_s": -0.0638,
+      "log_tail": [
+        "08:16:53 - daemon.manager - INFO - Cleaning up resources...",
+        "08:16:53 - daemon.manager - INFO - Database engine disposed",
+        "08:16:53 - daemon.manager - INFO - Graceful shutdown complete",
+        "INFO:     Application shutdown complete.",
+        "INFO:     Finished server process [2678540]"
+      ],
+      "log_path": "/tmp/bootwarm-final/logs/Ap_1/daemon.out",
+      "log_line_count": 295,
+      "loadavg_at_end": {
+        "1m": 7.27,
+        "5m": 5.93,
+        "15m": 4.96
+      },
+      "finished_at_iso": "2026-11-20T08:16:53Z"
+    },
+    "Ap_2": {
+      "leg": "Ap",
+      "index": 2,
+      "warm_enabled": true,
+      "contention_processes": 0,
+      "pin_cpu": 10,
+      "started_at": 1795162613.72952,
+      "started_at_iso": "2026-11-20T08:16:53Z",
+      "loadavg_at_start": {
+        "1m": 7.27,
+        "5m": 5.93,
+        "15m": 4.96
+      },
+      "cpu_count": 16,
+      "pid": 2680060,
+      "t_launch": 1795162613.7300255,
+      "cmd": "taskset -c 10 /home/nea/ensemble-src-wt-c2r-loadtest/.venv/bin/python -m daemon",
+      "warm_schemas_memoised": 237,
+      "exited_early": null,
+      "exit_code": -15,
+      "teardown_seconds": 0.7666842937469482,
+      "forced_kill": false,
+      "port_free_after_teardown": true,
+      "t_warm_start": 1795162617.5864816,
+      "t_warm_end": 1795162620.6373506,
+      "warm_duration_s": 3.0509,
+      "markers": {
+        "prebind": 1795162617.629,
+        "app_banner": 1795162620.3539,
+        "warm_log_first": 1795162620.6617,
+        "warm_log_complete": 1795162620.6617,
+        "lifespan_start": 1795162622.7448,
+        "lifespan_end": 1795162631.8123,
+        "serving": 1795162631.8123
+      },
+      "banner_count": 2,
+      "t_readyz": 1795162631.8201728,
+      "time_to_readyz_s": 18.0901,
+      "app_banner_to_readyz_s": 11.4662,
+      "prebind_to_readyz_s": 14.1911,
+      "lifespan_start_to_readyz_s": 9.0754,
+      "launch_to_lifespan_start_s": 9.0148,
+      "lifespan_duration_s": 9.0675,
+      "lifespan_end_to_readyz_s": 0.0079,
+      "warm_overlap_lifespan_s": 0.0,
+      "warm_windows_lifespan": true,
+      "warm_finished_before_lifespan_end": true,
+      "warm_finished_before_lifespan_start": true,
+      "warm_overlap_pre_lifespan_s": 3.0509,
+      "warm_start_after_launch_s": 3.8565,
+      "warm_end_after_launch_s": 6.9073,
+      "warm_start_minus_prebind_s": -0.0426,
+      "log_tail": [
+        "08:17:12 - daemon.manager - INFO - Cleaning up resources...",
+        "08:17:12 - daemon.manager - INFO - Database engine disposed",
+        "08:17:12 - daemon.manager - INFO - Graceful shutdown complete",
+        "INFO:     Application shutdown complete.",
+        "INFO:     Finished server process [2680060]"
+      ],
+      "log_path": "/tmp/bootwarm-final/logs/Ap_2/daemon.out",
+      "log_line_count": 295,
+      "loadavg_at_end": {
+        "1m": 6.92,
+        "5m": 5.92,
+        "15m": 4.97
+      },
+      "finished_at_iso": "2026-11-20T08:17:12Z"
+    },
+    "Bp_0": {
+      "leg": "Bp",
+      "index": 0,
+      "warm_enabled": false,
+      "contention_processes": 0,
+      "pin_cpu": 10,
+      "started_at": 1795162632.6161058,
+      "started_at_iso": "2026-11-20T08:17:12Z",
+      "loadavg_at_start": {
+        "1m": 6.92,
+        "5m": 5.92,
+        "15m": 4.97
+      },
+      "cpu_count": 16,
+      "pid": 2681752,
+      "t_launch": 1795162632.616581,
+      "cmd": "taskset -c 10 /home/nea/ensemble-src-wt-c2r-loadtest/.venv/bin/python -m daemon",
+      "exited_early": null,
+      "exit_code": -15,
+      "teardown_seconds": 0.7160441875457764,
+      "forced_kill": false,
+      "port_free_after_teardown": true,
+      "t_warm_start": null,
+      "t_warm_end": null,
+      "warm_duration_s": null,
+      "markers": {
+        "prebind": 1795162636.638,
+        "app_banner": 1795162638.2848,
+        "lifespan_start": 1795162639.695,
+        "lifespan_end": 1795162650.3176,
+        "serving": 1795162650.3176
+      },
+      "banner_count": 2,
+      "t_readyz": 1795162650.324642,
+      "time_to_readyz_s": 17.7081,
+      "app_banner_to_readyz_s": 12.0398,
+      "prebind_to_readyz_s": 13.6866,
+      "lifespan_start_to_readyz_s": 10.6297,
+      "launch_to_lifespan_start_s": 7.0784,
+      "lifespan_duration_s": 10.6227,
+      "lifespan_end_to_readyz_s": 0.007,
+      "log_tail": [
+        "08:17:30 - daemon.manager - INFO - Cleaning up resources...",
+        "08:17:30 - daemon.manager - INFO - Database engine disposed",
+        "08:17:30 - daemon.manager - INFO - Graceful shutdown complete",
+        "INFO:     Application shutdown complete.",
+        "INFO:     Finished server process [2681752]"
+      ],
+      "log_path": "/tmp/bootwarm-final/logs/Bp_0/daemon.out",
+      "log_line_count": 293,
+      "loadavg_at_end": {
+        "1m": 6.3,
+        "5m": 5.84,
+        "15m": 4.97
+      },
+      "finished_at_iso": "2026-11-20T08:17:31Z"
+    },
+    "Bp_1": {
+      "leg": "Bp",
+      "index": 1,
+      "warm_enabled": false,
+      "contention_processes": 0,
+      "pin_cpu": 10,
+      "started_at": 1795162651.0681896,
+      "started_at_iso": "2026-11-20T08:17:31Z",
+      "loadavg_at_start": {
+        "1m": 6.3,
+        "5m": 5.84,
+        "15m": 4.97
+      },
+      "cpu_count": 16,
+      "pid": 2683496,
+      "t_launch": 1795162651.0685558,
+      "cmd": "taskset -c 10 /home/nea/ensemble-src-wt-c2r-loadtest/.venv/bin/python -m daemon",
+      "exited_early": null,
+      "exit_code": -15,
+      "teardown_seconds": 0.716494083404541,
+      "forced_kill": false,
+      "port_free_after_teardown": true,
+      "t_warm_start": null,
+      "t_warm_end": null,
+      "warm_duration_s": null,
+      "markers": {
+        "prebind": 1795162654.855,
+        "app_banner": 1795162656.3721,
+        "lifespan_start": 1795162658.1233,
+        "lifespan_end": 1795162668.5464,
+        "serving": 1795162668.5465
+      },
+      "banner_count": 2,
+      "t_readyz": 1795162668.554027,
+      "time_to_readyz_s": 17.4855,
+      "app_banner_to_readyz_s": 12.1819,
+      "prebind_to_readyz_s": 13.6991,
+      "lifespan_start_to_readyz_s": 10.4307,
+      "launch_to_lifespan_start_s": 7.0547,
+      "lifespan_duration_s": 10.4232,
+      "lifespan_end_to_readyz_s": 0.0076,
+      "log_tail": [
+        "08:17:49 - daemon.manager - INFO - Cleaning up resources...",
+        "08:17:49 - daemon.manager - INFO - Database engine disposed",
+        "08:17:49 - daemon.manager - INFO - Graceful shutdown complete",
+        "INFO:     Application shutdown complete.",
+        "INFO:     Finished server process [2683496]"
+      ],
+      "log_path": "/tmp/bootwarm-final/logs/Bp_1/daemon.out",
+      "log_line_count": 293,
+      "loadavg_at_end": {
+        "1m": 6.83,
+        "5m": 6.0,
+        "15m": 5.04
+      },
+      "finished_at_iso": "2026-11-20T08:17:49Z"
+    },
+    "Bp_2": {
+      "leg": "Bp",
+      "index": 2,
+      "warm_enabled": false,
+      "contention_processes": 0,
+      "pin_cpu": 10,
+      "started_at": 1795162669.2978158,
+      "started_at_iso": "2026-11-20T08:17:49Z",
+      "loadavg_at_start": {
+        "1m": 6.83,
+        "5m": 6.0,
+        "15m": 5.04
+      },
+      "cpu_count": 16,
+      "pid": 2685260,
+      "t_launch": 1795162669.298315,
+      "cmd": "taskset -c 10 /home/nea/ensemble-src-wt-c2r-loadtest/.venv/bin/python -m daemon",
+      "exited_early": null,
+      "exit_code": -15,
+      "teardown_seconds": 0.6666841506958008,
+      "forced_kill": false,
+      "port_free_after_teardown": true,
+      "t_warm_start": null,
+      "t_warm_end": null,
+      "warm_duration_s": null,
+      "markers": {
+        "prebind": 1795162673.3451,
+        "app_banner": 1795162674.7057,
+        "lifespan_start": 1795162676.3763,
+        "lifespan_end": 1795162687.1927,
+        "serving": 1795162687.1927
+      },
+      "banner_count": 2,
+      "t_readyz": 1795162687.2004688,
+      "time_to_readyz_s": 17.9022,
+      "app_banner_to_readyz_s": 12.4948,
+      "prebind_to_readyz_s": 13.8554,
+      "lifespan_start_to_readyz_s": 10.8242,
+      "launch_to_lifespan_start_s": 7.078,
+      "lifespan_duration_s": 10.8164,
+      "lifespan_end_to_readyz_s": 0.0078,
+      "log_tail": [
+        "08:18:07 - daemon.manager - INFO - Cleaning up resources...",
+        "08:18:07 - daemon.manager - INFO - Database engine disposed",
+        "08:18:07 - daemon.manager - INFO - Graceful shutdown complete",
+        "INFO:     Application shutdown complete.",
+        "INFO:     Finished server process [2685260]"
+      ],
+      "log_path": "/tmp/bootwarm-final/logs/Bp_2/daemon.out",
+      "log_line_count": 293,
+      "loadavg_at_end": {
+        "1m": 6.68,
+        "5m": 6.0,
+        "15m": 5.05
+      },
+      "finished_at_iso": "2026-11-20T08:18:07Z"
+    },
+    "Cp_0": {
+      "leg": "Cp",
+      "index": 0,
+      "warm_enabled": true,
+      "contention_processes": 2,
+      "pin_cpu": 10,
+      "started_at": 1795162687.8954477,
+      "started_at_iso": "2026-11-20T08:18:07Z",
+      "loadavg_at_start": {
+        "1m": 6.68,
+        "5m": 6.0,
+        "15m": 5.05
+      },
+      "cpu_count": 16,
+      "contention_pids": [
+        2687419,
+        2687420
+      ],
+      "pid": 2687427,
+      "t_launch": 1795162688.3991551,
+      "cmd": "taskset -c 10 /home/nea/ensemble-src-wt-c2r-loadtest/.venv/bin/python -m daemon",
+      "warm_schemas_memoised": 237,
+      "exited_early": null,
+      "exit_code": -15,
+      "teardown_seconds": 1.4688119888305664,
+      "forced_kill": false,
+      "port_free_after_teardown": true,
+      "t_warm_start": 1795162699.6336727,
+      "t_warm_end": 1795162707.111819,
+      "warm_duration_s": 7.4781,
+      "markers": {
+        "prebind": 1795162699.7348,
+        "app_banner": 1795162706.0504,
+        "warm_log_first": 1795162707.1348,
+        "warm_log_complete": 1795162707.1348,
+        "lifespan_start": 1795162712.2803,
+        "lifespan_end": 1795162725.6565,
+        "serving": 1795162725.6565
+      },
+      "banner_count": 2,
+      "t_readyz": 1795162725.6725898,
+      "time_to_readyz_s": 37.2734,
+      "app_banner_to_readyz_s": 19.6222,
+      "prebind_to_readyz_s": 25.9378,
+      "lifespan_start_to_readyz_s": 13.3923,
+      "launch_to_lifespan_start_s": 23.8811,
+      "lifespan_duration_s": 13.3762,
+      "lifespan_end_to_readyz_s": 0.0161,
+      "warm_overlap_lifespan_s": 0.0,
+      "warm_windows_lifespan": true,
+      "warm_finished_before_lifespan_end": true,
+      "warm_finished_before_lifespan_start": true,
+      "warm_overlap_pre_lifespan_s": 7.4781,
+      "warm_start_after_launch_s": 11.2345,
+      "warm_end_after_launch_s": 18.7127,
+      "warm_start_minus_prebind_s": -0.1012,
+      "log_tail": [
+        "08:18:47 - daemon.manager - INFO - Cleaning up resources...",
+        "08:18:47 - daemon.manager - INFO - Database engine disposed",
+        "08:18:47 - daemon.manager - INFO - Graceful shutdown complete",
+        "INFO:     Application shutdown complete.",
+        "INFO:     Finished server process [2687427]"
+      ],
+      "log_path": "/tmp/bootwarm-final/logs/Cp_0/daemon.out",
+      "log_line_count": 297,
+      "loadavg_at_end": {
+        "1m": 7.18,
+        "5m": 6.19,
+        "15m": 5.16
+      },
+      "finished_at_iso": "2026-11-20T08:18:47Z"
+    },
+    "Cp_1": {
+      "leg": "Cp",
+      "index": 1,
+      "warm_enabled": true,
+      "contention_processes": 2,
+      "pin_cpu": 10,
+      "started_at": 1795162727.2199414,
+      "started_at_iso": "2026-11-20T08:18:47Z",
+      "loadavg_at_start": {
+        "1m": 7.18,
+        "5m": 6.19,
+        "15m": 5.16
+      },
+      "cpu_count": 16,
+      "contention_pids": [
+        2688291,
+        2688292
+      ],
+      "pid": 2688298,
+      "t_launch": 1795162727.7231185,
+      "cmd": "taskset -c 10 /home/nea/ensemble-src-wt-c2r-loadtest/.venv/bin/python -m daemon",
+      "warm_schemas_memoised": 237,
+      "exited_early": null,
+      "exit_code": -15,
+      "teardown_seconds": 1.2691028118133545,
+      "forced_kill": false,
+      "port_free_after_teardown": true,
+      "t_warm_start": 1795162738.6538043,
+      "t_warm_end": 1795162746.1262395,
+      "warm_duration_s": 7.4724,
+      "markers": {
+        "prebind": 1795162738.7375,
+        "app_banner": 1795162745.1271,
+        "warm_log_first": 1795162746.1299,
+        "warm_log_complete": 1795162746.1299,
+        "lifespan_start": 1795162751.3337,
+        "lifespan_end": 1795162765.4253,
+        "serving": 1795162765.4253
+      },
+      "banner_count": 2,
+      "t_readyz": 1795162765.4411936,
+      "time_to_readyz_s": 37.7181,
+      "app_banner_to_readyz_s": 20.3141,
+      "prebind_to_readyz_s": 26.7037,
+      "lifespan_start_to_readyz_s": 14.1075,
+      "launch_to_lifespan_start_s": 23.6105,
+      "lifespan_duration_s": 14.0916,
+      "lifespan_end_to_readyz_s": 0.0159,
+      "warm_overlap_lifespan_s": 0.0,
+      "warm_windows_lifespan": true,
+      "warm_finished_before_lifespan_end": true,
+      "warm_finished_before_lifespan_start": true,
+      "warm_overlap_pre_lifespan_s": 7.4724,
+      "warm_start_after_launch_s": 10.9307,
+      "warm_end_after_launch_s": 18.4031,
+      "warm_start_minus_prebind_s": -0.0837,
+      "log_tail": [
+        "08:19:26 - daemon.manager - INFO - Cleaning up resources...",
+        "08:19:26 - daemon.manager - INFO - Database engine disposed",
+        "08:19:26 - daemon.manager - INFO - Graceful shutdown complete",
+        "INFO:     Application shutdown complete.",
+        "INFO:     Finished server process [2688298]"
+      ],
+      "log_path": "/tmp/bootwarm-final/logs/Cp_1/daemon.out",
+      "log_line_count": 295,
+      "loadavg_at_end": {
+        "1m": 7.55,
+        "5m": 6.41,
+        "15m": 5.28
+      },
+      "finished_at_iso": "2026-11-20T08:19:26Z"
+    },
+    "Cp_2": {
+      "leg": "Cp",
+      "index": 2,
+      "warm_enabled": true,
+      "contention_processes": 2,
+      "pin_cpu": 10,
+      "started_at": 1795162766.7893722,
+      "started_at_iso": "2026-11-20T08:19:26Z",
+      "loadavg_at_start": {
+        "1m": 7.55,
+        "5m": 6.41,
+        "15m": 5.28
+      },
+      "cpu_count": 16,
+      "contention_pids": [
+        2689197,
+        2689198
+      ],
+      "pid": 2689207,
+      "t_launch": 1795162767.292429,
+      "cmd": "taskset -c 10 /home/nea/ensemble-src-wt-c2r-loadtest/.venv/bin/python -m daemon",
+      "warm_schemas_memoised": 237,
+      "exited_early": null,
+      "exit_code": -15,
+      "teardown_seconds": 1.7202908992767334,
+      "forced_kill": false,
+      "port_free_after_teardown": true,
+      "t_warm_start": 1795162777.8328657,
+      "t_warm_end": 1795162786.3403635,
+      "warm_duration_s": 8.5075,
+      "markers": {
+        "prebind": 1795162777.9125,
+        "app_banner": 1795162785.426,
+        "warm_log_first": 1795162786.351,
+        "warm_log_complete": 1795162786.351,
+        "lifespan_start": 1795162792.4289,
+        "lifespan_end": 1795162807.4198,
+        "serving": 1795162807.4198
+      },
+      "banner_count": 2,
+      "t_readyz": 1795162807.4420817,
+      "time_to_readyz_s": 40.1497,
+      "app_banner_to_readyz_s": 22.0161,
+      "prebind_to_readyz_s": 29.5296,
+      "lifespan_start_to_readyz_s": 15.0131,
+      "launch_to_lifespan_start_s": 25.1365,
+      "lifespan_duration_s": 14.9909,
+      "lifespan_end_to_readyz_s": 0.0222,
+      "warm_overlap_lifespan_s": 0.0,
+      "warm_windows_lifespan": true,
+      "warm_finished_before_lifespan_end": true,
+      "warm_finished_before_lifespan_start": true,
+      "warm_overlap_pre_lifespan_s": 8.5075,
+      "warm_start_after_launch_s": 10.5404,
+      "warm_end_after_launch_s": 19.0479,
+      "warm_start_minus_prebind_s": -0.0796,
+      "log_tail": [
+        "08:20:09 - daemon.manager - INFO - Cleaning up resources...",
+        "08:20:09 - daemon.manager - INFO - Database engine disposed",
+        "08:20:09 - daemon.manager - INFO - Graceful shutdown complete",
+        "INFO:     Application shutdown complete.",
+        "INFO:     Finished server process [2689207]"
+      ],
+      "log_path": "/tmp/bootwarm-final/logs/Cp_2/daemon.out",
+      "log_line_count": 295,
+      "loadavg_at_end": {
+        "1m": 8.2,
+        "5m": 6.72,
+        "15m": 5.43
+      },
+      "finished_at_iso": "2026-11-20T08:20:09Z"
+    }
+  },
+  "warmup_boots": [
+    {
+      "leg": "warmup",
+      "index": 0,
+      "time_to_readyz_s": 18.3163,
+      "exit_code": -15,
+      "exited_early": null,
+      "forced_kill": false,
+      "log_tail": [
+        "08:13:30 - daemon.manager - INFO - Cleaning up resources...",
+        "08:13:30 - daemon.manager - INFO - Database engine disposed",
+        "08:13:30 - daemon.manager - INFO - Graceful shutdown complete",
+        "INFO:     Application shutdown complete.",
+        "INFO:     Finished server process [2664636]"
+      ]
+    }
+  ],
+  "crashes": [],
+  "notes": [],
+  "verdict": {
+    "threshold_s": 1.0,
+    "pin_cpu": 10,
+    "median_a_s": 18.8402,
+    "median_b_s": 16.1409,
+    "delta_a_minus_b_s": 2.6993,
+    "regression": true,
+    "rule": "regression iff (median_A - median_B) > 1.0 s",
+    "median_c_s": 18.2374,
+    "delta_c_minus_a_s": -0.6028,
+    "pinned": {
+      "median_Ap_s": 17.7144,
+      "median_Bp_s": 17.7081,
+      "delta_Ap_minus_Bp_s": 0.0063,
+      "regression": false,
+      "note": "SUPPLEMENTARY (not the briefed verdict): the same rule applied to the PINNED pair, where the daemon and the busy loops share one cpu so the contention actually bites.",
+      "median_Cp_s": 37.7181,
+      "delta_Cp_minus_Ap_s": 20.0037
+    }
+  },
+  "llm_leg": {
+    "attempted": true,
+    "source_env_file": "/home/nea/ensemble-src/.env",
+    "timeout_s": 90.0,
+    "base_url": "https://llm.ensem.dev/v1",
+    "api_key_sha256_prefix": "e33c34f5af42",
+    "api_key_present": true,
+    "model": "agentic",
+    "tool_payload_names": [
+      "echo_probe",
+      "ping_probe"
+    ],
+    "tool_payload_bytes": 400,
+    "registry_stats_after_payloads": {
+      "entries": 10,
+      "payloads": 2,
+      "schema_builds": 10,
+      "schema_hits": 0,
+      "payload_misses": 2,
+      "payload_hits": 0
+    },
+    "latency_s": 3.4634,
+    "response_type": "AIMessage",
+    "response_content": "",
+    "tool_calls": [
+      {
+        "name": "echo_probe",
+        "args": {
+          "text": "ping"
+        },
+        "id": "call_734447e38a3746e0a30ddbf5"
+      }
+    ],
+    "has_tool_calls": true,
+    "usage_metadata": {
+      "input_tokens": 210,
+      "output_tokens": 12,
+      "total_tokens": 222,
+      "input_token_details": {},
+      "output_token_details": {}
+    },
+    "verdict": "pass",
+    "passed": true
+  },
+  "summary_table": [
+    {
+      "leg": "A",
+      "label": "warm ON (shipped shape)",
+      "warm_enabled": true,
+      "contention_processes": 0,
+      "pinned_to_cpu": null,
+      "n": 3,
+      "time_to_readyz_median_s": 18.8402,
+      "time_to_readyz_min_s": 17.983,
+      "time_to_readyz_max_s": 19.2544,
+      "time_to_readyz_spread_s": 1.2714,
+      "time_to_readyz_median_abs_dev_s": null,
+      "values_s": [
+        17.983,
+        18.8402,
+        19.2544
+      ],
+      "warm_duration_median_s": 4.2792,
+      "warm_duration_values_s": [
+        4.1302,
+        4.2792,
+        4.3342
+      ],
+      "warm_overlap_lifespan_median_s": 0.0,
+      "warm_overlap_pre_lifespan_median_s": 4.2792,
+      "lifespan_duration_median_s": 7.9807,
+      "schemas_memoised": [
+        237,
+        237,
+        237
+      ],
+      "crashed_boots": 0,
+      "forced_kills": 0
+    },
+    {
+      "leg": "B",
+      "label": "warm OFF (ENSEMBLE_SCHEMA_REGISTRY_WARM=0)",
+      "warm_enabled": false,
+      "contention_processes": 0,
+      "pinned_to_cpu": null,
+      "n": 3,
+      "time_to_readyz_median_s": 16.1409,
+      "time_to_readyz_min_s": 15.9878,
+      "time_to_readyz_max_s": 17.5526,
+      "time_to_readyz_spread_s": 1.5648,
+      "time_to_readyz_median_abs_dev_s": null,
+      "values_s": [
+        15.9878,
+        16.1409,
+        17.5526
+      ],
+      "warm_duration_median_s": null,
+      "warm_duration_values_s": [],
+      "warm_overlap_lifespan_median_s": null,
+      "warm_overlap_pre_lifespan_median_s": null,
+      "lifespan_duration_median_s": 9.4958,
+      "schemas_memoised": [
+        null,
+        null,
+        null
+      ],
+      "crashed_boots": 0,
+      "forced_kills": 0
+    },
+    {
+      "leg": "C",
+      "label": "warm ON + 2 busy-loop processes",
+      "warm_enabled": true,
+      "contention_processes": 2,
+      "pinned_to_cpu": null,
+      "n": 3,
+      "time_to_readyz_median_s": 18.2374,
+      "time_to_readyz_min_s": 17.5585,
+      "time_to_readyz_max_s": 18.2663,
+      "time_to_readyz_spread_s": 0.7078,
+      "time_to_readyz_median_abs_dev_s": null,
+      "values_s": [
+        17.5585,
+        18.2374,
+        18.2663
+      ],
+      "warm_duration_median_s": 3.9999,
+      "warm_duration_values_s": [
+        3.8978,
+        3.9999,
+        4.0746
+      ],
+      "warm_overlap_lifespan_median_s": 0.0,
+      "warm_overlap_pre_lifespan_median_s": 3.9999,
+      "lifespan_duration_median_s": 7.7827,
+      "schemas_memoised": [
+        237,
+        237,
+        237
+      ],
+      "crashed_boots": 0,
+      "forced_kills": 0
+    },
+    {
+      "leg": "Ap",
+      "label": "warm ON, daemon pinned to ONE cpu",
+      "warm_enabled": true,
+      "contention_processes": 0,
+      "pinned_to_cpu": 10,
+      "n": 3,
+      "time_to_readyz_median_s": 17.7144,
+      "time_to_readyz_min_s": 16.3326,
+      "time_to_readyz_max_s": 18.0901,
+      "time_to_readyz_spread_s": 1.7575,
+      "time_to_readyz_median_abs_dev_s": null,
+      "values_s": [
+        16.3326,
+        17.7144,
+        18.0901
+      ],
+      "warm_duration_median_s": 3.0509,
+      "warm_duration_values_s": [
+        2.6881,
+        3.0509,
+        3.2539
+      ],
+      "warm_overlap_lifespan_median_s": 0.0,
+      "warm_overlap_pre_lifespan_median_s": 3.0509,
+      "lifespan_duration_median_s": 9.0675,
+      "schemas_memoised": [
+        237,
+        237,
+        237
+      ],
+      "crashed_boots": 0,
+      "forced_kills": 0
+    },
+    {
+      "leg": "Bp",
+      "label": "warm OFF, daemon pinned to ONE cpu",
+      "warm_enabled": false,
+      "contention_processes": 0,
+      "pinned_to_cpu": 10,
+      "n": 3,
+      "time_to_readyz_median_s": 17.7081,
+      "time_to_readyz_min_s": 17.4855,
+      "time_to_readyz_max_s": 17.9022,
+      "time_to_readyz_spread_s": 0.4167,
+      "time_to_readyz_median_abs_dev_s": null,
+      "values_s": [
+        17.4855,
+        17.7081,
+        17.9022
+      ],
+      "warm_duration_median_s": null,
+      "warm_duration_values_s": [],
+      "warm_overlap_lifespan_median_s": null,
+      "warm_overlap_pre_lifespan_median_s": null,
+      "lifespan_duration_median_s": 10.6227,
+      "schemas_memoised": [
+        null,
+        null,
+        null
+      ],
+      "crashed_boots": 0,
+      "forced_kills": 0
+    },
+    {
+      "leg": "Cp",
+      "label": "warm ON + 2 busy loops, all pinned to ONE cpu",
+      "warm_enabled": true,
+      "contention_processes": 2,
+      "pinned_to_cpu": 10,
+      "n": 3,
+      "time_to_readyz_median_s": 37.7181,
+      "time_to_readyz_min_s": 37.2734,
+      "time_to_readyz_max_s": 40.1497,
+      "time_to_readyz_spread_s": 2.8763,
+      "time_to_readyz_median_abs_dev_s": null,
+      "values_s": [
+        37.2734,
+        37.7181,
+        40.1497
+      ],
+      "warm_duration_median_s": 7.4781,
+      "warm_duration_values_s": [
+        7.4724,
+        7.4781,
+        8.5075
+      ],
+      "warm_overlap_lifespan_median_s": 0.0,
+      "warm_overlap_pre_lifespan_median_s": 7.4781,
+      "lifespan_duration_median_s": 14.0916,
+      "schemas_memoised": [
+        237,
+        237,
+        237
+      ],
+      "crashed_boots": 0,
+      "forced_kills": 0
+    }
+  ]
+}

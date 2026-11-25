@@ -36,6 +36,7 @@ Strategy mirrors ``tests/api/test_instance_ui_prefs_api.py``:
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
@@ -187,6 +188,15 @@ async def client(engine: Engine):
     spy = _SpyManager()
     app.state.manager = spy
     app.state.start_time = 1000.0
+
+    # N3 fix-forward (tester-proven, TEST:PASS-WITH-NOTES 2026-11-19): the
+    # list route now makes a SECOND db-offload call (D1, ui-prefs batch
+    # read), which surfaces a stale-loop binding unless the seam is
+    # configured to THIS fixture's running loop — same one-liner the D1/D2
+    # pack fixtures carry.
+    from daemon.services import db_offload as _db_offload
+
+    _db_offload.configure(loop=asyncio.get_running_loop())
 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"

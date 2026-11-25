@@ -1,7 +1,7 @@
 # Decision Ledger — prompt-assent
 
-**Commission:** `prompt-assent` — the conversational approval lane (*The Emperor's Word / Assent*).
-**Doctrine:** see [`doctrine.md`](doctrine.md) — *"FE-UI is a deeper view; the working path is conversation. The Emperor's word, relayed by C2 with provenance, is a first-class approval lane."*
+**Commission:** `prompt-assent` — the conversational approval lane (*The user's Word / Assent*).
+**Doctrine:** see [`doctrine.md`](doctrine.md) — *"FE-UI is a deeper view; the working path is conversation. The user's word, relayed by C2 with provenance, is a first-class approval lane."*
 
 | Field | Value |
 |---|---|
@@ -14,7 +14,7 @@
 
 | Status | Meaning |
 |---|---|
-| `BLESSED` | Fixed by the commission. Implementation must match. Changing it needs the Emperor, not the architect. |
+| `BLESSED` | Fixed by the commission. Implementation must match. Changing it needs the user, not the architect. |
 | `DECIDED` | Fixed by the technical analysis (the question was closed *in* the analysis, not open). Binding on implementation. |
 | `RECOMMENDED-PENDING-ARCHITECT` | The analysis closed the question with a recommendation; the architect must ratify before the developer lane lands it. |
 | `OPEN-JUDGEMENT` | The analysis explicitly flagged its own proposal as a judgement call to be overruled if the architect disagrees. |
@@ -116,7 +116,7 @@ existing, in-tree, daemon-verified primitive:
   declare a new constant) (`daemon/tools/upgrade_journal.py:141`; widened from 15 min per user
   decision 2026-09-30, ADR-036). `manager.py:6130` computes the factor-2 window's `expires_at`
   with the same constant.
-- The **two clocks are independent**: the token TTL governs "how long the Emperor has to reply";
+- The **two clocks are independent**: the token TTL governs "how long the user has to reply";
   the window TTL governs "how long the reply's authorization lives". They need not be equal.
 
 ---
@@ -200,7 +200,7 @@ artifact)` key and returns an **empty list** if any part is missing
 `daemon/repositories/prompt_version/repository.py:2999-3029`). The lane needs its own list
 surface.
 
-**Rationale.** Ari must be able to show the Emperor what awaits assent without asking a human to
+**Rationale.** Ari must be able to show the user what awaits assent without asking a human to
 open the FE — that is the doctrine's "the working path is conversation".
 
 **Binding implementation constraints.** See `DECIDED-2` (read tool, not a route) and
@@ -273,7 +273,7 @@ Rationale, in the order that decided it:
   conn.execute(text(stmt))`), so one bad statement rolls back the whole ensure and **aborts
   boot**. A new **column** on an existing table (option b) re-opens exactly that surface on the
   hottest prompt table.
-- **Restart semantics.** A 60-minute token window means "daemon restart during the Emperor's
+- **Restart semantics.** A 60-minute token window means "daemon restart during the user's
   deliberation" is a **routine** event, not an edge case. (a) survives; (c) does not.
 - **Multi-daemon correctness.** The project runs multiple ensemble instances across remote VMs.
   PG-backed storage is the only option that is *correct* if a deployment ever runs two daemon
@@ -335,10 +335,10 @@ default constant** consumed by **both** the P2 defensive resolver and the P4 con
 prior "resolver off / class on" split is a defect under either default and is reconciled here.
 
 **Rationale of record.** This is the first lane in the tree that can change a live agent's **own
-guardrails** through a chat message; the house's most recent Emperor-ratified posture for a novel
+guardrails** through a chat message; the house's most recent user-ratified posture for a novel
 authority surface (Decision Module P1, 2026-11-09: *"dormant by default, nothing decides
 anything"*) is exactly this shape; the FE lane fully covers approvals meanwhile. **The flip to ON
-is one env var + restart per environment — no code change** (Emperor-owned, architect §8.1).
+is one env var + restart per environment — no code change** (user-owned, architect §8.1).
 
 **The honest counter-argument for the architect** (now resolved against the recommendation):
 Default-OFF/ON is *not* the security boundary
@@ -347,9 +347,9 @@ per-agent allow; the in-body `agent_id` gate; the user-turn window; the content 
 adds a **fifth** gate protecting operators who have not deliberately armed the lane — it does not
 make an unarmed lane unsafe. **But** this lane is the first in the tree that can change a live
 agent's **own guardrails** through a chat message (including Ari's `soul`/`rule`/`workflow`).
-If the Emperor wants the lane dormant until he has used it once, option (b) costs one env var
+If the user wants the lane dormant until he has used it once, option (b) costs one env var
 (`ENSEMBLE_PROMPT_ASSENT_ENABLED=0`) per environment and buys that assurance.
-**This is a judgement the Emperor owns — see `plan-overview.md` → Open Questions.**
+**This is a judgement the user owns — see `plan-overview.md` → Open Questions.**
 
 ---
 
@@ -366,7 +366,7 @@ House value: 8 base32 chars = **40 bits** (`daemon/tools/upgrade_journal.py:205-
 (32⁶ ≈ 1.07e9).
 
 **Recommendation: 8 base32 chars (40 bits).** It costs **nothing** operationally — Ari shows it in
-a code block, the Emperor copies it; the promote nonce is also 8 chars and is grouped as
+a code block, the user copies it; the promote nonce is also 8 chars and is grouped as
 `CONFIRM-XXXX-XXXX` (`nonce_grouped` `:211-215`) — and it removes the brute-force conversation
 from the review entirely.
 
@@ -395,7 +395,7 @@ effective attacker is therefore already inside the human's chat channel — at w
 is not the binding constraint. The token's real job is **anti-confusion** (binding one human reply
 to one specific item).
 
-**If the Emperor insists on the short code:** 6 chars is acceptable **only** with the per-item
+**If the user insists on the short code:** 6 chars is acceptable **only** with the per-item
 attempt counter + lockout + a global per-instance bound (see `risks.md` → Risk 5 / guessing loop).
 > **⚠ RESOLVED @ `df8da01a6` (D-3 / J-1 — AGREE).** The 6-char branch is **closed** — the
 > commission's ~6-char value is **rejected**. The per-item attempt counter + lockout are
@@ -440,7 +440,7 @@ token's single-use property is therefore a **secondary** guard against token reu
 *different* items (handled by the item binding) and against a confused-deputy replay (handled by
 the CAS).
 
-**Ordering matters only so a refusal never burns the Emperor's token.** Transition-then-consume is
+**Ordering matters only so a refusal never burns the user's token.** Transition-then-consume is
 safe: if the transition fails, the token is untouched (house rule: *"refusals never burn"*). If the
 consume then fails, the worst case is a live token on an already-decided row — and that token is
 **powerless**, because the CAS rejects the re-apply. **Consume-then-transition is the unsafe
@@ -597,8 +597,8 @@ Tests pin the construction properties; the runbook carries the "not the gate" la
 1. **The tool args can never carry the approver identity.** The tool signature accepts only
    `(action, version_id, token, user_confirmed, reject_reason)`. The *approver* is derived
    entirely from **daemon-owned** evidence: the message row (`source`, `message_metadata`) and the
-   source registry. Ari physically cannot assert "the Emperor is X" — it can only forward a token
-   that only the Emperor's turn could have produced.
+   source registry. Ari physically cannot assert "the user is X" — it can only forward a token
+   that only the user's turn could have produced.
 2. **The attestation is not constructible from arguments.** `AssentAttestation` is produced by the
    assent service **only after** the three-factor gate passes; it carries the **architect §2.3
    field set** (`architecture-recommendation.md` §2.3 @ `df8da01a6`):
@@ -776,7 +776,7 @@ tool**, **not** a new HTTP route.
 
 **Rationale.**
 - The **repo method is needed regardless** — the mint step needs the item's key
-  (`agent_id`/`version_tag`/`artifact`/`version`), and the tool needs to show the Emperor what is
+  (`agent_id`/`version_tag`/`artifact`/`version`), and the tool needs to show the user what is
   pending. Clone `count_pending`'s CORE-only predicate
   (`daemon/repositories/prompt_version/repository.py:2999-3029`: `state='pending_approval' AND
   artifact_class='CORE'`) and return rows ordered by `created_at`.
@@ -789,7 +789,7 @@ tool**, **not** a new HTTP route.
 - **`shared_meta_kv` snapshot is rejected** — *"cheapest to READ, most expensive to keep TRUE"*
   (`research/approval-path.md:128`). The approve/reject path runs through the HTTP service, so the
   KV write would need hooks in **two** places, one of which is a service bypass. **Drift in a
-  security-relevant list is the wrong kind of cheap**: a stale pending list means the Emperor
+  security-relevant list is the wrong kind of cheap**: a stale pending list means the user
   approves a row that has already moved.
 
 ---
@@ -937,9 +937,9 @@ trust-model change.
 **Analysis position (technical-analysis.md Risk 10).** Bind the token to a **content hash of the
 pending row** so that a mutated pending row invalidates the token.
 **Why.** *Ari is a confused deputy by construction.* It renders the diff and the token and relays
-the Emperor's reply. A prompt-injected Ari could try to present a **stale** diff or a **truncated**
+the user's reply. A prompt-injected Ari could try to present a **stale** diff or a **truncated**
 one. The token is bound to the ITEM; binding it also to the item's **content** means the token the
-Emperor approved is provably the token for the bytes he was shown.
+the user approved is provably the token for the bytes he was shown.
 **Cost.** One hash column on the token row (`content_hash`), computed at mint time from the
 pending row's content, and re-checked at approve time — a mutated pending row then yields
 `token-item-mismatch` (or a dedicated `token-content-mismatch`).
@@ -973,7 +973,7 @@ three commission factors **and** a channel-only check, with faithful-looking pro
    message row** (`daemon/manager.py:6126-6133` stamp → the row the `message_id` selects →
    nested `metadata["discord"]`) — **NEVER from tool args**. Without this, a prompt-injected ari
    mints for any CORE pending row, renders diff+token into any reachable surface, and supersedes
-   the Emperor's live token (DoS + authority-fabrication primitive). `list` remains ungated by
+   the user's live token (DoS + authority-fabrication primitive). `list` remains ungated by
    window (read-only, ari-gated only).
 2. **1:1-DM discrimination (K-3).** Private = `is_dm AND NOT is_group_dm`. The adapter gains a
    **lane-scoped, additive** `is_group_dm: bool` discriminator — **owned by P1** — with a

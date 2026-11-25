@@ -145,7 +145,16 @@ INTEGRATION_A_FILES=(
 # RESULT-echo: `|| EXIT_CODE=$?` list-context capture — under `set -e`, a bare
 # `EXIT_CODE=$?` after a failing command never executes (silent exit, no RESULT).
 EXIT_CODE=0
-timeout 280s "${PYTEST[@]}" \
+timeout 280s env \
+  -u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_HOST -u POSTGRES_PORT \
+  -u DATABASE_URL -u ENSEMBLE_DB_DSN \
+  -u ENSEMBLE_AUTH_ENABLED -u ENSEMBLE_AUTH_ISSUER -u ENSEMBLE_AUTH_CLIENT_ID \
+  -u ENSEMBLE_AUTH_CLIENT_SECRET -u ENSEMBLE_AUTH_DISCOVERY_URL \
+  -u ENSEMBLE_AUTH_ALLOWED_ORIGINS -u ENSEMBLE_AUTH_EXTERNAL_REDIRECT_BASE \
+  ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0 \
+  ENSEMBLE_SELF_ENV=dev \
+  PYTHONDONTWRITEBYTECODE=1 \
+  "${PYTEST[@]}" \
   "${INTEGRATION_A_FILES[@]}" \
   -n auto --tb=short -q -rf \
   --override-ini="timeout=240" \

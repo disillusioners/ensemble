@@ -7,6 +7,7 @@ if TYPE_CHECKING:
     from ..services.event_bus import EventBus
     from ..repositories.event.models import EventKind
 
+from ..services.event_registry import record as _event_registry_record
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,11 @@ class EventPublisherService:
                 kind=EventKind.INSTANCE_LIFECYCLE,
                 data=event_data,
             )
+            # Phase 5 event registry — class-2 bridge (T5.4): observe the
+            # durable emission AFTER create_event returns.
+            _event_registry_record("event_bus:instance_lifecycle",
+                                   instance_id=instance_id,
+                                   instance_status=status)
             logger.debug(f"Published INSTANCE_LIFECYCLE event for {instance_id[:8]}...: status={status}")
         except Exception as e:
             logger.warning(f"Failed to publish INSTANCE_LIFECYCLE event for {instance_id[:8]}...: {e}")

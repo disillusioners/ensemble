@@ -18,7 +18,7 @@ unchanged DM cells — with named tests, hermetic fixtures, named counter-mutati
 registered pack.
 
 > **SCOPE FENCE (B5): NO live promotion, NO arming, NO live-install mutation in this lane —
-> v0.29.20 staging only; the ceremony is a separate, post-lane Emperor act.**
+> v0.29.20 staging only; the ceremony is a separate, post-lane user act.**
 
 **Done means:** the matrix has a test per cell, the existing DM pins are green **unmodified**,
 each new pin has a counter-mutation that is demonstrated to REDDEN its cell, and the pack is

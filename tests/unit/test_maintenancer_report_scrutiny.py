@@ -97,3 +97,54 @@ def test_workflow_states_re_dispatch_cap(snippet: str) -> None:
         f"{WORKFLOW_PATH} must restate the fan-in escape-valve cap "
         f"({snippet!r} missing)"
     )
+
+
+# ── P5 T5.5 — report-ALWAYS on total failure ───────────────────────────────
+#
+# Home of the report-ALWAYS pin (this file is the report-semantics home;
+# the acceptance map CITES it rather than duplicating it).
+
+
+def test_workflow_encodes_report_always_on_total_failure() -> None:
+    """The report is written even when EVERY lane fails.
+
+    P2's acceptance row that had no pin yet: the report-writer child is
+    dispatched UNCONDITIONALLY, so a week in which every lane fails still
+    produces the report (with total-failure statuses).  The contract is
+    carried by all three surfaces — the Cardinal rule, the weekly-run flow
+    and the writer's own output contract.
+    """
+    rule = _read(PROJECT_ROOT / "agents" / "maintenancer" / "rule.md")
+    workflow = _read(WORKFLOW_PATH)
+    writer = _read(
+        PROJECT_ROOT
+        / "agents"
+        / "maintenancer"
+        / "skills-template"
+        / "run-report-writer.md"
+    )
+
+    assert "REPORT ALWAYS" in rule, (
+        "rule.md must carry the REPORT ALWAYS rule (P2 — the report is "
+        "written even on total failure)"
+    )
+    assert (
+        "Even when every lane fails, the report writer child still runs with "
+        "total-failure statuses"
+    ) in rule, (
+        "rule.md must state the report writer child still runs when EVERY "
+        "lane fails (total-failure statuses)"
+    )
+
+    assert "Dispatch the report writer — UNCONDITIONALLY" in workflow, (
+        "workflow.md must dispatch the report writer UNCONDITIONALLY"
+    )
+    assert "Total lane failure still produces a report" in workflow, (
+        "workflow.md must state that a total lane failure still produces a "
+        "report (the report-ALWAYS contract)"
+    )
+
+    assert "a total-failure week still produces all three artifacts" in writer, (
+        "the run-report-writer body must state a total-failure week still "
+        "produces all three artifacts (run + receipt + INDEX)"
+    )

@@ -40,9 +40,10 @@ module:
 * the cursor is OPAQUE and pins the evaluation instant; an invalid or
   EXPIRED cursor is an EXPECTED condition (``400 invalid_cursor``),
   never a 500 and never a silently answered gap;
-* the body is built OFF the event loop (the off-loop seam) and the
-  cursor-expiry probe runs inside that off-loop build — the event loop
-  never pays for the registry read or the body encode.
+* the body is built AND RENDERED off the event loop (the off-loop seam)
+  and the cursor-expiry probe runs inside that off-loop build — the
+  event loop never pays for the registry read, the byte-ceiling probe or
+  the body encode.
 
 The published contract (the wire vocabulary, the bounds and the error
 codes) lives in ``docs/architecture/metrics-query-contract.md`` — this
@@ -85,8 +86,10 @@ import json
 import time
 from typing import Any
 
+import orjson
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, Response
+from pydantic import TypeAdapter
 
 from daemon.auth.decorators import scope_required
 from daemon.checkpoint_metrics import render_metrics
@@ -213,11 +216,12 @@ async def get_metrics(request: Request) -> PlainTextResponse:
 #   — not the switch.  The query package
 #   never reads the switch (the ``census_gated`` reason comes from the
 #   public ``CensusSampler.gated`` property);
-# * the response BODY is BUILT off the event loop (``db_offload.offload``
-#   — the ``/api/work`` precedent).  AM-12 is BUILD-OFF-LOOP ONLY: the
-#   offload returns a Python object and FastAPI still ENCODES it on the
-#   loop, so the residual encode is BOUNDED and PINNED — ``max_points``
-#   ≤ 240 × the selector ceiling ≤ 50 ⇒ ≤ 12 000 points ≈ 3.6 ms.
+# * the response BODY is BUILT **and RENDERED** off the event loop
+#   (``db_offload.offload`` — the ``/api/work`` precedent).  The offload
+#   returns the encoded BYTES (``_render_off_loop`` → ``render_body``),
+#   so the event loop pays neither the registry read, nor the byte-ceiling
+#   probe, nor the JSON encode.  The on-loop residual is therefore only
+#   the ``Response`` construction.
 
 #: The error vocabulary of the query door (the contract's closed set).
 _ERR_UNKNOWN_FAMILY = "unknown_family"
@@ -342,14 +346,72 @@ def _expire_cursor(provider: Any, cursor: dict[str, Any]) -> None:
         raise _ExpiredCursor("The cursor has expired")
 
 
-def _encoded_size(payload: Any) -> int:
-    """The encoded byte size of a payload (the byte-ceiling probe)."""
+#: The orjson render options of the query door's WIRE body.
+#:
+#: ``OPT_NON_STR_KEYS`` / ``OPT_UTC_Z`` exist for EXACT parity with the
+#: renderer this door replaced (FastAPI's ``TypeAdapter(dict).dump_json``
+#: — pydantic's Rust core): that renderer coerces a non-``str`` mapping
+#: key to its JSON spelling and renders an aware-UTC datetime as ``Z``.
+#: With these two options orjson is byte-identical to it (the parity pack
+#: pins that on real-shaped envelopes, including the subnormal-float and
+#: astral-plane-unicode cases where ``json``'s own spelling differs).
+_DOOR_ORJSON_OPTIONS = orjson.OPT_NON_STR_KEYS | orjson.OPT_UTC_Z
+
+#: The adapter the pre-swap door rendered through (FastAPI's own
+#: serialization path for a bare-dict return) — the FALLBACK renderer for
+#: a payload orjson cannot express, and the parity pack's oracle.
+_FALLBACK_RENDERER: TypeAdapter[Any] = TypeAdapter(dict[str, Any])
+
+
+def render_body(payload: Any) -> bytes:
+    """Render a query-door payload to the EXACT bytes the route serves.
+
+    THE ONE RENDERER — both the served body and the byte-ceiling probe
+    call this function, so the ceiling can never be measured against a
+    different encoding than the one that goes on the wire (measuring one
+    spelling and serving another is a bound measured against a fiction;
+    the two renderers in play here disagree by a byte on subnormal-range
+    floats).
+
+    orjson is ~3-6x faster than the stdlib renderer at the sizes this
+    door serves (a full ``/series`` page is 150 KB - 2 MB), and it is
+    byte-identical to the pydantic-core renderer the door used before
+    the swap (pinned by ``tests/unit/test_orjson_parity.py``).
+
+    A payload orjson cannot express (an out-of-64-bit integer, an
+    unsupported key type) falls back to that same pydantic-core renderer
+    — the pre-swap behaviour, including its raise on a truly
+    unserializable object.
+    """
     try:
-        return len(
-            json.dumps(payload, separators=(",", ":"), default=str).encode("utf-8")
-        )
+        return orjson.dumps(payload, option=_DOOR_ORJSON_OPTIONS)
+    except TypeError:  # pragma: no cover — defensive
+        return _FALLBACK_RENDERER.dump_json(payload)
+
+
+def _encoded_size(payload: Any) -> int:
+    """The encoded byte size of a payload (the byte-ceiling probe).
+
+    THE PROBE MEASURES THE SERVED FORM — it calls :func:`render_body`,
+    the same renderer the route returns, so "the body fits the ceiling"
+    is a statement about the bytes on the wire.  (The pre-swap probe used
+    ``json.dumps``, whose float spelling differs from the renderer
+    FastAPI actually served — a one-byte-per-occurrence drift on
+    subnormal-range values.)
+
+    The stdlib-with-``default=str`` dump survives as the LAST-RESORT
+    measurement for a payload neither fast renderer can express; it was
+    the pre-swap probe and is never reached on a real envelope.
+    """
+    try:
+        return len(render_body(payload))
     except (TypeError, ValueError):  # pragma: no cover — defensive
-        return 0
+        try:
+            return len(
+                json.dumps(payload, separators=(",", ":"), default=str).encode("utf-8")
+            )
+        except (TypeError, ValueError):  # pragma: no cover — defensive
+            return 0
 
 
 def _trim_to_ceiling(envelope: dict[str, Any], *, key: str, items: list[Any]) -> list[Any]:
@@ -461,17 +523,23 @@ def _selectors(request: Request, *keys: str) -> list[str]:
     return out
 
 
-async def _build_off_loop(fn: Any, *args: Any, **kwargs: Any) -> Any:
-    """Build the response body OFF the event loop (AM-12).
+def _build_and_render(fn: Any, *args: Any, **kwargs: Any) -> bytes:
+    """Build a page AND render it — the whole body, on the off-loop worker.
 
-    The offload is the ``/api/work`` precedent (``db_offload.offload``).
-    The claim is BUILD-OFF-LOOP ONLY — the offload returns a Python
-    object and FastAPI still encodes it on the loop; the residual is
-    bounded by the ``max_points``/selector ceilings.
+    AM-12 used to stop at "build off-loop, encode on-loop": FastAPI
+    encoded the returned dict itself, so the residual encode rode the
+    event loop.  The door now renders the bytes (``render_body``), so the
+    encode rides the SAME offload call — the event loop pays neither the
+    registry read, nor the byte-ceiling probe, nor the JSON encode.
     """
+    return render_body(fn(*args, **kwargs))
+
+
+async def _render_off_loop(fn: Any, *args: Any, **kwargs: Any) -> bytes:
+    """Build + render a page on the off-loop worker (see ``_build_and_render``)."""
     from daemon.services.db_offload import offload as _offload
 
-    return await _offload(fn, *args, **kwargs)
+    return await _offload(_build_and_render, fn, *args, **kwargs)
 
 
 def _build_families_page(
@@ -580,6 +648,7 @@ def _build_series_page(
 
 @router.get(
     "/families",
+    response_model=dict[str, Any],
     dependencies=[scope_required(_SCOPE_READ, _SCOPE_READ_METRICS)],
     responses={
         200: {"description": "The registered metric families, as served."},
@@ -598,12 +667,18 @@ def _build_series_page(
         },
     },
 )
-async def get_metrics_families(request: Request) -> dict[str, Any]:
+async def get_metrics_families(request: Request) -> Response:
     """``GET /api/metrics/families`` — the family catalog AS SERVED.
 
     The catalog is DERIVED FROM THE REGISTRY (the registered objects +
     their registration-time family metadata) — there is no second family
     table, so a newly wired family is discoverable without a door edit.
+
+    THE BODY IS PRE-RENDERED (``render_body``): the route returns a
+    ``Response`` carrying orjson bytes, so FastAPI never encodes the
+    envelope on the event loop.  The ``response_model`` stays on the
+    decorator — it is the OpenAPI schema source and a returned
+    ``Response`` bypasses it (the schema is UNCHANGED by the swap).
 
     Raises:
         HTTPException: ``503 AUTH_NOT_CONFIGURED`` when auth is OFF
@@ -616,7 +691,7 @@ async def get_metrics_families(request: Request) -> dict[str, Any]:
     offset = cursor["offset"]
     instant = cursor["instant"] if cursor["instant"] is not None else int(time.time())
     try:
-        return await _build_off_loop(
+        body = await _render_off_loop(
             _build_families_page,
             provider,
             offset=offset,
@@ -625,10 +700,12 @@ async def get_metrics_families(request: Request) -> dict[str, Any]:
         )
     except _ExpiredCursor as exc:
         raise _err(400, _ERR_INVALID_CURSOR, str(exc)) from exc
+    return Response(content=body, media_type="application/json")
 
 
 @router.get(
     "/snapshot",
+    response_model=dict[str, Any],
     dependencies=[scope_required(_SCOPE_READ, _SCOPE_READ_METRICS)],
     responses={
         200: {"description": "The current published values."},
@@ -651,11 +728,14 @@ async def get_metrics_families(request: Request) -> dict[str, Any]:
 )
 async def get_metrics_snapshot(
     request: Request,
-) -> dict[str, Any]:
+) -> Response:
     """``GET /api/metrics/snapshot`` — the current published values.
 
     Staleness is EXPLICIT metadata (``last_publish_age_s``), never a
     silently stale number.
+
+    The body is PRE-RENDERED off the event loop (see
+    :func:`get_metrics_families` for the shape and the schema argument).
 
     Raises:
         HTTPException: ``503 AUTH_NOT_CONFIGURED`` (auth OFF — before any
@@ -682,7 +762,7 @@ async def get_metrics_snapshot(
     )
     instant = cursor["instant"] if cursor["instant"] is not None else int(time.time())
     try:
-        return await _build_off_loop(
+        body = await _render_off_loop(
             _build_snapshot_page,
             provider,
             family=family,
@@ -698,10 +778,12 @@ async def get_metrics_snapshot(
         ) from exc
     except _ExpiredCursor as exc:
         raise _err(400, _ERR_INVALID_CURSOR, str(exc)) from exc
+    return Response(content=body, media_type="application/json")
 
 
 @router.get(
     "/series",
+    response_model=dict[str, Any],
     dependencies=[scope_required(_SCOPE_READ, _SCOPE_READ_METRICS)],
     responses={
         200: {"description": "The windowed trend series."},
@@ -721,13 +803,16 @@ async def get_metrics_snapshot(
         },
     },
 )
-async def get_metrics_series(request: Request) -> dict[str, Any]:
+async def get_metrics_series(request: Request) -> Response:
     """``GET /api/metrics/series`` — the windowed trend.
 
     ``?series=`` is the LABEL-AWARE selector (``<name>{<k>=<v>,…}``) and
     ``?names=`` is NAME-level (every label variant).  ``?max_points=`` is
     the server-side bucket-max downsample; it is CLAMPED to the
-    ``max_points`` ceiling so the residual on-loop encode stays bounded.
+    ``max_points`` ceiling so the UPSTREAM work stays bounded.
+
+    The body is PRE-RENDERED off the event loop (see
+    :func:`get_metrics_families` for the shape and the schema argument).
 
     Raises:
         HTTPException: ``503 AUTH_NOT_CONFIGURED`` (auth OFF — before any
@@ -798,7 +883,7 @@ async def get_metrics_series(request: Request) -> dict[str, Any]:
     offset = cursor["offset"]
     instant = cursor["instant"] if cursor["instant"] is not None else int(time.time())
     try:
-        return await _build_off_loop(
+        body = await _render_off_loop(
             _build_series_page,
             provider,
             names=names or None,
@@ -813,6 +898,7 @@ async def get_metrics_series(request: Request) -> dict[str, Any]:
         raise _err(400, _ERR_INVALID_CURSOR, str(exc)) from exc
     except InvalidLabelFilter as exc:
         raise _err(400, _ERR_INVALID_LABEL_FILTER, str(exc)) from exc
+    return Response(content=body, media_type="application/json")
 
 
 # ── the capture-lane counters (m4 read site — EXPOSITION-NEUTRAL) ─────────

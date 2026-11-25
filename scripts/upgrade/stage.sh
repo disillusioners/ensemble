@@ -827,11 +827,58 @@ if [ -n "$_scripts_coverage_missing" ]; then
 fi
 _log "stamp coverage validated: PIPELINE_SCRIPTS_REV=$STAMP_REV contains every shipped executor-family path"
 
+# ── D4 (self-service-promote Wave 5, §2.6): source_commit + the STAGE-TIME
+# scripts-pin advance — the WRITER half of the pin self-advance (the arm-time
+# READER is daemon/tools/upgrade_tools.py scripts_pin_self_advance). The
+# guarded advance itself lives in executor_family.sh (sourceable + pinned);
+# this block owns the manifest fields, the journal rows and the fail-closed
+# refusal (a configured pin that cannot be advanced refuses the stage — the
+# arm would refuse pre-nonce anyway; a host with NO pin configured skips and
+# records scripts_pin_commit = source_commit as the release lane's intent).
+# The scripts-pin ownership TRANSFER (operator-owned → release-lane-written)
+# is JOURNALED here (stage-scripts-advance rows + manifest.scripts_pin_commit)
+# and auditable via reflog.
+SOURCE_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)"
+if ! printf '%s' "$SOURCE_COMMIT" | grep -Eq '^[0-9a-f]{40}$'; then
+    _warn "REFUSING TO STAGE: the staging tree has no resolvable HEAD commit — manifest.source_commit (D4/AC-D4-5) names the release's own source; a non-git staging tree cannot make that claim"
+    rm -rf "$STAGE_TMP"
+    exit 78
+fi
+
+_stage_scripts_pin_journal() { # best-effort row (journal may not exist yet pre-swap)
+    [ -d "${INSTALL_DIR:-}" ] && journal_init >/dev/null 2>&1 || true
+    journal_history_append "$1" "$2" >/dev/null 2>&1 \
+        || _warn "$1 journal append failed (best-effort)"
+}
+
+PIN_SCRIPTS_DIR="$(scripts_pin_from_env "${INSTALL_DIR:-}")"
+if [ -n "$PIN_SCRIPTS_DIR" ] && [ -d "$PIN_SCRIPTS_DIR" ]; then
+    if _adv_out="$(stage_scripts_pin_advance "$PIN_SCRIPTS_DIR" "$SOURCE_COMMIT" "$FLOOR_COMMIT" "$REPO_ROOT")"; then
+        SCRIPTS_PIN_COMMIT="$SOURCE_COMMIT"
+        _stage_scripts_pin_journal stage-scripts-advance "stage advanced the scripts pin: $_adv_out floor=$FLOOR_COMMIT coverage=empty(17 paths) scripts_pin=$(cd "$PIN_SCRIPTS_DIR/../.." && pwd -P) ownership=release-lane-written (version=$VERSION)"
+        _log "scripts pin advanced: $_adv_out ($PIN_SCRIPTS_DIR)"
+    else
+        _warn "REFUSING TO STAGE: scripts-pin advance impossible — $_adv_out"
+        rm -rf "$STAGE_TMP"
+        exit 78
+    fi
+else
+    # No pin dir configured (dev lanes): record the intent; the arm-time
+    # reader advances whatever pin the daemon resolves at arm time.
+    SCRIPTS_PIN_COMMIT="$SOURCE_COMMIT"
+    if [ -n "$PIN_SCRIPTS_DIR" ]; then
+        _warn "configured scripts pin '$PIN_SCRIPTS_DIR' is not a directory — recording scripts_pin_commit=source_commit only"
+    fi
+    _stage_scripts_pin_journal stage-scripts-advance "stage recorded scripts_pin_commit=$SOURCE_COMMIT (intent; no pin dir configured at stage time; version=$VERSION)"
+fi
+
 cat > "$STAGE_TMP/manifest.json" <<EOF
 {
   "version": "$VERSION",
   "binary_version": "$BINARY_VERSION",
   "staged_at": "$STAGED_AT",
+  "source_commit": "$SOURCE_COMMIT",
+  "scripts_pin_commit": "$SCRIPTS_PIN_COMMIT",
   "pipeline_scripts_floor_commit": "$FLOOR_COMMIT",
   "pipeline_scripts_rev": "$STAMP_REV",
   "known_schema_gen": "$KNOWN_SCHEMA_GEN",
@@ -1111,6 +1158,42 @@ if ! integrity_verify "$VERSION"; then
 fi
 
 _log "staged release $VERSION at $REL (rollback_safe=$ROLLBACK_SAFE source=$ROLLBACK_SAFE_SRC known_schema_gen=$KNOWN_SCHEMA_GEN contains_contract_phase=$CONTAINS_CONTRACT_PHASE) — NO flip performed (promote.sh owns current)"
+
+# ── Staged-release journal row (retention protection — FAIL-LOUD) ──────────
+#
+# FORMAT IS FROZEN: the release-retention sweep (lib.sh `retention_evict`)
+# greps this row by EVENT TOKEN `staged` and by a DETAIL that begins
+# exactly `release <VERSION> staged at ` — do not reword the prefix, do not
+# change the token.
+#
+# WHY THIS ROW IS FAIL-LOUD while `_stage_scripts_pin_journal` (above) is
+# deliberately BEST-EFFORT — the two rows are not the same kind of record:
+#   * scripts-pin row (`_stage_scripts_pin_journal`) — records an INTENT
+#     about a pin directory that may not even exist yet; losing it costs an
+#     audit detail and nothing else. Best-effort is correct there.
+#   * THIS row — is the ONLY durable record that a release dir under
+#     releases/ was staged and is AWAITING the promote ceremony. The
+#     retention sweep reads it to decide whether a staged-but-not-yet-
+#     promoted release may be evicted. A silently-missing row lets the
+#     sweep treat an awaiting-ceremony release as an ordinary release and
+#     delete it — the ceremony then refuses to promote a release that no
+#     longer exists (the `not-staged` refusal in promote.sh). A best-effort
+#     append would turn that into a silent data-loss window.
+# => A failed append is LOUD: warn + exit non-zero. The release dir is
+#    already swapped in, but it is NOT durably recorded; re-running
+#    stage.sh is the (idempotent) remediation.
+#
+# NOTE: `journal_fail_loud` (lib.sh) is deliberately NOT used here — its
+# message is flip-specific ("journal diverged from the flipped current
+# symlink", "a surviving open flipped txn makes the sweep roll back a
+# healthy promote"). The stage seat performs NO flip (promote.sh owns
+# `current`), so that wording would misdescribe this seat. The equivalent
+# fail-loud contract is spelled out inline instead: warn loudly + exit 1.
+if ! journal_history_append staged "release $VERSION staged at $REL (rollback_safe=$ROLLBACK_SAFE source=$ROLLBACK_SAFE_SRC) — awaiting ceremony (promote.sh owns current)"; then
+    _warn "journal append FAILED (staged row for $VERSION at $REL) — the staged release is NOT durably recorded and the retention sweep may evict a staged release that carries no 'staged' row. REFUSING to report a successful stage: re-stage to retry (stage.sh $UP_TARGET --version $VERSION)."
+    exit 1
+fi
+
 # D4(a)/T4.3 (phase 4): EXPLICIT success-path release. The lock's lifetime
 # no longer depends on the EXIT trap surviving (a trap-bypassing death is
 # the D4(a) orphan class; a NORMAL stage already released via the trap).

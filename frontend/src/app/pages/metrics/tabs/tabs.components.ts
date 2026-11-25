@@ -9,6 +9,7 @@ import { InstancesTabComponent } from './instances-tab.component';
 import { CheckpointTabComponent } from './checkpoint-tab.component';
 import { McpTabComponent } from './mcp-tab.component';
 import { NestReportsTabComponent } from './nest-reports-tab.component';
+import { ToolUsageTabHostComponent } from './tool-usage-tab-host.component';
 
 /**
  * The manifest → component MAP (T1 phase 2, task 2.4/2.5).
@@ -30,6 +31,13 @@ export const METRICS_TAB_COMPONENTS: Readonly<Record<MetricsTabId, Type<unknown>
   checkpoint: CheckpointTabComponent,
   mcp: McpTabComponent,
   'nest-reports': NestReportsTabComponent,
+  // The LAZY host — a thin statically-imported Type that satisfies the
+  // exact-cover contract; the heavy body is reached only via the host's
+  // dynamic `import()` (the tool-usage lane, phase 4 — the B4b lazy
+  // mechanism). NO static import of `tool-usage-tab.component` /
+  // `tool-usage.service` / `tool-usage.models` here — the tab pack pins
+  // the absence.
+  'tool-usage': ToolUsageTabHostComponent,
 };
 
 /** One tab of the shell — the manifest entry plus its body. */

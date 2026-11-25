@@ -66,9 +66,9 @@ from datetime import datetime, timezone as _stdlib_timezone
 from typing import Annotated, Any
 from zoneinfo import ZoneInfo
 
-from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
+from ._schema_registry import tool
 from ..services.self_alarm_service import (
     FAMILY_CRON,
     FAMILY_ONCE,
@@ -415,6 +415,53 @@ def _same_instant(left: datetime, right: datetime, tolerance_seconds: float = 1.
     return abs((left - right).total_seconds()) <= tolerance_seconds
 
 
+class SelfAlarmInput(BaseModel):
+    """Input schema for self_alarm."""
+
+    label: Annotated[
+        str,
+        Field(
+            description=(
+                "Short human name for the alarm (1-115 chars). Stored as "
+                "'self-alarm:<label>' — do NOT include the prefix."
+            )
+        ),
+    ]
+    when_or_every: Annotated[
+        str,
+        Field(
+            description=(
+                "When the alarm fires: an absolute ISO-8601 instant "
+                "('2026-10-20T09:00:00+07:00'), a relative duration "
+                "('45m', 'in 2h', '1d30m'), 'daily 06:30', "
+                "'weekly 1 06:30' (0=Sunday..6=Saturday) or a raw cron "
+                "expression ('cron 0 9 * * *'). At least 30 minutes out."
+            )
+        ),
+    ]
+    message_to_self: Annotated[
+        str,
+        Field(
+            description=(
+                "What YOU should do when the alarm fires (it fires into this "
+                "same session). Appended verbatim as the message's "
+                "Action line."
+            )
+        ),
+    ]
+    link_board_item: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=(
+                "Optional board item id ('wi-1a2b3c4d') to link — when the "
+                "alarm fires into THIS session you are told to board_get it "
+                "before acting."
+            ),
+        ),
+    ]
+
+
 def create_self_alarm_tools(
     service: Any,
     *,
@@ -451,51 +498,6 @@ def create_self_alarm_tools(
     caller_agent_id = agent_id or ""
     caller_instance_id = current_instance_id or ""
 
-    class SelfAlarmInput(BaseModel):
-        """Input schema for self_alarm."""
-
-        label: Annotated[
-            str,
-            Field(
-                description=(
-                    "Short human name for the alarm (1-115 chars). Stored as "
-                    "'self-alarm:<label>' — do NOT include the prefix."
-                )
-            ),
-        ]
-        when_or_every: Annotated[
-            str,
-            Field(
-                description=(
-                    "When the alarm fires: an absolute ISO-8601 instant "
-                    "('2026-10-20T09:00:00+07:00'), a relative duration "
-                    "('45m', 'in 2h', '1d30m'), 'daily 06:30', "
-                    "'weekly 1 06:30' (0=Sunday..6=Saturday) or a raw cron "
-                    "expression ('cron 0 9 * * *'). At least 30 minutes out."
-                )
-            ),
-        ]
-        message_to_self: Annotated[
-            str,
-            Field(
-                description=(
-                    "What YOU should do when the alarm fires (it fires into this "
-                    "same session). Appended verbatim as the message's "
-                    "Action line."
-                )
-            ),
-        ]
-        link_board_item: Annotated[
-            str | None,
-            Field(
-                default=None,
-                description=(
-                    "Optional board item id ('wi-1a2b3c4d') to link — when the "
-                    "alarm fires into THIS session you are told to board_get it "
-                    "before acting."
-                ),
-            ),
-        ]
 
     @register_tool_category("self-alarm")
     @tool(args_schema=SelfAlarmInput)
@@ -767,13 +769,23 @@ async def _arm_self_alarm(
 
     # ── A fired/paused ONE-SHOT must be re-armed with a STRICTLY later
     #    instant. A message-only re-arm keeps the stored `run_at`, so the
-    #    rebuilt adapter re-enqueues under the SAME
-    #    `scheduler:{source_id}:{run_at}` idempotency key and a still
-    #    non-terminal prior job (within 24 h) collapses the submit — the
-    #    alarm would silently never be delivered. (The recurring families
-    #    never carry that key: the engine emits it for one-time schedules
-    #    ONLY — `scheduler.py:1090-1094` — so a same-time re-arm of a
-    #    paused recurring alarm is safe and is the normal resume flow.)
+    #    rebuilt adapter re-enqueues under the SAME SLOT-STABLE
+    #    `scheduler:{source_id}:slot:{run_at}` idempotency key and the
+    #    submit is collapsed: with a still non-terminal prior job (within
+    #    24 h) the substrate returns the prior row (no new delivery), and
+    #    with an already-terminal prior job the terminal fallback's
+    #    masquerade is compensated (F1(b) — the phantom prelude and the
+    #    orphan fallback JobItem are cancelled). EITHER WAY the alarm
+    #    would silently never be delivered. The guard therefore STAYS
+    #    conservative under the slot-stable key (R1, fix/post-outage-
+    #    recovery b2): relaxing it is NOT provably safe, because the
+    #    slot is already claimed in both substrate arms.
+    #    (The recurring families never carry that key: the engine emits
+    #    it for one-time schedules ONLY — the adapter's
+    #    ``_route_via_job_queue`` gate is
+    #    ``SCHEDULE_TYPE_ONE_TIME and self._run_at is not None`` — so a
+    #    same-time re-arm of a paused recurring alarm is safe and is the
+    #    normal resume flow.)
     if (
         gate.mode == "reuse"
         and stored is not None

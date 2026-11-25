@@ -7,7 +7,7 @@ observe/inc call at a module site, with ONE exception — the F7 bytes
 call site (``daemon/persistence.py``), where an EXISTING observe gains a
 REAL value.
 
-THE THREE CLUSTERS
+THE CLUSTERS
 -------------------
 * **W1** — F0.3 · F1 · F3 · F4 · F5 · F6
 * **W2** — F7 · F8 · F9 · F10 · F11 · F12 · F13
@@ -16,6 +16,9 @@ THE THREE CLUSTERS
   plus two WRITE-TIME process counters the anomaly service
   increments at its refusal/suppression points through a lazy
   import of ``w4``'s module-level handles)
+* **W5** — F24 (the tool-usage family — one WRITE-TIME counter the
+  phase-1 observation tap feeds through ``w5``'s registered sink;
+  NO pull adapter — stat-primary)
 
 F2 is NOT here (the value ruling, AM-25 / LR-2) and neither are the F21
 phase families (AD4(b) / D-4).
@@ -54,11 +57,13 @@ from daemon.services.metrics_query.wiring.w1 import register_w1_adapters
 from daemon.services.metrics_query.wiring.w2 import register_w2_adapters
 from daemon.services.metrics_query.wiring.w3 import register_w3_adapters
 from daemon.services.metrics_query.wiring.w4 import register_w4_adapters
+from daemon.services.metrics_query.wiring.w5 import register_w5_adapters
 
 register_w1_adapters()
 register_w2_adapters()
 register_w3_adapters()
 register_w4_adapters()
+register_w5_adapters()
 
 
 def default_adapters() -> tuple[PullAdapter, ...]:

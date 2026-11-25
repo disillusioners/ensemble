@@ -118,7 +118,6 @@ import json
 import logging
 from typing import Annotated, Any
 
-from langchain_core.tools import tool
 from pydantic import Field
 
 from daemon.services.settings_service import (
@@ -128,6 +127,7 @@ from daemon.services.settings_service import (
     get_settings_resolution_snapshot as _svc_get_snapshot,
     resolve,
 )
+from ._schema_registry import tool
 from ._tool_registry import register_tool_category
 
 logger = logging.getLogger(__name__)

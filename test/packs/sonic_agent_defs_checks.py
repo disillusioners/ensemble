@@ -4,24 +4,24 @@
 Companion checker for pack ``sonic_agent_defs_unit_test`` (see the .sh
 sibling for the invocation contract).  Implements the phase-2 spec
 (``phase2-test-pack-spec.md``) assertions PLUS the sonic-routing
-amendment pins (Emperor ruling 2026-11-14, decisions.md "Sonic routing
+amendment pins (user ruling 2026-11-14, decisions.md "Sonic routing
 amendment") — each derived from the frozen blocks of the combined spec
 (``phase1-implementation-spec-v1.1.md``, amend block 2026-11-14) — the
 spec wins on any mismatch (spec §7-4 VERIFY-AT-IMPL doctrine).
 
-Combined shape (Emperor ruling 2026-11-13: v1.2 merged into v1.1): FIVE
+Combined shape (user ruling 2026-11-13: v1.2 merged into v1.1): FIVE
 sonic agents — the new ``sonic-developer`` layer plans/splits/dispatches/
 merges and authors HANDOFF-v2; ``sonic-coder`` is a one-shot MODULE
 executor (source exploration expected, RAG excluded, commits its module
 branch, returns a compact module report); ``sonic-reviewer`` and
 ``sonic-tester`` operate at INTEGRATION level (HANDOFF-v2 + base..merged).
 
-v0.30.2 amendment (Emperor ruling 2026-11-13, decisions.md R16-R19):
+v0.30.2 amendment (user ruling 2026-11-13, decisions.md R16-R19):
 giter re-added to sonic-leader + added to sonic-developer (escape hatch),
 devops on the leader, and the image read-trio granted to leader/developer/
 coder/reviewer via allow "image" + deny "image_save" (critic pattern).
 
-v0.30.5 sonic-routing amendment (Emperor ruling 2026-11-14, four rulings):
+v0.30.5 sonic-routing amendment (user ruling 2026-11-14, four rulings):
   A — the FROZEN blast-radius predicate (the frozen 14-glob block) is REMOVED; routing
       is by COMPLEXITY, not paths.  The developer assesses complexity after
       explore+plan and PAUSES on high/extremely-high with a handover
@@ -37,6 +37,13 @@ v0.30.5 sonic-routing amendment (Emperor ruling 2026-11-14, four rulings):
   D — "steady team" vocabulary becomes "expert team".
 The former A7 (blast globs) and A10 (blast escalation line) legs are gone;
 their replacements pin the complexity-handover protocol + interop.
+
+Maintenance roster amendment (commission 2026-11-20): the EXISTING
+``maintenancer`` agent joins sonic-leader's roster — leader = its SEVEN
+team members (4 sonic + giter + devops + maintenancer); the agent's
+``meta.json`` version goes 1.1.1 -> 1.1.2.  The tool grants are
+UNCHANGED (a roster member is not a tool grant) and the maintenancer's
+own roster (explorer/worker/coder) is untouched.
 
 Three layers:
 
@@ -104,11 +111,11 @@ SONIC_AGENTS = (
     "sonic-tester",
 )
 
-# ---- FROZEN [sonic-tools-v2] (combined spec §1.2/§1.3/§2.1 + Emperor ruling
+# ---- FROZEN [sonic-tools-v2] (combined spec §1.2/§1.3/§2.1 + user ruling
 # 2026-11-13: knowledge granted to sonic-developer + sonic-leader ONLY;
 # coder/reviewer/tester ZERO-KNOWLEDGE — the coder grant is REVERSED; coder
 # keeps SOURCE exploration with file tools, excluded ONLY from the RAG call)
-# ---- v0.30.2 roster & support-parity amendment (Emperor ruling 2026-11-13,
+# ---- v0.30.2 roster & support-parity amendment (user ruling 2026-11-13,
 # decisions.md R16-R19): giter re-added to sonic-leader AND added to
 # sonic-developer (escape hatch — workflow/worktree expertise); devops on the
 # leader (rarely invoked by design — infra/deploy escape hatch); the image
@@ -120,7 +127,7 @@ SONIC_AGENTS = (
 # ----
 FROZEN_TEAMS = {
     "sonic-leader": ["sonic-developer", "sonic-coder", "sonic-reviewer",
-                     "sonic-tester", "giter", "devops"],
+                     "sonic-tester", "giter", "devops", "maintenancer"],
     "sonic-developer": ["sonic-coder", "giter"],
     "sonic-coder": [],
     "sonic-reviewer": [],
@@ -161,16 +168,17 @@ FROZEN_TOOLS = {
 }
 # ---- END FROZEN [sonic-tools-v2] ----
 
-# Effective spawn sets (combined spec §9 + v0.30.2 amendment): leader = its six
-# team members (4 sonic + giter + devops) PLUS the two knowledge-lane support
+# Effective spawn sets (combined spec §9 + v0.30.2 amendment + the 2026-11-20
+# maintenance-roster amendment): leader = its seven team members (4 sonic +
+# giter + devops + maintenancer) PLUS the two knowledge-lane support
 # agents (TOOL_REQUIRED_AGENTS maps "knowledge" -> ["explorer", "kb-writer"])
 # PLUS image-reader (TOOL_REQUIRED_AGENTS maps "image" -> ["image-reader"]);
 # developer = sonic-coder + giter PLUS the same three implicit members; coder/
 # reviewer = image-reader ONLY; tester = EMPTY.
 EXPECTED_EFFECTIVE = {
     "sonic-leader": {"sonic-developer", "sonic-coder", "sonic-reviewer",
-                     "sonic-tester", "giter", "devops", "explorer", "kb-writer",
-                     "image-reader"},
+                     "sonic-tester", "giter", "devops", "maintenancer",
+                     "explorer", "kb-writer", "image-reader"},
     "sonic-developer": {"sonic-coder", "giter", "explorer", "kb-writer",
                         "image-reader"},
     "sonic-coder": {"image-reader"},
@@ -964,7 +972,7 @@ def a23_pok_audience(fx: Fixture) -> None:
 
 ASSERTIONS = (
     ("A1", a1_meta_parse, "meta.json parse + id==dirname x5"),
-    ("A2", a2_team_members, "team_members exact sets (leader=4 sonic + giter + devops; developer=[coder, giter])"),
+    ("A2", a2_team_members, "team_members exact sets (leader=4 sonic + giter + devops + maintenancer; developer=[coder, giter])"),
     ("A3", a3_allow_deny, "frozen allow/deny arrays + effective spawn sets"),
     ("A4", a4_llm_model, "llm_model pin map + both in default set"),
     ("A5", a5_recursion, "multiplier 7 coder-only"),
@@ -1199,7 +1207,7 @@ def build_good_fixture() -> Fixture:
         seal={},
         agents_changed=[ARI_RULE, BASELINE_FILE] + list(SONIC_BASELINE_PATHS),
         tool_required_agents=dict(_TOOL_REQUIRED_AGENTS_FROZEN),
-        allowed_models_default=["agentic", "coding", "coding2", "vision", "img-gen", "decision"],
+        allowed_models_default=["agentic", "coding", "vision", "img-gen", "decision"],
         pok_audience={k: set(v) for k, v in EXPECTED_POK_AUDIENCE.items()},
     )
     # Fill the remaining sonic artifact texts (baseline hashing needs all 20).
@@ -1240,6 +1248,10 @@ def _mutation_legs():
     def a2_leader_add_planner(fixture):
         _mutate_meta(fixture, "sonic-leader",
                      lambda m: m["team_members"].append("sonic-planner"))
+
+    def a2_leader_drop_maintenancer(fixture):
+        _mutate_meta(fixture, "sonic-leader",
+                     lambda m: m["team_members"].remove("maintenancer"))
 
     def a2_coder_add_worker(fixture):
         _mutate_meta(fixture, "sonic-coder",
@@ -1287,6 +1299,10 @@ def _mutation_legs():
     def a3_leader_drop_devops(fixture):
         _mutate_meta(fixture, "sonic-leader",
                      lambda m: m["team_members"].remove("devops"))
+
+    def a3_leader_drop_maintenancer(fixture):
+        _mutate_meta(fixture, "sonic-leader",
+                     lambda m: m["team_members"].remove("maintenancer"))
 
     def a3_developer_drop_giter(fixture):
         _mutate_meta(fixture, "sonic-developer",
@@ -1485,6 +1501,7 @@ def _mutation_legs():
         ("A1-drop-id", a1_drop_id),
         ("A1-trailing-comma", a1_trailing_comma),
         ("A2-leader-add-planner", a2_leader_add_planner),
+        ("A2-leader-drop-maintenancer", a2_leader_drop_maintenancer),
         ("A2-coder-add-worker", a2_coder_add_worker),
         ("A2-developer-add-reviewer", a2_developer_add_reviewer),
         ("A3-leader-drop-knowledge", a3_leader_drop_knowledge),
@@ -1497,6 +1514,7 @@ def _mutation_legs():
         ("A3-reviewer-deny-drop-editfile", a3_reviewer_deny_drop_editfile),
         ("A3-leader-drop-giter", a3_leader_drop_giter),
         ("A3-leader-drop-devops", a3_leader_drop_devops),
+        ("A3-leader-drop-maintenancer", a3_leader_drop_maintenancer),
         ("A3-developer-drop-giter", a3_developer_drop_giter),
         ("A3-leader-drop-image", a3_leader_drop_image),
         ("A3-developer-drop-image", a3_developer_drop_image),
@@ -1636,10 +1654,11 @@ def run_real() -> bool:
             print("FAIL A2-real sonic-coder spawned worker (deny-by-default broken)", file=sys.stderr)
             ok = False
     if ok:
-        print("PASS A2-real (discovery + leader spawns its 4 + developer spawns coder + coder deny-by-default)")
+        print("PASS A2-real (discovery + leader spawns its 7 + developer spawns coder + coder deny-by-default)")
     negatives = {
         "sonic-leader": ["leader", "developer", "planner", "worker"],
-        "sonic-developer": ["worker", "sonic-reviewer", "sonic-leader"],
+        "sonic-developer": ["worker", "sonic-reviewer", "sonic-leader",
+                            "maintenancer"],
         "sonic-coder": ["worker"],
         "sonic-reviewer": ["worker", "sonic-coder"],
         "sonic-tester": ["worker"],

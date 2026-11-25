@@ -1,0 +1,56 @@
+[identity] current_database() = ensemble_prod   current_user = ensemble
+=== ASSERTIONS A1-A14 ===
++-----+------------------------------------------------------------------------+--------------------------------------------------------------------------------------------+----------------------------------------------------+---------+
+| id  | assertion                                                              | observed                                                                                   | expected                                           | verdict |
++-----+------------------------------------------------------------------------+--------------------------------------------------------------------------------------------+----------------------------------------------------+---------+
+| A1  | parent exists AND status in {waiting_children, running} (amendment: tr | exists=True, first=waiting_children, re_read=None, final=waiting_children, mid_turn=False  | exists=True, status in {waiting_children, running} | PASS    |
+| A2  | watcher 8a1f60d7 resolves uniquely; target==parent; source_task==39320 | matches=1, state=CANCELLED, disposition=naturally_resolved, target=17efd2ef-9f98-46d4-b41b | matches=1, identity matches, state=PENDING|resolve | PASS    |
+| A3  | task 39320 exists and is terminal (or GC'd after resolution for a reso | watcher resolved; source_task=MISSING (GCed, expected)                                     | exists=True & terminal, OR resolved watcher with G | PASS    |
+| A4  | watched worker 542b49a6 exists and is terminal                         | exists=True, status=completed, updated_at=2026-11-17T19:04:27.795218+00:00                 | exists=True, status in {completed,terminated,error | PASS    |
+| A5  | watcher 999efa71 unique; target==parent; source_task==39424; child_id= | matches=1, state=CANCELLED, disposition=naturally_resolved, target=17efd2ef-9f98-46d4-b41b | matches=1, identity matches, state=PENDING|resolve | PASS    |
+| A6  | task 39424 exists and is terminal (or GC'd after resolution for a reso | watcher resolved; source_task=MISSING (GC'd, expected)                                     | exists=True & terminal, OR resolved watcher with G | PASS    |
+| A7  | all 4 commissions resolve uniquely; commissioner==parent; worker bindi | M1=abandoned/naturally_resolved; M2=abandoned/naturally_resolved; M3=outstanding/in_scope_ | 4/4 identity matches, state outstanding|resolved   | PASS    |
+| A8  | DRIFT GUARD: every PENDING watcher / outstanding commission of the par | pending_for_parent=0 (unknown=0), outstanding_for_parent=2 (unknown=0)                     | unknown=0 and unknown=0                            | PASS    |
+| A9  | parent status in {waiting_children, running} (transient self-resolving | status=waiting_children, mid_turn=False, first=waiting_children, re_read=None              | status in {waiting_children, running}              | PASS    |
+| A10 | watcher 5602e91d resolves uniquely; target==parent; source_task==39564 | matches=1, state=CANCELLED, disposition=naturally_resolved, target=17efd2ef-9f98-46d4-b41b | matches=1, identity matches, state=PENDING|resolve | PASS    |
+| A11 | watcher c83e12a2 resolves uniquely; target==parent; source_task==39564 | matches=1, state=CANCELLED, disposition=naturally_resolved, target=17efd2ef-9f98-46d4-b41b | matches=1, identity matches, state=PENDING|resolve | PASS    |
+| A12 | commission 06001f88 resolves uniquely; commissioner==parent; worker==8 | matches=1, state=outstanding, disposition=in_scope_stale, commissioner=17efd2ef-9f98-46d4- | matches=1, identity matches, state=outstanding|res | PASS    |
+| A13 | commission a1561f19 resolves uniquely; commissioner==parent; worker==8 | matches=1, state=outstanding, disposition=in_scope_stale, commissioner=17efd2ef-9f98-46d4- | matches=1, identity matches, state=outstanding|res | PASS    |
+| A14 | task 39564 (source of W3/W4) exists and is terminal (or GC'd after res | watchers resolved; source_task=MISSING (GC'd, expected)                                    | exists=True & terminal, OR resolved watchers with  | PASS    |
++-----+------------------------------------------------------------------------+--------------------------------------------------------------------------------------------+----------------------------------------------------+---------+
+
+=== PER-ROW DISPOSITION (8-row target set) ===
++-------+------------+----------+-------------+--------------------+------------------------------------------------+
+| label | kind       | id       | state       | disposition        | reason/note                                    |
++-------+------------+----------+-------------+--------------------+------------------------------------------------+
+| W1    | watcher    | 8a1f60d7 | CANCELLED   | naturally_resolved |                                                |
+| W2    | watcher    | 999efa71 | CANCELLED   | naturally_resolved | needs enqueued_at backfill                     |
+| W3    | watcher    | 5602e91d | CANCELLED   | naturally_resolved | needs enqueued_at backfill                     |
+| W4    | watcher    | c83e12a2 | CANCELLED   | naturally_resolved | needs enqueued_at backfill                     |
+| M1    | commission | 0cdc0b31 | abandoned   | naturally_resolved | worker_terminal_no_report / worker completed   |
+| M2    | commission | 90493206 | abandoned   | naturally_resolved | ttl_expired_not_live / worker waiting_children |
+| M3    | commission | 06001f88 | outstanding | in_scope_stale     | ttl_expired_not_live / worker waiting_children |
+| M4    | commission | a1561f19 | outstanding | in_scope_stale     | ttl_expired_not_live / worker waiting_children |
++-------+------------+----------+-------------+--------------------+------------------------------------------------+
+
+classification = partial
+parent_mid_turn = False (first=waiting_children, re_read=None)
+
+PARTIAL — 6 of 8 target row(s) are ALREADY resolved naturally and are EXCLUDED from the statements (remainder-only emission). Disclosed per row in the receipt:
+  W1 watcher 8a1f60d7 state=CANCELLED disposition=naturally_resolved
+  W2 watcher 999efa71 state=CANCELLED disposition=naturally_resolved
+  W3 watcher 5602e91d state=CANCELLED disposition=naturally_resolved
+  W4 watcher c83e12a2 state=CANCELLED disposition=naturally_resolved
+  M1 commission 0cdc0b31 state=abandoned disposition=naturally_resolved
+  M2 commission 90493206 state=abandoned disposition=naturally_resolved
+CONDITIONAL BACKFILL — 3 block(s) stamp enqueued_at on a row a pre-ceremony boot sweep already CANCELLED:
+  block 1 (W2-backfill) 999efa71-8ce3-4fd5-b19e-1627e0018205
+  block 2 (W3-backfill) 5602e91d-5d4c-4fb6-9e2b-8f351d203f52
+  block 3 (W4-backfill) c83e12a2-83b8-46ce-9213-f5a24a5060f6
+
+REQUEST WRITTEN (5 statement blocks) — NOT EXECUTED
+  /home/nea/ensemble-src-wt-wake-path-carrier-fix/.agents/shared/planning/wake-path-carrier-fix/repair/emitted/live_wedge_repair_request__20261118T183256Z.sql  sha256=64c250c7059e6e1d010f72a0fddeebaba1da6a326cc52080270bef30b82c9173
+  /home/nea/ensemble-src-wt-wake-path-carrier-fix/.agents/shared/planning/wake-path-carrier-fix/repair/emitted/live_wedge_repair_request__20261118T183256Z.receipt.md  sha256=a9b1a202ee245ec074cb850bb538f4740d93f5bc223b5125369356b985e3cf9a
+  /home/nea/ensemble-src-wt-wake-path-carrier-fix/.agents/shared/planning/wake-path-carrier-fix/repair/emitted/live_wedge_repair_request__20261118T183256Z.receipt.json  sha256=8f0da1c0d41318b613453a3d624ad9288c75be8cdffe363dd784150faa19e9e6
+
+Execution is the daemon's gated repair path (3-factor: user attestation + audit stamp + dry-run), not this script.

@@ -99,9 +99,9 @@ import logging
 import os
 from typing import TYPE_CHECKING, Annotated, Any
 
-from langchain_core.tools import tool
 from pydantic import Field
 
+from ._schema_registry import tool
 from ._tool_registry import register_tool_category
 
 if TYPE_CHECKING:

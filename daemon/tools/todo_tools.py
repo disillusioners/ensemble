@@ -51,8 +51,8 @@ import logging
 from builtins import list as _list_type
 from typing import TYPE_CHECKING
 
-from langchain_core.tools import tool
 
+from ._schema_registry import tool
 from ._tool_registry import register_tool_category
 from daemon.services.todo_manager import _normalize_subtask_status
 

@@ -223,6 +223,34 @@ journal_update "in_flight" \
 journal_mark_supervision || _warn "supervision txn stamp failed (advisory — continuing)"
 
 # ═══════════════════════════ 1. GRACE WAIT ══════════════════════════════════
+# D2 containment (c) / AC-D2-5 / the P-5 blind pin: the hand-back's version
+# FAST-FAIL was INACTIVE on the restart path — PROMOTE_EXPECTED_VERSION was
+# never set here, so the serving conjunct degraded to "2xx, no version
+# comparison" and a WRONG-VERSION daemon was accepted as SUCCESS (the same
+# defect the rollback path carried). The expected version is the CURRENT
+# release's manifest binary_version (ADR-027 — a restart does not change the
+# release; the gate below compares against the SAME source).
+#
+# It is resolved HERE — BEFORE the stop — because after the stop the
+# `current` symlink is still the same release (the restart never flips),
+# but resolving it up-front keeps the value available to the hand-back even
+# if the symlink is unreadable at that moment.
+if [ -L "$INSTALL_DIR/current" ]; then
+    _RESTART_CUR_NAME="$(readlink "$INSTALL_DIR/current")"
+    _RESTART_CUR_NAME="${_RESTART_CUR_NAME##*/}"
+    _RESTART_WANT_VER="$(manifest_field "$_RESTART_CUR_NAME" binary_version 2>/dev/null)"
+    if [ -n "$_RESTART_WANT_VER" ]; then
+        PROMOTE_EXPECTED_VERSION="$_RESTART_WANT_VER"
+        _log "restart: the hand-back version fast-fail is ARMED (expected=$PROMOTE_EXPECTED_VERSION) — a wrong-version daemon can no longer be accepted as success"
+    else
+        PROMOTE_EXPECTED_VERSION=""
+        _warn "restart: no binary_version in the current release $_RESTART_CUR_NAME manifest — the hand-back version fast-fail stays INACTIVE (degraded-but-known); the gate's version comparison remains the defence"
+    fi
+else
+    PROMOTE_EXPECTED_VERSION=""
+    _warn "restart: no current symlink — the hand-back version fast-fail stays INACTIVE (degraded-but-known); the gate's version comparison remains the defence"
+fi
+
 # The PRIMARY trigger (post-turn callback) fires this script at exact
 # turn-end — the turn's final DB writes may still be flushing, and
 # SINGLE-TERM's graceful drain (up to CHILD_STOP_WAIT_S) gives them their
@@ -255,9 +283,20 @@ if ! restart_via_launcher; then
     # out-of-band in HANDBACK_ERROR_FILE; the bare variable read degraded
     # to "none captured" because the resolver runs inside $()).
     HB_ERR="$(_handback_last_error_text)"
+    # D6-(iv) / AC-D6-6 (2026-11-19): the VERIFIER-PATH reason rides its
+    # OWN channel (HB_ERR stays the launchd resolver's diagnosis — the
+    # systemd path never writes it, C-9); the halt row takes it when the
+    # launchd channel is empty ⇒ never "none captured" on the systemd path.
+    HB_VERIFY_REASON="$(_handback_verify_reason_text)"
     # Warning #1 (review round 3): consume-then-clear — see promote.sh;
     # $$-keyed file, rm-after-read, never a cross-pid delete.
     rm -f "${HANDBACK_ERROR_FILE:-}" 2>/dev/null || true
+    rm -f "${HANDBACK_VERIFY_REASON_FILE:-}" 2>/dev/null || true
+    # hbk-err inode-churn fix (2026-11-22): the ELAPSED channel had no rm in
+    # any ceremony script — same consume-then-clear discipline (the name
+    # embeds this process id).
+    rm -f "${HANDBACK_VERIFY_ELAPSED_FILE:-}" 2>/dev/null || true
+    HB_ERR="${HB_ERR:-$HB_VERIFY_REASON}"
     journal_history_append halt "restart run_id=$RUN_ID: unit hand-back FAILED — daemon down; txn left open for boot-sweep convergence (no nohup fallback — Amendment #1; hand-back error: ${HB_ERR:-none captured})"
     _warn "unit hand-back FAILED — txn left open (boot sweep owns convergence)"
     exit 1

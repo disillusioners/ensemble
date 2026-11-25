@@ -99,7 +99,6 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import Annotated, Any, Literal
 
-from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from daemon.repositories.instance.repository import _MAX_TRAVERSAL_DEPTH
@@ -111,6 +110,7 @@ from daemon.services.snapshot_executor import (
 )
 from daemon.services.snapshot_search_service import SnapshotSearchService
 from daemon.services.snapshot_settings_utils import get_snapshot_create_enabled
+from ._schema_registry import tool
 from ._tool_registry import register_tool_category
 
 logger = logging.getLogger(__name__)

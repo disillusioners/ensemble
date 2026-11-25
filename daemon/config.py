@@ -488,8 +488,9 @@ class LLMConfig(BaseSettings):
     # the value, so our field_validator can handle comma-separated input.
     #
     # Shipped default (sel-default-20260927 + purpose-model-defaults
-    # 2026-10-17): ``("agentic", "coding", "coding2", "vision",
-    # "img-gen", "decision")`` — see ``_ALLOWED_MODELS_DEFAULT`` and the
+    # 2026-10-17; 2026-11-23 dropped the duplicate coding-family alias
+    # — moved inside the proxy group feature): ``("agentic", "coding",
+    # "vision", "img-gen", "decision")`` — see ``_ALLOWED_MODELS_DEFAULT`` and the
     # YAML interpolation literal at ``config.yaml:87``. ``vision`` is in
     # the default so the designer-agent vision-guard resolves
     # daemon-wide without forcing every deployment to add it to
@@ -517,7 +518,7 @@ class LLMConfig(BaseSettings):
             "unaffected. Resolved from OPENAI_SELECTABLE_MODELS with "
             "OPENAI_ALLOWED_MODELS as a legacy alias (warn-once when the "
             "legacy name is the effective source). Default: ``(\"agentic\", "
-            "\"coding\", \"coding2\", \"vision\", \"img-gen\", \"decision\")`` "
+            "\"coding\", \"vision\", \"img-gen\", \"decision\")`` "
             "— single source of truth is ``_ALLOWED_MODELS_DEFAULT``; "
             "YAML inlines the same list at the interpolation site; tests "
             "pin the equality."
@@ -839,6 +840,20 @@ class LimitsConfig(BaseSettings):
             "ENSEMBLE_METRICS_ENABLED). OFF ⇒ /metrics serves an empty "
             "200 and the samplers stop ticking. Read per request — no "
             "restart needed. Env LIMITS_METRICS_ENABLED."
+        ),
+    )
+    # tool-usage P1 (A-7 option (a)): backing field for the collection
+    # key's dotted config_path (limits.tool_usage_collection_enabled).
+    # Mirrors metrics_enabled's Field+path lockstep — a dotted path with
+    # no field is the v0.31.8 absent-config crash class. Default ON: this
+    # phase IS the measurement slice. Env LIMITS_TOOL_USAGE_COLLECTION_ENABLED.
+    tool_usage_collection_enabled: bool = Field(
+        default=True,
+        description=(
+            "Tool-usage collection kill-switch (managed tier). Opt-OUT "
+            "knob; default ON. Absent ⇒ code default (ON); present-but-"
+            "unparseable ⇒ FAIL-CLOSED OFF. Env "
+            "LIMITS_TOOL_USAGE_COLLECTION_ENABLED."
         ),
     )
     metrics_listener_port: int = Field(
@@ -1219,7 +1234,7 @@ class RamGuardConfig(BaseSettings):
       out-of-range explicit value ⇒ ``ValidationError`` out of
       ``load_config`` ⇒ **BOOT ABORTS** (never clamped), unless the
       master switch is OFF, which beats validation (§15 B26).
-    * ``poll_interval_ms``         — the tick cadence (default 200).
+    * ``poll_interval_ms``         — the tick cadence (default 1000).
     * ``grace_ms``                 — the TERM→KILL grace (default 250).
     * ``pss_confirm_deadline_ms``  — the one-shot PSS confirm deadline
       (default 250).
@@ -1261,12 +1276,12 @@ class RamGuardConfig(BaseSettings):
         # Same empty-string rule: ``RAM_GUARD_GRACE_MS=`` binds the
         # field's DEFAULT, never a boot abort.
         if isinstance(v, str) and not v.strip():
-            return {"poll_interval_ms": 200, "grace_ms": 250,
+            return {"poll_interval_ms": 1000, "grace_ms": 250,
                     "pss_confirm_deadline_ms": 250}[info.field_name]
         return v
 
     poll_interval_ms: int = Field(
-        default=200,
+        default=1000,
         ge=50,
         le=2000,
         description=(
@@ -1306,7 +1321,6 @@ class PersistenceConfig(BaseSettings):
     # ``daemon/api.py`` resolves the data directory from ``ENSEMBLE_DATA_DIR``
     # (with a ``DATA_DIR`` fallback) before loading ``ensemble.json``, so
     # there is no longer a second config knob to keep in sync.
-    checkpoint_interval: int = Field(default=1)
     checkpoint_ttl_hours: int = Field(default=CHECKPOINT_TTL_HOURS)
     checkpoint_cleanup_interval: int = Field(default=CHECKPOINT_CLEANUP_INTERVAL_HOURS)
     maintenance_check_interval_minutes: int = Field(default=MAINTENANCE_CHECK_INTERVAL_MINUTES)
@@ -2145,10 +2159,6 @@ class ServicesConfig(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="SERVICES_")
 
-    worker_poll_interval: float = Field(
-        default=0.5,
-        description="How often workers poll for tasks (seconds). Lower = more responsive but more CPU/DB load."
-    )
     stale_task_recovery_interval: int = Field(
         default=60,
         description="How often to check for stale tasks and recover them (seconds)."
@@ -3020,7 +3030,7 @@ class ServicesConfig(BaseSettings):
             "SERVICES_MISSION_STRAND_HEAL_RUNNING_ZOMBIE_BATCH_CAP."
         ),
     )
-    # source-gc (board wi-ed230eb4, Emperor directive 2026-11-07):
+    # source-gc (board wi-ed230eb4, user directive 2026-11-07):
     # knobs for ``SourcesGcService`` — the sweep that archives +
     # deletes unused terminal scheduler rows (``source_configs`` rows
     # that are ``source_type='scheduler' AND enabled=false AND status
@@ -3217,18 +3227,6 @@ class ServicesConfig(BaseSettings):
             "field (A8 house naming)."
         ),
     )
-    lease_heartbeat_interval_seconds: float = Field(
-        default=30.0,
-        description=(
-            "How often the in-process Execution Gate heartbeat task "
-            "refreshes a lease's heartbeat_at column while a "
-            "graph.astream call is in flight. Defaults to match "
-            "task_heartbeat_interval_seconds. Keep this at least "
-            "5-10x smaller than DEFAULT_STALE_LEASE_SECONDS (300 s) "
-            "so a few missed beats don't false-positive flag a live "
-            "lease as stale."
-        ),
-    )
     readiness_refresh_interval_seconds: int = Field(
         default=10,
         description=(
@@ -3310,7 +3308,19 @@ class JobSystemConfig(BaseSettings):
     retry_backoff_multiplier: float = Field(default=2.0, description="Exponential multiplier for backoff (2^retry_count * multiplier)")
     dlq_enabled: bool = Field(default=True, description="Enable dead letter queue functionality")
     event_dispatch_enabled: bool = Field(default=True, description="Enable event-based job dispatch")
-    observer_health_check_interval_seconds: int = Field(default=300, description="Interval in seconds for observer health checks")
+    observer_health_check_interval_seconds: int = Field(
+        default=300,
+        description=(
+            "Interval (seconds) at which ``JobFeedbackObserver`` re-checks "
+            "its own health. OWNER: this field lives on ``JobSystemConfig`` "
+            "(env ``ENSEMBLE_JOB_SYSTEM_OBSERVER_HEALTH_CHECK_INTERVAL_"
+            "SECONDS``) and is ALIVE — its consumer is "
+            "``daemon/services/job_feedback_observer.py`` (the observer's "
+            "``_health_check_interval``). It is NOT a ``SERVICES_*`` knob "
+            "and must not be moved (a field move would change its env var "
+            "and silently disable a live knob — engine-arc P1 T1.13)."
+        ),
+    )
     idempotency_key_ttl_hours: int = Field(default=24, description="TTL in hours for idempotency key deduplication")
     job_retry_scheduler_enabled: bool | None = Field(default=None, description="Enable background retry scheduler. None/empty = disabled.")
 
@@ -3399,6 +3409,237 @@ class SchedulingConfig(BaseSettings):
     )
 
 
+#: Retired config keys (engine-arc dead-knob sweep). Single source of truth
+#: shared by ``load_config`` (pops) and ``config_compat_contract`` (tolerated
+#: set). Adding a key here surfaces in BOTH the pop behavior and the contract.
+RETIRED_CONFIG_KEYS: dict[str, tuple[str, ...]] = {
+    "persistence": ("checkpointer_db_path", "checkpoint_interval"),
+    "services": ("worker_poll_interval", "lease_heartbeat_interval_seconds"),
+}
+
+
+class EngineConfig(BaseSettings):
+    """Configuration for the central polling/event engine (Engine Arc P1).
+
+    Env prefix ``ENSEMBLE_ENGINE_`` (the commission names it explicitly —
+    NOT ``SERVICES_ENGINE_*``; engine knobs are a different subsystem's
+    knobs and must not pollute the flat ``ServicesConfig`` — plan D1.8).
+    [Non-absolute wording — AMD-11: the former "70-field" count rotted
+    (tree truth 68 after the T1.12 dead-knob cleanup); this class is
+    large enough that a literal count is a lie in waiting.]
+
+    **DORMANCY TRUTH TABLE (D1.9 / CS-5 — three INDEPENDENT axes).** P1
+    freezes the NAMES only; P3/P4 implement the reads.
+
+    1. ``enabled`` (``ENSEMBLE_ENGINE_ENABLED``) — does the tick loop run?
+       Defaults **True**.
+    2. ``shadow_mode`` (``ENSEMBLE_ENGINE_SHADOW_MODE``) — is due-ness
+       computed and ``would_fire`` recorded while ``execute_fn`` is NEVER
+       invoked? Defaults **True**.
+    3. ``SERVICES_<MODULE>_USE_ENGINE`` (a separate, later-phase family) —
+       per-module execution ownership; OFF means the module's legacy loop
+       keeps execution. Zero flags are set in Phase 1.
+
+    The shipped combination is ``enabled=True`` + ``shadow_mode=True`` +
+    zero ``USE_ENGINE`` flags: **registered, observing, executing nothing**.
+    ``enabled=False`` stays the one-flag full-off.
+
+    AMD-8 RESOLVER NOTE (read by P3's fail-to-legacy resolver): a
+    MALFORMED / missing VALUE means fail-to-legacy (``engine_enabled =
+    False``, fail-closed); an ABSENT environment variable means the
+    pydantic default above (``enabled=True`` — observing). Absent and
+    malformed are deliberately different outcomes so a zero-env boot can
+    never silently kill the observatory.
+
+    The yaml ``engine:`` section in ``config.yaml`` is passed through by
+    ``load_config`` ONLY when it is present (the ``job_system`` /
+    ``scheduling`` pattern), so the ``ENSEMBLE_ENGINE_*`` env source stays
+    the canonical resolver for absent keys.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="ENSEMBLE_ENGINE_")
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "Axis 1 of the dormancy truth table: does the tick loop run? "
+            "Default True. False = the one-flag full-off (the engine still "
+            "constructs and exposes its registration inventory). "
+            "Env: ENSEMBLE_ENGINE_ENABLED."
+        ),
+    )
+    shadow_mode: bool = Field(
+        default=True,
+        description=(
+            "Axis 2: compute due-ness and record would_fire/SKIPPED_SHADOW "
+            "evidence while execute_fn is NEVER invoked. Default True (the "
+            "shipped dormant posture — 'dormant' is not 'absent'). "
+            "Env: ENSEMBLE_ENGINE_SHADOW_MODE."
+        ),
+    )
+    tick_resolution_seconds: float = Field(
+        default=1.0,
+        ge=0.1,
+        description=(
+            "Tick-loop resolution (seconds). One engine task owns the loop "
+            "and sleeps this long between due-set computations — never a "
+            "per-job sleep loop (phase2 D2.1). "
+            "Env: ENSEMBLE_ENGINE_TICK_RESOLUTION_SECONDS."
+        ),
+    )
+    tick_workers: int = Field(
+        default=2,
+        ge=1,
+        description=(
+            "Size of the engine's dedicated ThreadPoolExecutor used by the "
+            "DEDICATED_EXECUTOR concurrency class (CPU-bound work must not "
+            "steal the shared db_offload permits — phase2 D2.2). "
+            "Env: ENSEMBLE_ENGINE_TICK_WORKERS."
+        ),
+    )
+    watchdog_interval_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        description=(
+            "Cadence (seconds) of the engine-independent daemon-thread "
+            "watchdog sampler (phase4 D4.8 — a config value, never a "
+            "literal). Env: ENSEMBLE_ENGINE_WATCHDOG_INTERVAL_SECONDS."
+        ),
+    )
+    boot_max_window_seconds: float = Field(
+        default=120.0,
+        gt=0,
+        description=(
+            "The boot window the watchdog's stall threshold derives from: "
+            "stall when last-tick age > 3 x tick_resolution_seconds + "
+            "boot_max_window_seconds (phase4 D4.6). Default 120.0 = the "
+            "Emperor boot SLO (boot_epoch -> readyz-green <= 120s). "
+            "Env: ENSEMBLE_ENGINE_BOOT_MAX_WINDOW_SECONDS."
+        ),
+    )
+    boot_sweep_deadline_seconds: float = Field(
+        default=15.0,
+        gt=0,
+        description=(
+            "Per-pass deadline for an engine BOOT_SWEEP pass (awaited, "
+            "hard-deadlined; expiry logs ERROR and boot CONTINUES — boot "
+            "hygiene must never block boot). "
+            "Env: ENSEMBLE_ENGINE_BOOT_SWEEP_DEADLINE_SECONDS."
+        ),
+    )
+    boot_pass_deadline_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        description=(
+            "Per-pass deadline for an engine BOOT_PASS pass (awaited, "
+            "best-effort). Env: ENSEMBLE_ENGINE_BOOT_PASS_DEADLINE_SECONDS."
+        ),
+    )
+    extend_ceiling_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        description=(
+            "Ceiling (seconds) for an extend-policy await before the "
+            "dispatch is treated as a late failure (W-2). On breach the "
+            "existing TPE/dead escalation path takes over. The await is "
+            "bounded by asyncio.wait_for(asyncio.shield(task), "
+            "timeout=ceiling); on breach the task is then cancelled "
+            "(task.cancel()) and a bounded asyncio.gather awaits only the "
+            "cancelled task's settle. The to_thread payloads at "
+            "daemon/services/engine/execution.py:148/:184/:293 are NOT "
+            "bounded by this await ceiling — a payload already past "
+            "cancellation cannot be force-killed (residual thread-escape "
+            "window). "
+            "Env: ENSEMBLE_ENGINE_EXTEND_CEILING_SECONDS."
+        ),
+    )
+    retry_backoff_cap_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        description=(
+            "Cap (seconds) on a single retry backoff sleep so a long "
+            "backoff cannot stall the whole tick loop (W-2). "
+            "Env: ENSEMBLE_ENGINE_RETRY_BACKOFF_CAP_SECONDS."
+        ),
+    )
+    run_retention_days: int = Field(
+        default=30,
+        ge=1,
+        description=(
+            "Retention window for engine_runs rows in days. P1 only fixes "
+            "the KNOB (config surface); the prune sweep itself rides the "
+            "module-migration tail (routed follow-up, phase1 section 5 "
+            "retention note / AMD-1(e)). "
+            "Env: ENSEMBLE_ENGINE_RUN_RETENTION_DAYS."
+        ),
+    )
+
+
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def _coerce_engine_enabled_empty_to_safe(cls, value: Any) -> Any:
+        """AMD-8: absent => pydantic default; empty/malformed => safe (False).
+
+        Fail-to-legacy: an unreadable engine switch must never make the
+        engine own execution. A non-boolean, non-str, non-int value (e.g. a
+        list/dict) is NOT a kill switch and keeps fail-fast ValidationError.
+        """
+        if value is None:
+            return False
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int):
+            if value == 0:
+                return False
+            if value == 1:
+                return True
+            raise ValueError(
+                f"enabled must be a boolean-like value (got {value!r})"
+            )
+        if isinstance(value, str):
+            s = value.strip().lower()
+            if s == "":
+                return False
+            if s in ("0", "false", "no", "off"):
+                return False
+            if s in ("1", "true", "yes", "on"):
+                return True
+            return False
+        raise ValueError(f"enabled must be a boolean-like value (got {value!r})")
+
+    @field_validator("shadow_mode", mode="before")
+    @classmethod
+    def _coerce_engine_shadow_mode_empty_to_safe(cls, value: Any) -> Any:
+        """AMD-8: absent => default (True); empty/malformed => safe (True).
+
+        Safe shadow value is True (never invoke execute_fn).
+        """
+        if value is None:
+            return True
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int):
+            if value == 0:
+                return False
+            if value == 1:
+                return True
+            raise ValueError(
+                f"shadow_mode must be a boolean-like value (got {value!r})"
+            )
+        if isinstance(value, str):
+            s = value.strip().lower()
+            if s == "":
+                return True
+            if s in ("0", "false", "no", "off"):
+                return False
+            if s in ("1", "true", "yes", "on"):
+                return True
+            return True
+        raise ValueError(
+            f"shadow_mode must be a boolean-like value (got {value!r})"
+        )
+
+
 class NotifyUserConfig(BaseSettings):
     """Configuration for the ``notify_user`` tool (ari-voice, 2026-10-25).
 
@@ -3434,7 +3675,13 @@ class NotifyUserConfig(BaseSettings):
     min_interval_seconds: int = Field(
         default=60,
         ge=0,
-        description="The >=60s per-instance interval proxy for N=1/turn "
+        description="OWNER: this field lives on ``NotifyUserConfig`` "
+                    "(env ENSEMBLE_NOTIFY_USER_MIN_INTERVAL_SECONDS) — the "
+                    "``notify_user`` tool's rate limiter, NOT a SERVICES_* "
+                    "knob and NOT a periodic-engine interval. It must not be "
+                    "moved (a field move would change its env var and "
+                    "silently disable a live knob — engine-arc P1 T1.13). "
+                    "Value: the >=60s per-instance interval proxy for N=1/turn "
                     "(strict turn identity is not tool-visible; turns are "
                     "serialized per instance). Baseline = the instance's "
                     "last ACCEPTED-class ledger row (fold-able 4 pin) — "
@@ -3497,7 +3744,7 @@ class PromptAssentConfig(BaseSettings):
     lane is off ⇒ the tool refuses ``lane-disabled`` (the tool STAYS
     registered; ``mint`` is refused too). This is the first lane in the
     tree that can change a live agent's own guardrails through a chat
-    message; the house's most recent Emperor-ratified posture for a
+    message; the house's most recent user-ratified posture for a
     novel authority surface (Decision Module P1, 2026-11-09: "dormant by
     default, nothing decides anything") is exactly this shape. Arming is
     ONE env var per environment — no code change.
@@ -6485,7 +6732,7 @@ class SkillEvolutionConfig(EmbeddingConfig):
     # ``needs_more_data`` before the extension bump). The sanctioned
     # resolver (E-6 rule) may close such pairs; the age gate is the
     # TRIGGER condition only — winner selection is by GENERATION
-    # NUMBER, never timestamps (Emperor ruling E-6, 2026-11-17).
+    # NUMBER, never timestamps (user ruling E-6, 2026-11-17).
     ab_stall_timeout_days: float = Field(default=7.0)
 
     # ── Multi-metric composite scoring (Milestone 2 Phase 3) ──
@@ -7194,6 +7441,14 @@ class Config(BaseSettings):
     # NotifyUserConfig, env prefix ENSEMBLE_NOTIFY_USER_). Peers with
     # `scheduling:` — the yaml block mirrors the field names exactly.
     notify_user: NotifyUserConfig = Field(default_factory=NotifyUserConfig)
+    # engine-arc Phase 1 (Substrate, T1.6): the central polling/event
+    # engine knob section (class EngineConfig, env prefix
+    # ENSEMBLE_ENGINE_). Peers with `notify_user:` — the yaml block
+    # mirrors the field names exactly and load_config passes it through
+    # ONLY when present (the job_system / scheduling pattern), so env
+    # stays the canonical resolver for absent keys. Defaults ship the
+    # DORMANT posture: enabled=true + shadow_mode=true (D1.9 / CS-5).
+    engine: EngineConfig = Field(default_factory=EngineConfig)
     # prompt-assent (2026-11-10): the prompt_assent knob section
     # (architect D-2/H-11 — class PromptAssentConfig, env prefix
     # ENSEMBLE_PROMPT_ASSENT_): the DEFAULT-OFF fail-closed lane
@@ -7394,7 +7649,7 @@ def warn_deprecated_allowed_models_env() -> None:
 # Documented default for ``allowed_models`` when neither env var is set.
 # SINGLE SOURCE OF TRUTH (sel-default-20260927): this tuple MUST match the
 # ``config.yaml`` interpolation literal
-# ``${OPENAI_SELECTABLE_MODELS:-agentic,coding,coding2,vision,img-gen,decision}``
+# ``${OPENAI_SELECTABLE_MODELS:-agentic,coding,vision,img-gen,decision}``
 # EXACTLY.
 # The drift-detector pin test in
 # ``tests/unit/test_llm_allowed_models_precedence.py``
@@ -7418,10 +7673,12 @@ def warn_deprecated_allowed_models_env() -> None:
 _ALLOWED_MODELS_DEFAULT: tuple[str, ...] = (
     "agentic",
     "coding",
-    "coding2",
+    # 2026-11-23: dropped the duplicate coding-family alias (Emperor
+    # ruling — moved inside the proxy group feature); no longer shipped
+    # in the selectable default.
     "vision",
     # purpose-model-defaults commission (2026-10-17): join the
-    # established purpose-id family alongside agentic/coding/coding2/vision.
+    # established purpose-id family alongside agentic/coding/vision.
     # ``img-gen`` is the default purpose-id for the image-generation tool
     # (see ``daemon/tools/image_gen.py::IMAGE_GEN_DEFAULT_MODEL``);
     # ``decision`` is reserved for the decision-purpose consumer family
@@ -7459,7 +7716,7 @@ def warn_default_allowed_models_applied() -> None:
 
     Decided by inspecting ``os.environ`` directly — NOT by inspecting
     the ``yaml_value`` the resolver receives, because the YAML
-    interpolation ``${OPENAI_SELECTABLE_MODELS:-agentic,coding,coding2,vision,img-gen,decision}``
+    interpolation ``${OPENAI_SELECTABLE_MODELS:-agentic,coding,vision,img-gen,decision}``
     inlines the default and is therefore indistinguishable from an
     operator hard-coded value at the resolver layer.
 
@@ -7566,12 +7823,12 @@ def _resolve_allowed_models(
          exactly once per process.
       3. ``yaml_value`` — the YAML-interpolated value. The shipped
          ``config.yaml`` now inlines the default in its interpolation
-         (``${OPENAI_SELECTABLE_MODELS:-agentic,coding,coding2,vision,img-gen,decision}``),
+         (``${OPENAI_SELECTABLE_MODELS:-agentic,coding,vision,img-gen,decision}``),
          so the YAML layer hands us either the new-var value or that
          default — not an empty string. The empty-string branch is
          retained as defense-in-depth for custom/programmatic yaml and
          direct resolver calls: we substitute the documented default
-         ``("agentic", "coding", "coding2", "vision", "img-gen", "decision")`` (single source of
+         ``("agentic", "coding", "vision", "img-gen", "decision")`` (single source of
          truth: ``_ALLOWED_MODELS_DEFAULT``) so a no-env-var deployment
          matches the shipped YAML default. Non-empty values (e.g. an
          operator hard-coded the value in YAML bypassing the env vars)
@@ -8812,14 +9069,14 @@ def load_config(config_path: str | None = None) -> Config:
     # Resolve the OPENAI_SELECTABLE_MODELS / OPENAI_ALLOWED_MODELS
     # precedence chain for ``llm.allowed_models``. The shipped
     # config.yaml inlines the default in its interpolation
-    # (``${OPENAI_SELECTABLE_MODELS:-agentic,coding,coding2,vision,img-gen,decision}``),
+    # (``${OPENAI_SELECTABLE_MODELS:-agentic,coding,vision,img-gen,decision}``),
     # so the YAML layer hands us either the new-var value or that
     # default — not an empty string. We still need explicit precedence
     # here (and an os.environ check for the legacy name) so:
     #   * both vars set → new wins, no warning
     #   * only legacy set → legacy wins + one-shot warning
     #   * neither set → documented default
-    #     ("agentic","coding","coding2","vision","img-gen","decision") + one-shot
+    #     ("agentic","coding","vision","img-gen","decision") + one-shot
     #     default-applied WARNING naming the list
     # The "neither set" branch is defense-in-depth: it only fires when
     # a custom/programmatic yaml (or direct resolver call) presents
@@ -8950,7 +9207,8 @@ def load_config(config_path: str | None = None) -> Config:
         persistence_config.setdefault("db_path", "./data/instances.db")
     # ``checkpointer_db_path`` was removed (see PersistenceConfig above).
     # Silently drop it from the YAML dict so old configs keep loading.
-    persistence_config.pop("checkpointer_db_path", None)
+    for _rk in RETIRED_CONFIG_KEYS.get("persistence", ()):
+        persistence_config.pop(_rk, None)
     config_dict["persistence"] = persistence_config
 
     # compaction.model precedence (env COMPACTION_MODEL > yaml
@@ -9145,6 +9403,12 @@ def load_config(config_path: str | None = None) -> Config:
             if isinstance(processed_config["services"], dict) else {}
     else:
         services_config = {}
+    # The engine-arc dead-knob sweep (T1.12) retired these two ServicesConfig
+    # fields. ServicesConfig runs extra="forbid", so a deployed config still
+    # carrying either would fail validation at boot — drop them so old
+    # configs keep loading (same precedent as the persistence pop above).
+    for _rk in RETIRED_CONFIG_KEYS.get("services", ()):
+        services_config.pop(_rk, None)
     # Extract the yaml-side values (nested ``service_tool:`` block for
     # enabled/max_concurrent; the flat A8-named interval field).
     _st_yaml_block = services_config.get("service_tool")
@@ -9174,6 +9438,28 @@ def load_config(config_path: str | None = None) -> Config:
         # yaml carries the section so pydantic-settings' env source stays
         # the canonical resolver for absent keys.
         config_dict["scheduling"] = processed_config["scheduling"]
+    if "engine" in processed_config:
+        # engine-arc P1 (T1.6 / AC4): EngineConfig knobs default from env
+        # (ENSEMBLE_ENGINE_*). The section is passed through only when the
+        # yaml carries it (the job_system / scheduling shape) — BUT a
+        # plain passthrough would invert the documented precedence:
+        # pydantic-settings gives INIT KWARGS priority over env vars, so a
+        # yaml literal would shadow a live ENSEMBLE_ENGINE_* override
+        # (the "init-kwarg-beats-env" inversion trap the compaction /
+        # service_tool resolve sites were carved out to avoid). AC4
+        # requires "a yaml engine: section is honored AND an env value
+        # still wins on a present key", so any yaml key whose
+        # ENSEMBLE_ENGINE_<KEY> env var is SET is dropped here and left to
+        # the env source. Absent keys keep the yaml value; a wholly absent
+        # section keeps pydantic defaults.
+        _raw_engine = processed_config["engine"]
+        engine_config: Dict[str, Any] = (
+            dict(_raw_engine) if isinstance(_raw_engine, dict) else {}
+        )
+        for _engine_key in list(engine_config):
+            if f"ENSEMBLE_ENGINE_{_engine_key.upper()}" in os.environ:
+                engine_config.pop(_engine_key, None)
+        config_dict["engine"] = engine_config
     if "mcp_pool" in processed_config:
         config_dict["mcp_pool"] = processed_config["mcp_pool"]
     # Live-views max_media_bytes resolution (D2): env >
@@ -9349,7 +9635,7 @@ def load_config(config_path: str | None = None) -> Config:
     if not _ram_guard_switch:
         config_dict["ram_guard"] = RamGuardConfig.model_construct(
             ceiling_mib=None,
-            poll_interval_ms=200,
+            poll_interval_ms=1000,
             grace_ms=250,
             pss_confirm_deadline_ms=250,
         )

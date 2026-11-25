@@ -360,7 +360,6 @@ limits:
 
 persistence:
   db_path: "./data/instances.db"
-  checkpoint_interval: 1
   checkpoint_ttl_hours: 168
   checkpoint_cleanup_interval: 24
   max_instance_history: 300
@@ -533,7 +532,6 @@ def create_mock_config() -> MagicMock:
     config.compaction.enabled = False
 
     config.services = MagicMock(spec=ServicesConfig)
-    config.services.worker_poll_interval = 0.5
     config.services.stale_task_recovery_interval = 60
     config.services.task_timeout_minutes = 60
     config.services.max_task_retries = 3

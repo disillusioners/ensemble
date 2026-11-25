@@ -3,9 +3,17 @@ import { firstValueFrom } from 'rxjs';
 import { Observable } from 'rxjs';
 import { ApiService } from './api.service';
 import { SseService } from './sse.service';
+import { InstancesViewStateService } from './instances-view-state.service';
 import type { InstanceInfo, InstanceListResponse, InstanceStatus } from '../models';
 
 const PAGE_SIZE = 10;
+
+/**
+ * The refocus debounce (ms) — rapid tab switches collapse into ONE
+ * immediate refresh (the jobs-page exemplar's discipline). A hidden tab
+ * stops ISSUING polls; a refocus produces exactly ONE catch-up read.
+ */
+const REFOCUS_DEBOUNCE_MS = 2000;
 
 // Keep in sync with backend: daemon/repositories/instance/repository.py (KB_AGENT_IDS)
 
@@ -26,10 +34,31 @@ export function sortByCreatedAtDesc(instances: InstanceInfo[]): InstanceInfo[] {
 export class InstanceService {
   private readonly api = inject(ApiService);
   private readonly sseService = inject(SseService);
+  private readonly viewState = inject(InstancesViewStateService);
 
   // Polling interval: 60 seconds
   private readonly POLLING_INTERVAL = 60_000;
   private pollingIntervalId: ReturnType<typeof setInterval> | null = null;
+
+  /**
+   * The browser tab's visibility — the POLL GATE. A hidden tab stops
+   * ISSUING the 60 s instance-list poll (the cadence is unchanged for
+   * VISIBLE tabs).
+   */
+  private browserVisible = true;
+
+  /**
+   * The refocus debounce handle — rapid tab switches collapse into ONE
+   * immediate refresh (the timer id is kept so a second focus cancels and
+   * re-arms it instead of queueing a second refresh).
+   */
+  private refocusTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * The visibility listener — attached while the poll runs, detached on
+   * ``stopPolling`` (no leak).
+   */
+  private visibilityListener: (() => void) | null = null;
   private _currentProjectId: string | null = null;
   /**
    * Source-type filter threading. ``undefined`` = no filter (default);
@@ -330,6 +359,15 @@ export class InstanceService {
     // currently active tab's source filter.
     const effectiveSource = source ?? this._currentSource;
 
+    // Anchor: the route-selected instance (detail overlay) + its subtree must
+    // always be present in the list. Read INSIDE loadInstances() at fetch time
+    // — the same precedent as searchQuery() — so the initial load, pagination
+    // (loadMore) and the 60 s poll tick all inherit it automatically. No new
+    // param on startPolling; no anchor on the 8 s badge poll / tree fetches.
+    const anchor = this.viewState.detailVisible()
+      ? (this.viewState.activeInstanceId() ?? null)
+      : null;
+
     if (append) {
       this.isLoadingMore.set(true);
     } else {
@@ -348,6 +386,7 @@ export class InstanceService {
           undefined,           // order: BE default (pinned)
           true,                // include_descendants: default true (back-compat)
           effectiveSource,     // source: tab's active source-type filter (sticky via _currentSource)
+          anchor ?? undefined, // anchor: selected instance + subtree (only while detail is visible)
         )
       );
 
@@ -414,8 +453,22 @@ export class InstanceService {
     // Immediate load
     this.loadInstances(projectId, false, source);
 
+    // The VISIBILITY GATE — seed the flag from the document state and
+    // attach the listener while the poll runs.
+    this.browserVisible =
+      typeof document !== 'undefined' ? document.visibilityState !== 'hidden' : true;
+    if (typeof document !== 'undefined') {
+      this.visibilityListener = () => this.onVisibilityChange();
+      document.addEventListener('visibilitychange', this.visibilityListener);
+    }
+
     // Start polling interval (loadInstances reads searchQuery() each tick, so the active filter is reapplied automatically).
     this.pollingIntervalId = setInterval(() => {
+      // A hidden browser tab issues NO request — the cadence itself is
+      // unchanged (the 60 s budget is the same for a VISIBLE tab).
+      if (!this.browserVisible) {
+        return;
+      }
       this.loadInstances(projectId);
     }, this.POLLING_INTERVAL);
   }
@@ -428,6 +481,45 @@ export class InstanceService {
       clearInterval(this.pollingIntervalId);
       this.pollingIntervalId = null;
     }
+    // The visibility listener is detached (no leak) and a pending refocus
+    // refresh is dropped (a stopped poll must not fire a request).
+    if (this.visibilityListener && typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', this.visibilityListener);
+      this.visibilityListener = null;
+    }
+    if (this.refocusTimer !== null) {
+      clearTimeout(this.refocusTimer);
+      this.refocusTimer = null;
+    }
+  }
+
+  /**
+   * The visibility gate — a hidden browser tab stops the instance-list
+   * poll, and a refocus produces EXACTLY ONE immediate refresh (debounced
+   * by ``REFOCUS_DEBOUNCE_MS`` so a rapid tab-switch storm cannot issue a
+   * burst of reads). No catch-up burst is ever queued: the single refocus
+   * refresh IS the catch-up.
+   */
+  private onVisibilityChange(): void {
+    if (typeof document === 'undefined') {
+      return;
+    }
+    const visible = document.visibilityState !== 'hidden';
+    const wasHidden = !this.browserVisible;
+    this.browserVisible = visible;
+    if (!visible || !wasHidden) {
+      return;
+    }
+    if (this.refocusTimer !== null) {
+      clearTimeout(this.refocusTimer);
+    }
+    this.refocusTimer = setTimeout(() => {
+      this.refocusTimer = null;
+      if (!this.browserVisible) {
+        return;
+      }
+      this.loadInstances(this._currentProjectId ?? undefined);
+    }, REFOCUS_DEBOUNCE_MS);
   }
 
   /**

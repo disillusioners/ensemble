@@ -1,0 +1,23 @@
+......F..                                                                [100%]/home/nea/ensemble-src-wt-live-defects-p1/.venv/lib/python3.14/site-packages/_pytest/unraisableexception.py:33: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+  gc.collect()
+RuntimeWarning: Enable tracemalloc to get the object allocation traceback
+/home/nea/ensemble-src-wt-live-defects-p1/.venv/lib/python3.14/site-packages/_pytest/unraisableexception.py:33: RuntimeWarning: coroutine 'InstanceMessagingService._maybe_store_initiative_message' was never awaited
+  gc.collect()
+RuntimeWarning: Enable tracemalloc to get the object allocation traceback
+
+=================================== FAILURES ===================================
+E   AssertionError: 06f500af bug class: orphan watcher for source_task_id=1 (task.status='cancelled') must be CANCELLED after bus.start() — got state='PENDING'. Phase 1 _sweep_orphan_watchers() not implemented yet.
+    assert 'PENDING' == 'CANCELLED'
+      
+      - CANCELLED
+      + PENDING
+/home/nea/ensemble-src-wt-live-defects-p1/tests/postgres/test_06f500af_bug_class_eliminated_pg.py:489: AssertionError: 06f500af bug class: orphan watcher for source_task_id=1 (task.status='cancelled') must be CANCELLED after bus.start() — got state='PENDING'. Phase 1 _sweep_orphan_watchers() not implemented yet.
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-live-defects-p1/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/postgres/test_06f500af_bug_class_eliminated_pg.py::test_orphan_watcher_cancelled_on_startup_sweep
+1 failed, 8 passed, 1 warning in 19.06s

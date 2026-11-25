@@ -22,10 +22,23 @@ from uuid import uuid4
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Sequence
 
-from langchain_core.tools import tool
 from pydantic import BaseModel
 
+from ._schema_registry import tool
 from ._tool_registry import register_tool_category
+# Shared pure intent guard (2026-11-18 triple outage). The matcher lives in
+# ``_systemctl_guard`` so the bash lane AND the proc lane (proc_run reaches
+# the same predicate through its existing delegation) apply ONE intent model:
+# systemctl is decided over execution positions + statically resolved unit
+# operands; pkill/killall/fuser/kill/xargs-kill keep their text-scoped shape.
+from ._systemctl_guard import (
+    LIVE_NAME_PATTERNS as _SYSTEMCTL_GUARD_LIVE_NAMES,
+    MEANINGFUL_PATH_PATTERNS as _SYSTEMCTL_GUARD_PORT_TOKENS,
+    SYSTEMCTL_MUTATING as _SYSTEMCTL_GUARD_MUTATING,
+    SYSTEMCTL_READONLY as _SYSTEMCTL_GUARD_READONLY,
+    is_kill_like as _systemctl_guard_is_kill_like,
+    overlay_violation as _systemctl_guard_overlay_violation,
+)
 # agent-secrets P2 (design §1a) — the resolver vocabulary is IMPORTED
 # (never redefined; commission hard constraint). No import cycle:
 # ``secret_service`` / ``secret_resolver`` / ``kms_resolver`` do not
@@ -1939,11 +1952,44 @@ Returns:
 
 
 # ---------------------------------------------------------------------------
-# rogue-containment pkill overlay guard (adjudication 1, iter-1 hardened)
+# rogue-containment overlay guard (adjudication 1; 2026-11-18 intent rewrite)
 # ---------------------------------------------------------------------------
-# Pattern gate only — NO PID-identity resolution. Refuses bash commands that
-# look like process/port kills targeting LIVE ensemble processes, ports, or
-# install roots, unless an explicit fenced-test context marker is present.
+# The MATCHER lives in the pure module ``daemon/tools/_systemctl_guard.py``;
+# this block is the bash-lane seam (fence + public names). Read that module's
+# docstring for the full model. Summary of the 2026-11-18 rewrite:
+#
+#   - systemctl intent is decided over EXECUTION POSITIONS + statically
+#     resolved unit operands, never over raw text:
+#       * mutating verbs (stop/restart/kill/disable/mask/reload/daemon-reload/
+#         enable/start/try-restart/isolate) against the ensemble's own units
+#         are HARD-DENIED regardless of token composition —
+#         ``UNIT=ensemble-main.service; systemctl restart "$UNIT"``,
+#         ``S=ensemble; systemctl restart ${S}-main``,
+#         ``systemctl restart "$(echo ensemble-main)"`` are all refused now;
+#       * an operand that cannot be statically resolved (environment
+#         indirection, glob, non-trivial substitution) FAILS CLOSED;
+#       * read-only verbs (status/show/is-active/is-enabled/is-failed/cat/
+#         list-*/get-default/show-environment/help) are ALLOWED against ANY
+#         unit, including ``ensemble-main`` — the over-block that made live
+#         inspection impossible (``systemctl show ensemble-main -p Restart``
+#         used to be refused by the text scan) is fixed;
+#       * heredoc bodies, single-quoted text, ``echo``/``printf``/``grep``
+#         arguments are DATA — documenting ``systemctl restart <unit>`` in a
+#         doc-write no longer trips the guard. ``bash -c``, ``bash <<EOF``
+#         (heredoc-as-stdin), ``eval``, ``su -c``, ``runuser -c``,
+#         ``ssh host '<cmd>'``, ``systemd-run``/``watch`` (argv) and
+#         ``xargs <cmd>`` are recursed into, and a payload HANDED TO an
+#         executor (piped into a shell / scheduler / xargs / ssh) is
+#         refused when it carries the pre-2026-11-18 text guard's
+#         mutating-ensemble shape. Quoting through a runner is therefore
+#         NOT an escape for the shapes this guard can see statically.
+#         RESIDUAL (stated, not hidden): a payload the runner reads at RUN
+#         time from a FILE (``bash -c "$(cat script.sh)"``) is invisible to
+#         static analysis — the guard sees the substitution, never the
+#         file's content.
+#   - pkill / killall / fuser / ``kill`` / ``xargs kill`` keep the ORIGINAL
+#     text-scoped semantics (a quoted target stays refused). Their prose
+#     over-block residual is unchanged and disclosed in the commission report.
 #
 # Fence mechanism (documented for the census walk):
 #   - ambient daemon env ENSEMBLE_FENCED_TEST_CONTEXT=1 ONLY.
@@ -1953,104 +1999,49 @@ Returns:
 # Scratch-sentinel / scratch-named targets (no live pattern) pass without
 # the marker.
 #
+# Live pattern families (unchanged; A1 added the demo port token):
+#   "ensemble-prod", "ensemble-daemon", "ensemble-main", "ensemble-demo",
+#   "agents-ensemble", plus the 9797/9798/7979 whole-word port tokens.
+#
 # Residuals / evasion surface (documented for the census walk, N10):
 #   - two-step PID laundering (``lsof -ti:9797`` then ``kill <pid>``): the
-#     gate is pattern-based, not PID-identity based;
+#     kill legs are pattern-based, not PID-identity based;
 #   - regex variants that do not contain a pattern token verbatim
 #     (``pkill -f 'ensemble.*prod'``);
-#   - substring collisions (``ensemble-maintenance`` does NOT match
-#     ``ensemble-main`` as a whole token in the command string? it does —
-#     conservative over-refusal is accepted);
+#   - a script WRITTEN in one call and executed in a LATER call is checked
+#     at execution time only (the write is data, by design);
 #   - ``kill -9 -1`` (signal every process the uid may signal);
 #   - same-uid / same-install limits (see port_ownership residuals).
 # The ownership claim (component A) is the control that does not depend on
 # command text; this overlay is defense-in-depth only.
-#
-# Word-boundary / anchored design (iter-1 D2c):
-#   - kill-like verbs match as command words only, so "skill " does NOT
-#     trigger (\b boundary prevents the substring match inside "skill").
-#   - port tokens match only as whole words (\b9797\b), so "19797" does
-#     not trigger.
-#   - systemctl: read-only verbs (status/show/is-active/list-units/cat/
-#     is-enabled/is-failed/get-default) are ALLOWED against live units;
-#     mutating verbs (stop/restart/kill/disable/mask/reload/daemon-reload/
-#     enable/start/try-restart/isolate) are gated.
-#
-# Live patterns (iter-1 D2a adds ensemble-main, ensemble-demo; A1 adds
-# "\b7979\b"):
-#   "ensemble-prod", "ensemble-daemon", "ensemble-main", "ensemble-demo",
-#   "\b9797\b", "\b9798\b", "\b7979\b", "agents-ensemble"
 
-_PKILL_OVERLAY_LIVE_NAME_PATTERNS: tuple[str, ...] = (
-    "ensemble-prod",
-    "ensemble-daemon",
-    "ensemble-main",
-    "ensemble-demo",
-    "agents-ensemble",
-)
+_PKILL_OVERLAY_LIVE_NAME_PATTERNS: tuple[str, ...] = _SYSTEMCTL_GUARD_LIVE_NAMES
 
-_PKILL_OVERLAY_SYSTEMCTL_MUTATING: frozenset[str] = frozenset({
-    "stop", "restart", "kill", "disable", "mask", "reload",
-    "daemon-reload", "enable", "start", "try-restart", "isolate",
-})
+_PKILL_OVERLAY_SYSTEMCTL_MUTATING: frozenset[str] = _SYSTEMCTL_GUARD_MUTATING
 
-_PKILL_OVERLAY_SYSTEMCTL_READONLY: frozenset[str] = frozenset({
-    "status", "show", "is-active", "list-units", "list-unit-files",
-    "cat", "is-enabled", "is-failed", "get-default", "help",
-})
+_PKILL_OVERLAY_SYSTEMCTL_READONLY: frozenset[str] = _SYSTEMCTL_GUARD_READONLY
+
+_PKILL_OVERLAY_PORT_TOKENS: tuple[tuple[str, str], ...] = _SYSTEMCTL_GUARD_PORT_TOKENS
 
 
 def _pkill_overlay_is_kill_like(cmd_lower: str) -> bool:
-    # kill-like verbs as command words (word-boundary).
-    if _re.search(r"\bpkill\b", cmd_lower):
-        return True
-    if _re.search(r"\bkillall\b", cmd_lower):
-        return True
-    if _re.search(r"\bfuser\b", cmd_lower):
-        return True
-    # "kill" as a command word: preceded by start/whitespace/;&|(` then
-    # optional spaces; not part of another word.
-    if _re.search(r"(^|[\s;&|(`])\s*kill\b", cmd_lower):
-        return True
-    if "xargs kill" in cmd_lower or _re.search(r"\bxargs\s+kill\b", cmd_lower):
-        return True
-    if "systemctl" in cmd_lower:
-        # only mutating verbs are gated; read-only verbs pass
-        for verb in _PKILL_OVERLAY_SYSTEMCTL_MUTATING:
-            if _re.search(r"\b" + _re.escape(verb) + r"\b", cmd_lower):
-                return True
-        return False
-    return False
+    """Compat wrapper — text-scoped kill-shape detection (kill legs only)."""
+    return _systemctl_guard_is_kill_like(cmd_lower)
 
 
 def _pkill_overlay_violation(command, env=None) -> str | None:
-    """Return the matched live pattern if the command must be refused,
-    else None. Pure function (no I/O) so it is unit-testable."""
-    if isinstance(command, (list, tuple)):
-        cmd_str = " ".join(str(c) for c in command)
-    else:
-        cmd_str = str(command)
-    lower = cmd_str.lower()
-    if not _pkill_overlay_is_kill_like(lower):
-        return None
+    """Return the refusal token if the command must be refused, else None.
+
+    The decision itself is delegated to the shared pure matcher
+    (``_systemctl_guard.overlay_violation``); the only seam-local logic is
+    the ambient-only fence read below.
+    """
     # fix-round 2 / B6: the fence is read from the DAEMON-SET AMBIENT
     # environment ONLY. ``env`` (the agent-settable tool-call overlay) is
     # accepted for call-site compatibility but is DELIBERATELY IGNORED as a
     # fence source — otherwise any agent could grant itself a fence in the
     # same call that issues a live-pattern kill.
     del env
-    fenced = os.environ.get("ENSEMBLE_FENCED_TEST_CONTEXT") == "1"
-    if fenced:
+    if os.environ.get("ENSEMBLE_FENCED_TEST_CONTEXT") == "1":
         return None
-    for name in _PKILL_OVERLAY_LIVE_NAME_PATTERNS:
-        if name in lower:
-            return name
-    # port tokens as whole words (A1 hygiene: demo port 7979 joins)
-    for port_num, port_pat in (
-        ("9797", r"\b9797\b"),
-        ("9798", r"\b9798\b"),
-        ("7979", r"\b7979\b"),
-    ):
-        if _re.search(port_pat, lower):
-            return port_num
-    return None
+    return _systemctl_guard_overlay_violation(command)

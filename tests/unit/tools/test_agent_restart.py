@@ -712,10 +712,16 @@ class TestT8Extras:
         calls: list[dict] = []
 
         def _rec(argv, install_dir, extra_env=None, *, run_id=None,
-                 unit_prefix="ensemble-upgrade-", unit_properties=None):
+                 unit_prefix="ensemble-upgrade-", unit_properties=None,
+                 identity_stamper=None):
+            # cycle-3 set D: the D3-E3 spawn seam now threads the
+            # executor-identity stamper kwarg (daemon/manager.py — the
+            # restart drain passes it on every kind); the old recorder
+            # signature predated it and TypeError'd the drain.
             calls.append(
                 {"argv": list(argv), "extra_env": dict(extra_env or {}),
-                 "unit_prefix": unit_prefix}
+                 "unit_prefix": unit_prefix,
+                 "identity_stamper": identity_stamper}
             )
             return 424242, "(daemonized)"
 
@@ -744,6 +750,9 @@ class TestT8Extras:
             )
             assert result is True
             assert calls[0]["unit_prefix"] == "ensemble-restart-"
+            # cycle-3 set D: the D3-E3 identity stamper rides the spawn
+            # call (persisted into pending_op before the seam returns)
+            assert calls[0]["identity_stamper"] is not None
             if provenance_ok:
                 assert calls[0]["extra_env"].get("ENSEMBLE_RESTART_LIVE") == "1"
             else:
@@ -868,6 +877,39 @@ class TestCase5NotifyContents:
         body = svc._render_applied_overrides(wake, audit)
         assert "not-applied — resolved tier=env" in body, body
         # restore the module-global (other tests read it)
+        ss.set_last_applied_resolution(None)
+
+    def test_render_applied_overrides_applied_false_renders_skipped(
+        self, tmp_path: Path
+    ):
+        """F10: a resolution record carrying ``applied=False`` (a failed
+        boot apply) must render as 'not-applied (boot apply skipped)'."""
+        from daemon.services import settings_service as ss
+        from daemon.services.upgrade_journal_sweep import (
+            UpgradeJournalSweepService,
+        )
+
+        svc = UpgradeJournalSweepService(tmp_path, manager=_manager())
+        wake = uj.PendingWake(
+            run_id="r-applied-false", kind="restart", env="live",
+            arming_instance_id=INSTANCE_ID,
+        )
+        audit = {
+            "overrides": [
+                {"key": "limits.worker_pool_size", "live_before": 5,
+                 "db_value": 7, "status": "pending"}
+            ]
+        }
+        ss.set_last_applied_resolution(
+            {"limits.worker_pool_size": {
+                "source": "db", "value": 7, "default": 5,
+                "env_value": None, "yaml_value": None, "db_override": 7,
+                "applied": False,
+            }}
+        )
+        body = svc._render_applied_overrides(wake, audit)
+        assert "not-applied (boot apply skipped)" in body, body
+        assert "(applied)" not in body, body
         ss.set_last_applied_resolution(None)
 
     def test_outcome_labels_x4(self) -> None:

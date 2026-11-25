@@ -151,6 +151,7 @@ async def maybe_inject_ari_pok_block(
         from .pok_injection import (  # noqa: PLC0415
             POK_BLOCK_TITLE,
             admit_view,
+            make_retrieval_recorder,
             render_pok_block,
         )
         from .pok_service import POKService  # noqa: PLC0415
@@ -167,6 +168,20 @@ async def maybe_inject_ari_pok_block(
                 # deterministic floor baseline ranks the view
                 embeddings_map=service._repo.embeddings_map(project_id),
                 rank_fn=service.rank_for_view,
+                # The RETRIEVAL RECORDER (pok-write-gate Phase 10,
+                # T10.13 — the W-1 close): the rows admitted to THIS
+                # view are recorded as ledger RETRIEVAL rows, so the
+                # librarian's J-metric chain (which SUPERSEDES
+                # ``access_count``) reads real data. The recorder is
+                # never-raise (the §4.9 double containment: the
+                # hook site guards it AND the recorder guards each
+                # row), so the injection path stays infallible.
+                on_retrieval=make_retrieval_recorder(
+                    service._repo,
+                    project_id,
+                    agent_id=ARI_AGENT_ID,
+                    source="injection",
+                ),
             )
             body = render_pok_block(result)
             if not body:

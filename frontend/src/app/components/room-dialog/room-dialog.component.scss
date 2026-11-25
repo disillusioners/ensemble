@@ -260,3 +260,62 @@ $green: #10b981;
   padding: 0.5rem;
   border-top: 1px solid $border;
 }
+
+// ── gc-fe-surfaces: the nest-wide ('global') / per-instance ('joined')
+//    modes. MODE-SCOPED RULES ONLY — the shipped 'instance' mode keeps
+//    the stylesheet exactly as it was, and the two new modes share
+//    their chrome through the host mode class. ─────────────────────────
+
+.room-dialog--global .pane-header-text,
+.room-dialog--joined .pane-header-text {
+  color: $accent;
+}
+
+// The honest truncation notice — the list is a PREFIX of the nest.
+.room-dialog--global .pane-truncated,
+.room-dialog--joined .pane-truncated {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.375rem 0.625rem;
+  border-top: 1px solid $border;
+  background-color: rgba(56, 189, 248, 0.08);
+  color: $text-secondary;
+  font-size: 0.7rem;
+
+  mat-icon {
+    font-size: 0.95rem;
+    width: 0.95rem;
+    height: 0.95rem;
+    color: $accent;
+  }
+}
+
+// The honest stale notice — a failed refresh, the last-known rows kept.
+.room-dialog--global .pane-stale,
+.room-dialog--joined .pane-stale {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.375rem 0.625rem;
+  border-bottom: 1px solid $border;
+  background-color: rgba(245, 158, 11, 0.12);
+  color: #fbbf24;
+  font-size: 0.7rem;
+
+  mat-icon {
+    font-size: 0.95rem;
+    width: 0.95rem;
+    height: 0.95rem;
+  }
+}
+
+// The honest absent state — the open room vanished from the list.
+.room-dialog--global .pane-state-absent,
+.room-dialog--joined .pane-state-absent {
+  color: $text-secondary;
+
+  .pane-state-text {
+    color: $text-secondary;
+  }
+}

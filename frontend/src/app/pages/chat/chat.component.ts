@@ -1923,6 +1923,33 @@ export class ChatComponent implements OnInit, OnDestroy {
     });
   }
 
+  /**
+   * Open the NEST-WIDE room browser (gc-fe-surfaces item (a)) — the
+   * global surface that lists EVERY chatroom in this nest and lets the
+   * operator read any of them.
+   *
+   * Deliberately NOT gated on a selected instance: the browser spans the
+   * whole nest, so the control is actionable with nothing selected (the
+   * visible ≡ actionable discipline — the shipped per-instance icon
+   * stays gated, this one does not).
+   *
+   * No timer lives here: the dialog owns its own polling lane (D2.3),
+   * and the chat page keeps its timer ban.
+   */
+  protected onOpenRoomsBrowser(): void {
+    this.dialog.open(RoomDialogComponent, {
+      data: {
+        mode: 'global',
+      },
+      // BIG modal — the same geometry constant as the shipped modal
+      // (82vw × 82vh; the `room-dialog-panel` global rule in styles.scss
+      // lifts Material's 560px / 65vh defaults).
+      ...ROOM_DIALOG_SIZE,
+      panelClass: 'room-dialog-panel',
+      backdropClass: 'room-dialog-backdrop',
+    });
+  }
+
   protected onToggleWatchover(): void {
     // BUG 1/2 companion: same rationale as onSendMessage — the toggle
     // is clickable during the transient re-show window where

@@ -282,7 +282,6 @@ def make_spawn_manager(
         allowed_models = [
             "agentic",
             "coding",
-            "coding2",
             "vision",
             "img-gen",
             "decision",

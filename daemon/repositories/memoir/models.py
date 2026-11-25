@@ -100,7 +100,7 @@ class StarsListType(TypeDecorator):
     """A flat list of entity mentions — ``TEXT[]`` on PG, JSON on SQLite.
 
     Contract (D1.8, architect-verified round-trip on both drivers for
-    ``["Emperor", "the Emperor"]``, ``None`` and ``[]``):
+    ``["the user", "The user"]``, ``None`` and ``[]``):
 
     * ``impl = JSON`` and ``cache_ok = True``.
     * ``load_dialect_impl`` → ``dialect.type_descriptor(ARRAY(Text()))``
@@ -159,6 +159,15 @@ PERSONA_VALID_TRANSITIONS: frozenset[tuple[str, str]] = frozenset({
     ("pending_approval", "draft"),
     ("draft", "archived"),
 })
+
+#: Agent ids exempt from the human-lane requirement on PERSONA approval,
+#: but ONLY when the actor is the agent itself acting through the
+#: internal lane (DD-9 amendment, user ruling 2026-11-18, paraphrased:
+#: that agent works face-to-face with the user daily, so its review is
+#: continuous rather than queued; other agents lack that proximity and
+#: keep the gate). Append-only versions keep any drift one row from
+#: revert, and the transition vocabulary is unchanged for everyone.
+PERSONA_SELF_RATIFY_AGENTS: frozenset[str] = frozenset({"ari"})
 
 #: The persona version STATUS vocabulary (the CHECK constraint domain).
 PERSONA_STATUSES: frozenset[str] = frozenset({
@@ -472,8 +481,8 @@ class MemoirSynthesis(SQLModel, table=True):
 class MemoirStar(SQLModel, table=True):
     """One canonical entity node of the Constellation.
 
-    A star is the CANONICAL surface form of an entity — "the Emperor",
-    not "my dear". Alternative surface forms live in
+    A star is the CANONICAL surface form of an entity — "the user",
+    not "the operator". Alternative surface forms live in
     :class:`MemoirStarAlias` and resolve back to this row.
 
     ``heat`` is the accumulated-recall accumulator (never negative —
@@ -534,7 +543,7 @@ Index(
 class MemoirStarAlias(SQLModel, table=True):
     """One alternative surface form bound to a canonical star.
 
-    "my dear", "the Emperor", "Your Majesty" — every one of them is an
+    "the operator", "the user", "the owner" — every one of them is an
     ALIAS of exactly one canonical star, per agent. The
     ``uq_memoir_alias_agent_alias`` unique constraint is what makes the
     alias table an IDENTITY map rather than a suggestion list: one alias
@@ -637,6 +646,19 @@ class MemoirReflectionState(SQLModel, table=True):
     )
 
 
+#: The proposal DECISION vocabulary (the review axis — SEPARATE from the
+#: DELIVERY vocabulary above). ``NULL`` means UNDECIDED; the two tokens are
+#: the totality of a human decision on a proposal. This is a CLOSED set and
+#: is bound to the model + the 20261119 migration's CHECK text, exactly like
+#: the delivery vocabulary — a third token is rejected by the database.
+PROPOSAL_DECISION_ACCEPTED = "accepted"
+PROPOSAL_DECISION_DECLINED = "declined"
+
+PROPOSAL_DECISIONS: frozenset[str] = frozenset(
+    {PROPOSAL_DECISION_ACCEPTED, PROPOSAL_DECISION_DECLINED}
+)
+
+
 class MemoirProposalLedger(SQLModel, table=True):
     """The durable keepsake-proposal and notification ledger (C3 / W2).
 
@@ -656,6 +678,29 @@ class MemoirProposalLedger(SQLModel, table=True):
     slot. The vocabulary is bound to the MODEL (V2-D 1.5) and is
     TEST-ENFORCED — a fifth token is rejected by the database, not
     merely absent from the source.
+
+    THE DECISION AXIS IS ITS OWN COLUMN, NEVER A FIFTH DELIVERY TOKEN.
+    ``notification_status`` answers "was this DELIVERED?"; ``decision_status``
+    answers "was this READ, and what did the reviewer say?". They are
+    orthogonal — a delivered proposal can still be undecided, and a decided
+    one has no further delivery question — so folding a decision token into
+    the delivery vocabulary would conflate two independent state machines
+    (and corrupt the 1/day gate, which counts CONSUMPTION, not judgement).
+    ``decision_status`` is NULLABLE and renders the model's UNDECIDED state
+    as :data:`PROPOSAL_DECISIONS`' EXCLUDED value: :data:`None`. A decision
+    is only meaningful as the triple (:data:`PROPOSAL_DECISIONS` token,
+    ``decided_by`` actor-claim, ``decided_at`` instant) — the columns are
+    written together, by one compare-and-set, and never independently.
+
+    A DECIDED ROW LEAVES THE OPEN SET FOREVER. Both the briefing's zone
+    render and the notify target come from ONE statement builder
+    (``MemoirKeepsakeProposalService._zone_selection_statement``), which
+    excludes every row whose ``decision_status`` is set — so a reviewed
+    proposal can never be re-announced and can never be rendered as an
+    open question. The exclusions live in that ONE builder precisely so
+    neither path can drift from the other; the write path
+    (``record_review``) additionally compare-and-sets on
+    ``decision_status IS NULL``, so a decision is recorded at most once.
     """
 
     __tablename__ = "memoir_proposal_ledger"
@@ -664,6 +709,13 @@ class MemoirProposalLedger(SQLModel, table=True):
         CheckConstraint(
             "notification_status IN ('pending', 'enqueued', 'sent', 'failed')",
             name="ck_memoir_proposal_ledger_notification_status",
+        ),
+        # THE DECISION CHECK (one of the closed two tokens, or NULL).
+        # Byte-identical to the 20261119 migration's DDL text.
+        CheckConstraint(
+            "decision_status IS NULL OR decision_status IN "
+            "('accepted', 'declined')",
+            name="ck_memoir_proposal_ledger_decision_status",
         ),
         UniqueConstraint(
             "agent_id", "episode_id", name="uq_memoir_proposal_agent_episode"
@@ -686,6 +738,23 @@ class MemoirProposalLedger(SQLModel, table=True):
     )
     reason: str = Field(
         default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+    )
+    # ── THE DECISION AXIS (review state — nullable by design) ───────────
+    #: ``NULL`` = UNDECIDED (the honest initial state); otherwise one of
+    #: :data:`PROPOSAL_DECISIONS`. The DB CHECK above is the enforcer.
+    decision_status: str | None = Field(
+        default=None, sa_column=Column(Text, nullable=True)
+    )
+    #: The actor-claim token of the reviewer. Validated against
+    #: :data:`PIN_ACTORS` at the service seam (never spelled as a literal
+    #: anywhere), so the reviewer vocabulary has ONE home.
+    decided_by: str | None = Field(
+        default=None, sa_column=Column(Text, nullable=True)
+    )
+    #: The aware-UTC instant the decision was recorded (one unambiguous
+    #: instant; the service coerces through ``coerce_to_aware_utc``).
+    decided_at: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
     )
     created_at: datetime = Field(
         sa_column=Column(DateTime(timezone=True), nullable=False)
@@ -942,8 +1011,12 @@ __all__ = [
     "MemoirSynthesis",
     "PERSONA_SOURCES",
     "PERSONA_STATUSES",
+    "PERSONA_SELF_RATIFY_AGENTS",
     "PERSONA_VALID_TRANSITIONS",
     "PIN_ACTORS",
+    "PROPOSAL_DECISIONS",
+    "PROPOSAL_DECISION_ACCEPTED",
+    "PROPOSAL_DECISION_DECLINED",
     "StarsListType",
     "SYNTHESIS_VERBS",
     "render_keepsake_line",

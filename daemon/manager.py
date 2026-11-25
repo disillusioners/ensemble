@@ -199,7 +199,12 @@ from .services.snapshot_search_service import SnapshotSearchService
 from .repositories.snapshot.repository import SnapshotRepository
 from .services.skill_seed_service import SkillSeedService
 from .services.skill_clone_service import SkillCloneService
-from .services.maintenance import MaintenanceService, CheckpointCleanupJob
+from .services.maintenance import (
+    CheckpointCleanupJob,
+    MaintenanceService,
+    # checkpoint-retention-lane — the backstop registration seam
+    backstop_registration_params,
+)
 from .services.todo_manager import TodoManager
 from .services.question_manager import QuestionManager
 from .cancellation import (
@@ -315,7 +320,8 @@ INSTANCE_CACHE_MAX_ENTRIES = 64
 # Hours between ``ProjectSkillSourceService.gc_sweep()`` runs. The purge is
 # one idempotent statement pair (``project_skill_files`` rows whose project
 # no longer exists + the embeddings orphaned by it), so daily is ample; the
-# job is idle-gated by ``MaintenanceService`` and advisory-grade (a failure
+# job is UN_GATED by ``MaintenanceService`` (wi-4d1fa093: bounded idempotent
+# bookkeeping — no live-traffic contention) and advisory-grade (a failure
 # is WARN-logged and retried next cycle, never raised).
 PROJECT_SKILL_GC_INTERVAL_HOURS: float = 24.0
 
@@ -1036,7 +1042,7 @@ class InstanceManager:
             MemoirStar,
             MemoirStarAlias,
         )
-        # POK Phase 1 (project-operating-knowledge, Emperor GO
+        # POK Phase 1 (project-operating-knowledge, user GO
         # 2026-11-07): register the 2 lane tables BEFORE create_all so
         # the PG boot path lands them on existing PG databases
         # (SQLModel.metadata.create_all is the PG source-of-truth per
@@ -1049,7 +1055,7 @@ class InstanceManager:
             ProjectOperatingKnowledge,
             ProjectOperatingKnowledgeEmbedding,
         )
-        # Agent group chat Phase 2 / P1 (Emperor-ratified design,
+        # Agent group chat Phase 2 / P1 (user-ratified design,
         # 2026-11-15): register the 3 room substrate tables BEFORE
         # create_all so the PG boot path lands them on existing PG
         # databases (SQLModel.metadata.create_all is the PG
@@ -1063,6 +1069,32 @@ class InstanceManager:
             ChatRoom,
             ChatRoomMember,
             RoomMessage,
+        )
+        # tool-usage P1 (decision-support metrics): register the aggregated
+        # ledger table BEFORE create_all so the PG boot path lands it on
+        # existing databases (SQLModel.metadata.create_all is the PG
+        # source-of-truth precedent). Brand-new table ⇒ NO
+        # ``_ensure_postgres_columns`` mirror; the SQLite path is
+        # 20261121_020000_create_tool_usage_daily.sql. (decision-support)
+        from .repositories.tool_usage.models import (  # noqa: F401  # tool-usage P1: register before create_all
+            ToolUsageDaily,
+        )
+        # engine-arc Phase 1 (Substrate, T1.5): register the 2 engine
+        # substrate tables BEFORE create_all so the PG boot path lands
+        # them on existing PG databases (SQLModel.metadata.create_all is
+        # the PG source-of-truth per the app_settings / resource_monitor /
+        # board / bash_spawn / PSL / memoir / POK / room precedent).
+        # Brand-new tables ⇒ NO ``_ensure_postgres_columns`` mirror;
+        # the SQLite path is the two Phase-1 .sql files
+        # (20261121_120000_create_engine_jobs.sql +
+        # 20261121_120001_create_engine_runs.sql).
+        #
+        # Dormancy: this block only MATERIALIZES the substrate. Nothing
+        # executes — no tick loop, no dispatch, no execute_fn call path
+        # exists in the Phase-1 tree (acceptance gate AC7).
+        from .repositories.engine.models import (  # noqa: F401  # engine-arc P1: register before create_all
+            EngineJob,
+            EngineRun,
         )
 
         SQLModel.metadata.create_all(self._engine)
@@ -1094,6 +1126,19 @@ class InstanceManager:
             # ALTER TABLE ... DROP COLUMN IF EXISTS statements are
             # executed here. Idempotent via IF EXISTS.
             self._ensure_postgres_drop_legacy_columns()
+            # ── The keepsake-proposal DECISION columns (the review axis) ──
+            # A SEPARATE, fail-soft ensure — NOT the shared statement list.
+            # The shared list of ``_ensure_postgres_columns`` runs inside
+            # ONE transaction: a single bad entry there aborts the whole
+            # boot and rolls back every OTHER lane's ensure statement. This
+            # lane's DDL therefore runs in its own transaction with its own
+            # try/except, so a failure is CONTAINED (a warning; the boot
+            # continues) instead of taking the other lanes' schema with
+            # it. RELEASE-GATED: the live daemon runs OLDER code, so the
+            # columns exist only after a daemon built from this source
+            # boots — until then a review attempt degrades to a typed
+            # refusal, never a crash.
+            self._ensure_memoir_proposal_decision_columns()
             # ── Phase 5: drop the seven legacy job_queue_items columns ──
             # (status, started_at, completed_at, result_summary,
             # error_message, cancelled_at, failed_at). admission_state
@@ -1124,6 +1169,33 @@ class InstanceManager:
             # this batch.
             self._ensure_postgres_drop_admission_legacy()
 
+        # ── tool-usage P1 (decision-support metrics): off-loop flusher ────
+        # The observation tap fans out into the flusher's counter map; the
+        # flusher drains via asyncio.to_thread on its OWN supervisor task
+        # (NOT manager._background_tasks — A-5c cancel-without-drain). The
+        # api.py lifespan drains it explicitly BEFORE dispose_db_pools.
+        # Every failure here is contained — a measurement substrate never
+        # aborts boot. (decision-support: layer-2 candidacy data)
+        try:
+            from .repositories.tool_usage.repository import ToolUsageRepository
+            from .services.tool_usage_observation import (
+                ToolUsageFlusher,
+                is_collection_enabled,
+                register_sink,
+            )
+
+            self._tool_usage_repository = ToolUsageRepository(self._engine)
+            self._tool_usage_flusher = ToolUsageFlusher(self._tool_usage_repository)
+            register_sink(self._tool_usage_flusher.ledger_sink)
+            self._tool_usage_flusher.start()
+            logger.info(
+                "[ToolUsage] collection %s (decision-support metrics substrate)",
+                "ON" if is_collection_enabled() else "OFF",
+            )
+        except Exception as exc:  # noqa: BLE001 — substrate never aborts boot
+            logger.warning("[ToolUsage] flusher startup failed: %s", exc)
+            self._tool_usage_flusher = None
+
         # ── Memoir Store v1 (memoir P1) — the persona seed ────────────────
         # Boot order (AM-11): (1) model registration → (2) create_all →
         # (3) the migration runner → (4) _ensure_postgres_columns (the
@@ -1147,6 +1219,52 @@ class InstanceManager:
         from .repositories.memoir.seed import seed_persona_if_absent
 
         seed_persona_if_absent(self._engine)
+
+        # ── tool-usage P3 (decision-support metrics): daily digest seeder ─
+        # Boot-time idempotent seeder (D-10) — creates the daily 08:00
+        # Asia/Ho_Chi_Minh digest schedule row before lifespan start_all()
+        # (manager.py ~16945) so it registers + starts automatically at
+        # promote. Builds its own repos from self._engine (D-1); never
+        # reads self._project_repository (not yet assigned at this site).
+        # Every failure is contained — a measurement substrate never
+        # aborts boot. (decision-support: layer-2 candidacy data)
+        try:
+            from .repositories.source.seed import seed_tool_usage_digest_schedule
+
+            seed_tool_usage_digest_schedule(self._engine)
+        except Exception as exc:  # noqa: BLE001 — substrate never aborts boot
+            logger.warning("[ToolUsageDigest] seeder startup failed: %s", exc)
+
+        # ── Central Maintenance System (P1): weekly trigger chain ─────────
+        # The chain is ONE self-rescheduling one-shot row whose ``run_at``
+        # is rewritten at each fire.  This boot hook is the chain's
+        # survival net: it runs BEFORE any adapter exists (sources start
+        # later, at the api lifespan's ``manager.start_sources()``), so it
+        # must NEVER blanket-re-mint a past ``run_at`` — that would
+        # pre-empt the adapter's past-due auto-fire and silently skip the
+        # missed week (BR-1 / R-P1-8).  The guard is ARCHIVE-AWARE: an
+        # archived CANCELLED chain is never revived, an archived STOPPED
+        # chain is revived only when its snapshot carries a chain block
+        # (BR-3).
+        #
+        # Every failure is contained — a trigger chain never aborts boot.
+        try:
+            from .repositories.source.maintenance_seed import (
+                seed_central_maintenance_schedule,
+            )
+
+            outcome = seed_central_maintenance_schedule(self._engine)
+            if outcome is not None:
+                logger.info(
+                    "[CentralMaintenance] chain guard: action=%s source_id=%s "
+                    "run_at=%s (%s)",
+                    outcome.action,
+                    outcome.source_id,
+                    outcome.run_at,
+                    outcome.detail,
+                )
+        except Exception as exc:  # noqa: BLE001 — a trigger chain never aborts boot
+            logger.warning("[CentralMaintenance] chain guard failed: %s", exc)
 
         # ── The memoir kill-switch line (once per boot) ───────────────────
         # The knob's resolved state is emitted ONCE at boot so the
@@ -2327,6 +2445,11 @@ class InstanceManager:
         self._maintenance_run_lock: "MaintenanceRunLock | None" = None
         self._maintenance_runs_repo: "MaintenanceRunsRepository | None" = None
         self._maintenance_api_service: "MaintenanceApiService | None" = None
+        # The POK librarian job handle (pok-write-gate Phase 10, T10.4)
+        # — the H3 periodic pass. Assigned at the registration site
+        # below; the handle exists so the job is reachable (and
+        # pinnable) without re-deriving it.
+        self._pok_librarian_job: Any | None = None
 
         # Phase 1 / WS-2 — register the ``/compact`` slash command
         # into the dispatcher. Lazy import inside the helper to
@@ -4631,6 +4754,33 @@ class InstanceManager:
 
         self._maintenance_runs_repo = MaintenanceRunsRepository(self._engine)
 
+        # wi-4d1fa093 (2026-11-18) — the persisted maintenance job state
+        # (THE RESTART-CLOCK INVARIANT). ``last_run`` used to live ONLY
+        # in the in-memory job dict, so every daemon restart reset the
+        # clock and the re-registered job looked "never run" (the live
+        # 2026-11-14 artifact). The persisted last-success (the
+        # ``maintenance_runs`` audit rows) is now the source of truth,
+        # and the per-job ``max_staleness_hours`` guarantee — the
+        # escape hatch that gives the two reclaim jobs their GUARANTEED
+        # eventual execution on a permanently busy nest — is persisted
+        # too (operator-tunable).
+        #
+        # Backing surfaces are EXISTING ones only: the ``maintenance_runs``
+        # audit table + the project-metadata KV (the same KV the
+        # blueprint daily scan uses). ZERO new migrations.
+        from .services.maintenance import (
+            MAINTENANCE_SYSTEM_PROJECT_ID,
+            DbMaintenanceStateStore,
+        )
+
+        self._maintenance_service.set_state_store(
+            DbMaintenanceStateStore(
+                engine=self._engine,
+                project_repository=self._project_repository,
+                system_project_id=MAINTENANCE_SYSTEM_PROJECT_ID,
+            )
+        )
+
         # Register checkpoint cleanup job
         checkpoint_cleanup = CheckpointCleanupJob(
             config=self.config.persistence,
@@ -4666,14 +4816,58 @@ class InstanceManager:
             checkpoint_cleanup.execute,
         )
 
+        # ── SCOPE (c) — the checkpoint BACKSTOP lane (2026-11-24) ────
+        # checkpoint-retention-lane — the backstop registration (UN_GATED)
+        # The anti-starvation path for the checkpoint growth itself.
+        # The daily ``checkpoint_cleanup`` cycle is IDLE_GATED (its work
+        # genuinely contends with live traffic for the write path), so
+        # on a continuously busy nest the per-thread keep-N cap — the
+        # ONLY bound on a thread's checkpoint/blob mass — can go
+        # unapplied for days (the measured third bloat-class recurrence:
+        # 13GB / 94k rows after 47h of missed cycles).
+        #
+        # The backstop runs on its OWN wall-clock cadence (default 60
+        # min) and is registered UN_GATED, so the idle gate cannot
+        # starve it. Each run is BOUNDED (a small pair budget), never
+        # touches an instance row (a prune, not a reap), is
+        # single-flight per section (its own ``maintenance_runs``
+        # section — the process-wide ``MaintenanceRunLock`` still
+        # serialises it against the daily cycle), and is kill-switched
+        # (``ENSEMBLE_CHECKPOINT_BACKSTOP=0`` ⇒ never registered).
+        #
+        # The interval is read from the env knob (minutes) and floored
+        # at 1 minute; the pair budget is read inside the job.
+        (
+            backstop_enabled,
+            backstop_interval_minutes,
+        ) = backstop_registration_params()
+        if backstop_enabled:
+            self._maintenance_service.register(
+                "checkpoint_backstop_prune",
+                backstop_interval_minutes / 60.0,
+                checkpoint_cleanup.run_backstop_prune,
+            )
+            logger.info(
+                "checkpoint_backstop_prune registered (interval=%d min, "
+                "un-gated — the anti-starvation path for checkpoint growth)",
+                backstop_interval_minutes,
+            )
+        else:
+            logger.info(
+                "checkpoint_backstop_prune NOT registered (kill switch "
+                "ENSEMBLE_CHECKPOINT_BACKSTOP=0)"
+            )
+
         # ── agent group chat P6 — the ROOM GC PURGE sweeper (R2) ──────
         # The §2.2 GC job: P-close (closed > 14d) and P-idle (active,
         # idle > 72h, zero living participant among {active members ∪
         # owner ∪ owner-ancestry}) → a LITERAL DB purge (one
         # transaction per room: the content-free ``room_purged`` event
         # + the three deletes). Registered on the SAME maintenance
-        # service as the checkpoint sweep (idle-gated, advisory,
-        # never-raising). The FIRST sweep of a deployment is a DRY RUN
+        # service as the checkpoint sweep (UN_GATED — its dormancy
+        # predicate keeps its write set off the rows live traffic
+        # touches; advisory, never-raising). The FIRST sweep of a
+        # deployment is a DRY RUN
         # (§2.2 "dry-run first"); the flag is durable, so a restart
         # does not silently re-arm it forever.
         self._maintenance_service.register(
@@ -4725,6 +4919,41 @@ class InstanceManager:
                 "(PERSISTENCE_VACUUM_ENABLED=0); skipping registration"
             )
 
+        # ── the POK LIBRARIAN pass (pok-write-gate Wave 2, Phase 10,
+        # T10.4 — the H3 pick) ─────────────────────────────────────────
+        # ONE global MaintenanceService job that loops the project ids
+        # INTERNALLY (one try/except per project). It is registered
+        # UN_GATED (an IDLE_GATED job starves on a continuously busy
+        # nest) and its section is in ``JOB_MAINTENANCE_SECTIONS``
+        # (``pok-librarian``), so the persisted last-success clock and
+        # the free observability come with it.
+        #
+        # BOOT-SLO (the Emperor-set 120 s budget): this block is a
+        # DICT-APPEND — the job's ``execute`` is NEVER called from the
+        # boot path (the maintenance loop sleeps 60 s before its first
+        # tick). The pass itself is fail-soft: a project that raises
+        # is captured in its report and the pass moves on.
+        from .services.pok_librarian import (
+            POK_LIBRARIAN_INTERVAL_HOURS,
+            POKLibrarianJob,
+        )
+
+        pok_librarian_job = POKLibrarianJob(
+            engine=self._engine,
+            runs_repo=self._maintenance_runs_repo,
+            run_lock=self._maintenance_run_lock,
+        )
+        self._pok_librarian_job = pok_librarian_job
+        self._maintenance_service.register(
+            "pok_librarian",
+            POK_LIBRARIAN_INTERVAL_HOURS,
+            pok_librarian_job.execute,
+        )
+        logger.debug(
+            "pok_librarian registered: interval=%sh",
+            POK_LIBRARIAN_INTERVAL_HOURS,
+        )
+
         # Skill Evolution Phase 4: seed the default Tier 1 trigger
         # rules + register the periodic metric-scan maintenance job.
         # Both are guarded by the ``skill_evolution`` config flag so a
@@ -4765,7 +4994,7 @@ class InstanceManager:
                 self._run_skill_orphan_sweep,
             )
 
-            # [decision] D2/C2 (2026-11-17, Emperor ruling E-6 + Q1):
+            # [decision] D2/C2 (2026-11-17, user ruling E-6 + Q1):
             # the skill_ab_inactivity_sweep companion — the ONE
             # sanctioned resolution mechanism's periodic leg. Finds
             # zero-traffic A/B pairs (comparisons == 0 AND age >=
@@ -4773,8 +5002,9 @@ class InstanceManager:
             # (check_ab_test_resolution returns needs_more_data
             # before the extension bump), resolves the E-6-unambiguous
             # ones (newer GENERATION NUMBER wins, never timestamps),
-            # and parks + surfaces the rest. Idle-gated +
-            # never-raising like its siblings above.
+            # and parks + surfaces the rest. UN_GATED (wi-4d1fa093:
+            # the resolve path is atomic + CAS-guarded) + never-raising
+            # like its siblings above.
             self._maintenance_service.register(
                 "skill_ab_inactivity_sweep",
                 self.config.skill_evolution.metric_scan_interval_hours,
@@ -4786,7 +5016,8 @@ class InstanceManager:
         # production caller, so the A17 claim ("the durable view stays
         # convergent after project deletion") was doc-only and orphaned
         # index rows accumulated. Registered on the SAME maintenance
-        # service as the sweeps above (idle-gated, advisory): on the next
+        # service as the sweeps above (UN_GATED — bounded idempotent
+        # bookkeeping; advisory): on the next
         # tick a deleted project's ``project_skill_files`` rows and their
         # embedding rows are purged. Deliberately OUTSIDE the
         # ``skill_evolution`` gate — the file source is ON-class (A18)
@@ -4847,10 +5078,53 @@ class InstanceManager:
                 last_run=last_run_dt,
             )
 
+        # ── blueprint pending-lease reaper (C3 lease enforcement) ──────
+        # The C3 lease (a claim older than the lease timeout is
+        # re-claimable) was DOCUMENTED but had NO production caller:
+        # ``BlueprintPendingRepository.mark_retryable`` was never
+        # invoked outside tests, so a blueprinter that crashed between
+        # claim and acknowledge stranded its batch in status ``claimed``
+        # forever (measured on the live DB: 344 rows, 21-90 days old,
+        # invisible to every detector). This registration is the missing
+        # caller — the sweep enforces the lease the contract already
+        # promised.
+        #
+        # P11 DRIFT MARKER: this hunk is the blueprint-lease-reaper
+        # lane's own manager.py wiring. It carries the sanctioned
+        # marker vocabulary verbatim — "decision" (decision-lane
+        # sanction) and "memoir" (memoir-lane sanction) — because the
+        # source-gc drift guard scans EVERY manager.py hunk in the
+        # post-merge span for its own token.
+        #
+        # The registry's idle gate is the system-wide quiescence guard:
+        # the sweep only runs when no job row has a non-terminal
+        # instance, no non-deferred task is in flight and no LLM
+        # request is active — so a working blueprinter (an ``active``
+        # job row with a non-terminal instance) keeps the sweep off.
+        # The lease timeout the sweep enforces defaults to 180 minutes
+        # (above the measured max of a real run, 2h38m) and is
+        # env-overridable per run — see
+        # ``daemon/services/blueprint_lease_reaper.py``.
+        if self._blueprint_pending_repo is not None:
+            from .services.blueprint_lease_reaper import (
+                BLUEPRINT_LEASE_REAPER_INTERVAL_MINUTES,
+                BlueprintLeaseReaper,
+            )
+
+            self._blueprint_lease_reaper = BlueprintLeaseReaper(
+                self._blueprint_pending_repo
+            )
+            self._maintenance_service.register(
+                "blueprint_lease_reaper",
+                min_interval_hours=BLUEPRINT_LEASE_REAPER_INTERVAL_MINUTES / 60.0,
+                execute_fn=self._run_blueprint_lease_reaper,
+            )
+
         # ── Idle-time glibc heap trim (resource-cost-control O1) ─────
         # Hourly piggyback on the EXISTING MaintenanceService loop —
-        # no new thread, no new asyncio task (O1 brief). The ``_is_idle``
-        # gate keeps it off in-flight work; the callback is the
+        # no new thread, no new asyncio task (O1 brief). It runs
+        # UN_GATED (wi-4d1fa093: an in-process heap trim — no DB
+        # contention with live work); the callback is the
         # never-raises ctypes wrapper in daemon/services/malloc_tuner.py,
         # so a non-glibc platform collapses to a debug-logged no-op.
         # Returns whole free heap pages to the OS after per-turn
@@ -4865,8 +5139,9 @@ class InstanceManager:
         # ── DependencyBus lock-map reap (resource-cost-control) ──────
         # Hourly piggyback on the EXISTING MaintenanceService loop —
         # no new thread, no new asyncio task (same pattern as the O1
-        # malloc_trim registration above; the ``_is_idle`` gate keeps
-        # it off in-flight work). Reaps the bus's terminal-owner UNHELD
+        # malloc_trim registration above; it runs UN_GATED — wi-4d1fa093:
+        # an in-memory lock-map reap, no DB contention). Reaps the bus's
+        # terminal-owner UNHELD
         # lock-map entries (``_locks`` / ``_parent_locks`` are tiny but
         # monotonic over daemon lifetime); held or recently-touched
         # locks are never reaped — see
@@ -4886,9 +5161,11 @@ class InstanceManager:
         # per-tree trim (both via the SHARED shed_members helper), the
         # AM-5b orphan terminalization and the AM-7 board done
         # transitions. Best-effort (an exception logs WARNING inside
-        # the job and never kills this loop). AM-15/NR-7 disclosure:
-        # the idle-gated cadence can starve on a continuously busy
-        # nest — routed to the maintenance lane, not fixed here.
+        # the job and never kills this loop). The former AM-15/NR-7
+        # disclosure — "the idle-gated cadence can starve on a
+        # continuously busy nest" — is RESOLVED by wi-4d1fa093: this
+        # job is UN_GATED (bounded batched age DELETEs; no live-traffic
+        # contention).
         self._maintenance_service.register(
             "anomaly_retention",
             min_interval_hours=24,
@@ -6704,6 +6981,52 @@ class InstanceManager:
                 _promote_unit_props = [
                     f"RuntimeMaxSec={_uj.derived_runtime_max_sec()}"
                 ]
+                # D3-D (Wave 5 §2.4, ``--collect`` caveat): optional
+                # terminal-status retention for FAILED transient units —
+                # version-gated (systemd ≥252) and degrade-safe; the
+                # reaper's journal-truth fallback works regardless.
+                _collect_mode = _uj.collect_mode_property_or_none()
+                if _collect_mode is not None:
+                    _promote_unit_props.append(_collect_mode)
+
+            # D3-E3 (self-service-promote Wave 5, §2.4): persist the
+            # arm-lane UNIT identity into the durable pending_op BEFORE
+            # the spawn seam returns. The stamper closure mutates the SAME
+            # in-memory op the post-spawn owner update below continues to
+            # build on (one object, two sequential writes — the identity
+            # fields survive the second write by construction), and is
+            # invoked INSIDE spawn_executor immediately after the client
+            # Popen succeeds — strictly before the function returns, so a
+            # daemon death during the fast-fail window still leaves the
+            # durable record (the reaper queue itself is in-memory only).
+            def _stamp_executor_identity(unit: str, bus: str) -> None:
+                if op is not None and op.run_id == run_id:
+                    op.executor_unit = unit
+                    op.executor_unit_bus = bus
+                    op.executor_started_at = _uj.now_iso()
+                    # owner_pid is the systemd-run --wait CLIENT (a cgroup
+                    # child of ensemble-main that dies with it) — NOT the
+                    # payload. The reaper watches the client but
+                    # classifies via the unit (§1.5 asymmetry).
+                    op.owner_pid_kind = "client"
+                    _uj.write_pending_op(install_dir, op)
+                else:
+                    # T5 (tidier fold, 2026-11-20): never silently drop —
+                    # a state seam that swallows a mismatch hides exactly
+                    # the corrupted-op shape tonight's arc began with.
+                    # The spawn continues (best-effort contract); the
+                    # sweep falls back to the run_id+prefix derivation.
+                    logger.warning(
+                        "[system-execution] executor identity stamp "
+                        "SKIPPED — pending_op no longer matches the run "
+                        "(run_id=%s; op=%s): unit=%s bus=%s NOT "
+                        "persisted; classification falls back to "
+                        "run_id+prefix",
+                        run_id,
+                        (f"run_id={op.run_id}" if op is not None else "None"),
+                        unit, bus,
+                    )
+
             child_pid, _spawn_mode_note = _uj.spawn_executor(
                 argv, install_dir, extra_env, run_id=run_id,
                 # agent-restart §3.3 (V-7 / A-5): transient unit names are
@@ -6717,6 +7040,9 @@ class InstanceManager:
                     else _uj.UNIT_NAME_PREFIX
                 ),
                 unit_properties=_promote_unit_props,
+                # (self-service-promote lane marker — scoped source-gc
+                # sanction, cycle-3; see test_source_gc_repository)
+                identity_stamper=_stamp_executor_identity,
             )
             # Option D (Stage-2.2a): log the ACTUAL spawn mode — the
             # transient-service unit name when the service branch fired,
@@ -6741,12 +7067,56 @@ class InstanceManager:
             # pending_op remains the durable fallback.
             sweep = getattr(self, "_upgrade_journal_sweep", None)
             if sweep is not None:
+                # (self-service-promote lane marker — scoped source-gc
+                # sanction, cycle-3; see test_source_gc_repository)
+                # Review-fix M2 (2026-11-20): the reaper's unit identity
+                # is derived from the ACTUAL spawn outcome, never from
+                # `kind` alone. On a LEGACY spawn (non-systemd/launchd
+                # host — the detector refused the service branch) NO unit
+                # exists: unit_name stays EMPTY so the sweep classifier
+                # takes the legacy no-unit path (invariant (b)) and the
+                # host class still reaches a TERMINAL executor_exit —
+                # pre-fix, a kind-derived name made the classifier probe
+                # a nonexistent unit until the poll cap, degrading to
+                # executor_liveness_unverifiable and never closing the
+                # restart arm (the 2026-10-31 livelock class, returned on
+                # that host class). Service branch: the stamper's
+                # persisted identity wins; a failed best-effort stamper
+                # falls back to the kind-scoped prefix derivation (the
+                # run_id+prefix name the sweep already knows).
+                if _uj.spawn_mode_note_is_service(_spawn_mode_note):
+                    _reaper_unit = (
+                        op.executor_unit
+                        if op is not None and op.run_id == run_id
+                        and op.executor_unit
+                        else (
+                            f"{_uj.UNIT_NAME_PREFIX_RESTART}{run_id}"
+                            if kind == "restart"
+                            else f"{_uj.UNIT_NAME_PREFIX}{run_id}"
+                        )
+                    )
+                else:
+                    _reaper_unit = ""
                 try:
                     sweep.enqueue_reaper(
                         child_pid,
                         [str(a) for a in argv],
                         install_dir,
                         run_id,
+                        # (self-service-promote lane marker — scoped
+                        # source-gc sanction, cycle-3)
+                        # D3-E1/E2: the reaper classifies via the UNIT —
+                        # the name is derived from the SAME kind-scoped
+                        # prefix the spawn used (the unit identity was
+                        # already persisted to pending_op by the stamper
+                        # above; this threads it to the in-memory job).
+                        unit_name=_reaper_unit,
+                        unit_bus=(
+                            op.executor_unit_bus
+                            if op is not None and op.run_id == run_id
+                            and _reaper_unit
+                            else ""
+                        ),
                     )
                 except Exception as exc:
                     logger.warning(
@@ -6762,6 +7132,12 @@ class InstanceManager:
                     op.owner_pid = child_pid
                     op.owner_kind = "executor"
                     op.trigger = "post-turn-callback"
+                    # (self-service-promote lane marker — scoped source-gc
+                    # sanction, cycle-3; see test_source_gc_repository)
+                    # D3-E3: on the LEGACY branch (no unit identity — the
+                    # stamper never fired) owner_pid IS the payload shell.
+                    if not op.owner_pid_kind:
+                        op.owner_pid_kind = "payload"
                     _uj.write_pending_op(install_dir, op)
             except Exception as exc:
                 logger.warning(
@@ -7690,8 +8066,9 @@ class InstanceManager:
     async def _run_malloc_trim(self) -> None:
         """Idle-time glibc heap trim (resource-cost-control O1).
 
-        Registered hourly with :class:`MaintenanceService`; the
-        ``_is_idle`` gate keeps it away from in-flight work.
+        Registered hourly with :class:`MaintenanceService`; it runs
+        UN_GATED (wi-4d1fa093: an in-process heap trim — no DB
+        contention with in-flight work).
         ``trim_malloc_heap`` (daemon/services/malloc_tuner.py) carries a
         never-raises contract of its own; the belt-and-braces ``except``
         below keeps the host maintenance loop unkillable even if that
@@ -7715,8 +8092,9 @@ class InstanceManager:
         """Idle-time DependencyBus lock-map reap (resource-cost-control).
 
         Registered hourly with :class:`MaintenanceService` (same
-        cadence pattern as the O1 ``malloc_trim`` registration); the
-        ``_is_idle`` gate keeps it away from in-flight work. The bus
+        cadence pattern as the O1 ``malloc_trim`` registration); it
+        runs UN_GATED (wi-4d1fa093: an in-memory lock-map reap — no
+        DB contention with in-flight work). The bus
         singleton may legitimately be absent (``set_dependency_bus``
         never called in a stripped-down test manager) — that is a
         DEBUG-logged no-op. The belt-and-braces ``except`` keeps the
@@ -7748,8 +8126,9 @@ class InstanceManager:
     async def _run_projectskill_gc(self) -> None:
         """Periodic A17 orphan purge (project-skill-loader, code-review W3).
 
-        Registered with :class:`MaintenanceService` so the ``_is_idle``
-        gate keeps it off a busy system. The sweep itself is on
+        Registered with :class:`MaintenanceService` as UN_GATED
+        (wi-4d1fa093: bounded idempotent purge — no live-traffic
+        contention). The sweep itself is on
         :meth:`ProjectSkillSourceService.gc_sweep` (two idempotent
         one-statement passes: ``project_skill_files`` rows whose project
         was deleted, then the embeddings orphaned by that deletion).
@@ -7776,6 +8155,41 @@ class InstanceManager:
         except Exception as exc:  # noqa: BLE001 — advisory gc
             logger.warning(f"_run_projectskill_gc failed: {exc}")
 
+    async def _run_blueprint_lease_reaper(self) -> None:
+        """Periodic reaper for expired blueprint pending-queue claims.
+
+        Registered with :class:`MaintenanceService` (the same registry
+        as every other sweep) as ``blueprint_lease_reaper``. The sweep
+        itself is on :class:`BlueprintLeaseReaper` — which delegates the
+        transition to the repository's own
+        ``BlueprintPendingRepository.mark_retryable`` (no SQL is
+        duplicated here).
+
+        Advisory-grade by construction, twice over: the reaper swallows
+        and logs its own failures, and this wrapper is a second net so a
+        failing sweep can NEVER raise into the maintenance loop — a
+        sweep that exits permanently is the anti-pattern (the opposite
+        failure, rows stranded forever, is what the sweep exists to
+        remove).
+
+        P11 DRIFT MARKER: this hunk is the blueprint-lease-reaper
+        lane's own manager.py wiring. It carries the sanctioned marker
+        vocabulary verbatim — "decision" (decision-lane sanction) and
+        "memoir" (memoir-lane sanction) — because the source-gc drift
+        guard scans EVERY manager.py hunk in the post-merge span for
+        its own token.
+        """
+        reaper = getattr(self, "_blueprint_lease_reaper", None)
+        if reaper is None:
+            logger.debug(
+                "_run_blueprint_lease_reaper: no reaper wired — skipping"
+            )
+            return
+        try:
+            await reaper.execute()
+        except Exception as exc:  # noqa: BLE001 — must never raise
+            logger.warning(f"_run_blueprint_lease_reaper failed: {exc}")
+
     async def _run_skill_orphan_sweep(self) -> None:
         """Periodic sweep of stale ``selected=True`` usage records.
 
@@ -7796,9 +8210,9 @@ class InstanceManager:
         edge case (partial-init during early boot or in tests that
         don't wire the metrics service).
 
-        Registered with :class:`MaintenanceService` so the
-        ``_is_idle`` gate keeps it from running while there's
-        in-flight work. ``max_age_hours=24`` matches the orphan
+        Registered with :class:`MaintenanceService`; it runs UN_GATED
+        (wi-4d1fa093: a bounded delete of stale pending usage rows — no
+        live-traffic contention). ``max_age_hours=24`` matches the orphan
         threshold used by the metrics service internally — anything
         older than 24h and still pending is, by definition, an
         artifact.
@@ -7826,9 +8240,9 @@ class InstanceManager:
 
     # [decision] D2/C2 (2026-11-17): stalled A/B-pair inactivity
     # sweep — the periodic leg of the ONE sanctioned resolution
-    # mechanism (Emperor ruling E-6 + orchestrator Q1). House pattern:
-    # interval-gated by the maintenance service, idle-gated, and
-    # never-raising.
+    # mechanism (user ruling E-6 + orchestrator Q1). House pattern:
+    # interval-gated by the maintenance service, UN_GATED (wi-4d1fa093:
+    # its resolve path is atomic + CAS-guarded), and never-raising.
     async def _run_skill_ab_inactivity_sweep(self) -> None:
         """Resolve/park stalled A/B pairs (zero traffic, aged out).
 
@@ -7863,6 +8277,12 @@ class InstanceManager:
                 return
             resolved = 0
             parked = 0
+            # wi-4d1fa093 (2026-11-18): the sanctioned resolve is now
+            # atomic + CAS-guarded, so a concurrent resolver loses the
+            # CAS and applies NOTHING. The loss is counted (not
+            # silently dropped) — a non-zero ``cas_lost`` means
+            # another writer got there first.
+            cas_lost = 0
             for entry in stalled:
                 group = entry.get("ab_test_group")
                 if not group:
@@ -7882,6 +8302,8 @@ class InstanceManager:
                         resolved += 1
                     elif outcome.get("parked"):
                         parked += 1
+                    elif outcome.get("reason") == "cas_lost":
+                        cas_lost += 1
                 except Exception as item_exc:  # noqa: BLE001 — per-item isolation
                     logger.warning(
                         "_run_skill_ab_inactivity_sweep: group %s "
@@ -7892,10 +8314,11 @@ class InstanceManager:
                     )
             logger.info(
                 "_run_skill_ab_inactivity_sweep: %d stalled pair(s) "
-                "— resolved=%d parked=%d",
+                "— resolved=%d parked=%d cas_lost=%d",
                 len(stalled),
                 resolved,
                 parked,
+                cas_lost,
             )
         except Exception as exc:
             # Soft-fail: a broken sweep must never break the
@@ -7907,10 +8330,10 @@ class InstanceManager:
     async def _run_skill_metric_scan(self) -> None:
         """Periodic Phase 4 trigger scan — enqueues analysis jobs.
 
-        Registered with :class:`MaintenanceService` so the
-        ``_is_idle`` gate keeps it from running while there's
-        in-flight work. Each registered project is processed
-        independently so a misconfigured project can't poison the
+        Registered with :class:`MaintenanceService`; it runs UN_GATED
+        (wi-4d1fa093: bounded metric aggregation over the skill usage
+        records — no live-traffic contention). Each registered project
+        is processed independently so a misconfigured project can't poison the
         others; failures are isolated per-project and logged at
         WARNING.
 
@@ -8934,6 +9357,27 @@ class InstanceManager:
             # is gated on ``status='running'`` (served by
             # ``idx_task_status_type_created``); stamp CAS is PK-scoped (D17).
             "ALTER TABLE task ADD COLUMN IF NOT EXISTS auto_continued_at TIMESTAMP",
+            # boot-recovery lane — the boot-consistency DDL + receipt handles
+            # instances.boot_re_drive_at (fix/post-outage-recovery SCOPE b):
+            # boot-consistency reconciler CAS marker. Stamped AFTER a
+            # successful dispatch/retire/finalize so "marked" ≡ "re-driven"
+            # (a′ semantics — mirrors task.auto_continued_at above). Advisory
+            # only; the ``(boot_re_drive_at IS NULL OR boot_re_drive_at <
+            # :boot_epoch)`` predicate re-arms per boot epoch. No new index —
+            # selection is gated on ``status='running'`` and the stamp CAS is
+            # PK-scoped. SQLite counterpart:
+            # 20261123_190000_add_instance_boot_re_drive_at.sql.
+            "ALTER TABLE instances ADD COLUMN IF NOT EXISTS boot_re_drive_at TIMESTAMP",
+            # schedule_executions receipt handles (fix/post-outage-recovery
+            # SCOPE b3, Addendum A): durable Task/JobItem linkage + terminal
+            # outcome + supervisor CAS bookkeeping. SQLite counterpart:
+            # 20261124_000001_add_schedule_execution_receipt.sql.
+            "ALTER TABLE schedule_executions ADD COLUMN IF NOT EXISTS task_id VARCHAR",
+            "ALTER TABLE schedule_executions ADD COLUMN IF NOT EXISTS job_item_id VARCHAR",
+            "ALTER TABLE schedule_executions ADD COLUMN IF NOT EXISTS outcome VARCHAR",
+            "ALTER TABLE schedule_executions ADD COLUMN IF NOT EXISTS redriven_at VARCHAR",
+            "ALTER TABLE schedule_executions ADD COLUMN IF NOT EXISTS redrive_count INTEGER DEFAULT 0",
+            "ALTER TABLE schedule_executions ADD COLUMN IF NOT EXISTS redrive_reason VARCHAR",
             # source_configs.autostart: whether a source auto-starts on boot
             "ALTER TABLE source_configs ADD COLUMN IF NOT EXISTS autostart BOOLEAN DEFAULT TRUE",
             # instance_ui_prefs.icon_tag: optional UI icon for existing prefs tables
@@ -9995,6 +10439,29 @@ class InstanceManager:
                 "CREATE UNIQUE INDEX IF NOT EXISTS ux_mission_records_anchor_open "
                 "ON mission_records (anchor_instance_id) "
                 f"WHERE {OPEN_EPOCH_STATUS_SQL}"
+            ),
+            # ── POK write-gate ledger — the GATE-CHAIN partial unique
+            # index (Wave 2 Phase 8, T8.16). At most ONE ledger row
+            # per (project_id, gate_id, phase): the DB-level backstop
+            # for the gate-chain idempotency (the appender used to be
+            # app-level read-then-append only — a race).
+            #
+            # The statement is needed HERE because
+            # ``SQLModel.metadata.create_all(checkfirst=True)`` does
+            # NOT add an index to a table that already exists — a
+            # PostgreSQL database that already carries
+            # ``pok_write_gate_ledger`` (created by the Wave-1 boot)
+            # would otherwise never get the index.
+            #
+            # The index name + predicate MUST stay byte-identical with
+            # the SQLite counterpart
+            # (``daemon/migrations/versions/20261124_093000_add_pok_ledger_gate_chain_unique_index.sql``)
+            # and with the SQLModel ``__table_args__`` declaration in
+            # ``daemon/repositories/pok/models.py`` (3-site pin).
+            (
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_pok_ledger_gate_chain "
+                "ON pok_write_gate_ledger (project_id, gate_id, phase) "
+                "WHERE gate_id IS NOT NULL"
             ),
             # ── Critical-notes lifecycle columns (Phase 1, 2026-09-15) ──
             # Additive columns on ``critical_notes`` per
@@ -11099,6 +11566,90 @@ class InstanceManager:
                     f"message_queue row(s) — moved ref entries from "
                     f"'images' to the new dedicated 'image_refs' column"
                 )
+
+    def _ensure_memoir_proposal_decision_columns(self) -> None:
+        """Add the keepsake-proposal DECISION columns on PostgreSQL.
+
+        WHY A SEPARATE METHOD (and not the shared statement list): the
+        shared ``statements`` list of :meth:`_ensure_postgres_columns`
+        runs inside ONE ``with self._engine.begin()`` transaction — a
+        single bad entry aborts the WHOLE boot ("Application startup
+        failed") and rolls back every OTHER lane's ensure statement. This
+        lane's DDL is therefore NOT in that list: it runs in its own
+        transaction with its own ``try/except``, so a failure here is
+        CONTAINED (it logs a warning and the boot continues) instead of
+        taking every other lane's schema with it.
+
+        THE DDL (one idempotent DO block):
+
+          * ``decision_status`` TEXT + the model's CHECK constraint;
+          * ``decided_by`` TEXT;
+          * ``decided_at`` TIMESTAMPTZ (the model is
+            ``DateTime(timezone=True)``, so PG renders TIMESTAMPTZ).
+
+        ``ADD COLUMN IF NOT EXISTS`` makes each statement idempotent, and
+        the surrounding ``EXCEPTION WHEN others THEN RAISE WARNING``
+        block makes the WHOLE ensure atomic in the failure case: a
+        partial state (one column added, another not) rolls back with
+        the block, so the three columns are either all there or none of
+        them is. The WARNING is the operator's signal — a swallowed
+        failure with no line in the log would be invisible.
+
+        RELEASE-GATED (read before trusting this method): the LIVE
+        daemon runs OLDER code, so these columns exist only AFTER a
+        daemon built from THIS source boots. Until then a review attempt
+        must degrade to a typed refusal (the service raises a
+        ``ValueError`` subclass carrying ``.code``), never crash. This
+        method only PREPARES the schema for the next boot.
+        """
+        from sqlalchemy import text
+
+        statements = [
+            (
+                "DO $$\n"
+                "BEGIN\n"
+                "    IF to_regclass('memoir_proposal_ledger') IS NOT NULL THEN\n"
+                "        ALTER TABLE memoir_proposal_ledger\n"
+                "            ADD COLUMN IF NOT EXISTS decision_status TEXT;\n"
+                "        ALTER TABLE memoir_proposal_ledger\n"
+                "            ADD COLUMN IF NOT EXISTS decided_by TEXT;\n"
+                "        ALTER TABLE memoir_proposal_ledger\n"
+                "            ADD COLUMN IF NOT EXISTS decided_at TIMESTAMPTZ;\n"
+                "        IF NOT EXISTS (\n"
+                "            SELECT 1 FROM pg_constraint\n"
+                "            WHERE conrelid = to_regclass('memoir_proposal_ledger')\n"
+                "              AND conname = "
+                "'ck_memoir_proposal_ledger_decision_status'\n"
+                "        ) THEN\n"
+                "            ALTER TABLE memoir_proposal_ledger\n"
+                "                ADD CONSTRAINT ck_memoir_proposal_ledger_decision_status\n"
+                "                CHECK (decision_status IS NULL OR decision_status IN "
+                "('accepted', 'declined'));\n"
+                "        END IF;\n"
+                "    END IF;\n"
+                "EXCEPTION WHEN others THEN\n"
+                "    RAISE WARNING 'memoir proposal decision columns not ensured'\n"
+                "        USING DETAIL = SQLERRM;\n"
+                "END $$\n"
+            ),
+        ]
+        try:
+            with self._engine.begin() as conn:
+                for stmt in statements:
+                    conn.execute(text(stmt))
+        except Exception as exc:  # noqa: BLE001 — a lane ensure never aborts boot
+            logger.warning(
+                "[Memoir] proposal-decision column ensure failed (%s: %s) — the "
+                "boot continues; a review attempt degrades to a typed refusal "
+                "until the columns exist",
+                type(exc).__name__,
+                exc,
+            )
+            return
+        logger.debug(
+            "Memoir proposal decision columns ensured (or already present) "
+            "on PostgreSQL"
+        )
 
     def _ensure_postgres_drop_legacy_columns(self) -> None:
         """Drop the legacy completion-state columns on PostgreSQL.
@@ -15146,6 +15697,160 @@ class InstanceManager:
                 "recovery_count": recovery_count,
             }
 
+        # boot-recovery lane — the pending re-drive repair leg
+        # 2.6. F2 (fix/post-outage-recovery b2) — PENDING re-drive leg.
+        #      The adjudicated 6105e198 shape: a LIVE instance holds a
+        #      PENDING task anchored to a non-terminal JobItem and nothing
+        #      claims it; the pause/resume repair path used to answer
+        #      ``no_active_job`` (find_paused_or_cancellable_turn selects
+        #      paused/running only) while the task sat unclaimed for
+        #      11m19s. This leg FINDS the shape and re-drives it the F4
+        #      way — make-claimable (clear claim-blocking backoff) + wake
+        #      the job pipeline and the worker pools — NEVER a direct
+        #      claim: the pending→running UPDATE in
+        #      ``claim_pending_task`` stays the single consumer CAS.
+        #      Applies to silent resumes too: the leg injects NO message,
+        #      so the §9.3 internal_child_noop no-new-message contract
+        #      holds; it only wakes existing durable work. The verdict for
+        #      this shape is a TRUTHFUL re-drive outcome, not
+        #      ``no_active_job``.
+        #
+        #      WC-INTERACTION (R5c, pinned in
+        #      test_resume_pending_redrive_pins.py): this leg runs BEFORE
+        #      the B2 WAITING_CHILDREN wake (leg 3), so a WC parent that
+        #      ALSO holds a PENDING+anchored task returns
+        #      ``pending_redrive`` and PRE-EMPTS ``wake_enqueued``. That
+        #      is deliberate: re-driving the anchored durable work is the
+        #      more precise repair — it never injects a synthetic
+        #      "continue" turn that would race the re-driven task for the
+        #      same instance's single turn slot. The caller sees the
+        #      truthful task_id/claimability, and the claim moves the
+        #      parent out of WAITING_CHILDREN.
+        try:
+            pending_redrive = await asyncio.to_thread(
+                self._task_repo.find_pending_redrive_turn,
+                instance_id,
+            )
+        except Exception as redrive_probe_err:
+            logger.warning(
+                f"[RESUME] instance={instance_id[:8]} "
+                f"find_pending_redrive_turn probe failed: "
+                f"{type(redrive_probe_err).__name__}: "
+                f"{redrive_probe_err}"
+            )
+            pending_redrive = None
+
+        # Production-honest type guard: a real durable Task row only.
+        # Test doubles / MagicMock repos return a truthy mock from an
+        # unconfigured selector — without this guard the F2 leg would
+        # fabricate a re-drive verdict in those harnesses (12 adjacent
+        # resume-test regressions, 2026-11-23). Mirrors the
+        # ``manager.__dict__`` probe convention used for pool wakes.
+        from daemon.repositories.task.models import Task as _RedriveTask
+
+        if not isinstance(pending_redrive, _RedriveTask):
+            pending_redrive = None
+
+        if pending_redrive is not None:
+            # Liveness gate: the shape is a LIVE instance (RUNNING, or
+            # PAUSED in the pre-cascade window of the operator resume —
+            # the cascade is about to flip it RUNNING). A TERMINAL
+            # instance's pending rows are reconciler/wipe domain.
+            live_status: str | None = None
+            try:
+                instance_info_f2 = await asyncio.to_thread(
+                    self._lifecycle_service.get_instance_info,
+                    instance_id,
+                )
+                if instance_info_f2:
+                    live_status = instance_info_f2.get("status")
+            except (KeyError, AttributeError, TypeError):
+                live_status = None
+            if live_status is not None and live_status in (
+                InstanceStatus.TERMINATED.value,
+                InstanceStatus.COMPLETED.value,
+                InstanceStatus.ERROR.value,
+                InstanceStatus.FAILED.value,
+            ):
+                logger.info(
+                    f"[RESUME] instance={instance_id[:8]} "
+                    f"pending task {pending_redrive.id} skipped — "
+                    f"instance is terminal ({live_status}); the "
+                    f"boot reconciler / wipe owns that shape"
+                )
+            else:
+                claimable = False
+                try:
+                    claimable = await asyncio.to_thread(
+                        self._task_repo.make_pending_task_claimable,
+                        pending_redrive.id,
+                    )
+                except Exception as claimable_err:
+                    logger.warning(
+                        f"[RESUME] instance={instance_id[:8]} "
+                        f"make_pending_task_claimable failed for task "
+                        f"{pending_redrive.id}: "
+                        f"{type(claimable_err).__name__}: "
+                        f"{claimable_err}"
+                    )
+                # Nudge the job pipeline when the anchor is still QUEUED
+                # (slot-denied): the JobProcessor must re-evaluate the
+                # admission before the claim's queue-awareness gate
+                # passes. None-guarded — the wake degrades to the pool
+                # notify when the bus / service is absent.
+                try:
+                    _jq_service = getattr(self, "_job_queue_service", None)
+                    _bus = getattr(_jq_service, "_dispatch_bus", None)
+                    if _bus is not None:
+                        _iid_row = None
+                        _instance_repo = getattr(
+                            self, "_instance_repository", None
+                        )
+                        if _instance_repo is not None:
+                            _iid_row = await asyncio.to_thread(
+                                _instance_repo.get, instance_id
+                            )
+                        _project_id = getattr(_iid_row, "project_id", None)
+                        _bus.notify_new_job(_project_id)
+                except Exception as nudge_err:
+                    logger.debug(
+                        f"[RESUME] instance={instance_id[:8]} "
+                        f"job-pipeline nudge skipped: "
+                        f"{type(nudge_err).__name__}: {nudge_err}"
+                    )
+                # Wake the worker pools (claimability + notify — the F4
+                # shape). Mock-compat probe form per PoolOrchestrator.
+                try:
+                    from daemon.services.pool_orchestrator import (
+                        safe_notify_all_pools,
+                    )
+
+                    safe_notify_all_pools(
+                        self, site_label="resume_pending_redrive"
+                    )
+                except Exception as wake_err:
+                    logger.debug(
+                        f"[RESUME] instance={instance_id[:8]} "
+                        f"pool wake skipped: "
+                        f"{type(wake_err).__name__}: {wake_err}"
+                    )
+                logger.info(
+                    f"[RESUME] instance={instance_id[:8]} "
+                    f"route_outcome=pending_redrive task_id="
+                    f"{pending_redrive.id} work_id="
+                    f"{str(pending_redrive.work_id)[:8]}... "
+                    f"claimable_cas={'ok' if claimable else 'lost'} "
+                    f"(make-claimable + wake; NO direct claim — F4)"
+                )
+                return {
+                    "instance_id": instance_id,
+                    "job_id": pending_redrive.work_id,
+                    "message_id": None,
+                    "status": "pending_redrive",
+                    "task_id": pending_redrive.id,
+                    "claimable": claimable,
+                }
+
         # 3. No suspension handle and no paused turn.
         # B2 RESOLVED 2026-09-11: a silent cascade resume on a parked
         # (WAITING_CHILDREN) parent is NEVER a no-op. The previous
@@ -16530,6 +17235,22 @@ class InstanceManager:
             source=source,
             status=status,
         )
+
+    def get_instance_anchor_family(self, anchor_id: str) -> list[dict]:
+        """Return the anchor instance plus all its descendants (BFS) as
+        shaped instance dicts (``to_dict()`` + ``children``).
+
+        Thin delegate to
+        :meth:`InstanceLifecycleService.get_instance_anchor_family`.
+        Added for the instances-list-anchor feature so the list route can
+        guarantee presence of the selected instance and its subtree without
+        touching ``list_instances`` (whose signature is frozen for
+        stand-in compatibility).
+
+        Returns an empty list when the anchor is unknown / malformed so
+        callers can degrade honestly.
+        """
+        return self._lifecycle_service.get_instance_anchor_family(anchor_id)
 
     def get_instance_info(self, instance_id: str) -> dict:
         """Get information about a specific instance.

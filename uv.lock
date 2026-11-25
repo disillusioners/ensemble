@@ -479,7 +479,7 @@ wheels = [
 
 [[package]]
 name = "ensemble"
-version = "0.31.2"
+version = "0.31.54"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
@@ -499,6 +499,7 @@ dependencies = [
     { name = "langgraph-checkpoint-sqlite" },
     { name = "mcp" },
     { name = "modelcontextprotocol" },
+    { name = "orjson" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic" },
     { name = "pydantic-settings" },
@@ -547,6 +548,7 @@ requires-dist = [
     { name = "langgraph-checkpoint-sqlite", specifier = ">=2.0.0" },
     { name = "mcp", specifier = ">=1.9.0" },
     { name = "modelcontextprotocol", specifier = ">=1.0.1" },
+    { name = "orjson", specifier = ">=3.11" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.1.0" },
     { name = "pydantic", specifier = ">=2.10.0" },
     { name = "pydantic-settings", specifier = ">=2.7.0" },

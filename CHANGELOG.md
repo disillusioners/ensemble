@@ -5,6 +5,394 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.31.54] — 2026-11-25
+
+### Fixed — Dump-lane probe advisories R1/R2/R3 + curator filing (commission dump-health-nits-v03154)
+
+- Runbook path defect (R1) — `docs/runbooks/dump-lane-health-probe.md` §1 and §4 pointed at `cd /home/nea/ensemble-src`, a detached HEAD that predates `scripts/audit/` and drifts by design; the staged release payload ships `scripts/upgrade/` only, never `scripts/audit/`. Both sections now name the PRECONDITION — a checkout whose tree contains the probe (tag v0.31.53 or later) — state in one line why NOT the detached checkout, and carry one-line existence guards that refuse in the exit-78 family instead of dying with a python "No such file". The probe stays repo-only: no payload surgery, no `PIPELINE_SCRIPTS_REV` / `PIPELINE_SCRIPTS_FLOOR_COMMIT` re-pin. The documented §1/§4 invocation was run FIRST-HAND from a named checkout: the `pg` provider against the live `ensemble_prod` returns exit 75 `reason=db_query_error` (`relation "public.dump_lane_heartbeat" does not exist` — the truthful fail-closed state while the heartbeat table does not exist), the `file` provider returns 0 FRESH against a fresh marker, 75 against a missing path and 76 against a 30-day-old marker; the credential was sourced into `PGPASSWORD` (never argv) and 0 occurrences of it reached any captured output.
+- Uncited outage figure (R2) — the `CHANGELOG.md` v0.31.53 entry and the v0.31.53 HANDOFF both asserted a backup-outage DURATION that no in-repo source establishes. Both now cite the citable facts — POK `pg-host-clockwork-landscape-01` (devops, 2026-11-23: `pgdumpall` 17:00Z daily FAILING, dump PVC 99.7% full) — and state explicitly that the outage duration was never established in-repo. No POK row was written (read-only citation; zero POK writes in this slice).
+- Probe edge cases (R3) — `--max-age-hours nan|inf|+inf|infinity` escaped the guard (`nan <= 0` is False) and died inside `int(round(nan*3600))` with a bare traceback OUTSIDE the exit-78 family; the probe now refuses any non-finite threshold with `REASON_BAD_MAX_AGE` on the house exit-78 path. `REASON_DRIVER_UNAVAILABLE` was documented in the runbook but never emitted (every engine-open failure landed as `db_unreachable`, whose action misdirects the operator to the LB); an `ImportError` at the engine open (a missing psycopg/sqlmodel — `ModuleNotFoundError` included) now yields `reason=driver_unavailable`, and everything else stays `db_unreachable`. The runbook's reason vocabulary is now closed and pinned: each of the 13 slugs has exactly one action row, and a new unit pin fails if the script and the runbook drift. The probe's unit pack moves 36 → 39 nodes, mutation-proven 8/8 (the two new legs RED when the `math.isfinite` clause or the `except ImportError` clause is removed, each restore byte-identical).
+- Pack registry re-stamp (R5) — the tester's `pok_grant_pins` count re-stamp (10 → 18) is cherry-picked onto the integration branch with the tester's authorship preserved, and the stale `kb-importer = 1` figure at `.agents/shared/planning/pok-write-gate/plan-overview.md:341` is filed as curator work (re-derived: 5 active rows across 2 projects, +1 superseded) — the pok-write-gate lane's plan file was NOT edited.
+- R4 — OPEN (NOT in this slice): the heartbeat-table DDL, the cluster-side CronJob upsert, the weekly maintenancer wiring (a DB-versioned prompt artifact) and shipping the probe inside the release payload remain operator / follow-up steps; the probe is reachable only from a checkout.
+- NO promote (STAGED ONLY — the Emperor's ceremony owns the flip).
+
+## [v0.31.53] — 2026-11-25
+
+### Added — Feeder grant cleanup + dump-lane health visibility (commission feeder-grants-dump-health)
+
+- Feeder grant cleanup (POK write-gate Phase 9 close-out) — the `pok` grant is removed from `agents/experiencer/meta.json`; this is the ONLY grant change in the release (Emperor pre-approved). It mirrors the landed kb-writer rider `fd7dc6480` exactly: the grant census pin moves 53 → 52, `GRANT_ABSENT_EXCEPTIONS` gains `experiencer` (a DECLARED exception, not a hole in the completeness walk), and a new `TestTheExperiencerGrantAbsence` class pins the absence positively — the experiencer holds no `pok` grant, the absence is declared, its RAG-side routing tool `rag` survives, and the four compensating operational agents (ari / project-manager / leader / devops) hold the grant. The mutation leg is proven: re-adding the grant REDs the absence pin and the census pin while the ordering pin stays green (throwaway `git archive` extract; evidence under `evidence-pok-write-gate-w1/`). `.agents/shared/metrics/tool-categories.json` (66 categories, vocabulary_version 11) and `agents/.prompt-artifacts.sha256` are byte-identical — no `.md` prompt artifact changed.
+- kb-importer feeder assessment — ASSESS-AND-REPORT ONLY: no grant change, no row move, no store mutation. kb-importer's live POK authorship re-derived at 5 active rows (the 2026-11-23 census figure of 1 was stale), all classified operational under the Phase 9 §4 routing map; the named row `agent-01-skill-injection-flag-scope` verified live (access_count 10, verify_count 0, never verified), and its 2026-11-09 figures re-derived and confirmed. Disposition: KEEP the grant, with the documented reason in the plan set and the handoff — NOT a POK row, because a POK write would be exactly the unilateral live-store mutation this commission forbids; the "if the Emperor reads it as misplaced" removal + routing spec is included for his decision.
+- Dump-lane health visibility — the silent backup outage must never repeat (POK `pg-host-clockwork-landscape-01`, devops, 2026-11-23: pgdumpall 17:00Z daily FAILING — dump PVC 99.7% full; the outage duration was never established in-repo). A READ-ONLY operator probe (`scripts/audit/dump_lane_staleness.py`) answers one question — when did the last dump SUCCEED — and answers it LOUDLY when the answer is bad. The marker is a heartbeat row the cluster-side `pg_dumpall` CronJob publishes, read over the one channel that already exists (PostgreSQL via the LB); the daemon never reaches kubernetes, and the cluster-side upsert is an OPERATOR-ACTIONABLE runbook step, not daemon code. Threshold 8 days (a daily dump, a weekly check), cadence = the weekly central-maintenance run, loud channel = a stderr banner plus one structured stdout `RESULT:` line, exit codes 0 FRESH / 76 STALE / 75 NO-MARKER / 78 CONFIG, and fail-closed behaviour — absence of evidence is a failure, never "fine". 36 hermetic unit nodes, mutation-proven 6/6.
+- NO promote (STAGED ONLY — the Emperor's ceremony owns the flip).
+
+## [v0.31.52] — 2026-11-24
+
+### Added — POK write-path gate (commission pok-write-gate)
+
+- POK write-path gate — Wave 1 mechanical enforcement + admission ledger + kb-writer grant removal; Wave 2 four-outcome shadow-first judge + ASK contract + soft-max librarian; amended guideline DRAFT for ratification; NO promote (STAGED ONLY — the Emperor's ceremony owns the flip).
+
+## [v0.31.51] — 2026-11-24
+
+### Added — instance-list anchor: the selected instance + its children are always present (commission instances-list-anchor)
+
+- `GET /api/instances` gains an optional `anchor` query param (uuid). When present and resolvable, the response's `instances` array ADDITIONALLY contains the anchor row and ALL its descendants, appended after the normal rows (anchor first, BFS order), deduped by `instance_id`, merged BEFORE the UI-prefs batch fetch so pin/color/icon prefs cover the family rows. Family rows deliberately bypass `project_id`/`exclude_kb`/`search`/`source`/`order` — an explicit presence request (the same lineage-over-filters precedent as descendant loading). The envelope (`total`/`limit`/`offset`/`has_more`/`truncated`) keeps normal-page semantics; unknown/malformed anchors and family-fetch failures degrade to an unchanged list (HTTP 200, WARN, never 422/500).
+- Implementation stays off the event loop (v0.27.14 discipline): the family fetch is a route-local SECOND `db_offload` call (the prefs-read pattern). New additive seams only: manager facade `get_instance_anchor_family`, lifecycle BFS bounded by `INSTANCE_LIST_ANCHOR_BFS_CAP = 500` (rate-limited WARN on cap hit, mirroring the MAX_DESCENDANTS_PER_PAGE discipline) using the batched `list_child_ids_for_parents` IN-query per level plus a new batched repository `list_by_ids` (one SELECT IN — no N+1). `manager.list_instances` and every existing seam signature are UNTOUCHED.
+- FE (service layer only): `ApiService.listInstances` gains a trailing `anchor?: string` (set only when truthy — absent ⇒ byte-identical URL); `InstanceService` reads `detailVisible() ? activeInstanceId() : null` inside `loadInstances()` at fetch time (the `searchQuery()` threading precedent), so the initial load, pagination and the 60 s sidebar poll all carry the anchor while the detail view is open; the 8 s badge poll / `listInstanceTree` stay anchor-free. Deep links (`/projects/<pid>/instances/<iid>`) now show the selected instance + subtree in the left list; no component/template changes (the parent_id tree builder nests the family rows as-is).
+- Verification on the merged tip: BE scoped shard 44 passed (new packs `tests/api/test_list_instances_anchor_param.py` + `tests/api/test_list_instances_anchor_family.py` plus offload_prefs / response_bytes / tree_loading regressions); FE 5 suites / 236 passed including the rooms-btn regression spec; `tsc --noEmit -p tsconfig.app.json` clean. Pre-existing reds (source_param 6, ui_prefs 13) proven base-identical in env-armed daemon-child shells (older fixtures never strip AuthMiddleware; the new packs do) — NOT this release's regressions. STAGED ONLY — NOT promoted (the Emperor's ceremony owns the flip).
+
+## [v0.31.50] — 2026-11-24
+
+### Fixed — POK family count: STRICT family-key membership (commission pok-family-count-strict; board wi-f0a9418c)
+
+- The family BOUND was never wrong; the COUNT was. `POKRepository.count_active_in_family` counted every ACTIVE slug that merely `startswith("<family>-")` — a PREFIX SUPERSET. A LONGER family inflated a SHORTER one (`skill-e6-*` counted toward `skill`) and an UNNUMBERED slug with no family at all (`verify-something-unnumbered`) counted too. The count is now EXACT family-key equality: every active row's canonical family key is derived with the new single source `daemon.repositories.pok.models.pok_family_key` (compiled from the UNCHANGED canonical `POK_FAMILY_SLUG_PATTERN`) and compared for EQUALITY. `POK_FAMILY_MAX = 3` and `POK_ACTIVE_CAP_PER_PROJECT = 1024` are UNCHANGED.
+- The `pok_family_full` refusal now names the family's OWN members (`active family members:`) instead of the prefix-sharing rows. The count-aware cure text, the `active_count` / `archive_needed` arithmetic and the over-bound wording are byte-identical. The repository docstring's "DELIBERATE SUPERSET (documented, not a bug)" doctrine is removed — it is OVERTURNED by this commission.
+- Blast radius (MEASURED on the 2026-11-23 census, 499 active rows, `census-rows-active-2026-11-23.mech-labels.tsv`): the 21 families reported over-cap under the prefix rule are 19 PHANTOM and 2 GENUINE. Genuinely over (4 true rows each): `guard-inv` and `prompt-assent` — the guardrail STILL refuses for both (`active_count` 4 → `archive_needed` 2, "over the bound by 1"). The 19 phantom breaches DISSOLVE: a family owning fewer than 3 rows is no longer refused because a longer family's rows occupied its slots. 34 families sit at exactly 3 true rows (10 inside the 21) and are ONE WRITE AWAY from refusing; the family-surgery merge for the 2 genuine families is a SEPARATE curation step (count-preserving supersede — never an archive to make room) and is NOT part of this change. The live store was NOT touched: no POK write, no archive, no supersede.
+- Verification on the merged tip: the registered 7-file POK pack (`pok_family_key_scoped_pack`, now including the new `tests/unit/services/test_pok_family_strict_unit.py`) = **263 passed / 0 failed** (base `52c9bfc83` = 212/0; +51 new nodes). MUTATION-PROVEN: reverting ONLY the counter's filter to the prefix superset turns the pack RED (44 failed = the 40 new-file legs + the 4 reconciled legs in `tests/unit/services/test_pok_service_unit.py`), and `git restore` restores the file's sha256 identically (263/263 re-green). Six superset-encoded assertions were reconciled — four whose premises DISSOLVE now assert ADMISSION instead of refusal. Zero guideline line-anchor drift: `pok_service.py` `:105 :121 :123 :241 :311 :461 :462 :470` are byte-identical to base and `daemon/services/pok_injection.py` is untouched.
+- Merges: `819496817` (module `pok-family-strict-core`), `5f0cc9f1d` + `cb25cd536` (module `pok-family-strict-corpus`). STAGED ONLY — NOT promoted (the Emperor's ceremony).
+
+## [v0.31.42] — 2026-11-23
+
+### Reverted — agent model pins restored to canonical aliases (Emperor ruling; rider to board wi-1921ba17)
+
+- The v0.31.40 agentic-bridge repin is reverted via the RECORDED machinery (agentic-bridge-repin/decisions.md row D3 — inverse of commit 9c6eb2c46 restricted to its 6 files): `"llm_model": "agentic"` restored in agents/{aegis,sonic-developer,sonic-leader,sonic-reviewer}/meta.json; the 3 EXPECTED_LLM_MODEL sonic values + the 3 self-test fixture metas + the aegis T27 pin restored in lockstep; the FROZEN [sonic-llm-pins] block re-titled v4 → v3 (both markers). Ruling of record: canonical model vocabulary = ALIASES ONLY (agentic, coding, quick, title); proxy pool ids are implementation details behind the alias layer; provider fallback is the proxy's job. v0.31.40 was never promoted — this release carries the revert so the staged stack is canonical at promote time. sonic-coder / sonic-tester (coding) and the aegis children never moved and needed no revert.
+- Guideline anchor re-derivation (review minor#3, same seam): 11 drifted pok_service.py line anchors in docs/guidelines/guideline-pok-durable-vs-rolling-state.md fixed — the +1 shift left by the v0.31.41 cap-raise comment line (:104→:105 ×2, :122→:123 ×2, :120→:121 ×2, :240→:241 ×2, :310→:311, :461→:462, refusal-envelope range :460-469→:461-470) — VALUES untouched; each new anchor opened + confirmed in source. The pok_injection.py :474 and CHANGELOG.md :226-230 citations left byte-intact (pre-existing staleness, disclosed: the 64→256 entry lives at CHANGELOG.md:574).
+- Verification on the merged tip: sonic_agent_defs pack — self-test legs PASS; static red set {A3, A8, A9} IDENTICAL to base (all pre-existing: the `room` allow entry, the maintenancer workflow prompt-drift, the stale A9 fence base); the A4 counter-mutation model legs now expect canonical `agentic` and STILL FIRE (non-vacuous); agents/aegis/meta.json DROPPED OUT of the A9 residual-diff list (the revert restored its pre-bridge bytes — strictly less drift). tests/unit/agents/test_aegis_security_family.py 556/556. Guideline registration 43/43. `grep -rln '"llm_model": "agentic-turbo"' agents/` → EMPTY.
+## [v0.31.41] — 2026-11-23
+
+### Changed — POK active-entry storage cap 512 → 1024 (board wi-1921ba17)
+
+- Single-knob raise: `POK_ACTIVE_CAP_PER_PROJECT` 512 → 1024 (`daemon/services/pok_service.py`). Refuse-never-evict semantics, PER-PROJECT scope, and the read-side injection budget (8 entries / 2,900 chars PER-VIEW) are ALL unchanged. The knob is verified single-source: no env-var, `config.yaml`, or DB-backed override exists; the tool description (`daemon/tools/pok.py`) and the seed script import the constant and auto-follow. Zero migrations — the count is enforced in Python only (no SQL CHECK/trigger).
+- Read-budget PROOF + PIN: new `TestCapIndependenceReadBudget` (`tests/unit/services/test_pok_injection_unit.py`, append-only +3 nodes) pins `POK_BLOCK_MAX_ENTRIES == 8` / `POK_BLOCK_MAX_CHARS == 2_900` and proves FUNCTIONALLY — storage cap monkeypatched to 64 AND to 4096 over a 40-row synthetic in-memory store — that the rendered view admits exactly 8 entries / 2,371 chars (≤ 2,900) in BOTH regimes. A future cap raise can never silently change the read budget without these legs going red.
+- Test pins moved to the new expectation: AC19 `test_active_cap_constant_is_1024` (both `== 1024` value pins); the tool-description negative guards now also pin `"512 active entries"` ABSENT (retired values: 64, 256, 512).
+- Docs aligned to the new house marker `[active cap 1024 — commission 2026-11-23, board wi-1921ba17]`: `decisions.md` A-13 (+ new ruling row ER-3 mirroring ER-2), `implementation-readiness` / `architecture-recommendation` / `council-fold-record` current-value pointers, and the durable-vs-rolling guideline (arc 64 → 256 → 512 → 1024; grep-expect 1024; analogous fix-loss-only statement for the 1024 bump). Historical surfaces (tester RESULTS, CHANGELOG history, tree-pinned studies, at-time event logs, ER-2, guideline provenance lines) byte-intact.
+- Verification on the merged tip: scoped POK pack (6 files, the PACKS.md `pok_family_key_scoped_pack` invocation) — 212 passed (209 registered + 3 new). The critical note `571c4019` (doctrine: storage cap ≠ injection budget) is a live-DB row with no repo mirror — untouched by a staged repo release, and its doctrine claim remains TRUE under 1024.
+## [v0.31.40] — 2026-11-23
+
+### Fixed — agent model pins repointed off the dead llmproxy `agentic` alias (BRIDGE)
+
+- The llmproxy model id `agentic` returned HTTP 400 `invalid_request_error` (`"openai: Invalid API parameter, please check the documentation."`) on every request on BOTH deployments (`llm.ensem.dev`, `llm.daoduc.org`) during the 2026-11-23 outage; every agent whose model was `agentic` — directly, or via the `OPENAI_MODEL` default — died on its first model call. The live install `.env` default was repointed to `agentic-turbo` (backup kept) and needs a daemon restart to load; the four agents below carry their OWN `meta.json` pin, which wins at priority-3 model resolution (`daemon/services/instance_lifecycle.py:2205-2214`), so the `.env` change alone did NOT revive them.
+- Repointed `"llm_model": "agentic"` → `"agentic-turbo"` (a healthy pool) in exactly four agent definitions: `agents/aegis/meta.json`, `agents/sonic-developer/meta.json`, `agents/sonic-leader/meta.json`, `agents/sonic-reviewer/meta.json`. Nothing else in those files was touched.
+- Pins re-pinned in lockstep: `tests/unit/agents/test_aegis_security_family.py` (the aegis T27 model pin) and `test/packs/sonic_agent_defs_checks.py` (`EXPECTED_LLM_MODEL`, `FROZEN [sonic-llm-pins-v3]` → `v4`, plus the three matching self-test fixture metas). The pack's A4 counter-mutation legs stay RED (non-vacuous).
+- **THIS IS A BRIDGE, NOT A FIX.** The permanent fix is proxy-side — repairing the `agentic` alias (expert-team job `98c5b408`). **REVERT (named so it is not forgotten):** once the alias is healthy again and the Emperor prefers the canonical alias, restore `"llm_model": "agentic"` in the same four `meta.json` files, restore the three sonic values in `EXPECTED_LLM_MODEL` and the three matching self-test fixture metas in the same pack file, and retitle the FROZEN block back to `v3`. `sonic-coder` / `sonic-tester` (`coding`) and the aegis children (`coding`) never moved and need no revert. The decision ledger is `.agents/shared/planning/agentic-bridge-repin/decisions.md`.
+- Verification: `meta.json` is NOT in `VERSIONED_PROMPT_ARTIFACTS` (`daemon/tools/prompt_artifacts.py`) and NOT in the prompt-artifact baseline `agents/.prompt-artifacts.sha256` (217 rows, zero `meta.json`) and NOT in `SEALED_SHA_BASELINES` (`tests/test_chart_image_delivery_e2e.py`) — so NO baseline or seal re-pin was required. Base-vs-head net-new delta: ZERO (the `sonic_agent_defs` static red set `{A3, A8, A9}` is unchanged — all three pre-existing and unrelated to this change; the aegis file is 556 passed at both base and head; the meta.json-walking set is 5 failed / 135 passed at both, the same 5 pre-existing).
+- Independent re-probe of the premise (2026-11-23T15:03Z, live key): `agentic` returned **HTTP 200** on BOTH deployments across four request shapes (minimal, daemon-shaped non-streaming, streaming, tool-bearing) — i.e. the alias was ALREADY HEALTHY roughly nine hours after the 06:00Z diagnosis, so the original 400 was either repaired in the interim or is not reproducible with the shapes probed. This does not change the action taken (the repoint is cheap and reversible) but it raises the priority of the REVERT above; the expert team is asked to confirm whether the alias is repaired and whether the 400 reproduces.
+- Zero migration files in the v0.31.39 → v0.31.40 delta.
+
+## [v0.31.39] — 2026-11-23
+
+### Fixed — release-note truthfulness (v0.31.38 correction)
+
+- The id path still calls store.get() ONLY (never the resolver) and threads the requested id; its not-found refusal now carries the typed NOT_FOUND shape (was untyped Project '<id>' not found — no in-tree consumer matched the old string).
+- The in-repo `## [v0.31.38]` section is corrected BY THIS RELEASE, so every future payload embedding the CHANGELOG carries the accurate claim instead of the refuted "byte-compatible" wording. The already-cut `v0.31.38` tag is NOT re-cut — this correction is additive and lands in `v0.31.39`.
+
+### Added — verification hardening for the 7-tool triad
+
+- Per-verb JSON-schema required sets VERIFIED for the 7 verbs by a read-only schema probe over the real tools (in-memory SQLite + REAL `SQLModelProjectRepository`): future add=[`summary`], remove=[`entry_id`], list=[]; history add=[`entry_type`,`summary`], search=[`query`], delete=[`entry_id`], list=[] — the triad params (`project_id`/`name`/`shortname`) are NEVER required on any of the 7 verbs (the triad params are defaulted optional; the remaining params are keyword-only so the schema keeps them required). These required-set assertions ARE committed as regression pins on BOTH sides: the future verbs are pinned in `tests/unit/test_project_future_resolution.py` (class `TestSchemaRequiredSets` — add/remove/list) and the history verbs in `tests/unit/test_project_history_resolution.py` (class `TestTriadSchemaPins` — add/list/search/delete).
+- Runtime gate pack `project_resolution_triad_runtime_proof` registered in `.agents/tester/PACKS.md`: drives the 7 tools directly against a REAL `SQLModelProjectRepository` over in-memory SQLite — shortname resolution on EVERY verb, the id path NEVER calls the resolver (call count 0 on all 7), typed `AMBIGUOUS_PROJECT` with candidates + query, typed `NOT_FOUND` with query, and the must-provide refusal. 35/35 checks PASS (`RESULT: PASS`) on the v0.31.38 merged tree `449163f17`.
+- History verb doc precision: the `name` path runs the FULL resolution ladder (which also matches shortnames) while `shortname` is resolved against SHORTNAMES ONLY — the `project_future_*` verb Args text states this ("The project name or shortname"; "Resolved against SHORTNAMES ONLY — never against the project name"); the `project_history_*` verb Args text NOW states it too — every history verb's `name` Args read "The project name or shortname (used if project_id is not provided). Resolved via scope=\"name\" — the FULL ladder (L1-L5): may match the project NAME or any of its SHORTNAMES." FIXED in this release: `b51c63397` landed that source edit to `daemon/tools/project_history.py` (the four history verbs' Args text) — the open residual is CLOSED.
+- Zero migration files in the v0.31.38 → v0.31.39 delta.
+
+## [v0.31.38] — 2026-11-23
+
+### Added — Project reference resolution: name/shortname on project_future_* + project_history_* (7 tools)
+
+- All 7 tools (`project_future_add`/`list`/`remove`, `project_history_add`/`list`/`search`/`delete`) now accept the same `project_id`/`name`/`shortname` triad as `project_get`: a project may be referenced by id, by full name, or by shortname on every tool.
+- Resolution goes through the SINGLE repository seam `SQLModelProjectRepository.resolve_project_reference` (5-tier ladder; `scope=name` runs the full ladder, `scope=shortname` is strict) — zero duplicated matching logic across the seven tools.
+- Typed refusals `NOT_FOUND` + `AMBIGUOUS_PROJECT` (with candidates + query) are returned on every tool, giving a consistent, actionable error shape.
+- The id path still calls store.get() ONLY (never the resolver) and threads the requested id; its not-found refusal now carries the typed NOT_FOUND shape (was untyped Project '<id>' not found — no in-tree consumer matched the old string).
+
+### Fixed — project_get refusal-shape fold-ins
+
+- `AMBIGUOUS_PROJECT` now carries the `query` field (parity with `NOT_FOUND`).
+- Stale `-> dict | None` annotation corrected to `-> dict`.
+- Zero migration files in the v0.31.37 → v0.31.38 delta.
+
+## [v0.31.37] — 2026-11-23
+
+### Fixed — Readiness: checkpoint-saver sentinel boot-warm tolerance (Leg A, defect class: false boot-window readiness flap)
+
+- Live evidence 2026-11-22T22:24:40Z (v0.31.33 boot): ONE readiness tick degraded `/readyz` (~112s into boot, `checkpoint_saver: sentinel checkpoint read failed`; queue_max_age=1.27s), self-recovered next tick — a green→503→green flap inside the Emperor boot SLO window (boot_epoch→readyz-green ≤120s), an auto-rollback risk at flip ceremonies. Root cause: the sentinel `aget_tuple` rides the saver's single `asyncio.Lock` (hot path by design); boot-window checkpoint-restore storms hold the lock past the 0.9s inner budget, yielding a GRACE-ELIGIBLE class (`pool_busy`/`read_timeout`) that the composite nonetheless degraded (the GraceTracker deliberately never alters the verdict).
+- Fix (verdict-truth, not desensitisation): inside a 120.0s boot window measured from the daemon boot epoch (`READINESS_BOOT_WARM_WINDOW_S`), grace-eligible `checkpoint_saver` classes no longer degrade the composite — the component stays True with an OBSERVABLE marker (`detail.checkpoint_saver_boot_warm` + a WARNING log). Fail-closed both ways: `hard_component_red` (exception) and the OUTER `probe_timeout` still degrade IN-window; every class degrades post-window; a missing boot epoch means no window means degrade. Probe budget UNCHANGED (0.9s inner / 1.0s outer); sentinel still rides the hot path. Subsumes the never-landed 2026-10-30 "checkpoint-amplification" lane (zero commits in any ref — verified).
+- Observability: degraded reason strings now carry the failure-class token (` (class=pool_busy|hard_component_red|probe_timeout)`) — the live journal could not distinguish transient from genuine. Per-tick sentinel latency logs at DEBUG. Repairs 6 pre-existing stale-assertion reds in `tests/test_readiness_checkpoint_saver.py` (verified at base v0.31.36: 6 failed / 14 passed).
+
+### Changed — Event registry: L-11 declared-silent kind retirement (Leg B)
+
+- Retired the six zero-producer `EventKind` members (`processing_started`, `processing_completed`, `processing_failed`, `child_failed`, `message_completed`, `room_post`) with a `RETIRED_EVENT_KINDS` deprecation ledger (reason / retired_at / revive procedure per kind — revival is a re-registration trail, not blind deletion). Evidence: zero in-tree producers or consumers (whole-tree grep incl. string-form emissions, FE, engine projection/catalog surfaces — the `room_post` tool name and the SSE `child_failed` stream event_type are distinct namespaces); zero historical rows for all six in live `ensemble_prod` and demo `ensemble_demo` (read-only census 2026-11-23); `room_post` superseded by `room_tag_delivery`/`room_proposal`/`room_decision` rows.
+- Census 30=23/6/1 → **24=23/0/1**; `BRIDGE_PENDING`/`DECLARED_SILENT_KINDS` now empty; the deferred `turn_transition` and the 23 bridged kinds untouched. New tripwire pins: ledger completeness (drop a row ⇒ RED), retired∩registered=∅, `record()` of a retired kind refuses into the `record_refused_unknown_kind_total` counter (also the silent-revival tripwire). `event_registry_unit_test` pack re-baselined 69→78 nodes.
+- Zero migration files in the v0.31.36 → v0.31.37 delta.
+
+## [v0.31.36] — 2026-11-22
+
+### Added — ENGINE-ARC FLIP-PREP: kill-switch execution wiring + truthful boot posture + SLO gate (flip-day surface complete)
+
+- **Kill-switch execution-path wiring (defect 91cd80d3 CLOSED)** — `EngineSwitchResolver.resolve_job` is now read at tick time through the resolution ladder (per-job `kill_switch_key` → `ENSEMBLE_ENGINE_ENABLED` → `ENSEMBLE_ENGINE_SHADOW_MODE` → spec), closing the engine-core inertness defect where the engine-wide mass-rollback lever was boot-scoped (restart-scoped) only. A tripped switch stamps `SKIPPED_KILL_SWITCHED` (reason token `KILL_SWITCHED`) on the observer specs; capability proven 12/12 on the merged-tip kill-switch boot evidence. Fail-to-legacy polarity and supervisor-boundary preservation pinned; a runtime trip takes effect on the next tick, no restart.
+- **Truthful boot posture line** — the single INFO `engine boot posture:` line now reports the real `USE_ENGINE` state (via `describe_use_engine_flags`) instead of a hardcoded value; the honest all-unset posture reads 0/12 engaged. New behavioral pin `tests/unit/services/engine/test_boot_posture_truth.py`.
+- **SLO gate classes** — formal bounds WARM ≤ 250 ms (dormant / un-contended host; observed band 103.310–191.188 ms) and COLD ≤ 360 ms (cold / contended host; observed band 237.982–307.878 ms); flip-day class = COLD. `test/packs/engine_boot_slo_gate.sh` owns the block-elapsed measurement (LEG 3 WARM measurement, LEG 4 COLD constant + provenance). The ACTIVE-shape gated number is recorded as an OBSERVATION only; the active ≤ 600 ms formalization is explicitly named as a §9 next-touch (PENDING — not shipped in this release).
+- **Flip-day surface completion** — with the above, the flip-prep surface is complete (kill-switch execution wiring, truthful posture, SLO gate ownership). The ceremony flip itself remains Emperor-owned; this release stages only.
+- **Drift disclosure (tag-to-tag honesty)** — the v0.31.35 → v0.31.36 delta is the flip-prep arc only. Riding arcs already carry their own dated sections above and are NOT duplicated here: the central-maintenance-system arc (v0.31.33–v0.31.35: maintenancer, scheduler source adapter, maintenance-reports door), the WC-watchdog wedge-notice false-positive cure (v0.31.33), and the v0.31.33/34/35 version bumps. ZERO migration files in the live-current-tag → slot-tag delta (v0.31.31 → v0.31.36).
+
+## [v0.31.35] — 2026-11-22
+
+### Fixed — Central Maintenance System live-proof cures (staged-boot v0.31.34 feedback)
+
+- Maintenancer workflow/skills hardening: dispatch-context framing, tool-family vocabulary, evidence-root pinning, and local-weekday handling (run-report writer + lane skill templates).
+- Y1 fence completed: scheduler pack scripts + router-manifest suites self-fence auth env — results now independent of ambient host environment.
+- P5B staged-boot manual-trigger proof (receipt shape verbatim @ v0.31.34) documented; provenance/results-root equivalence + schedule-knobs pins added. Zero daemon behavior change.
+
+## [v0.31.34] — 2026-11-22
+
+### Added — Central Maintenance System (lane `feature/central-maintenance-system`, P1–P5)
+
+- The **maintenancer** agent (`agents/maintenancer/`): roster + templated skills (lane-skill check, run-report writer), report-scrutiny and fan-in-valve pins, and the maintenance knowledge-base coverage gate.
+- **Scheduled-tasks source adapter** (`daemon/sources/adapters/scheduler.py`): TZ/DST-correct scheduling, catch-up + idempotency semantics, one-shot cap discipline; REST API with phase-3 contract + delete-guard placement; scheduler acceptance pack (177 nodes, no-skip parking) green.
+- **Maintenance-reports door**: `GET` + `HEAD /api/maintenance-reports` (scope-reuse `maintenance:read`, auth-OFF 503 fail-closed, protected-default class) + FE report view (in-app markdown render, lazy `/report` route).
+- P5A verification: maintenancer pin quartet + scheduler packs registered in PACKS.md; router class/scope manifest pins extended (declared-route census 127 · mount census 43 · api_families 39).
+
+## [v0.31.33] — 2026-11-22
+
+### Fixed — WC watchdog wedge-notice false-positive class (wake-source recognition)
+
+- Cured the waiting-children watchdog FALSE-POSITIVE wedge notices (anomaly a370b036; four false `system:watchdog:wedge` notices on ari root 77ddcb9f 2026-11-21→22, children verified alive/processing at notice time). The wedge pass recognized only PROCESS_REPORT carriers as legitimate liveness, so healthy event-waiting and parked-cascade roots read as "no_live_carrier / zero non-terminal children".
+- New tri-state `_has_legitimate_wake_source` gate in the wedge pass (after S4 in-scope admission, before the carrier check, both arms): (1) any live PENDING/RUNNING delivery task of any kind (`list_live_delivery_tasks_for_instance`); (2) armed job-watch rows whose watched receipt can still fire (terminal receipt = stranded watcher = not a wake source); (3) open PENDING/DEFERRED report-injection obligations (`has_open_obligation_for_parent`, the RDRS armed-post-restart callbacks); (4) resumable descendants via the canonical mission-live guard (`evaluate_mission_live` with `skip_root=True`, bus count = fulfillable watchers only); (5) unsettled `mission_commissions` rows over the permanent tree (RDRS lane-7 semantics — the watchdog defers to lane-7 TTL adjudication).
+- True ⇒ suppress + clear the wedge episode (one INFO log naming the holding leg); wired-read RAISED ⇒ UNKNOWN ⇒ suppressed without clearing (R1 tri-state fail-closed); unwired leg reads False (existing fixtures unchanged). Detection power preserved: a genuinely wedged root (no wake sources, no live tree, nothing pending) still flags; proven by mutation pins both directions.
+- Preserved exactly: `WEDGE_SOURCE`, reason-code fingerprint episode dedupe, B.S.5 skip + l6_anchor exemption, kill-switch emission-only semantics, S4 row-checked notice composition, hang pass / B3 escalation/release / W-B heartbeat gate, `enqueue_message` + `safe_notify_all_pools` wake path. The watchdog remains resolve_work-disjoint.
+- Regression: new behavioral pin pack `tests/unit/services/test_waiting_children_watchdog_wake_sources.py` (17 nodes, PACKS.md-registered) — both false-positive shapes (event-watch parent; parked-cascade parent with live grandchild), true-wedge legs (classic + S4 arms), fulfillable/unfulfillable split, tri-state fail-closed, stranded-watch, skip_root polarity, and preservation pins; mutation-verified both directions (gate forced always-True ⇒ 9 fire-expecting pins RED; per-leg flip-off ⇒ each leg non-vacuous). Base-run evidence: 8 RED suppression pins on pre-fix base (defect reproduced) flip green post-fix.
+
+## [v0.31.32] — 2026-11-22
+
+### Added — ENGINE-ARC PHASE-2 PILOT: OrphanWatcherSweepService onto the engine execution path, shipping FLAG-OFF (dormant by default)
+
+- First real engine execution capability: the orphan watcher sweep service gained an engine-routed execution path (dual-path migration of `OrphanWatcherSweepService` onto the central polling/event engine). DORMANT BY DEFAULT — `SERVICES_ORPHAN_WATCHER_SWEEP_USE_ENGINE` is unset in every environment, so the LEGACY scheduler path remains the owner of the orphan sweep; the engine participates in observing ticks only (`SKIPPED_SHADOW` rows, zero non-shadow executions).
+- Parity-proven: parity proof is the core deliverable of the pilot — engine-routed sweep behavior is asserted equal to the legacy loop before any flag flip; "engine-owns-proven" (legacy suppression + engine exclusivity under the flag) and flag-off legacy-loop resume are pinned in the pilot gate pack (59 nodes; F-1/F-2 residue evidence).
+- One-flag rollback scope: unsetting `SERVICES_ORPHAN_WATCHER_SWEEP_USE_ENGINE` returns the orphan sweep entirely to the legacy loop; production bridge failure seam pinned with truthful executor-drop logging; dual-path gate hardened per review riders R1–R6.
+- Drift disclosure (tag-to-tag delta honesty): the v0.31.31 → v0.31.32 delta is the pilot arc only. Sibling-lane releases v0.31.28 (project_get name-resolution ladder), v0.31.29 + v0.31.31 (job lookup resolver divergence + canonical ID follow-up keying), and v0.31.30 (hbk inode-churn mint fix) already carry their own dated sections above (v0.31.30 shipped without a section — its fix is disclosed here) and are NOT duplicated. Zero migration files in the live-current-tag → slot-tag delta (v0.31.27 → v0.31.32): the pilot adds ZERO migrations.
+
+## [v0.31.31] — 2026-11-22
+
+### Fixed — Job lookup resolver divergence & canonical ID follow-up keying
+
+- WorkResolverService: normalized incoming work_id parameters across `resolve_work`, `per_kind_status_for`, and record converters, stripping leading/trailing whitespace, surrounding quotes, brackets, and backticks.
+- Job queue tools: sanitized incoming job IDs across all 17 work-id-taking tools (`job_get`, `job_inject`, `job_continue`, `job_cancel`, `job_retry`, `job_delete`, `job_restore`, `job_pause`, `job_resume`, `job_messages`, `job_tree`, `job_progress`, `job_answer`, `watch_job`, `unwatch_job`, `watch_jobs`, `watch_mission`) against trailing newlines, whitespace, and formatting artifacts.
+- Post-resolution canonical ID keying: follow-up database lookups and mutations in `job_continue` (soft-delete check), `job_cancel`, `job_retry`, `job_delete`, `job_restore`, `watch_job`/`watch_jobs` (watch arming + notify), and `watch_mission` (pre-dispatch receipt) now key on the canonical `record.work_id` instead of the raw decorated input, eliminating false "has been deleted" and "may not exist" errors.
+- JobItem-only completion and continuation: reinforced `job_continue` handling for JobItem-only completed rows (e.g. direct task jobs without a Task row), correcting terminal-state checks and error messaging.
+- Regression test pack: widened unit test pack `tests/unit/test_job_lookup_resolver_divergence.py` to 61 nodes covering JobItem-only, Task-only, dual-backed, full 7-decoration matrix across all tool surfaces, and `watch_mission` receipt resolution; registered in PACKS.md.
+
+## [v0.31.29] — 2026-11-22
+
+### Fixed — Job lookup resolver divergence (job_get / job_inject / job_continue / watch_mission)
+
+- WorkResolverService: normalized incoming work_id parameters across `resolve_work`, `per_kind_status_for`, and record converters, stripping leading/trailing whitespace, surrounding quotes, brackets, and backticks.
+- Job queue tools: sanitized incoming job IDs across all 10 job tool entrypoints (`job_get`, `job_inject`, `job_continue`, `job_cancel`, `job_pause`, `job_resume`, `job_messages`, `job_tree`, `job_progress`, `job_answer`) against trailing newlines, whitespace, and formatting artifacts.
+- JobItem-only completion and continuation: reinforced `job_continue` handling for JobItem-only completed rows (e.g. direct task jobs without a Task row), correcting terminal-state checks and error messaging.
+- Regression test pack: added 31-node unit test pack `tests/unit/test_job_lookup_resolver_divergence.py` exercising JobItem-only, Task-only, dual-backed, decorated ID normalization, and tool surfaces; registered in PACKS.md.
+
+## [v0.31.28] — 2026-11-22
+
+### Fixed — `project_get` name resolution: shortname + case-insensitive + substring ladder
+
+- `project_get(name=...)` now resolves through ONE ladder: exact name -> exact shortname -> case-insensitive exact name -> case-insensitive exact shortname -> case-insensitive substring over NAME + SHORTNAMES only. A shortname such as "ensemble" now resolves to its project instead of returning "not found".
+- The project DESCRIPTION is never searched, and projects of any status (active/paused/archived) stay resolvable.
+- A reference matching several projects returns a typed AMBIGUOUS_PROJECT refusal that LISTS the candidates (the tool never picks one for you); an unknown reference keeps the "not found" wording and error_code NOT_FOUND.
+- The explicit `shortname=` argument resolves against shortnames only, never against the project name.
+
+## [v0.31.27] — 2026-11-22
+
+### Added — Release B (Engine Arc Phase 1): central polling/event engine + event registry, shipping DORMANT
+
+- Engine Arc Phase 1 (central polling/event engine + event registry) ships in the OBSERVER-SPEC POSTURE: observer specs registered, ZERO executables (execute_fn withheld) — shadow rows are present (registered + observing, executing nothing).
+- NO existing periodic mechanism is modified: the engine registers for OBSERVATION only; the legacy path still owns every mechanism.
+- Migration delta is +2 ADDITIVE tables (`engine_jobs`, `engine_runs`) — CREATE TABLE IF NOT EXISTS / CREATE INDEX IF NOT EXISTS only, zero removals; inert on rollback.
+- `SERVICES_<MODULE>_USE_ENGINE` flags exist, all default OFF; none is wired to any module yet.
+
+## [v0.31.26] — 2026-11-21
+
+### Added — Release A (defects-first): orphan-watcher born-dead fix; bash-spawn retention/stall fix + env-redaction rider; tester PACKS/QUARANTINE bookkeeping
+
+- Orphan-watcher born-dead fix: a watcher created in the same transaction as its target instance now arms correctly instead of being born dead (no orphaned un-armed rows).
+- Bash-spawn retention/stall fix: retained bash-spawned children no longer stall the parent turn; spawn lifecycle reconciles on completion/failure.
+- Bash-spawn stamp env-redaction rider: bash-spawn stamp output redacts ambient env values (no secret leakage in stamps).
+- Tester PACKS/QUARANTINE bookkeeping: PACKS.md and QUARANTINE.md reconciled with current test inventory (tester lane evidence).
+
+### Added — Riding drift (staged as-is per plan D8.6/AMD-4; 59 drift commits landed during the engine-arc lane)
+
+- AGPL-3.0-only relicense.
+- Tool-usage metrics Phase 1 (ENSEMBLE-37): ledger + tap + F24 + FE tab.
+- schedule-fire-notify: the creating instance is notified when a scheduled task fires.
+- v0.31.24 and v0.31.25 version bumps (drift commits, no separate CHANGELOG sections).
+
+## [0.31.24] — 2026-11-21
+
+### Added — schedule-fire-notify: the creating instance is notified when a scheduled task fires
+
+- New fire-notice seam `daemon/services/schedule_fire_notify.py` (+ `schedule_fire_notify_metrics.py` counters): when a scheduled task transitions to running, the instance that created it receives a notice carrying the work handle. Router (`daemon/routers/schedules.py`), scheduling service, and scheduler adapter carry the identity through.
+- Identity gate at BOTH dispatch sites (architect amendment DEC-9): only the structural creator is notified; the planner's blanket deferred-site skip was amended out as unsafe.
+- Creator identity persists via a config-JSON creator key — additive, ZERO SQL migrations (no `.sql` file this release).
+- Acceptance pack `tests/packs/scheduler_fire_notify_acceptance.sh` self-fences with `ENSEMBLE_AUTH_ENABLED=false` inside the pack (W1: ambient-auth environments are fenced by the pack itself, not the host).
+- Composition: v0.31.24 = v0.31.23 content (cpu-arc2 + cpu-l1 performance lanes) + schedule-fire-notify; zero file overlap, blob-check 12/12, merged-tree gate 181/48/31/4 green. Tester evidence: `.agents/tester/RESULTS/2026-11-21-schedule-fire-notify-test-lane.md`.
+
+## [0.31.23] — 2026-11-21
+
+### Changed — ram-guard poll cadence 200 ms → 1000 ms (M1, cpu-l1-cheap-overhead)
+
+- `RamGuardConfig.poll_interval_ms` default (and ctor default) moved from 200 to 1000 ms (`RAM_GUARD_POLL_INTERVAL_MS` mechanism unchanged; bounds (50, 2000) unchanged). ~5× reduction in ram-guard-tick frequency: per-tick `scan_proc` cost stays ~11.3 ms, so steady-state CPU share of the scan path falls from the live-measured ~17.9% to ~3.6% of one core by frequency arithmetic (live re-measure post-promote).
+- Trade-off: breach-detection latency rises from ≤200 ms to ≤1 s; on the pathological balloon path (1–3 GiB/s) up to ~1–3 GB more growth before kill. Emperor accepted this for the CPU saving. Confirm window (250 ms one-shot PSS confirm, fail-open ⇒ kill) and TERM→KILL grace (250 ms) are unchanged.
+- Scoping of `/proc` scan to watched pgids is deliberately NOT included (behavior-changing on the kill-decision surface, no measurement-first evidence) — see DECISIONS-l1.md.
+
+## [0.31.22] — 2026-11-20
+
+### Fixed — prompt_reload compact-note wake-up: the post-compaction history swap is now a FRESH message list
+
+- The post-compaction message list is EXACTLY `[compaction doc ("Compacted context"), a new [SYSTEM CONTEXT: Compacted Context] note]` + one natural model ack — ZERO pre-compaction messages survive (the verbatim tail splice is removed; Emperor ruling 2026-11-20).
+- The fresh-swap path disables the injected-message hoist so the spec-bound order holds (doc first, note second); house auto-compaction hoisting is unchanged.
+- Messages arriving strictly after the arm are preserved AFTER the note (mid-flight arrivals); the steady state stays exactly the two-message list.
+- The deliberate-compact rate limit (900s) is unchanged. New E2E gate `prompt_reload_fresh_swap_e2e` proves the live post-swap shape with a REAL compaction (base negative-control RED + merged-tree GREEN).
+
+## [0.31.21] — 2026-11-20
+
+### Changed — sonic push doctrine: the sonic lane's end-of-task cycle becomes MERGED + PUSHED + STAGED
+
+- The sonic lane's end-of-task cycle is now MERGED + PUSHED + STAGED (previously the lane stopped at a committed module branch on the local worktree)
+- sonic-developer owns the release chain: merge -> push `origin latest` -> push the release tag -> `stage.sh live` WITHOUT `--allow-stale-stage`
+- sonic-leader verifies the pushed tip + the pushed tag READ-ONLY (no merge, no push, no tag cut)
+- sonic-coder's never-push / never-merge bound is UNCHANGED — the module executor still commits its own branch and never touches the release chain
+- Zero migrations, zero daemon-code changes (release bookkeeping only)
+
+## [0.31.19] — 2026-11-20
+
+### Changed — sonic-leader roster gains maintenancer (nest-maintenance/repair escape hatch): meta v1.1.2 + census pin + sonic_agent_defs pack update; sonic-leader prompt artifacts enumerate the new seat + prompt-artifact seal re-pin; version bump 0.31.18 -> 0.31.19. Zero migrations, zero daemon-code changes.
+
+## [0.31.18] — 2026-11-20
+
+### Changed — self-service promote choreography (wi-aa89581b family): zero-operator ceremony seam fixes D1-D6
+
+D6 hand-back verdict machine (PENDING → ACTIVE → SUCCESS; FAILED only on affirmative evidence; BUDGET-EXHAUSTED a distinct verdict; rc=3 never labeled a timeout); D1 attribution fixes — the O_CLOEXEC LISTEN fd leak closed at `bind_retry.py` and the DUAL_FIGHT census-scope defect fixed to `-sTCP:LISTEN` (both refusal paths byte-preserved); D2 watchdog hold/restore failsafe (stop-never-disable + restore transient + version fast-fail on all three paths); D3 executor liveness classified via the transient unit + journal heartbeat (no more false `executor_exit` for a live ceremony); D5 rollback-target filesystem capture (`in_flight.captured_previous`, R0-first resolution chain, three-way parity resolver); D4 scripts-pin advance leg + single-writer floor/REV bumper (`scripts/bump-pipeline-floor.sh`). Code + tests + docs only, ZERO migrations; the promote ceremony itself is unchanged (the Emperor's ceremony owns the flip).
+
+## [0.31.17] — 2026-11-20
+
+### Changed — culprit-2 RESIDUAL pass: the 50 factory-local tool input models hoisted to module scope (warm-assembly pydantic rebuild 50 -> 0)
+
+- Changed (17 files, `daemon/tools/*.py`): every factory-local `class XInput(BaseModel)` — 50 of them, across `job_queue`, `board_tools`, `board_link`, `scheduling`, `view_write`, `instance_ops`, `instance_read`, `wedge_capture`, `notify_user`, `self_alarm`, `memoir`, `room`, `metrics_read`, `nest_report_read`, `prompt_reload`, `prompt_assent`, `guidelines` — is now declared at MODULE level, verbatim (same name, fields, annotations, defaults, docstrings). WHY: a class statement inside a tool factory executes on EVERY factory call, so the 2B schema registry — which memoises the decorator's schema INFERENCE — could not prevent it; at module level the class builds once at import and every assembly is served from the registry cache. AST census at the lane base: all 50 had STATIC fields and ZERO closure dependencies, so the move is behaviour-preserving
+- MEASURED (whole surface, `create_instance_tools`, 199 tools, the 2B lane's own instrument): pydantic model classes per WARM assembly 50 -> 0 (warm assembly 0.068 s -> 0.015 s); cold first assembly 882 -> 832 classes (the 50 hoisted classes now build once at import, outside the per-assembly path); payload re-derivation 0; tool-NAME census sha256 UNCHANGED (`cde4886b...`, 199 names)
+- INVARIANT (agent-visible tool schemas IDENTICAL): the OpenAI tool payload and the `args_schema` JSON of all 199 tools are BYTE-IDENTICAL to the pre-change tree — whole-surface payload sha256 `af7cb945fc5252cd7f1248e946e15bdc0e62cd2fc42fe32c4329ac6a847baf07` before and after (each captured provenance-asserted inside its own tree), plus a per-cohort BASE fixture captured BEFORE the hoist that the cohort pins compare byte-for-byte
+- Added (gate): `test/packs/module_level_input_models_unit_test.sh` (registered in `.agents/tester/PACKS.md` as `module_level_input_models_unit_test`) — the four cohort pin files + the 2B schema-registry pack + the frozen tool-NAME pack + an inline whole-surface census asserting the SECOND assembly constructs ZERO pydantic model classes (cold > 100) and that the second payload derivation constructs zero. MUTATION-PROVEN: re-inlining a factory-local class turns the placement / zero-census / byte-identity legs RED
+- Fixed (usage path, `daemon/services/instance_messaging.py`): the F3 fingerprint window is now MIRRORED — the fingerprint is re-read AFTER the count completes, and the `(count, fingerprint, tokens)` cache write happens only if the post-read equals the pre-read; on a mismatch the write is DISCARDED and the next cycle recomputes. Closes the residual where a history mutation inside the no-await window could pair a PRE-mutation fingerprint with a POST-mutation count. Emitted values are unchanged
+- MEASURED (boot-warm load test — 2B's disclosed risk, now discharged): the schema-registry boot warm costs +2.26 s of median time-to-readyz (warm ON 18.94 s vs warm OFF 16.69 s, 3 boots per leg, merged tree; the base tree measured +2.70 s). The warm runs ENTIRELY in the pre-lifespan app-import phase — its overlap with the uvicorn lifespan is 0.0 s — so it saves 1.52 s of lifespan work while adding its full 3.83 s to boot. VERDICT: a STARTUP REGRESSION, DISCLOSED (not fixed): the shipped knob `ENSEMBLE_SCHEMA_REGISTRY_WARM=0` returns the CPU to operators who prefer it, and flipping the default (or starting the warm after the listener binds) is a shipped-behaviour decision left to the Emperor
+- MEASURED (live LLM): a `build_instance_llms`-shaped chat model carrying the registry-bound tool payload was accepted by the live proxy endpoint (one minimal tool-invoking request, 3.46 s) — 2B's "never exercised against a live LLM" residual is discharged
+- Added (bench harness): `scripts/bench_boot_warm_startup.py` — a rerunnable boot-warm/startup load-test harness (real uvicorn boots; warm ON / OFF / contended legs; per-boot time-to-readyz, warm duration, warm-vs-lifespan overlap); evidence under `.agents/shared/planning/sonic-team/culprit2-residual/evidence/`
+
+## [0.31.16] — 2026-11-20
+
+### Changed — agent-turn CPU lane row2: tier-A tiktoken de-dup / pydantic schema registry / tier-B shape-aware chunked token counting (`feature/agent-turn-cpu-row2`; base `213ea6c1e`)
+
+- Changed (compaction — tier A, `daemon/compaction.py`): the redundant WHOLE-LIST token counts are removed from the three compaction counting paths, and every emitted count and every gate/loop DECISION stays byte-identical to the pre-change implementation. `compact_state` counts the SELECTABLE pool ONCE (the same list was re-counted up to FIVE times per compaction, yielding the same value); `_apply_ceiling_rule` replaces the O(S²) re-summing with an O(S) incremental saving pass; `emergency_truncate` replaces the O(P·N) + O(H·N) whole-list re-counts in its two loops with a single O(N + H + P) running count
+- Changed (usage path — tier A, `daemon/services/instance_messaging.py`): the context-usage snapshot counted the WHOLE history through tiktoken on every emit; a cheap fingerprint ("did the history change?") now runs BEFORE the count — an EQUAL fingerprint skips the whole-history count, and the emitted value is unchanged (a mutation between the two reads re-counts rather than letting a stale count survive)
+- Changed (tools — tier B, `daemon/tools/_schema_registry.py` NEW + `daemon/graph.py`): the process-level registry memoises the pydantic `args_schema` of each `@tool` (the decorator built ~640 fresh model classes per graph assembly) and the derived OpenAI JSON-schema payload per tool identity; `build_instance_llms` now derives the payload ONCE and hands the SAME dicts to every `bind_tools` site (the vision branch + the two standard binds — the vision branch and the standard-with-tools bind are mutually exclusive at runtime, so the runtime multiplier was 2 × N_tools, not 3 ×). MEASURED: steady-state pydantic model classes per assembly 2198 → 50 and 2.11 s → 0.07 s (97.7 % reduction); cold first assembly 2442 → 1662 classes. The provider payload is byte-identical (same name / description / parameters / key order), the tool NAME is langchain's own and never re-derived, and only the SCHEMA is cached — never the tool object — so the per-instance closure is untouched and MCP tools stay dynamic in the STRICTEST sense: MCP tools carry a DICT schema (`daemon/mcp/tool_adapter.py:526`) => `_payload_key` returns None => MCP payloads are NEVER memoised at all — re-derived from the live schema on every assembly, so an MCP re-discovery cannot serve a stale payload (strictly stronger than a cache-key argument)
+- Changed (boot warm — tier B, `daemon/__main__.py`): the cold cost is PAID ONCE — the FIRST graph assembly, the flagship 23.16 s stall — and the warm moves it off the event loop and off the request path onto a BACKGROUND thread started before the listener binds, so the first user-visible restore pays ~0 schema-build cost. The warm ADDS to boot wall-clock rather than overlapping it: pydantic's core holds the GIL while it generates a schema, so the warm competes with the boot sequence for CPU. It warms against an INERT manager (no live manager, no database, no instance state) and is BEST EFFORT — a warm failure is logged and the daemon boots anyway; the warmed schema count is a FLOOR, not a guarantee (a factory that refuses to build against the inert manager aborts the warm; the schemas after that point warm lazily, on their first real use). Operator knob: `ENSEMBLE_SCHEMA_REGISTRY_WARM=0` disables the warm, and the registry then warms lazily on the first assembly. Residual (50 classes / 0.07 s): 61 of 271 tools declare a factory-local `class XInput(BaseModel)` — hoisting those to module scope would take the residual to zero, deferred as a follow-up
+- Changed (token counting — tier B, `daemon/loader.py`): `estimate_tokens` counts in O(n) instead of O(n²) above a 16 KiB threshold by splitting the text at whitespace/newline boundaries into ≤ 4 KiB chunks and summing the per-chunk counts. The cut is SHAPE-AWARE: the boundary character is still carried INTO THE NEXT CHUNK, EXCEPT when it TERMINATES a whitespace run of >= 16 IDENTICAL chars, in which case the cut is taken AFTER that character — cl100k merges up to 32 consecutive LFs and up to 128 consecutive spaces into a single token, so the plain rule dropped one character from the window (4095, not 4096) and misaligned EVERY subsequent boundary against the merge grid (~2 tokens per boundary); the shape-aware rule keeps such a run whole at the cut and holds the over-count at ~1 token per boundary (<= n/CHUNK tokens in total, i.e. <= ~0.1 % at 200 KB with 4 KB chunks). The earlier drift breach was a SYNTHETIC-CORPUS ARTIFACT (pure LF-run / spaces-run) — the realistic corpora already met the audited bound (LF-code 0.0015 %, CRLF 0.0015 %, lone-CR 0.0014 %, markdown 0.0154 %, prose 0.0000 %, minified 0.0000 %, dense-JSON 0.0407 %, base64 0.0000 %, digits 0.0480 %), and the shape-aware cut closed the rest (LF-run 1.5680 % -> 0.0000 %, spaces-run 3.1350 % -> 0.0000 %) — EVERY shape now sits at or below the audited 0.1 % bound, with over-count <= ~1 token per boundary. NO RULING EXTENSION REQUESTED. Timing: 200 KB pathological unbroken corpus — 27.05 s on the exact path → 0.3247 s through the chunked path (GATE-D). Knobs: `ENSEMBLE_TOKEN_COUNT_EXACT=1` (kill-switch — restores the exact path everywhere), `ENSEMBLE_TOKEN_COUNT_THRESHOLD` (default 16384), `ENSEMBLE_TOKEN_COUNT_CHUNK` (default 4096)
+- Ruling (Emperor, Discord 2026-11-19): "Counting only for reference low drift allowed"
+- Ruling (front door, Ari 2026-11-20): "ADOPT the shape-aware cut as the 2C implementation — it preserves the Emperor's standing ruling (2026-11-19, verbatim: 'Counting only for reference low drift allowed') with ZERO need to widen the bound, since even the synthetic worst cases land at 0.000%."
+- Registered: four mutation-proven tester packs, re-run and verified on this merged tree — `compaction_tier_a_byte_identity_unit_test` PASS 158/158 (53.8 s; the 3 new F3 window pins included), `tier_b_token_drift_bound_unit_test` PASS (38 pytest nodes + the 13-shape x 4-size table), `schema_registry_bind_once_unit_test` PASS 24/24, `frozen_tool_name_discovery_unit_test` PASS 7/7; unit set 196 passed (71.3 s); self-gating benchmark `scripts/bench_tier_b_token_drift.py` exit 0 with ZERO violations (GATE-D 200 KB chunked timing 0.3247 s; lf_run 200 KB exact 6250 -> chunked 6250 = 0.0000 %; spaces_run 200 KB exact 1563 -> chunked 1563 = 0.0000 %; letters_run / symbols_run 0.0000 %)
+- Fixed (2A F3 — usage-path staleness window, `daemon/services/instance_messaging.py`): the usage-path fingerprint is now read BEFORE the count on the cache-miss path, closing the window where a mutation paired a NEW fingerprint with an OLD count (a later equal-fingerprint skip could then serve that stale count); the emitted count is unchanged
+- Fixed (2B shipped-text corrections — F2/F4/F5): documentation-only — no executable line changed
+- Migrations: this release authors ZERO `daemon/migrations/versions/*.sql` — the delta is additive-only (no DROP TABLE / DROP COLUMN in the UP direction)
+- No prompt-artifact change: this lane edits no agent prompt files — the release diff against the base commit is EMPTY under `agents/`
+
+## [0.31.15] — 2026-11-20
+
+### Changed — `/api/jobs` badge polling: bounded badge-leg fetch, batched route N+1s, FE visibility gates (`sonic/jobs-badge-loop-hog`; Emperor ruling 2026-11-19)
+
+- Changed (daemon): the badge leg's resolver fetch is now BOUNDED — `WorkResolverService.list_work` pushes an EXPLICIT client limit into SQL (`_query_jobs`: `.limit(limit + len(ensure_job_ids or ()) + TIE_PAD)`, `TIE_PAD=8`), so the batched lookups (`_batch_instances` / `_batch_mission_fields` / task-timing) and the row-conversion loop run over a bounded set instead of hydrating EVERY matching terminal job; the Python stable sort + slice stays authoritative (wire order unchanged: `created_at` desc, append-order tie-break); D-29/D-69 page-completeness preserved ALWAYS via ONE targeted IN re-query for ensured ids below the cut. The NO-LIMIT path is deliberately untouched — D-68 leader ruling (Q1-ii): "no server-side default cap"
+- Changed (daemon): the `GET /api/jobs` route's per-row N+1s are batched — per-QUEUED-job `_get_queue_position` → ONE batched pending-list fetch (project-global positions, values byte-identical to the old per-row call) and per-dead_letter-row sync `get_dlq_by_job_id` → ONE IN query (`DeadLetterService.get_dlq_by_job_ids`)
+- Changed (daemon): the three unbounded `get_all_active_watches()` reads (`job_queue_service.py:556` / `:711` / `:844`) are bridged off the event loop (`asyncio.to_thread`, house bridge precedent at `:1841`) and read through the new bounded `watcher_repository.get_active_watches()`
+- Changed (frontend): tab-visibility gates on the 6 ungated always-on pollers — 8 s 5-leg badge indicator, home instances (120 s), metrics resources-live (8 s), instance.service (60 s), mcps-gateway (10 s), command-state (5 s): hidden tabs stop polling, a refocus triggers ONE debounced refresh, a supersede token guards out-of-order async writes, listeners are torn down on destroy. ALL interval literals unchanged — the 8 s badge cadence STAYS and visible tabs keep full cadence (Emperor ruling 2026-11-19); the badge's per-leg `catchError` + retain-last-good-count rule is untouched
+- Registered (gates): engine-bound pins — fetched-row budget, per-row-lookup reddens pin, SELECT-count flatness, page-completeness, order compatibility (`tests/unit/services/test_work_resolver_badge_pushdown.py`, `tests/unit/routers/test_jobs_list_badge_batch.py`) + FE contract pins (`frontend/src/app/poll-visibility.bindings.pins.spec.ts`: 6 interval pins + 12 gate pins)
+- Added (measurement): badge-cost harness `.agents/tester/harness/jobs-badge-cost/` (base/head modes, 5-leg badge composite ×8 rounds, statement census) with the BEFORE baseline and the AFTER raw on the merged tree
+- Effect (structural, measured at fixture scale): the badge leg's unbounded hydration is bounded, the route's per-row queries are batched, and the watch reads leave the event loop; the fleet-scale 3.7–4× felt-inflation / loop-lag re-measurement is NOT lane-verified (the harness is in-process, SQLite-scale, with no LoopLagProbe) — disclosed in the HANDOFF; at-scale verification belongs to the ceremony
+- Zero migrations; additive-only delta
+
+## [0.31.13] — 2026-11-19
+
+### Changed — instances-list Option D (off-loop + no-revalidation) + FE home poll cadence (`sonic/instances-optd-fe-poll`; ANALYSIS §8 row D; Emperor directives 2026-11-19)
+
+- Changed (daemon): GET /api/instances list handler — (1) ui-prefs batch read moved off the event loop onto the db-offload executor (second route-local `await _offload(...)`, `daemon/routers/instances.py:545-548`); (2) FastAPI response_model re-validation pass skipped (hand-built `JSONResponse` via `resp.model_dump(mode="json", exclude=…)` reproducing the Option-A key-ABSENT exclusion byte-for-byte; decorator + OpenAPI unchanged). Response bytes IDENTICAL pre/post — proven by the golden byte-parity pack `tests/api/test_instances_list_response_bytes.py` (git-archive fd61c0ba2 baseline, `daemon.__file__` assert, raw-bytes equality + key-absence). Expected ~−180 ms/req of loop occupancy (~80 ms DB + ~100 ms serialization); should damp the 3.7–4× badge-load inflation of instances legs (ANALYSIS §6 H3)
+- Changed (frontend): home instances-list poll 10 s → 120 s (`home.component.ts:110`, one literal — 12× rate cut on the app's default route; polling mechanism untouched). Full 16-poller FE survey committed at `.agents/shared/planning/sonic-team/instances-optd-fe-poll/FE-POLL-SURVEY.md` for the Emperor's fleet-wide cadence decision
+- Registered: mutation-proven pack `tests/api/test_instances_list_offload_prefs.py` (db-offload thread-identity teeth — 4/5 die on on-loop revert) + the byte-identity golden pack; Option-A wire corpus kept green
+- Zero migrations; additive-only delta
+
+## [0.31.12] — 2026-11-19
+
+### Changed — instances-list Option A: drop `mcp_tool_names` from GET /api/instances list rows (`feature/instances-list-mcp-tool-names`; analysis `.agents/shared/planning/sonic-team/instances-list-latency/ANALYSIS.md` §8)
+
+- Changed: the GET /api/instances LIST response no longer carries the `mcp_tool_names` key on any row (key-ABSENT, not null — route-level `response_model_exclude` + list-path kwarg removal). Public REST field drop, Emperor-approved with the knowledge that out-of-repo consumers are unknown; zero in-repo consumers (frontend grep 0 hits across 4 spellings; the agent tool layer reads `manager.list_instances` directly, not the route)
+- Unchanged: GET /api/instances/{id} and POST /api/instances still serve the field populated; the OpenAPI schema still advertises it on the shared InstanceInfo model (documented schema-vs-runtime gap, disclosed follow-up)
+- Effect (projection per ANALYSIS §8, not re-measured): ~57% payload cut per list call (FE_A 6.06 MB → ~2.6 MB; p50 824 → ~650 ms); zero migrations; additive-only delta
+- Registered: mutation-proven pack `tests/api/test_instances_list_mcp_tool_names.py` (key-absence + detail-presence pins) + independent tester wire-shape gate `instances_list_mcp_tool_names_wire_shape_unit_test` in the shared PACKS registry
+
+## [0.31.11] — 2026-11-19
+
+### Fixed — maintenance starvation composite fix (`wi-4d1fa093`)
+
+- Fixed: maintenance starvation composite — A idle_policy tiering, B persisted max_staleness (restart-proof), CAS atomic resolve, D skip-streak telemetry + tests
+
+## [0.31.9] — 2026-11-19
+
+### Fixed — upgrade-script refusal quoting (`fix/upgrade-script-refusal-quoting`)
+
+- Fixed: upgrade-script refusal messages no longer execute their own backticked commands — lib.sh quoting fix + class scanner + pins
+- Registered: tester safety pack `upgrade_refusal_message_safety` + class scanner `tests/upgrade_refusal_scan.py` in the gate surface
+- Migrations: this release authors ZERO `daemon/migrations/versions/*.sql`; the one migration it carries (20261119_000001 decision-axis columns) is drift-inherited from latest@28ec14338, additive `ADD COLUMN` only
+
+## [0.31.8] — 2026-11-19
+
+### Fixed — agent tool-lane systemctl/bash guard-inversion closing fixes (`fix/systemctl-guard-pipe-shapes`, board `wi-a5ec5b3e`)
+
+- Fixed: the shared systemctl intent guard (bash + proc tool lanes) analyses a piped payload as a WHOLE TEXT — a mutating verb anywhere in the text is caught, not only at the leading command position
+- Fixed: per-tool option arity — ONE shared option analyser (bundled `--opt=v`, attached `--opt v`, value-option forms) now covers ALL scanners, an UNKNOWN option fails CLOSED, and the sudo/env/stdbuf value options are peeled correctly
+- Fixed: heredoc bodies are analysed as bodies — a heredoc handed to a pipe-fed executor is scanned, and a heredoc delivered to a bare `ssh` host is recognised as REMOTE stdin execution and refused
+- Fixed: the xargs recursion is analysed WHOLE-TAIL (the operand set, not just the command word) and the resolved payload is scanned; the mutating-verb set is ONE derived source of truth (no per-scanner drift) and `ssh` arity fails CLOSED when the remote command cannot be resolved
+- Changed: 7 over-block shapes removed — the READ-ONLY verbs pass through every runner, and a property name colliding with a mutating verb no longer refuses in a DIRECT context
+- No schema migration — this release carries ZERO `daemon/migrations/versions/*.sql` changes
+- Gates: tester re-gate PASS-WITH-NOTES (`eb520859f` / `33c54d5f6`), implementation review NEEDS-REVISION → closed, tidier CLEANUP-REQUIRED → closed; mutation harness 21/21 legs (89 reds, EXPECTED red-count equality, byte-identical restore, post-restore green re-run); pack 257/257 file + 296/296 pack, net-new reds 0
+
+## [0.31.7] — 2026-11-19
+
+### Fixed — POK multi-token family key + count-aware family-full cure (`fix/pok-family-key`)
+
+- Fixed: the POK family gate now derives a MULTI-TOKEN family key (`<a>-<b>`, e.g. `snapshot-l3`) instead of single-token prefix matching; a `pok_family_full` refusal now names the active family members it counted
+- Fixed: the family-full cure is count-aware — an over-cap family receives an exact `archive_needed` count (archive arithmetic proven: archiving 1 of 4 still refused; archiving 2 of 4 admits) instead of the imprecise "archive one" wording
+
+### Docs — dual-key census blast-radius map + A-26a decision-ledger supersession (`fix/pok-family-key`)
+
+- Dual-key family census blast-radius map (2026-11-18): per-family active-member counts under the corrected key derivation
+- A-26a decision-ledger supersession recorded in the POK planning set
+
+## [0.31.6] — 2026-11-19
+
+### Fixed — wake-path carrier fix: parked parents wake at terminal (`wi-8f60e6f1`)
+
+- Fixed: watcher fire-at-terminal (a nudge-armed watcher whose target is not the child's structural parent now fires on COMPLETED/TERMINATED, closing the can-never-fire RCA class) + nudge self-surgery guard (a nudger can no longer nudge itself — the live-wedge shape) + park-predicate qualification + wedge-notice truthfulness (notices now report honestly). The D-2 delivery contract is made honest: at-least-once with a bounded duplicate window, not at-most-once. Shapes S1–S4 landed; zero migrations.
+- Operational: the wedged live parent (ari root `17efd2ef`) was repaired 2026-11-18 under user attestation (5/5 blocks, server-verified byte identity, notices ceased); this release carries the durable code fix. Gates: tester pack 115 = 47+68, watchdog 51, reconciler 47, PG null-delta; implementation review CLEARED.
+
+## [0.31.5] — 2026-11-18
+
+### Fixed — agent tool-lane unit-control guard laundering closure (`wi-a5ec5b3e`)
+
+- Fixed: agent tool-lane unit-control guard laundering closure — pipe-into-shell and xargs-stdin shapes, unpeeled runners (su/runuser/systemd-run/watch/ssh), and scheduler handoff (at/batch/crontab) now refused with read-only inspection still allowed (reviewer finding on wi-a5ec5b3e, 12 bypass class); pins + counter-mutations extended
+
+## [0.31.4] — 2026-11-18
+
+### Fixed — agent tool-lane systemctl guard intent-match inversion (`wi-a5ec5b3e`)
+
+- Fixed: agent tool-lane unit-control guard intent-match inversion fix + unit-stop wrapper closure + proc lane, board wi-a5ec5b3e, 2026-11-18 triple-outage
+
+## [0.31.3] — 2026-11-18
+
+### Added — group-chat FE fast-follow surfaces (`feature/gc-fe-surfaces`)
+
+- Global room browser in the app header (RoomDialog global/joined modes + header control) and a per-instance joined-rooms row button with conditional visibility — room-less instances render no button
+- Read-only `GET /api/rooms` room-list surface (bounded, shared membership predicate) backing the FE global-lane service layer
+- Contracts pinned by specs: polling freshness, 422/404 taxonomy, truncated render at limit, anchor visibility; e2e rooms-gate suites (playwright, dedicated-port fence) + FE-UI drift-guard sanctions
+
 ## [0.31.2] — 2026-11-18
 
 ### Fixed — skill-system defect fixes C1/C2/C3 + skill-keeper verification (`feature/skill-system-defects`)
@@ -89,14 +477,14 @@ Disclosures: (i) PC-1/PC-2 premise corrections honored (resolver print is dead p
 
 ## [0.30.8] — 2026-11-14
 
-### Added — Ari nest-ops fleet grant: instance_read + instance_ops (`feature/ari-instance-stop-grant`, Emperor directive 2026-11-14; zero migrations)
+### Added — Ari nest-ops fleet grant: instance_read + instance_ops (`feature/ari-instance-stop-grant`, user directive 2026-11-14; zero migrations)
 
 - **Tools.** Categories `instance_read` (5 fleet reads) + `instance_ops` (6 audited acts incl. `instance_terminate`) granted to `ari` WHOLE-CATEGORY (read+act pair; per-tool allow stays rejected per D-13); holder population now {`ari`, `maintenancer`}.
-- **Gates.** The layer-3 authorized-agent frozensets in `daemon/tools/instance_{read,ops}.py` widened {maintenancer} → {`ari`, `maintenancer`} (D-13 single-owner amended by Emperor clarification 2026-11-14); audit ledger, protected-target two-tier policy, provenance gates, shared terminate budget (3 acts/24h) UNCHANGED and bind every holder; privileged category set stays 22 — no new category, tool or migration.
+- **Gates.** The layer-3 authorized-agent frozensets in `daemon/tools/instance_{read,ops}.py` widened {maintenancer} → {`ari`, `maintenancer`} (D-13 single-owner amended by user clarification 2026-11-14); audit ledger, protected-target two-tier policy, provenance gates, shared terminate budget (3 acts/24h) UNCHANGED and bind every holder; privileged category set stays 22 — no new category, tool or migration.
 - **Pins.** Re-pointed same-PR: board_registration `ari` trailing tail, anomaly grant-pin constants + source literal, memoir tail faces, instance_ops registration allow-lists + behaviour positive leg.
 - **Docs.** `ari` tools_note fleet-surfaces section + rule.md fleet-surgery exception; prompt-artifact baseline re-stamped (217 rows unchanged); `agents/ari/rule.md` seal row re-pinned.
 - **Artifact.** `tool-categories.json` REGENERATED with the house generator (never hand-edited; generator byte-identity proven): `project_future` added, count 64→65; the GRANT itself adds no category or per-agent data — the file delta is the pre-existing F-1 pair completion, not the grant.
-- **Stage.** Staged-not-promoted; the Emperor's 3-factor nonce ceremony owns the flip; grant takes effect only at promote.
+- **Stage.** Staged-not-promoted; the user's 3-factor nonce ceremony owns the flip; grant takes effect only at promote.
 - **Disclosures.** Pre-existing on `latest`, NOT introduced by this lane: (1) tool-category artifact drift — the committed artifact lacked `project_future` vs the tool registry; `doc_maintenance` is genuinely registered (`daemon/tools/comment_edit.py:536`, `daemon/tools/doc_commit.py:88`, `daemon/tools/doc_write.py:267`) and was RETAINED by the regeneration — REGENERATED in this release with the house generator (never hand-edited; count 64→65; VOCABULARY_VERSION stays 10); (2) three pre-existing reds in `tests/unit/test_anomaly_report_grant_pins.py` (`test_the_grant_is_the_last_element`, `test_the_three_phase_3_touched_agents_carry_both_entries`, `test_the_seal_map_is_zero_stale` — the last from a stale `agents/leader/rule.md` seal row left by the prior lane) — reproduced red at base, untouched here, routed for the leader's sweep.
 
 ## [0.30.7] — 2026-11-14
@@ -112,7 +500,7 @@ Disclosures: (i) PC-1/PC-2 premise corrections honored (resolver print is dead p
 
 ## [0.30.6] — 2026-11-14
 
-### Changed — sonic routing amendment: routing by COMPLEXITY, cross-team interop, overrides, expert-team terminology (Emperor's four rulings 2026-11-14; `feature/sonic-routing-v0305`, base `3f45cd6dd`; zero migrations)
+### Changed — sonic routing amendment: routing by COMPLEXITY, cross-team interop, overrides, expert-team terminology (the user's four rulings 2026-11-14; `feature/sonic-routing-v0305`, base `3f45cd6dd`; zero migrations)
 
 - **Ruling A — routing by COMPLEXITY, not paths.** The frozen `[sonic-blast-radius-v1]` 14-glob predicate is REMOVED from all sonic prompts and the pack. The sonic-developer assesses `low|medium|high|extremely-high` after explore+plan; HIGH/EXTREMELY-HIGH → PAUSE (no coder dispatch) + `handover suggestion: <complexity> because <reasons from the plan>` to the leader; low/medium → proceed. A quick change in a core file is legitimate sonic work. Ordering: explore → plan → verdict → dispatch.
 - **Ruling A — leader adjudication.** On a handover suggestion the leader ACCEPTs (ends the commission as a HANDOVER-REPORT to Ari — developer reasoning + leader assessment + work state, first line `SONIC-VERDICT: ESCALATED`) or REJECTs (narrower split, recorded reasoning). Handover seam = the commission result message; no new machinery.
@@ -158,9 +546,9 @@ Disclosures: (i) PC-1/PC-2 premise corrections honored (resolver print is dead p
 
 ## [0.30.2] — 2026-11-13
 
-### Changed — sonic-team roster & support-parity amendment (Emperor ruling 2026-11-13; `feature/sonic-team-v0302`, base `c1d81593e`; content-only, zero migrations)
+### Changed — sonic-team roster & support-parity amendment (user ruling 2026-11-13; `feature/sonic-team-v0302`, base `c1d81593e`; content-only, zero migrations)
 
-- **Roster — giter returns as escape hatch (R16/R20).** `sonic-leader` `team_members` gains `giter` and `devops`; `sonic-developer` gains `giter` (Emperor: *"gitter shouldn't removed, they know about workflow, worktree"* — the developer already owns the house worktree/merge machinery per `[sonic-merge-strategy-v1]`). The internal commit choreography is UNCHANGED (sonic-coder commits its module branch, sonic-developer merges `--no-ff` in dependency order); giter is dispatched only for gnarly git/worktree rescue, devops is "rarely invoked by design — the infra/deploy escape hatch"; release-lane git stays outside the sonic loop.
+- **Roster — giter returns as escape hatch (R16/R20).** `sonic-leader` `team_members` gains `giter` and `devops`; `sonic-developer` gains `giter` (the user: *"gitter shouldn't removed, they know about workflow, worktree"* — the developer already owns the house worktree/merge machinery per `[sonic-merge-strategy-v1]`). The internal commit choreography is UNCHANGED (sonic-coder commits its module branch, sonic-developer merges `--no-ff` in dependency order); giter is dispatched only for gnarly git/worktree rescue, devops is "rarely invoked by design — the infra/deploy escape hatch"; release-lane git stays outside the sonic loop.
 - **Image support-parity (R18).** The read trio `{explain_image, image_get, image_list}` granted to sonic-leader / sonic-developer / sonic-coder / sonic-reviewer via `allow "image"` + `deny "image_save"` (the established critic pattern); `image-reader` joins each grantee's effective spawn set (category implication, pinned in the pack's EXPECTED_EFFECTIVE). `compare_images`/`design` NOT granted (design-category holders remain designer + critic only); `generate_image`/`image_save` omitted — read/view only. sonic-coder gains its first `deny` key. sonic-tester UNTOUCHED.
 - **Omissions recorded (R19).** `generate_chart`/`charter`, `generate_image`, `image_save`, `sketcher`/`critic`, `wanderer` omitted; sonic-coder's other steady-coder gaps (snapshot/instance/service/midflight) not directed by the ruling — no change.
 - **Pins in lockstep.** `test/packs/sonic_agent_defs_checks.py` FROZEN_TEAMS/FROZEN_TOOLS/EXPECTED_EFFECTIVE updated for the four touched agents; 13 new counter-mutation legs (54 total, ALL RED — incl. the leader-add-design guard that REDs if the design category ever reaches a sonic agent); real-resolver negatives updated (giter now team-legal for leader + developer). Prompt baseline regenerated: 201-row baseline set unchanged — 6 sonic artifact shas re-hashed. Agent meta versions bumped (leader 1.1.1, developer 1.0.1, coder 1.1.1, reviewer 1.1.1).
@@ -180,11 +568,11 @@ Disclosures: (i) PC-1/PC-2 premise corrections honored (resolver print is dead p
 
 ## [0.29.20] — 2026-11-12
 
-### Added — prompt-assent Phase 1.5: designated channels, pinned-approver model (`feature/assent-designated-channels`; design `.agents/shared/planning/prompt-assent-channels/`; the Emperor's doctrine carried verbatim: *"we consider channel is private/dm for now"*)
+### Added — prompt-assent Phase 1.5: designated channels, pinned-approver model (`feature/assent-designated-channels`; design `.agents/shared/planning/prompt-assent-channels/`; the user's doctrine carried verbatim: *"we consider channel is private/dm for now"*)
 
 - **The designated-channel capability.** The operator may pin ONE approver to a guild channel via `ENSEMBLE_PROMPT_ASSENT_DESIGNATED_CHANNELS` (a JSON object `{"<channel_id>": "<approver_user_id>"}`); a turn in that channel BY that human is private-EQUIVALENT to a 1:1 DM — it may mint, and it may approve a token minted in that same channel. The parse is strict and all-or-nothing (ids match `^[1-9][0-9]{0,31}$` as JSON strings, never coerced; duplicate keys refused; ≤ 64 entries; one bad entry invalidates the WHOLE map ⇒ `designation-config-invalid`, never a silent repair); designation is exact channel-id match (threads are NOT designated); the map is read at call time from the process environment (an `.env` edit needs a daemon restart) and the DM path NEVER reads it (INVARIANT-DM: resolver-raise pin + source-shape pin + map-unset equivalence). One classification owner (`mint_context.designation_outcome`, side-neutral legs per D-18) serves both the mint gate and the approve-side predicate — the two can never disagree. The map is NOT a credential and `ens_env_read` does NOT redact it (D-16, recorded as deliberate): the authorization is daemon-side author-id equality against the message author, and even a malicious map cannot mint without a genuine user turn by the pinned human in the designated channel.
-- **Two new refusal codes — the taxonomy is 29 (27 + 2, test-pinned)**: `approver-not-pinned` ("you are not the pinned approver of this room" — the re-designation-window and stranger-in-the-room refusals; outside the mismatch class, NEVER burns) and `designation-config-invalid` (the operator's map is malformed or carries an invalid entry — a configuration fault naming every offending key by key-never-value; NEVER burns). The withdrawn-designation refusal stays `token-channel-mismatch` (leg 4f) — mismatch-class, BURNS the durable counter (the KEEP-BURN ruling, D-17: five such attempts revoke the live token). Delivery of a mint in a designated room is the **accept-and-record posture (D-14, LEADER RULING 1)**: the token + the canonical render post into the room exactly as in a DM — an explicit, overridable default flagged for the Emperor at arming time (`dm-deliver` and `redact-render` are the named, unbuilt alternatives); the mint's INFO line and the decision's audit payload carry the 12-hex `map_digest` (content-free provenance; no schema change).
-- **Schema UNCHANGED**: no table, no column, no migration — the migration head stays `20261110_221500_create_prompt_assent_tokens.sql` at **128 files**; the lane is pure code + env surface (`daemon/tools/prompt_assent.py`, `daemon/repositories/prompt_assent/{designation,mint_context}.py`, `daemon/services/prompt_version_service.py`). The surface ships INERT: default-OFF, no map configured, no arming by the lane — arming is the Emperor's act, after the K-3 live designated-channel probe (a two-phase, six-leg procedure with three armed states and an explicit disarm-or-ratify step; the lane must not be RELIED UPON until the six outcomes are recorded). Operator surface: `docs/runbooks/prompt-assent.md` (the probe, the map contract, the KEEP-BURN warning, the v0.29.18 DM-only-fallback recovery via re-stage from `df4a92732`).
+- **Two new refusal codes — the taxonomy is 29 (27 + 2, test-pinned)**: `approver-not-pinned` ("you are not the pinned approver of this room" — the re-designation-window and stranger-in-the-room refusals; outside the mismatch class, NEVER burns) and `designation-config-invalid` (the operator's map is malformed or carries an invalid entry — a configuration fault naming every offending key by key-never-value; NEVER burns). The withdrawn-designation refusal stays `token-channel-mismatch` (leg 4f) — mismatch-class, BURNS the durable counter (the KEEP-BURN ruling, D-17: five such attempts revoke the live token). Delivery of a mint in a designated room is the **accept-and-record posture (D-14, LEADER RULING 1)**: the token + the canonical render post into the room exactly as in a DM — an explicit, overridable default flagged for the user at arming time (`dm-deliver` and `redact-render` are the named, unbuilt alternatives); the mint's INFO line and the decision's audit payload carry the 12-hex `map_digest` (content-free provenance; no schema change).
+- **Schema UNCHANGED**: no table, no column, no migration — the migration head stays `20261110_221500_create_prompt_assent_tokens.sql` at **128 files**; the lane is pure code + env surface (`daemon/tools/prompt_assent.py`, `daemon/repositories/prompt_assent/{designation,mint_context}.py`, `daemon/services/prompt_version_service.py`). The surface ships INERT: default-OFF, no map configured, no arming by the lane — arming is the user's act, after the K-3 live designated-channel probe (a two-phase, six-leg procedure with three armed states and an explicit disarm-or-ratify step; the lane must not be RELIED UPON until the six outcomes are recorded). Operator surface: `docs/runbooks/prompt-assent.md` (the probe, the map contract, the KEEP-BURN warning, the v0.29.18 DM-only-fallback recovery via re-stage from `df4a92732`).
 - **Tests** — the proof surface: the 32-cell refusal matrix (`tests/unit/test_prompt_assent_designated_channel.py` + `test_prompt_assent_designation_parser.py` + the extended registration census), counter-mutation-proven pins incl. the resolver-raises INVARIANT-DM leg and the ordering tripwire; net-new reds 0.
 
 ## [0.29.19] — 2026-11-12
@@ -204,10 +592,10 @@ Disclosures: (i) PC-1/PC-2 premise corrections honored (resolver print is dead p
 
 ## [0.29.18] — 2026-11-11
 
-### Added — prompt-assent: the conversational approval lane, "The Emperor's Word / Assent" (`feature/prompt-assent`; design `.agents/shared/planning/prompt-assent/`, binding ruling `architecture-recommendation.md` @ `df8da01a6`)
+### Added — prompt-assent: the conversational approval lane, "The user's Word / Assent" (`feature/prompt-assent`; design `.agents/shared/planning/prompt-assent/`, binding ruling `architecture-recommendation.md` @ `df8da01a6`)
 
 - **The doctrine lands as one ari-only tool** (`prompt_assent`, category `prompt-assent` — PRIVILEGED entry #21, the ari-EXACTLY three-layer posture): `list` (cross-agent pending CORE rows, content-free INFO lines), `mint` (a 40-bit `CONFIRM-` token shown WITH the canonical diff it authorizes — one shared render helper, `render_sha256` = sha256 of the exact shown bytes, effective side included), and `approve`/`reject` (the relayed decision, one append-only `prompt_audit_events` row inside the same transaction as the state change). The mint is GATED (K-2): it requires a live, ≤10-min-fresh user-origin window in a **1:1 DM** (group-DM discrimination + absent-discriminator fail-closed, K-3) and the approve binds BOTH the channel AND the daemon-derived human (`mint_user_id` equality, K-8). Tokens are hash-only, 60-min TTL, single-use, refusals-never-burn, re-mint-supersedes; per-token durable attempt counter + lockout at 5, counters in their OWN transaction (the D-4 blocking rule).
-- **THE OPERATOR KNOB — default OFF, fail-closed (D-2, Emperor-owned arming).** `ENSEMBLE_PROMPT_ASSENT_ENABLED` (config class `PromptAssentConfig`, prefix `ENSEMBLE_PROMPT_ASSENT_`, ENV-ONLY — no yaml block). Unset or invalid ⇒ the lane refuses `lane-disabled` (the tool stays registered; `mint` refused too; the not-ari envelope wins over the switch). **Arming is ONE env var per environment — no code change**; the switch is read at call time (no restart needed). ONE shared default constant (`PROMPT_ASSENT_DEFAULT_ENABLED = False` in `daemon/config.py`) is consumed by BOTH the config class and the tool's call-time resolver — the prior "resolver off / class on" split is reconciled per the architect's §7-defect-6 ruling, pinned non-vacuously. The lane is **dormant out of the box** (the Decision-Module-P1 posture for a novel authority surface: "dormant by default, nothing decides anything").
+- **THE OPERATOR KNOB — default OFF, fail-closed (D-2, user-owned arming).** `ENSEMBLE_PROMPT_ASSENT_ENABLED` (config class `PromptAssentConfig`, prefix `ENSEMBLE_PROMPT_ASSENT_`, ENV-ONLY — no yaml block). Unset or invalid ⇒ the lane refuses `lane-disabled` (the tool stays registered; `mint` refused too; the not-ari envelope wins over the switch). **Arming is ONE env var per environment — no code change**; the switch is read at call time (no restart needed). ONE shared default constant (`PROMPT_ASSENT_DEFAULT_ENABLED = False` in `daemon/config.py`) is consumed by BOTH the config class and the tool's call-time resolver — the prior "resolver off / class on" split is reconciled per the architect's §7-defect-6 ruling, pinned non-vacuously. The lane is **dormant out of the box** (the Decision-Module-P1 posture for a novel authority surface: "dormant by default, nothing decides anything").
 - **The guessing-loop budget (K-9/D-3b)** — per-relay-instance, in-RAM, hourly: `ENSEMBLE_PROMPT_ASSENT_HOURLY_MISMATCH_BUDGET` (default 10), the 11th mismatch refuses `mismatch-budget-exceeded`; the durable leg is the PG per-token `attempts` + lockout. Multi-daemon non-sharing is the one ledgered residual (by design).
 - **The runbook** (`docs/runbooks/prompt-assent.md`) — arming/disarming, the gate, TTL/freshness, the refusal table, the "nothing happened" troubleshooting path, the K-3 live group-DM confirmation procedure, and the FIVE mandated disclosures: `self-approval-attempt` is **not the gate**; the memoir persona surface is a **recorded gap**; factor 1 is the **relay's self-assertion**; the pending list is **cross-agent** (no agent filter); **refusals write no ledger row**.
 - **Rollback = fix-loss-only**: one new table (`prompt_assent_tokens`, 128th `*.sql` + the `create_all` seam), **zero** `_ensure_postgres_columns` entries (the boot-abort surface untouched), in-binary registration (an old binary simply lacks the lane).
@@ -237,7 +625,7 @@ Disclosures: (i) PC-1/PC-2 premise corrections honored (resolver print is dead p
 
 ### Fixed — POK active-entry admission cap raised 64 → 256 (`feature/pok-cap-256`)
 
-- POK active-entry admission cap 64 → 256 (Emperor directive 2026-11-10) — the per-project cap on active operating-knowledge entries (`POK_ACTIVE_CAP_PER_PROJECT`, `daemon/services/pok_service.py`), enforced in Python only (no SQL CHECK/trigger/migration encodes the count, so no schema migration was added). Admission remains refuse-never-evict at the new cap. The 64-cap had blocked all agent writes to the store.
+- POK active-entry admission cap 64 → 256 (user directive 2026-11-10) — the per-project cap on active operating-knowledge entries (`POK_ACTIVE_CAP_PER_PROJECT`, `daemon/services/pok_service.py`), enforced in Python only (no SQL CHECK/trigger/migration encodes the count, so no schema migration was added). Admission remains refuse-never-evict at the new cap. The 64-cap had blocked all agent writes to the store.
 
 ## [0.29.10] — 2026-11-10
 
@@ -252,7 +640,7 @@ Disclosures: (i) PC-1/PC-2 premise corrections honored (resolver print is dead p
 
 ## [0.29.9] — 2026-11-10
 
-### Added — Decision Module P1, SHADOW-ONLY (Emperor-ratified 2026-11-09): the proxy-decisions thin client, seam registry, shadow overlay, kill channel (`feature/decision-module-p1`; design `.agents/shared/planning/decision-module/`)
+### Added — Decision Module P1, SHADOW-ONLY (user-ratified 2026-11-09): the proxy-decisions thin client, seam registry, shadow overlay, kill channel (`feature/decision-module-p1`; design `.agents/shared/planning/decision-module/`)
 
 - **The overlay NEVER decides — observes + logs only.** P1 ships DORMANT by default: per-seam default OFF, apply is SUPERSET-ONLY (a consult may add context it may never remove), and only seam S1 (snapshot-search consult) is registered — **S2/S3/S4 stay UNREGISTERED**; arming is gated on the disclosed A-list (see the staged verification artifact). The S1 consult is DETACHED (council round 3): a bounded background task inside the overlay, strong-referenced, never-apply, so `search()` returns byte-identical results whether the overlay is armed or not.
 - **Thin client over the proxy's `/v1/decisions` shape** (`daemon/decision/`) — the client emits the OpenAI-decisions shape and the proxy canonicalizes R3/R4 (the client never emits criteria); connect-phase faults reach no socket; the switch cache invalidates narrowly (spy-pinned) and honours the global-master poison.
@@ -352,7 +740,7 @@ Disclosures: (i) PC-1/PC-2 premise corrections honored (resolver print is dead p
 
 ## [0.29.4] — 2026-11-08
 
-### Added — Project Operating Knowledge (POK): the audience-scoped operating-procedure store (`feature/project-operating-knowledge`, Emperor GO 2026-11-07; design v3.4 + ER-1)
+### Added — Project Operating Knowledge (POK): the audience-scoped operating-procedure store (`feature/project-operating-knowledge`, user GO 2026-11-07; design v3.4 + ER-1)
 
 - **`project_operating_knowledge` + embeddings companion (2 additive tables, NO FK) + the `source_tier` trust column** — the DB-canon store of ordered operating procedures per project, carrying the ER-1 **audience dimension** (`operation` → {ari, leader, devops} | `implementation` → {leader, developer} | `both` → everyone; curator narrowing via `audience_agents`), the UNIQUE partial index `uq_pok_active_slug` (dual-active structurally impossible; append-with-supersede is the only mutation path), and five-axis orthogonality (provenance ⊥ pinned ⊥ audience ⊥ status ⊥ source_tier).
 - **Three tools + category** — `pok_upsert` (the writer states audience and source tier at capture), `pok_query` (**UNIVERSAL READ — any agent on the project reads any entry regardless of audience tags; the dimension gates ACTIVE injection only**), `pok_curate` (leader/PM: pin/dispute/archive/audience reclassify). Category `pok` non-privileged; 40-agent grant sweep per B4 rules (watcher excluded via empty-allow inheritance, insert-before `nest-report`, canary append-end).

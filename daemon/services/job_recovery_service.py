@@ -61,6 +61,7 @@ from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.job_queue.models import AdmissionState, Decision
 from daemon.repositories.task.models import TaskStatus
 from daemon.services.dependency_bus import get_dependency_bus
+from daemon.services.event_registry import record as _event_registry_record
 from daemon.services.job_state_machine import InvalidTransitionError
 from daemon.services.mission_live_guard import (
     evaluate_mission_live,
@@ -4511,6 +4512,11 @@ class JobRecoveryService:
                 kind=EventKind.JOB_COMPLETED.value,
                 data=data,
             )
+            # Phase 5 event registry — class-2 bridge (T5.4): observe the
+            # durable emission AFTER create_event returns.
+            _event_registry_record("event_bus:job_completed",
+                                   instance_id=instance_id or "",
+                                   source="job_recovery_service.pattern_f")
             logger.debug(
                 "_publish_finalize_witness_event: published "
                 "JOB_COMPLETED witness row for job %s... "

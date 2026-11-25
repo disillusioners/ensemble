@@ -220,6 +220,11 @@ class TestL3MissionLeg:
         reports._bus_count_pending_for_target_sync = (
             lambda _iid: 1
         )
+        # F-1: the QUALIFIED (S3/D-1) helper is the one the gate
+        # reads — stamp it too, or the double is ignored.
+        reports._bus_count_fulfillable_pending_for_target_sync = (
+            lambda _iid: 1
+        )
         allowed, reason, _wait = await reports._root_completion_gate(
             None, iid
         )

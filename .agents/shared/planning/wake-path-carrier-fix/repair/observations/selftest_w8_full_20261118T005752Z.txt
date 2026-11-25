@@ -1,0 +1,18 @@
+=== PER-ROW DISPOSITION (synthetic) ===
++-------+------------+----------+-------------+----------------+------------------------------------------------+
+| label | kind       | id       | state       | disposition    | reason/note                                    |
++-------+------------+----------+-------------+----------------+------------------------------------------------+
+| W1    | watcher    | 8a1f60d7 | PENDING     | in_scope_stale |                                                |
+| W2    | watcher    | 999efa71 | PENDING     | in_scope_stale |                                                |
+| W3    | watcher    | 5602e91d | PENDING     | in_scope_stale |                                                |
+| W4    | watcher    | c83e12a2 | PENDING     | in_scope_stale |                                                |
+| M1    | commission | 0cdc0b31 | outstanding | in_scope_stale | worker_terminal_no_report / worker completed   |
+| M2    | commission | 90493206 | outstanding | in_scope_stale | ttl_expired_not_live / worker waiting_children |
+| M3    | commission | 06001f88 | outstanding | in_scope_stale | ttl_expired_not_live / worker waiting_children |
+| M4    | commission | a1561f19 | outstanding | in_scope_stale | ttl_expired_not_live / worker waiting_children |
++-------+------------+----------+-------------+----------------+------------------------------------------------+
+
+SELFTEST artifacts written (8 blocks, 0 naturally-resolved row(s) excluded, 0 backfill block(s)):
+  /home/nea/ensemble-src-wt-wake-path-carrier-fix/.agents/shared/planning/wake-path-carrier-fix/repair/selftest/live_wedge_repair_request__SELFTEST__20261118T005752Z.sql  sha256=8b1796baa5f8ef4dc4c3080ec87d174264d0cd983df9a20ddbf22200cc5b8895
+  /home/nea/ensemble-src-wt-wake-path-carrier-fix/.agents/shared/planning/wake-path-carrier-fix/repair/selftest/live_wedge_repair_request__SELFTEST__20261118T005752Z.receipt.md  sha256=96cdcdfc3038a09d3c1ff7cff3c3f2d5485d58292beb2987125ee4bacf57f261
+SYNTHETIC FIXTURE — NOT A LIVE REQUEST. Nothing in emitted/ was touched.

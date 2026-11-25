@@ -87,6 +87,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Tie-break padding for the SQL pushdown on the badge leg (jbh-m1a). When ``list_work`` is called with an explicit ``limit``, the JobItem SELECT is capped at ``limit + len(ensure_job_ids or ()) + TIE_PAD`` so the batch lookups and row loop run over a bounded set; the Python stable sort + slice at list_work stays authoritative. TIE_PAD covers append-order ties that the SQL ORDER BY (created_at desc only) cannot preserve, plus a small safety margin.
+TIE_PAD = 8
+BADGE_TIE_PAD = TIE_PAD
+_TIE_PAD = TIE_PAD
+_BADGE_TIE_PAD = TIE_PAD
+
 
 # ── Admission-state → representative status map ───────────────────────────
 # Phase 4: the ``status`` column is frozen at the INSERT default. When
@@ -152,6 +158,51 @@ def _kind_from_task_type(task_type: str | None) -> str:
     if task_type in REPORT_TASK_TYPES:
         return "report"
     return "report"
+
+
+# ── Defensive work-id normalization (resolver boundary) ───────────────────
+# Agents routinely paste a ``work_id`` out of markdown / JSON tool output.
+# That text drags along surrounding whitespace and one or more layers of
+# quote / bracket / backtick punctuation (e.g. ``"`abc`"`` or ``['abc']``).
+# A raw lookup with such a handle misses the indexed column and surfaces a
+# spurious "Job not found" even though the work exists. Normalize ONCE at the
+# resolver boundary so every lookup surface (resolve_work /
+# per_kind_status_for / the job tools / watch reconciliation) shares the same
+# rule. Matched wrappers are peeled repeatedly for doubly-pasted handles;
+# a non-string or empty-after-cleaning input degrades to ``None`` (fail-soft,
+# matching the read-only resolver contract) rather than raising.
+_WORK_ID_WRAPPERS: tuple[tuple[str, str], ...] = (
+    ("`", "`"),
+    ('"', '"'),
+    ("'", "'"),
+    ("[", "]"),
+    ("(", ")"),
+    ("{", "}"),
+)
+
+
+def _normalize_work_id(work_id: Any) -> str | None:
+    """Return a clean, non-empty work-id string, or ``None``.
+
+    Strips leading/trailing whitespace and any matched quote, bracket or
+    backtick wrappers (repeatedly, for handles pasted with nested
+    punctuation). Non-string input and input that is empty after cleaning
+    return ``None`` so callers fall back to "not found" / default instead of
+    raising on malformed agent-supplied identifiers.
+    """
+    if not isinstance(work_id, str):
+        return None
+    cleaned = work_id.strip()
+    while cleaned:
+        changed = False
+        for left, right in _WORK_ID_WRAPPERS:
+            if len(cleaned) >= 2 and cleaned[0] == left and cleaned[-1] == right:
+                cleaned = cleaned[1:-1].strip()
+                changed = True
+                break
+        if not changed:
+            break
+    return cleaned or None
 
 
 # ── WorkRecord ─────────────────────────────────────────────────────────────
@@ -1074,15 +1125,25 @@ class WorkResolverService:
 
         Args:
             work_id: The UUID4 work identifier (Task.work_id or
-                JobItem.job_id).
+                JobItem.job_id). Normalized defensively first — leading /
+                trailing whitespace and matched quote / bracket / backtick
+                wrappers from a pasted id are stripped; an empty or
+                non-string value resolves to ``None``.
 
         Returns:
             A populated :class:`WorkRecord`, or ``None`` if neither
             table has a row with this identifier.
         """
+        # Normalize the caller-supplied handle once at the resolver
+        # boundary so a pasted id (whitespace / quotes / backticks) still
+        # hits the indexed column, and both backing tables see the SAME
+        # clean key (symmetry between Task-backed and JobItem-backed work).
+        normalized_id = _normalize_work_id(work_id)
+        if normalized_id is None:
+            return None
         # Task branch: indexed unique lookup on Task.work_id.
-        task = self._task_repo.get_by_work_id(work_id)
-        job = self._job_repo.get(work_id)
+        task = self._task_repo.get_by_work_id(normalized_id)
+        job = self._job_repo.get(normalized_id)
         if task is not None and job is not None:
             # Dual-backed work unit (dispatch flow: the JobItem and
             # its linked Task share work_id == job_id). D3: the
@@ -1156,7 +1217,9 @@ class WorkResolverService:
 
         Args:
             work_id: The UUID4 work identifier (Task.work_id or
-                JobItem.job_id).
+                JobItem.job_id). Normalized defensively (same rule as
+                :meth:`resolve_work`); an empty / non-string value returns
+                ``default``.
             default: Status to return when the work cannot be resolved
                 (the row was deleted between the terminal commit and
                 the notify, or the resolver is partial-wired in a
@@ -1166,7 +1229,10 @@ class WorkResolverService:
             The canonical status from the resolved :class:`WorkRecord`,
             or ``default`` when the lookup returns ``None``.
         """
-        record = self.resolve_work(work_id)
+        normalized_id = _normalize_work_id(work_id)
+        if normalized_id is None:
+            return default
+        record = self.resolve_work(normalized_id)
         if record is None:
             return default
         return record.status
@@ -1435,7 +1501,43 @@ class WorkResolverService:
         child_job_instance_ids: set[str] = set()
 
         if query_jobs_table:
-            jobs = self._query_jobs(project_id, instance_id, job_status_filters)
+            # SQL pushdown (jbh-m1a): when ``limit`` is explicit (not
+            # None), cap the JobItem fetch so the batch lookups and row
+            # loop run over a bounded set. D-68 LEADER RULING
+            # (wi-3f5bea95): "no server-side default cap" — when
+            # ``limit`` is None we issue NO SQL limit and NO default
+            # cap; every matching row is returned. The Python stable
+            # sort + slice at the bottom of list_work stays
+            # AUTHORITATIVE (wire order = created_at desc, append-order
+            # tie-break — unchanged).
+            if limit is not None and limit >= 0:
+                _sql_limit = limit + len(ensure_job_ids or ()) + TIE_PAD
+            else:
+                _sql_limit = None
+            jobs = self._query_jobs(
+                project_id,
+                instance_id,
+                job_status_filters,
+                limit=_sql_limit,
+            )
+            # Page-completeness fallback (D-29/D-69): ensured ids draw
+            # from the fetched list. After bounding, any ensure_job_ids
+            # id MISSING from the bounded page is recovered by ONE
+            # targeted IN re-query so ensured rows ALWAYS appear. Runs
+            # before the batch lookups so the recovered rows' instance /
+            # mission / timing data is resolved in the same batched
+            # passes (no extra per-row SELECTs).
+            if ensure_job_ids:
+                _present = {j.job_id for j in (jobs or [])}
+                _missing = [jid for jid in ensure_job_ids if jid not in _present]
+                if _missing:
+                    _recovered = self._query_jobs(
+                        project_id,
+                        instance_id,
+                        job_status_filters,
+                        job_ids=set(_missing),
+                    )
+                    jobs = list(jobs or []) + list(_recovered or [])
             if jobs:
                 instance_ids = {
                     j.instance_id for j in jobs if j.instance_id is not None
@@ -1614,7 +1716,9 @@ class WorkResolverService:
         # asymmetry — DC-G).
         task_timing = (task.started_at, task.completed_at)
         return WorkRecord(
-            work_id=task.work_id,
+            # Symmetric with the JobItem-backed converter: normalize the
+            # Task's work_id so both paths emit a clean canonical handle.
+            work_id=_normalize_work_id(task.work_id) or task.work_id,
             kind=_kind_from_task_type(task.task_type),
             status=canonicalize_status(task.status),
             instance_id=task.instance_id,
@@ -1694,6 +1798,16 @@ class WorkResolverService:
         paired Task — e.g. virtual message-driven JobItems post-D13)
         surface ``None`` — the resolver still accepts that shape
         because the contract test suite covers it.
+
+        **JobItem-only rows** (no paired Task row — direct message jobs,
+        or jobs whose Task row was purged / never minted) are a first-class
+        shape here. Every field on the returned :class:`WorkRecord` is
+        sourced from the JobItem (plus its joined Instance) with NO Task
+        dependency: ``status`` maps ``admission_state`` together with
+        ``terminal_reason`` through :func:`canonicalize_status` (the same
+        per-kind dispatch :meth:`per_kind_status_for` reports), and
+        ``kind`` is always ``"job"``. This keeps single-record lookups
+        symmetric with the Task-backed path.
 
         Field-name mapping from JobItem / Task → WorkRecord:
 
@@ -1957,7 +2071,10 @@ class WorkResolverService:
             error = None
 
         return WorkRecord(
-            work_id=job.job_id,
+            # Normalize defensively so a pasted / whitespace-padded JobItem
+            # PK still produces a clean, canonical work_id on the record —
+            # symmetric with the Task-backed converter below.
+            work_id=_normalize_work_id(job.job_id) or job.job_id,
             kind="job",
             status=status,
             instance_id=job.instance_id,
@@ -2295,6 +2412,8 @@ class WorkResolverService:
         project_id: str | None,
         instance_id: str | None,
         status_filters: list[JobStatusFilter] | None,
+        limit: int | None = None,
+        job_ids: set[str] | None = None,
     ) -> list[JobItem]:
         """Run the JobItem SELECT for ``list_work`` and return the rows.
 
@@ -2338,6 +2457,8 @@ class WorkResolverService:
                 stmt = stmt.where(JobItem.project_id == project_id)
             if instance_id is not None:
                 stmt = stmt.where(JobItem.instance_id == instance_id)
+            if job_ids:
+                stmt = stmt.where(JobItem.job_id.in_(job_ids))
             if status_filters:
                 # Build the OR-of-ANDs predicate. Each filter row is
                 # one branch of the outer OR; the row's clauses are
@@ -2382,6 +2503,8 @@ class WorkResolverService:
                 if branches:
                     stmt = stmt.where(or_(*branches))
             stmt = stmt.order_by(col(JobItem.created_at).desc())
+            if limit is not None:
+                stmt = stmt.limit(limit)
             return list(session.exec(stmt))
 
     def _batch_child_instance_ids(self, instance_ids: set[str]) -> set[str]:

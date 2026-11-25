@@ -1,0 +1,36 @@
+[identity] current_database() = ensemble_prod   current_user = fake
+[PASS] 1 all 8 stale: classification=not_yet (expected not_yet)
+        dispositions: W1=in_scope_stale, W2=in_scope_stale, W3=in_scope_stale, W4=in_scope_stale, M1=in_scope_stale, M2=in_scope_stale, M3=in_scope_stale, M4=in_scope_stale
+        needs_backfill: []
+[identity] current_database() = ensemble_prod   current_user = fake
+[PASS] 2 one commission already abandoned: classification=partial (expected partial)
+        dispositions: W1=in_scope_stale, W2=in_scope_stale, W3=in_scope_stale, W4=in_scope_stale, M1=in_scope_stale, M2=naturally_resolved, M3=in_scope_stale, M4=in_scope_stale
+        needs_backfill: []
+[identity] current_database() = ensemble_prod   current_user = fake
+[PASS] 3 boot-sweep cancel (needs backfill): classification=partial (expected partial)
+        dispositions: W1=in_scope_stale, W2=naturally_resolved, W3=in_scope_stale, W4=in_scope_stale, M1=in_scope_stale, M2=in_scope_stale, M3=in_scope_stale, M4=in_scope_stale
+        needs_backfill: ['W2']
+[identity] current_database() = ensemble_prod   current_user = fake
+[PASS] 4 UNKNOWN extra PENDING watcher (A8): classification=unexpected (expected unexpected)
+        - A8 DRIFT GUARD: every PENDING watcher / outstanding commission of the parent is INSIDE the 8-row target set: observed=pending_for_parent=5 (unknown=1), outstanding_for_parent=4 (unknown=0) expected=unknown=0 and unknown=0
+        - UNKNOWN PENDING watcher feedface source_task=39700 child=82551f59 — outside the 8-row target set
+        dispositions: W1=in_scope_stale, W2=in_scope_stale, W3=in_scope_stale, W4=in_scope_stale, M1=in_scope_stale, M2=in_scope_stale, M3=in_scope_stale, M4=in_scope_stale
+        needs_backfill: []
+[identity] current_database() = ensemble_prod   current_user = fake
+[PASS] 5 parent mid-wake running (A1/A9): classification=unexpected (expected unexpected)
+        - A1 parent exists AND status == waiting_children: observed=exists=True, status=running expected=exists=True, status=waiting_children
+        - A9 parent status IS waiting_children (a re-run never clobbers an unknown world): observed=status=running expected=status=waiting_children
+        dispositions: W1=in_scope_stale, W2=in_scope_stale, W3=in_scope_stale, W4=in_scope_stale, M1=in_scope_stale, M2=in_scope_stale, M3=in_scope_stale, M4=in_scope_stale
+        needs_backfill: []
+[identity] current_database() = ensemble_prod   current_user = fake
+[PASS] 6 all 8 resolved (parent already woke): classification=already_repaired (expected already_repaired)
+        dispositions: W1=naturally_resolved, W2=naturally_resolved, W3=naturally_resolved, W4=naturally_resolved, M1=naturally_resolved, M2=naturally_resolved, M3=naturally_resolved, M4=naturally_resolved
+        needs_backfill: []
+[identity] current_database() = ensemble_prod   current_user = fake
+[PASS] 7 target row missing: classification=unexpected (expected unexpected)
+        - A10 watcher 5602e91d resolves uniquely; target==parent; source_task==39564; child==82551f59: observed=matches=0, state=None, disposition=unexpected, target=None, source_task=None, child=None expected=matches=1, identity matches, state=PENDING|resolved
+        - UNEXPECTED target row W3 (watcher 5602e91d): state=None worker_status=None
+        dispositions: W1=in_scope_stale, W2=in_scope_stale, W3=unexpected, W4=in_scope_stale, M1=in_scope_stale, M2=in_scope_stale, M3=in_scope_stale, M4=in_scope_stale
+        needs_backfill: []
+
+7/7 cases PASS

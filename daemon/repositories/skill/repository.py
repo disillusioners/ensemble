@@ -39,6 +39,13 @@ Design highlights
   schema works on both SQLite and PostgreSQL. Embeddings are
   stored as plain JSON arrays of floats (NOT BYTEA, NOT pickle,
   NOT numpy) — the project standard for JSON-shaped columns.
+
+Size rationale (2470 lines): six repositories share one table module
+and the raw-SQL hot paths (atomic counters, BM25 full-text search,
+bulk embedding lookup) live alongside the CRUD, so the file sits in
+the 1000-3000 band honestly. Splitting per repository would scatter
+the shared engine/JSONB conventions and the whitelisted-column
+counter helpers; keep together unless a seventh repository arrives.
 """
 
 from __future__ import annotations
@@ -50,7 +57,7 @@ from datetime import datetime, timezone
 from math import log
 from typing import Any, Optional
 
-from sqlalchemy import case, func, text
+from sqlalchemy import case, func, text, update
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, col, select
 
@@ -2332,6 +2339,115 @@ class SkillABTestRepository:
                 f"winner_skill_id={winner_skill_id}"
             )
             return test
+
+    def resolve_atomic(
+        self,
+        ab_test_group: str,
+        winner_skill_id: str,
+        loser_skill_id: str,
+        *,
+        require_zero_comparisons: bool = False,
+    ) -> bool:
+        """CAS-guarded, SINGLE-TRANSACTION A/B resolution.
+
+        The three terminal mutations of a resolution —
+
+        1. the pair row (``resolved_at`` + ``winner_skill_id``),
+        2. the loser skill (``is_active=False``, ``status='inactive'``,
+           ``ab_test_group`` RETAINED),
+        3. the winner skill (``ab_test_group`` cleared,
+           ``status='active'``) —
+
+        are applied inside ONE session / ONE transaction. The pair
+        row is claimed with a compare-and-set UPDATE whose predicate
+        is ``resolved_at IS NULL`` (plus ``comparisons = 0`` when
+        ``require_zero_comparisons`` is set). A CAS loser applies
+        NOTHING: the transaction is rolled back and ``False`` is
+        returned (exactly-once resolution).
+
+        Why this shape (the pre-fix service ran the three mutations
+        as three independent ``asyncio.gather`` transactions): a
+        mid-flight failure left the pair HALF resolved — the pair row
+        written while the winner stayed bound to the group, or the
+        loser deactivated while the winner was never re-activated.
+
+        Args:
+            ab_test_group: The shared UUID of the test.
+            winner_skill_id: The winning variant's skill id.
+            loser_skill_id: The losing variant's skill id.
+            require_zero_comparisons: When True the CAS predicate also
+                requires ``comparisons = 0`` — the zero-traffic guard.
+                A pair whose counter moved since it was read loses the
+                CAS and is NEVER resolved on traffic.
+
+        Returns:
+            ``True`` when this caller won the CAS (mutations
+            committed), ``False`` when the CAS was lost (zero
+            mutations applied).
+
+        Raises:
+            Exception: any DB error propagates — the session context
+                manager rolls the transaction back, so a mid-transaction
+                failure leaves ZERO partial mutations.
+        """
+        now = _now_iso()
+        with Session(self.engine) as session:
+            stmt = (
+                update(SkillABTest)
+                .where(SkillABTest.ab_test_group == ab_test_group)
+                .where(SkillABTest.resolved_at.is_(None))
+            )
+            if require_zero_comparisons:
+                stmt = stmt.where(SkillABTest.comparisons == 0)
+            stmt = stmt.values(
+                resolved_at=now, winner_skill_id=winner_skill_id,
+            )
+            result = session.execute(stmt)
+            if result.rowcount != 1:
+                # CAS lost — the pair was resolved concurrently (or its
+                # counter moved). NOTHING is mutated.
+                session.rollback()
+                logger.info(
+                    "Skill A/B CAS lost: ab_test_group=%s (rowcount=%s) "
+                    "— no mutation performed",
+                    ab_test_group,
+                    result.rowcount,
+                )
+                return False
+
+            loser = session.get(Skill, loser_skill_id)
+            if loser is None:
+                logger.warning(
+                    "Skill A/B resolve: loser skill not found: id=%s "
+                    "(pair still resolved)",
+                    loser_skill_id,
+                )
+            else:
+                loser.is_active = False
+                loser.status = "inactive"
+                loser.updated_at = now
+
+            winner = session.get(Skill, winner_skill_id)
+            if winner is None:
+                logger.warning(
+                    "Skill A/B resolve: winner skill not found: id=%s "
+                    "(pair still resolved)",
+                    winner_skill_id,
+                )
+            else:
+                winner.ab_test_group = None
+                winner.status = "active"
+                winner.updated_at = now
+
+            session.commit()
+            logger.info(
+                "Resolved skill A/B test (atomic CAS): ab_test_group=%s, "
+                "winner_skill_id=%s, loser_skill_id=%s",
+                ab_test_group,
+                winner_skill_id,
+                loser_skill_id,
+            )
+            return True
 
     def get_active_tests(
         self,

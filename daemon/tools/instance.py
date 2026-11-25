@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from functools import partial
 from typing import TYPE_CHECKING, Annotated, Any, Callable, Literal
 
-from langchain_core.tools import tool, BaseTool
+from langchain_core.tools import BaseTool
 
 from pydantic import BaseModel, Field, model_validator
 from sqlmodel import Session
@@ -248,6 +248,7 @@ def expand_allow_for_innate_skills(
         return allow
     return [*allow, *extra]
 
+from ._schema_registry import tool
 from .bash import bash
 from .filesystem import (
     list_directory,
@@ -264,6 +265,12 @@ from .agent_mother import create_mother_tools
 from .project import create_project_tools
 from .job_queue import create_job_tools, create_mission_watch_tools
 from .scheduling import create_scheduling_tools
+try:
+    from .tool_usage import create_tool_usage_tools_if_available
+except Exception as exc:  # pragma: no cover
+    logger.warning("tool_usage tools unavailable: %s", exc)
+    def create_tool_usage_tools_if_available(*a, **k):
+        return []
 from .missions import create_mission_tools
 from .help import create_help_tool
 from .knowledge_tools import create_knowledge_tools
@@ -3019,7 +3026,7 @@ def create_guidelines_tools_if_available(manager, current_instance_id: str, agen
 def create_room_tools_if_available(manager, current_instance_id: str, agent_id: str, agent_tag: str | None = None) -> list:
     """Create the five agent group-chat room tools for one instance/agent.
 
-    Agent group chat Phase 2 / P5 (2026-11-16, Emperor-ratified design).
+    Agent group chat Phase 2 / P5 (2026-11-16, user-ratified design).
     The tools are ``room_create`` / ``room_post`` / ``room_read`` /
     ``room_task_decision`` / ``room_close`` (``daemon/tools/room.py``).
 
@@ -6811,6 +6818,11 @@ Returns:
     child cascade contract), "wake_enqueued" (a parked WAITING_CHILDREN
     parent got a durable wake turn), "wake_failed" (the WC-wake enqueue
     refused — inspect the error / refusal_kind fields for cause),
+    "pending_redrive" (a PENDING task anchored to a non-terminal JobItem
+    was found and made claimable, and the job pipeline + worker pools were
+    woken — the F2 no_active_job repair; task_id / claimable identify the
+    work; it PRE-EMPTS "wake_enqueued" for a WAITING_CHILDREN parent that
+    also holds anchored pending work),
     "already_resuming" (a resume was already in flight for this
     instance — the dedup guard at manager.py:10122 short-circuits rather
     than starting a second graph turn), "deferred_report_recovery"
@@ -7041,6 +7053,16 @@ Returns:
     )
     tools.extend(scheduling_tool_list)
 
+    # ── Tool-usage digest tool (tool-usage-metrics-p1 Phase 3) ──────────
+    # Read-only digest over the tool-usage ledger; writes a durable markdown
+    # file to the canonical root. Three-step registration seam (decorator +
+    # CATEGORY_MODULES entry + construction). Reuses the "scheduling"
+    # category so no new category value / vocab bump.
+    tool_usage_tool_list = create_tool_usage_tools_if_available(
+        manager, current_instance_id, agent_id, agent_tag=version_tag
+    )
+    tools.extend(tool_usage_tool_list)
+
     # ── Board tools (ari-tools Phase 1 — the Workbook) ───────────────────
     # The global, DB-backed work board. Same critical list-append pattern
     # as job_tools / scheduling_tool_list above: decorator-only
@@ -7147,7 +7169,7 @@ Returns:
     #     auto-grant it.
     #   * ``instance_ops``  — the six audited acts (terminate, reclaim,
     #     nudge, mark, answer, dismiss). Destructive; holders {ari,
-    #     maintenancer} per the Emperor directive 2026-11-14
+    #     maintenancer} per the user directive 2026-11-14
     #     (commission ari-instance-stop-grant) — D-13 single-owner
     #     population amended; the audit ledger, protected-target
     #     two-tier policy, provenance gates and the fleet terminate
@@ -7462,7 +7484,7 @@ Returns:
     # either invisible to the help tool or BYPASSES the privileged strip.
     #
     # The category is PRIVILEGED (entry #21): the conversational
-    # approval lane mints and consumes ASSENT TOKENS on the Emperor's
+    # approval lane mints and consumes ASSENT TOKENS on the user's
     # behalf — the empty-allow inherit universe must never hold that
     # authority. The ari-only audience is spelled by the
     # ``tools.allow: ["prompt-assent"]`` entry (agents/ari/meta.json)

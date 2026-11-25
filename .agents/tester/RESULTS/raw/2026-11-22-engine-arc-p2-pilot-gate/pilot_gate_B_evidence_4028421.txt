@@ -1,0 +1,43 @@
+--- (a) posture: engine_jobs ---
+            id             |        service_tag        |                kill_switch_key                | interval_seconds | dead | enabled 
+---------------------------+---------------------------+-----------------------------------------------+------------------+------+---------
+ drift-reconcile           | drift-reconcile           | SERVICES_DRIFT_RECONCILE_USE_ENGINE           |              300 |    0 |       1
+ eligible-pending          | eligible-pending-sweep    | SERVICES_ELIGIBLE_PENDING_SWEEP_USE_ENGINE    |               90 |    0 |       1
+ job-lock                  | job-lock-sweep            | SERVICES_JOB_LOCK_SWEEP_USE_ENGINE            |               90 |    0 |       1
+ mission-strand-heal       | mission-strand-heal       | SERVICES_MISSION_STRAND_HEAL_USE_ENGINE       |              300 |    0 |       1
+ orphan-watcher            | orphan-watcher-sweep      | SERVICES_ORPHAN_WATCHER_SWEEP_USE_ENGINE      |               90 |    0 |       1
+ plane-sync-watchdog       | plane-sync-watchdog       | SERVICES_PLANE_SYNC_WATCHDOG_USE_ENGINE       |              300 |    0 |       1
+ report-delivery-recovery  | report-delivery-recovery  | SERVICES_REPORT_DELIVERY_RECOVERY_USE_ENGINE  |              300 |    0 |       1
+ sources-gc                | sources-gc                | SERVICES_SOURCES_GC_USE_ENGINE                |             3600 |    0 |       1
+ stale-pause               | stale-pause-sweep         | SERVICES_STALE_PAUSE_SWEEP_USE_ENGINE         |              300 |    0 |       1
+ tmp-image                 | tmp-image-cleanup         | SERVICES_TMP_IMAGE_CLEANUP_USE_ENGINE         |             3600 |    0 |       1
+ waiting-children-watchdog | waiting-children-watchdog | SERVICES_WAITING_CHILDREN_WATCHDOG_USE_ENGINE |             3600 |    0 |       1
+ watch-reconcile           | watch-reconcile-sweep     | SERVICES_WATCH_RECONCILE_SWEEP_USE_ENGINE     |              300 |    0 |       1
+(12 rows)
+
+--- (b) shadow cadence: engine_runs job_id=orphan-watcher ---
+ id |            started_at            |    outcome     | skip_reason |             boot_id              
+----+----------------------------------+----------------+-------------+----------------------------------
+  5 | 2026-11-22T13:00:39.261682+00:00 | SKIPPED_SHADOW | SHADOW      | bff98250ffa346b1b3fc850b5602ec9a
+ 15 | 2026-11-22T13:02:09.496734+00:00 | SKIPPED_SHADOW | SHADOW      | bff98250ffa346b1b3fc850b5602ec9a
+ 18 | 2026-11-22T13:03:39.593057+00:00 | SKIPPED_SHADOW | SHADOW      | bff98250ffa346b1b3fc850b5602ec9a
+(3 rows)
+
+--- (c1) orphan-watcher non-SKIPPED_SHADOW/SHADOW count ---
+ orphan_non_shadow 
+-------------------
+                 0
+(1 row)
+
+--- (c2) any-job non-SKIPPED_* count ---
+ any_non_skipped 
+-----------------
+               0
+(1 row)
+
+--- (e) planted watcher final state ---
+          watch_id          |   state   |        created_at         |             fired_at             
+----------------------------+-----------+---------------------------+----------------------------------
+ pilot_gate_b_stale_4028421 | CANCELLED | 2020-01-01T00:00:00+00:00 | 2026-11-22T13:02:06.495919+00:00
+(1 row)
+

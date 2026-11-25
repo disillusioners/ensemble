@@ -20,7 +20,7 @@
 
 ## Final fix cycle (W1-W3) — unit-pack coverage, drills unchanged
 The W-fix cycle (2026-08-23, tip `9be59635` → this delta) landed its fixtures in the unit packs, not the drill; the drill's 96 assertions are unchanged and re-proven green on the fixed tree:
-- **W1** (stale-heartbeat lock break ignores a live owner) — `launcher_supervisor_unit_test` 8v/8w (sweep defer + `_js_lock_acquire` seam) and `release_journal_unit_test` 7c (lib.sh `lock_acquire` mirror): stale heartbeat + LIVE owner → lock never broken; dead owner → break proceeds.
+- **W1** (stale-heartbeat lock break ignores a live owner) — `launcher_supervisor_unit_test` 8v/8v2 (sweep defer + `_js_lock_acquire` seam) and `release_journal_unit_test` 7c (lib.sh `lock_acquire` mirror): stale heartbeat + LIVE owner → lock never broken; dead owner → break proceeds.
 - **W2** (kill-window heal misfires on same-version re-promote abort) — `launcher_supervisor_unit_test` 8u/8u2 and `release_journal_unit_test` 12e (REAL same-version promote abort): heal requires journal `current` ≠ txn target; same-version abort clears pre-flip with NO rollback/quarantine/count.
 - **W3** (adopt_stale_txn recovery writes unchecked) — `release_journal_unit_test` 8m/8n: chmod-induced write failure → txn LEFT OPEN + loud WARN + exit 78 (never close over a failed state write).
 - Pack totals this cycle: journal 219 → 243, launcher 167 → 190, drills 96/96.

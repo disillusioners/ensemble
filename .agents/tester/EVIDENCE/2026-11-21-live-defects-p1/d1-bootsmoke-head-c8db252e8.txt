@@ -1,0 +1,685 @@
+14:01:37 - daemon.services.bind_retry - INFO - Bound 0.0.0.0:8191 on attempt 1 after 0.0s
+14:01:40 - daemon.registry - WARNING - Tool config validation: Agent 'maintenancer': deny entry 'git_commit' is neither a known category nor a known tool
+14:01:40 - daemon.tools.memoir_knob - INFO - [Memoir] ENSEMBLE_MEMOIR_ENABLED is unset and the configuration disables the surface (memoir.enabled=false) — memoir surface DISABLED
+14:01:41 - daemon.tools.instance - DEBUG - ask_questions hidden: root-candidate with source_type=None
+14:01:41 - daemon.tools._schema_registry - INFO - [schema-registry] boot warm complete: 255 schema(s) memoised
+14:01:41 - daemon.config - INFO - [LiveViews] max_media_bytes=2147483648 (source=default)
+14:01:41 - daemon.config - INFO - [ServiceTool] service_tool_enabled=True (env ENSEMBLE_SERVICE_TOOL_ENABLED), max_concurrent=10, reconcile_interval=90s
+14:01:41 - daemon.config - INFO - [ContextMessages] kv_ambient_system_default_enabled=True (env ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED)
+14:01:41 - daemon.config - INFO - [VSCode] webview_csp_fix=True (env ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX)
+14:01:41 - daemon.config - INFO - [CriticalNotes] core_cap=8 reference_max=500 stale_days=90 (always-on per D4 — no ENSEMBLE_* env flag)
+14:01:41 - daemon.config - INFO - [CriticalNotes:reserved] tail_cap=6 section_char_cap=12000 floor_count=2 query_max_chars=2000 mint_cap_per_read=10 fusion_bm25_weight=0.4 fusion_vector_weight=0.6 fusion_threshold=0.3 llm_select=False (all CONSUMED Phase-2; defaults only — no ENSEMBLE_* env flag, D4)
+14:01:41 - daemon.config - INFO - [ResponseValidation] empty_response_guard=True (env ENSEMBLE_EMPTY_RESPONSE_GUARD), empty_guard_compaction_skip=False (env ENSEMBLE_EMPTY_GUARD_COMPACTION_SKIP)
+14:01:41 - daemon.config - INFO - [SymptomRepair] symptom_repair_ladder=True (env ENSEMBLE_SYMPTOM_REPAIR_LADDER), repair_loop_durable=True (env ENSEMBLE_REPAIR_LOOP_DURABLE)
+14:01:41 - daemon.api - INFO - Starting Ensemble v0.31.23
+14:01:42 - daemon.api - INFO - remote-hands gateway is DISABLED (MCPS_GATEWAY_ENABLED) — the route /api/mcps-gateway/ws is not registered
+14:01:43 - mcp.server.lowlevel.server - DEBUG - Initializing server 'ensemble-kb'
+14:01:43 - mcp.server.lowlevel.server - DEBUG - Registering handler for ListToolsRequest
+14:01:43 - mcp.server.lowlevel.server - DEBUG - Registering handler for CallToolRequest
+14:01:43 - mcp.server.lowlevel.server - DEBUG - Registering handler for ListResourcesRequest
+14:01:43 - mcp.server.lowlevel.server - DEBUG - Registering handler for ReadResourceRequest
+14:01:43 - mcp.server.lowlevel.server - DEBUG - Registering handler for PromptListRequest
+14:01:43 - mcp.server.lowlevel.server - DEBUG - Registering handler for GetPromptRequest
+14:01:43 - mcp.server.lowlevel.server - DEBUG - Registering handler for ListResourceTemplatesRequest
+14:01:43 - mcp.server.sse - DEBUG - SseServerTransport initialized with endpoint: /api/mcp/kb/sse/messages/
+14:01:43 - daemon.api - INFO - [Auth] route classes tagged (public/module-lane/protected)
+14:01:43 - daemon.config - INFO - [LiveViews] max_media_bytes=2147483648 (source=default)
+14:01:43 - daemon.config - INFO - [ServiceTool] service_tool_enabled=True (env ENSEMBLE_SERVICE_TOOL_ENABLED), max_concurrent=10, reconcile_interval=90s
+14:01:43 - daemon.config - INFO - [ContextMessages] kv_ambient_system_default_enabled=True (env ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED)
+14:01:43 - daemon.config - INFO - [VSCode] webview_csp_fix=True (env ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX)
+14:01:43 - daemon.config - INFO - [CriticalNotes] core_cap=8 reference_max=500 stale_days=90 (always-on per D4 — no ENSEMBLE_* env flag)
+14:01:43 - daemon.config - INFO - [CriticalNotes:reserved] tail_cap=6 section_char_cap=12000 floor_count=2 query_max_chars=2000 mint_cap_per_read=10 fusion_bm25_weight=0.4 fusion_vector_weight=0.6 fusion_threshold=0.3 llm_select=False (all CONSUMED Phase-2; defaults only — no ENSEMBLE_* env flag, D4)
+14:01:43 - daemon.config - INFO - [ResponseValidation] empty_response_guard=True (env ENSEMBLE_EMPTY_RESPONSE_GUARD), empty_guard_compaction_skip=False (env ENSEMBLE_EMPTY_GUARD_COMPACTION_SKIP)
+14:01:43 - daemon.config - INFO - [SymptomRepair] symptom_repair_ladder=True (env ENSEMBLE_SYMPTOM_REPAIR_LADDER), repair_loop_durable=True (env ENSEMBLE_REPAIR_LOOP_DURABLE)
+14:01:43 - daemon.api - INFO - Starting Ensemble v0.31.23
+14:01:44 - daemon.api - INFO - remote-hands gateway is DISABLED (MCPS_GATEWAY_ENABLED) — the route /api/mcps-gateway/ws is not registered
+14:01:44 - mcp.server.lowlevel.server - DEBUG - Initializing server 'ensemble-kb'
+14:01:44 - mcp.server.lowlevel.server - DEBUG - Registering handler for ListToolsRequest
+14:01:44 - mcp.server.lowlevel.server - DEBUG - Registering handler for CallToolRequest
+14:01:44 - mcp.server.lowlevel.server - DEBUG - Registering handler for ListResourcesRequest
+14:01:44 - mcp.server.lowlevel.server - DEBUG - Registering handler for ReadResourceRequest
+14:01:44 - mcp.server.lowlevel.server - DEBUG - Registering handler for PromptListRequest
+14:01:44 - mcp.server.lowlevel.server - DEBUG - Registering handler for GetPromptRequest
+14:01:44 - mcp.server.lowlevel.server - DEBUG - Registering handler for ListResourceTemplatesRequest
+14:01:44 - mcp.server.sse - DEBUG - SseServerTransport initialized with endpoint: /api/mcp/kb/sse/messages/
+14:01:44 - daemon.api - INFO - [Auth] route classes tagged (public/module-lane/protected)
+INFO:     Started server process [2021190]
+INFO:     Waiting for application startup.
+14:01:44 - daemon.ensemble_config - INFO - Loaded ensemble config: database=postgres
+14:01:44 - daemon.config - INFO - [LiveViews] max_media_bytes=2147483648 (source=default)
+14:01:44 - daemon.config - INFO - [ServiceTool] service_tool_enabled=True (env ENSEMBLE_SERVICE_TOOL_ENABLED), max_concurrent=10, reconcile_interval=90s
+14:01:44 - daemon.config - INFO - [ContextMessages] kv_ambient_system_default_enabled=True (env ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED)
+14:01:44 - daemon.config - INFO - [VSCode] webview_csp_fix=True (env ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX)
+14:01:44 - daemon.config - INFO - [CriticalNotes] core_cap=8 reference_max=500 stale_days=90 (always-on per D4 — no ENSEMBLE_* env flag)
+14:01:44 - daemon.config - INFO - [CriticalNotes:reserved] tail_cap=6 section_char_cap=12000 floor_count=2 query_max_chars=2000 mint_cap_per_read=10 fusion_bm25_weight=0.4 fusion_vector_weight=0.6 fusion_threshold=0.3 llm_select=False (all CONSUMED Phase-2; defaults only — no ENSEMBLE_* env flag, D4)
+14:01:44 - daemon.config - INFO - [ResponseValidation] empty_response_guard=True (env ENSEMBLE_EMPTY_RESPONSE_GUARD), empty_guard_compaction_skip=False (env ENSEMBLE_EMPTY_GUARD_COMPACTION_SKIP)
+14:01:44 - daemon.config - INFO - [SymptomRepair] symptom_repair_ladder=True (env ENSEMBLE_SYMPTOM_REPAIR_LADDER), repair_loop_durable=True (env ENSEMBLE_REPAIR_LOOP_DURABLE)
+14:01:44 - daemon.repositories.factory - INFO - Creating PostgreSQL engine: 127.0.0.1:5432/ensemble_dev
+14:01:44 - daemon.repositories.factory - INFO - MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS DISABLED — no trustworthy Phase-0 measurement
+14:01:44 - daemon.repositories.factory - INFO - Manager engine pool sizing: pool_size=15 (limits.manager_pool_size; default tier 15, floor = default)
+14:01:44 - daemon.services.settings_service - INFO - [Settings] limits.checkpoint_pool_max_size: env tier wins — config field 10 -> 15 (applies on this boot; restart-required semantics)
+14:01:44 - daemon.services.settings_service - INFO - [Settings] limits.checkpoint_pool_timeout_s: env tier wins — config field 5.0 -> 20.0 (applies on this boot; restart-required semantics)
+14:01:44 - daemon.services.settings_service - INFO - [Settings] wedge_notice_emission_enabled: default tier wins - DB/env-only key (no Config field) - resolved value True (applies on this boot; restart-required semantics: takes effect per tick)
+14:01:44 - daemon.services.settings_service - INFO - [Settings] applied 0 db override(s)
+14:01:44 - daemon - INFO - [TmpImages] ready: dir=data/tmp_images count=0 max_bytes=1073741824
+14:01:44 - daemon - INFO - [Config] reasoning_echo_disabled_models=[] (models matching these patterns will NOT echo reasoning_content; all others echo)
+14:01:44 - daemon - INFO - [Config] default_streaming=True (clean_llm_config injects streaming=True when callers don't pass an explicit flag; OPENAI_STREAMING env var controls it)
+14:01:44 - daemon - INFO - [Config] default_request_gzip=False (clean_llm_config attaches gzip httpx clients when True; OPENAI_REQUEST_GZIP env var controls it)
+14:01:44 - daemon - INFO - [Config] default_request_timeout=610s (clean_llm_config injects it when a site omits request_timeout — tightening ∞→610s; OPENAI_REQUEST_TIMEOUT controls it)
+14:01:44 - daemon - INFO - [Config] empty_degenerate_reinvoke_cap=3 (router stops re-invoking on reasoning-only/<think>-only empties at the cap)
+14:01:44 - daemon.rag.config - INFO - Running RAG auto-test...
+14:01:44 - httpcore.connection - DEBUG - connect_tcp.started host='rag.mtri.app' port=443 local_address=None timeout=60.0 socket_options=None
+14:01:44 - httpcore.connection - DEBUG - connect_tcp.complete return_value=<httpcore._backends.anyio.AnyIOStream object at 0x7f5a89e5ecf0>
+14:01:44 - httpcore.connection - DEBUG - start_tls.started ssl_context=<ssl.SSLContext object at 0x7f5a8a175d00> server_hostname='rag.mtri.app' timeout=60.0
+14:01:44 - httpcore.connection - DEBUG - start_tls.complete return_value=<httpcore._backends.anyio.AnyIOStream object at 0x7f5a89ea9f90>
+14:01:44 - httpcore.http11 - DEBUG - send_request_headers.started request=<Request [b'POST']>
+14:01:44 - httpcore.http11 - DEBUG - send_request_headers.complete
+14:01:44 - httpcore.http11 - DEBUG - send_request_body.started request=<Request [b'POST']>
+14:01:44 - httpcore.http11 - DEBUG - send_request_body.complete
+14:01:44 - httpcore.http11 - DEBUG - receive_response_headers.started request=<Request [b'POST']>
+14:01:45 - httpcore.http11 - DEBUG - receive_response_headers.complete return_value=(b'HTTP/1.1', 200, b'OK', [(b'date', b'Sat, 21 Nov 2026 14:01:43 GMT'), (b'server', b'uvicorn'), (b'content-length', b'124'), (b'content-type', b'application/json')])
+14:01:45 - httpcore.http11 - DEBUG - receive_response_body.started request=<Request [b'POST']>
+14:01:45 - httpcore.http11 - DEBUG - receive_response_body.complete
+14:01:45 - httpcore.http11 - DEBUG - response_closed.started
+14:01:45 - httpcore.http11 - DEBUG - response_closed.complete
+14:01:45 - httpcore.connection - DEBUG - close.started
+14:01:45 - httpcore.connection - DEBUG - close.complete
+14:01:45 - daemon.rag.config - INFO - RAG auto-test passed: LightRAG is reachable
+14:01:45 - daemon.manager - INFO - Context compaction enabled: threshold=0.8, recent_window=10, min_window=3
+14:01:45 - daemon.manager - INFO - [InstanceCache] effective: ttl_hours=6 max_entries=64 (ttl source=default; restart-required)
+14:01:45 - daemon.repositories.factory - INFO - Creating PostgreSQL engine: 127.0.0.1:5432/ensemble_dev
+14:01:45 - daemon.repositories.factory - INFO - MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS DISABLED — no trustworthy Phase-0 measurement
+14:01:45 - daemon.repositories.factory - INFO - Manager engine pool sizing: pool_size=15 (limits.manager_pool_size; default tier 15, floor = default)
+14:01:45 - daemon.migrations.runner - INFO - Skipping migrations for non-SQLite database (schema evolution handled by EnsembleManager._ensure_postgres_columns)
+14:01:45 - daemon.manager - DEBUG - Legacy `status` column already dropped; skipping backfill statement: UPDATE job_queue_items SET admission_state = 'queued' WHERE status = 'pending' A
+14:01:45 - daemon.manager - DEBUG - Legacy `status` column already dropped; skipping backfill statement: UPDATE job_queue_items SET admission_state = 'active' WHERE status IN ('processi
+14:01:45 - daemon.manager - DEBUG - Legacy `status` column already dropped; skipping backfill statement: UPDATE job_queue_items SET admission_state = 'done', terminal_reason = status WH
+14:01:45 - daemon.manager - DEBUG - Legacy `status` column already dropped; skipping backfill statement: UPDATE job_queue_items SET admission_state = 'done', terminal_reason = status WH
+14:01:45 - daemon.manager - DEBUG - Legacy `status` column already dropped; skipping backfill statement: UPDATE job_queue_items SET admission_state = 'done', terminal_reason = status WH
+14:01:45 - daemon.manager - DEBUG - Legacy `status` column already dropped; skipping backfill statement: UPDATE job_queue_items SET admission_state = 'dead' WHERE status = 'dead_letter'
+14:01:45 - daemon.manager - DEBUG - Legacy `error_message` column already dropped (Phase 5+); skipping terminal_reason backfill statement: UPDATE job_queue_items SET terminal_reason = 'failed' WHERE admission_state = 'd
+14:01:45 - daemon.manager - INFO - _ensure_postgres_columns: drift_events index ensure complete (ix_drift_events_plugin, ix_drift_events_plugin_divergence, ix_drift_events_observed_at — CREATE INDEX IF NOT EXISTS is idempotent)
+14:01:45 - daemon.manager - INFO - _ensure_postgres_columns: resource_monitor boolean repair complete (applied=[], already_ok=['resource_instance_sample.estimated=boolean', 'resource_limit_policy.enabled=boolean', 'resource_limit_policy.user_gated=boolean'], unrecognised=[], missing=[])
+14:01:45 - daemon.manager - INFO - _ensure_postgres_columns: checkpoint trio autovacuum reloptions ensure complete (applied=0, already_set=3, table_missing=0)
+14:01:45 - daemon.manager - DEBUG - Phase 4 column drop: ``waiting_for`` and ``children`` removed (or absent) on PostgreSQL
+14:01:45 - daemon.manager - DEBUG - Memoir proposal decision columns ensured (or already present) on PostgreSQL
+14:01:45 - daemon.manager - DEBUG - Phase 5 column drop: seven legacy job_queue_items columns removed (or absent) on PostgreSQL
+14:01:45 - daemon.tools.memoir_knob - WARNING - [Memoir] ENSEMBLE_MEMOIR_ENABLED is unset — memoir surface ENABLED by default; set `ENSEMBLE_MEMOIR_ENABLED=false` to disable
+14:01:45 - daemon.manager - INFO - mission_records: mode resolved (mode=enforce)
+14:01:45 - daemon.services.mission_record_service - INFO - mission_records backfill: scanning 1 committed non-dry instance_nudge audit rows (dry_run=False)
+14:01:45 - daemon.services.mission_record_service - INFO - mission_records backfill: done scanned=1 minted_epochs=0 minted_commissions=0 skipped_terminal=0 skipped_no_actor=0 skipped_missing_instance_row=1 (dry_run=False)
+14:01:45 - daemon.manager - INFO - mission_records: advisory nudge-commission backfill COMMITTED run (enforce boot): {'scanned': 1, 'minted_epochs': 0, 'minted_commissions': 0, 'skipped_terminal': 0, 'skipped_no_actor': 0, 'skipped_missing_instance_row': 1}
+14:01:45 - daemon.services.boot_epoch - INFO - Boot epoch captured (DB clock): 2026-11-21T14:01:45.882639
+14:01:45 - daemon.repositories.message_queue.repository - WARNING - JOURNAL: MessageQueueRepository.clear_all preserve_in_flight=True about to DELETE 0 message_queue row(s) (env-poison family audit). doomed_message_ids=[]
+14:01:45 - daemon.manager - INFO - discard_on_startup: CAPTURE_PHASE complete — stashed 0 doomed id(s) for the deferred DELETE_PHASE (D-P3.9; DELETE moves off the boot critical path)
+14:01:45 - daemon.repositories.task.repository - WARNING - JOURNAL: TaskRepository.clear_all preserve_in_flight=True about to DELETE 0 task row(s) (env-poison family audit). doomed_work_ids=[]
+14:01:45 - daemon.manager - INFO - Cleared 0 backlog task(s) (discard_on_startup=backlog-clear; running/paused preserved)
+14:01:45 - daemon.services.secret_persistence_scrub - DEBUG - [SecretScrub] process scrubber registered (service id=140026808255216)
+14:01:45 - daemon.repositories.instance.repository - INFO - Cascade lineage mode resolved: permanent (env ENSEMBLE_CASCADE_LINEAGE=<unset>); permanent enumeration uses instances.parent_id, hierarchy fallback uses instance_hierarchy. Restart required to flip.
+14:01:45 - daemon.repositories.instance.repository - INFO - Governor recursion guard resolved: enabled (env LIMITS_GOVERNOR_RECURSION_GUARD_ENABLED=<unset>); refuses governor spawn when parent chain already contains ≥ K governors (K from LIMITS_MAX_GOVERNOR_ANCESTORS, default 1). Restart required to flip.
+14:01:45 - daemon.services.context_messages - INFO - Ambient KV freshness ENABLED (per-turn fresh)
+14:01:45 - daemon.services.report_integrity_guard - INFO - Report-integrity (b) terminal-waiting guard resolved: ENABLED (default — enforcement: one adjudication notice injected to the parent at the completion stamp; never blocks) (env leg only; explicit `report_integrity.b_terminal_waiting_guard_enabled: false` in config.yaml still vetoes) (env WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED=<unset>). Restart required to flip. See docs/setup.md (WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED).
+14:01:45 - daemon.config - INFO - [LiveViews] max_media_bytes=2147483648 (source=default)
+14:01:46 - daemon.config - INFO - [ServiceTool] service_tool_enabled=True (env ENSEMBLE_SERVICE_TOOL_ENABLED), max_concurrent=10, reconcile_interval=90s
+14:01:46 - daemon.config - INFO - [ContextMessages] kv_ambient_system_default_enabled=True (env ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED)
+14:01:46 - daemon.config - INFO - [VSCode] webview_csp_fix=True (env ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX)
+14:01:46 - daemon.config - INFO - [CriticalNotes] core_cap=8 reference_max=500 stale_days=90 (always-on per D4 — no ENSEMBLE_* env flag)
+14:01:46 - daemon.config - INFO - [CriticalNotes:reserved] tail_cap=6 section_char_cap=12000 floor_count=2 query_max_chars=2000 mint_cap_per_read=10 fusion_bm25_weight=0.4 fusion_vector_weight=0.6 fusion_threshold=0.3 llm_select=False (all CONSUMED Phase-2; defaults only — no ENSEMBLE_* env flag, D4)
+14:01:46 - daemon.config - INFO - [ResponseValidation] empty_response_guard=True (env ENSEMBLE_EMPTY_RESPONSE_GUARD), empty_guard_compaction_skip=False (env ENSEMBLE_EMPTY_GUARD_COMPACTION_SKIP)
+14:01:46 - daemon.config - INFO - [SymptomRepair] symptom_repair_ladder=True (env ENSEMBLE_SYMPTOM_REPAIR_LADDER), repair_loop_durable=True (env ENSEMBLE_REPAIR_LOOP_DURABLE)
+14:01:46 - daemon.services.attestation_resolver - INFO - Leader completion attestation resolved: mode=enforce window=3 deny_bound=3 attestation_enabled=true llm_judge_enabled=true llm_judge_model=quick llm_judge_timeout_s=180.0 N_le_min_recent_window=PASS (env ENSEMBLE_LEADER_ATTESTATION_MODE=<unset>, ENSEMBLE_LEADER_ATTESTATION_WINDOW=<unset>, ENSEMBLE_LEADER_ATTESTATION_DENY_BOUND=<unset>, ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED=<unset>, ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S=<unset>). Restart required to flip. See docs/setup.md (ENSEMBLE_LEADER_ATTESTATION_MODE).
+14:01:46 - daemon.sources.dispatcher - INFO - ResponseDispatcher initialized with subscriber_id=response_dispatcher
+14:01:46 - daemon.manager - INFO - G7: created partial unique index ux_blueprint_one_core (one core per project, active rows)
+14:01:46 - daemon.manager - INFO - [/compact] registered /compact command (availability predicate unpopulated — O-B6)
+14:01:46 - daemon.manager - INFO - Bootstrapping 3 built-in MCP servers...
+14:01:46 - daemon.repositories.mcp_server.repository - INFO - Updated MCP server: id=6307fec1-0538-4f7b-bc8d-ab4099868b3d
+14:01:46 - daemon.manager - INFO - Built-in MCP server 'webfetch' disabled (MCP_DISABLE_BUILT_IN_WEBFETCH), deactivated existing record
+14:01:46 - daemon.manager - DEBUG - Built-in MCP server already exists: context7
+14:01:46 - daemon.mcp.builtin_servers.plane - INFO - Plane workspace resolution: env=dev source=explicit-marker slug=(account-default)
+14:01:46 - daemon.manager - WARNING - Builtin 'plane' skipped — workspace refused (POLICY): workspace 'nea' is production-only; this environment resolves to dev; agents with mcp_full_access=['plane']: project-manager
+14:01:46 - daemon.manager - WARNING - Agent capability gap: project-manager declare(s) mcp_full_access ['plane'] but the builtin was POLICY-REFUSED this boot (the row is INACTIVE; see the workspace-refused WARNING above)
+14:01:46 - daemon.manager - INFO - Built-in MCP server bootstrap complete
+14:01:46 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=datacenter (description=updated, schema_doc=updated)
+14:01:46 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=server (description=updated, schema_doc=updated)
+14:01:46 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=rack (description=updated, schema_doc=updated)
+14:01:46 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=k8s_cluster (description=updated, schema_doc=updated)
+14:01:46 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=k8s_node (description=updated, schema_doc=updated)
+14:01:46 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=network (description=updated, schema_doc=updated)
+14:01:46 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=load_balancer (description=updated, schema_doc=updated)
+14:01:46 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=database (description=updated, schema_doc=updated)
+14:01:46 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=storage (description=updated, schema_doc=updated)
+14:01:46 - daemon.repositories.infra.repository - INFO - Bootstrapped infra asset types: 9 total, 0 new, 9 updated
+14:01:46 - daemon.manager - DEBUG - Infra asset types already registered: 9 total, 9 updated
+14:01:46 - daemon.manager - INFO - Plugin registry boot-scan: 1 plugin(s) (opendesign), 2 plugin-skill(s)
+14:01:46 - daemon.manager - DEBUG - [E4.1] skill stale-deactivation reconciliation skipped: brake ENSEMBLE_SKILL_STALE_DEACTIVATION_ENABLED is OFF (default)
+14:01:46 - daemon.services.decision.registry - INFO - decision seam registered: seam_id=snapshot.l3.selection kind=choice direction=WITHIN_SET
+14:01:46 - daemon.manager - INFO - MCP server 'webfetch' disabled (env var), skipping warmup pool registration
+14:01:46 - daemon.mcp.warmup_pool - DEBUG - Registered server 'context7' with pool_size=1
+14:01:46 - daemon.manager - DEBUG - MCP server 'plane' unavailable (module not installed), skipping warmup pool registration
+14:01:46 - daemon.manager - INFO - MCP warm-up pool initialized: 1 server(s) registered, warmup running in background
+14:01:46 - daemon.persistence - INFO - Creating PostgreSQL checkpointer for localhost:5432/ensemble
+14:01:46 - daemon.persistence - INFO - Checkpoint pool sizing applied: max_size=15 timeout_s=20.0 (explicit kwargs; boot caller resolves limits.checkpoint_pool_max_size / limits.checkpoint_pool_timeout_s from the YAML Config; default tier 10/5.0)
+14:01:46 - daemon.persistence - INFO - PostgreSQL checkpointer adapter ready (saver=AsyncPostgresSaver(pool=AsyncConnectionPool), adapter_pool=asyncpg.Pool)
+14:01:46 - daemon.services.maintenance - DEBUG - Registered maintenance job: checkpoint_cleanup (interval=24h)
+14:01:46 - daemon.services.maintenance - DEBUG - Registered maintenance job: room_gc_sweep (interval=6.0h)
+14:01:46 - daemon.services.maintenance - DEBUG - Registered maintenance job: vacuum_maintenance (interval=24.0h)
+14:01:46 - daemon.manager - DEBUG - vacuum_maintenance registered: interval=24.0h, dead_tup_min=1000, dead_tup_scale_fraction=0.0500
+14:01:46 - daemon.manager - DEBUG - Eager-warmed tool metadata + tiktoken encoder
+14:01:46 - daemon.manager - INFO - Skill trigger seed (Phase 4): 0 new default triggers inserted
+14:01:46 - daemon.services.maintenance - DEBUG - Registered maintenance job: skill_metric_scan (interval=24.0h)
+14:01:46 - daemon.services.maintenance - DEBUG - Registered maintenance job: skill_orphan_sweep (interval=24.0h)
+14:01:46 - daemon.services.maintenance - DEBUG - Registered maintenance job: skill_ab_inactivity_sweep (interval=24.0h)
+14:01:46 - daemon.services.maintenance - DEBUG - Registered maintenance job: project_skill_gc (interval=24.0h)
+14:01:46 - daemon.services.maintenance - DEBUG - Registered maintenance job: blueprint_daily_scan (interval=5.0h)
+14:01:46 - daemon.services.maintenance - DEBUG - Registered maintenance job: malloc_trim (interval=1.0h)
+14:01:46 - daemon.services.maintenance - DEBUG - Registered maintenance job: dependency_bus_lock_reap (interval=1.0h)
+14:01:46 - daemon.services.maintenance - DEBUG - Registered maintenance job: anomaly_retention (interval=24h)
+14:01:46 - daemon.services.maintenance_boot_sweep - INFO - maintenance boot sweep: 0 interrupted run(s) in section=checkpoint-cleanup
+14:01:46 - daemon.repositories.room.boot - INFO - room boot regen (P1 re-derivation): pending_tagged=0 rooms=0 members=0 (no routing at P1 — durable pending rows surfaced by the parent's next legitimate lane per the one-hop rule)
+14:01:46 - daemon.manager - DEBUG - room boot regen counts: {'pending_rows': 0, 'rooms_with_pending': 0, 'members_with_pending': 0}
+14:01:46 - daemon.manager - INFO - room boot delivery: pending_tagged=0 delivered=0 deferred=0 filtered_not_targets=0 rooms=0 members=0
+14:01:46 - daemon.manager - DEBUG - room boot delivery counts: {'pending_rows': 0, 'rooms_with_pending': 0, 'members_with_pending': 0, 'delivered': 0, 'deferred': 0, 'filtered_not_targets': 0}
+14:01:46 - daemon.services.maintenance - INFO - Maintenance service started
+14:01:47 - daemon.services.skill_seed_service - INFO - Skill seeding complete: 0 new, 0 updated, 95 unchanged, 0 errors
+14:01:47 - daemon.manager - DEBUG - Skill bank seeding (Phase 3): {'new': 0, 'updated': 0, 'unchanged': 95, 'errors': 0}
+14:01:47 - daemon.manager - INFO - SessionManager initialized with PostgreSQL checkpointer (localhost:5432/ensemble)
+14:01:47 - daemon.services.message_queue_boot_recovery - INFO - [HardReboot] MQ boot pass: reset=0
+14:01:47 - daemon.config - INFO - [CriticalNotes:state] tiered=true projects_with_pins=0/2 total_pinned=0 (gating active when projects_with_pins>=1 per §4.2 #8; projects without pins fall back to render-all)
+14:01:47 - daemon.services.main_loop_bridge - INFO - MainLoopBridge: event loop set to <uvloop.Loop running=True closed=False debug=False>
+14:01:47 - daemon.services.stale_task_recovery - INFO - Running startup crash recovery (no grace period)...
+14:01:47 - daemon.services.stale_task_recovery - INFO - Startup recovery complete: 0 tasks recovered
+14:01:47 - daemon.services.stale_task_recovery - INFO - StaleTaskRecovery started: threshold=10min, interval=60s, grace=30s, max_retries=3
+14:01:47 - daemon.services.stale_pause_sweep - INFO - StalePauseSweepService started: interval=300s, age_bound=7200s, batch_cap=100
+14:01:47 - daemon.services.report_delivery_recovery - INFO - ReportDeliveryRecoveryService started: interval=300s, age_bound=10min, batch_cap=100, retry=1min, lanes=[deferred=True, no_row_backstop=True, pending_age=True, recovery_retry=True, orphan=True, stuck_wake=True, mission_reconciliation=True, wc_orphan_detector=True]
+14:01:47 - daemon.services.worker_pool - INFO - Starting WorkerPool with 5 workers...
+14:01:47 - daemon.services.worker_pool - INFO - Worker worker-0 started
+14:01:47 - daemon.services.worker_pool - INFO - Worker worker-1 started
+14:01:47 - daemon.services.worker_pool - INFO - Worker worker-2 started
+14:01:47 - daemon.services.worker_pool - INFO - Worker worker-3 started
+14:01:47 - daemon.services.worker_pool - INFO - Worker worker-4 started
+14:01:47 - daemon.services.worker_pool - INFO - WorkerPool started: 5 workers
+14:01:47 - daemon.services.worker_pool - INFO - Starting WorkerPool with 2 workers...
+14:01:47 - daemon.services.worker_pool - INFO - Worker chat-worker-0 started
+14:01:47 - daemon.services.worker_pool - INFO - Worker chat-worker-1 started
+14:01:47 - daemon.services.worker_pool - INFO - WorkerPool started: 2 workers
+14:01:47 - daemon.services.pool_orchestrator - INFO - ChatSourceWorkerPool started: workers=2, prefixes=telegram:,slack:,discord:
+14:01:47 - daemon.services.report_delivery_recovery - DEBUG - RDRS lane 2: post-wipe recovery (no-row backstop; F-2 wedge closure per durability-f1-f2 / phase2 task 2.8) rows=0 recovered=0 skipped_busy=0 errors=0
+14:01:47 - daemon - INFO - question-packs rehydrated: 0
+14:01:47 - daemon.api - INFO - P3/decision-f deferred DELETE_PHASE: no doomed ids (operator gate QUEUE_DISCARD_ON_STARTUP may be off, or no rows matched the doomed predicate; DELETE no-ops)
+14:01:47 - daemon.services.report_delivery_recovery - INFO - RDRS lane 7: mission_reconciliation admitted 0 outstanding commission(s) (mode=enforce, ttl=21600s, batch_cap=100)
+14:01:47 - daemon.services.stale_pause_sweep - DEBUG - stale-pause sweep: candidates=0 resumed=0 (cutoff=2026-11-21T12:01:47.866215+00:00, age_bound=7200s)
+14:01:47 - daemon - INFO - [Startup] bash spawn durable registry wired (boot_id=ee3bd38e)
+14:01:47 - daemon.services.bash_spawn_reaper - INFO - BashSpawnRetentionSweepService started: interval=900s
+14:01:47 - daemon - INFO - [Startup] bash spawn retention sweep started (interval=900s)
+14:01:47 - daemon.services.report_delivery_recovery - DEBUG - RDRS lane 2: post-wipe recovery (no-row backstop; F-2 wedge closure per durability-f1-f2 / phase2 task 2.8) rows=0 recovered=0 skipped_busy=0 errors=0
+14:01:47 - daemon.services.report_delivery_recovery - INFO - RDRS lane 7: mission_reconciliation admitted 0 outstanding commission(s) (mode=enforce, ttl=21600s, batch_cap=100)
+Context7 Documentation MCP Server v4.7.3 running on stdio
+14:01:49 - daemon.services.bash_spawn_reaper - DEBUG - bash reaper: retention sweep tick 1 — nothing to do
+14:01:49 - daemon.mcp.tool_adapter - DEBUG - Adapted MCP tool: resolve-library-id -> mcp_context7_resolve-library-id
+14:01:49 - daemon.mcp.tool_adapter - DEBUG - Adapted MCP tool: query-docs -> mcp_context7_query-docs
+14:01:49 - daemon.mcp.warmup_pool - INFO - Warmed up pool for 'context7' (1/1 connections)
+14:01:49 - daemon.mcp.warmup_pool - INFO - MCP warmup complete: 1 server(s) ready
+14:01:49 - daemon.manager - INFO - MCP warm-up pool ready: {'context7': {'available': 1, 'pool_size': 1, 'healthy': True}}
+14:01:49 - daemon.mcp.warmup_pool - INFO - Started MCP health check loop (interval=60s)
+14:01:49 - daemon.services.mcp_service - INFO - eager_warm_schemas: primed 1/1 MCP server schema(s) (context7: 2 tool(s))
+14:01:52 - daemon.api - INFO - [Startup] baseline auto-reset: seeded 228 row(s), drift hits=294
+14:01:52 - daemon.registry - INFO - AgentRegistry.discover_custom_agents: registered 0 custom agent(s)
+14:01:52 - daemon.api - INFO - [Startup] custom-agent discovery: registered 0
+14:01:52 - daemon.api - INFO - [Startup] Prompt-artifact baseline clean: 217 versioned artifact(s) match .prompt-artifacts.sha256
+14:01:52 - daemon.api - INFO - WorkResolverService constructed and wired to InstanceManager
+14:01:52 - daemon.api - INFO - Phase 2 Batch 2: watcher_repo + work_resolver wired to TaskProcessor / WorkerPool / StaleTaskRecovery
+14:01:52 - daemon.api - INFO - RetryScheduler disabled (job_retry_scheduler_enabled is not set)
+14:01:52 - daemon.manager - INFO - JobQueueService wired into SourceRegistry for scheduler routing
+14:01:52 - daemon.manager - INFO - SkillJobDispatcher wired to manager (evolution_lane_resolved=True [env-resolved-or-default], evolution_lane_config_default=False, fix_cooldown_seconds=1800, fix_burst_cap=3, fix_burst_window_seconds=86400)
+14:01:52 - daemon.manager - INFO - JobQueueService connected to SessionManager
+14:01:52 - daemon.manager - INFO - JobQueueMgmtService connected to SessionManager
+14:01:52 - daemon.services.job_recovery_service - INFO - Starting job recovery — checking PROCESSING jobs...
+14:01:52 - daemon.services.job_recovery_service - INFO - Job recovery complete: 0 recovered, 0 alive, 0 total
+14:01:52 - daemon.api - INFO - Job recovery: {'recovered': 0, 'alive': 0, 'total': 0}
+14:01:53 - daemon.services.job_recovery_service - INFO - Pattern-f1 orphan-ACTIVE-JobItem recovery ENABLED (default; set ENSEMBLE_ORPHAN_F1_ENABLED=0 to disable — restart required to flip)
+14:01:53 - daemon.api - INFO - Pattern (h) zombie-active close boot: enabled=True, age_bound=7200s, batch_cap=25 (SERVICES_DRIFT_RECONCILE_ZOMBIE_CLOSE_* to override)
+14:01:53 - daemon.services.job_recovery_service - INFO - Pattern-g defer-self-witness autopromote ENABLED (default; ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED unset or set to a truthy value) — matched deferred PENDING tasks in the self-witness blind-spot will be unstuck by flipping task.is_deferred=false on the drift cadence. Set ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED=0 (or 00/-0/0./0x0/false/no/off) + restart to disable the bounded unstick
+14:01:53 - daemon.api - INFO - Drift reconciler started: interval=300s, min_pending_age=300s, min_orphan_age=900s, f1_tree_activity_max_age=900s, zombie_close_enabled=True, zombie_close_age_bound=7200s, zombie_close_batch_cap=25
+14:01:53 - daemon.services.eligible_pending_sweep - INFO - EligiblePendingSweepService started: interval=90s, min_pending_age=60s
+14:01:53 - daemon.api - INFO - EligiblePendingSweepService started: interval=90s (default 90s), min_pending_age=60s (default 60s)
+14:01:53 - daemon.services.orphan_watcher_sweep - INFO - OrphanWatcherSweepService started: interval=90s
+14:01:53 - daemon.api - INFO - OrphanWatcherSweepService started: interval=90s (default 90s), grace=30s (default 30s)
+14:01:53 - daemon.services.job_lock_sweep - INFO - JobLockSweepService started: interval=90s (default 90s)
+14:01:53 - daemon.api - INFO - JobLockSweepService started: interval=90s (default 90s)
+14:01:53 - daemon.services.watch_reconcile_sweep - INFO - WatchReconcileSweepService started: interval=300s (default 300s)
+14:01:53 - daemon.api - INFO - WatchReconcileSweepService started: interval=300s (default 300s)
+14:01:53 - daemon.api - INFO - MissionStrandHealer started: interval=300s (default 300s)
+14:01:53 - daemon.services.tmp_image_cleanup_service - INFO - TmpImageCleanupService started: interval=3600s retention=30d
+14:01:53 - daemon - INFO - [TmpImages] cleanup service started: interval=3600s retention=30d
+14:01:53 - daemon.services.sources_gc_service - INFO - [SourcesGC] started: enabled=True dry_run=False interval=3600s retention=14d batch_cap=25
+14:01:53 - daemon - INFO - [LiveViews] passcode substrate ready: strike_ceiling=10 grant_ttl=86400s rate_limit=5/5-per-min
+14:01:53 - daemon - INFO - [LiveViews] subsystem ready: enabled=True roots=['designer-artifact', 'planning', 'reports', 'tmp-images', 'video-artifact']
+14:01:53 - daemon.services.plane_sync_watchdog_service - INFO - PlaneSyncWatchdogService started: interval=300s backoff_base=60s backoff_max=1800s max_attempts=5
+14:01:53 - daemon - INFO - [PlaneSync] watchdog started: interval=300s backoff_base=60s backoff_max=1800s max_attempts=5
+14:01:53 - daemon.api - INFO - Waiting-children watchdog started: interval=3600s, hang_threshold=3600s
+14:01:53 - daemon.api - INFO - Long-tool-nudge scanner started: interval=60s, default_threshold=900s
+14:01:53 - daemon.services.llm_stream_watchdog - INFO - [StreamWatchdog] loop started: threshold=45s interval=1.0s registry=0 live stream(s)
+14:01:53 - daemon.api - INFO - [StreamWatchdog] started: threshold=45s
+14:01:53 - daemon.services.resource_monitor.facade - INFO - resource-monitor started: sample_s=30 flush_s=60 retention=(2880, 336, 180)
+14:01:53 - daemon.api - INFO - [ResourceMonitor] started
+14:01:53 - daemon.api - INFO - [RamGuard] started (ceiling=8773465702 bytes source=derived-meminfo poll_ms=1000 grace_ms=250 confirm_ms=250)
+14:01:53 - daemon.services.metrics_listener - INFO - [MetricsListener] started on 127.0.0.1:8192
+14:01:53 - daemon.services.metrics_census - INFO - [MetricsCensus] started: interval=15s application_name=ensemble-metrics-census
+14:01:53 - daemon.services.metrics_query.wiring.sources - INFO - [Metrics] runtime source bundle resolved: present=census,mcp_snapshot,readiness_composite,resource_monitor,sweeps absent=db_connect,dsn,install_dir,manager,mcps_gateway_service,wedge_watchdog
+14:01:53 - daemon.services.orphan_watcher_sweep - DEBUG - OrphanWatcherSweepService: tick 1, but dependency_bus is not wired (legacy test fixture / pre-wiring lifespan) — relying on the startup sweep
+14:01:53 - daemon.services.plane_sync_watchdog_service - INFO - PlaneSyncWatchdogService: Plane sync workspace 'nea' is production-only; this environment resolves to dev — watchdog no-op (no re-drives; projects in error/drift will recover on next activation)
+14:01:53 - daemon.services.waiting_children_watchdog - INFO - [Watchdog] Starting periodic loop: interval=3600s, hang_threshold=3600s
+14:01:53 - daemon.services.long_tool_nudge - INFO - [LongToolNudge] Starting periodic loop: interval=60s default_threshold=900s
+14:01:53 - daemon.manager - INFO - DeadLetterService connected to InstanceManager
+14:01:53 - daemon.services.job_feedback_observer - INFO - JobFeedbackObserver started
+14:01:53 - daemon.api - INFO - JobFeedbackObserver started
+14:01:53 - daemon.services.dependency_bus - DEBUG - sweep_orphan_watchers: no orphan PENDING watchers found (after grace filter)
+14:01:53 - daemon.services.dependency_bus - INFO - bus start: warmed=0 pending watchers, recovered=0 fired-but-unsent watchers, swept=0 orphan pending watcher(s)
+14:01:53 - daemon.services.dependency_bus - INFO - DependencyBus registered
+14:01:53 - daemon.api - INFO - DependencyBus started (recovered=0 FIRED-but-unsent watchers)
+14:01:53 - daemon.api - INFO - System default project bootstrapped: 71931ae0-0f25-5fbf-853b-2a78cc978d7e
+14:01:53 - daemon.services.job_processor - INFO - JobProcessor started
+14:01:53 - daemon.api - INFO - JobProcessor started
+14:01:53 - daemon.services.job_processor - INFO - JobProcessor: JobFeedbackObserver wired (MESSAGE jobs route through observer — sole dispatch path post-Phase-D)
+14:01:53 - daemon.api - INFO - JobFeedbackObserver wired into JobProcessor
+14:01:53 - daemon.manager - INFO - JobFeedbackObserver wired into InstanceManager
+14:01:53 - daemon.api - INFO - JobFeedbackObserver wired into InstanceManager (report_lane=ON)
+14:01:53 - daemon.manager - INFO - NotificationBroadcaster connected to InstanceManager
+14:01:53 - daemon.services.job_processor - DEBUG - [TRACE] _process_loop: started
+14:01:53 - daemon.api - INFO - Auto-provisioned system queues for 2 projects
+14:01:53 - daemon.sources.cleanup - INFO - SourceCleanup started (interval: 21600s)
+14:01:53 - daemon.sources.dispatcher - INFO - Starting ResponseDispatcher
+14:01:53 - daemon.sources.registry - INFO - Loading and scheduling auto-start for enabled adapters...
+14:01:53 - daemon.sources.registry - INFO - Scheduled auto-start for 0 adapters (delayed 60.0s)
+14:01:53 - daemon.manager - INFO - Message sources system started
+14:01:53 - daemon - INFO - [Readiness] Refresher started: interval=10s, queue_freshness_threshold=120s
+14:01:53 - daemon - INFO - [MemoirEmbed] worker started: interval=60s batch=8 dims=1536
+14:01:53 - daemon.tools.memoir_knob - WARNING - [MemoirReflect] ENSEMBLE_MEMOIR_REFLECTION_ENABLED is unset — the reflection lane is ENABLED by default; set `ENSEMBLE_MEMOIR_REFLECTION_ENABLED=false` to disable it
+14:01:53 - daemon.tools.memoir_knob - WARNING - [MemoirReflect] the reflection budget knobs are unset and use their constitutional defaults: ENSEMBLE_MEMOIR_REFLECTION_CONSTELLATION_MAX_LLM_CALLS_PER_PASS, ENSEMBLE_MEMOIR_REFLECTION_MAX_CHARS_PER_SYNTHESIS, ENSEMBLE_MEMOIR_REFLECTION_MAX_LLM_CALLS_PER_PASS, ENSEMBLE_MEMOIR_REFLECTION_MAX_SYNTHESES_PER_PASS, ENSEMBLE_MEMOIR_REFLECTION_NIGHTLY_CAP, ENSEMBLE_MEMOIR_REFLECTION_TRIGGER_SUM (unset budget knobs are never silent; set them to tune the lane)
+14:01:53 - daemon - INFO - [MemoirReflect] worker started: interval=30s thread=memoir-reflect
+14:01:53 - daemon.tools.memoir_knob - WARNING - [MemoirPoignancy] ENSEMBLE_MEMOIR_POIGNANCY_ENABLED is unset — the scoring lane is ENABLED by default; set `ENSEMBLE_MEMOIR_POIGNANCY_ENABLED=false` to disable it
+14:01:53 - daemon - INFO - [MemoirPoignancy] worker started: interval=20s batch=10 backfill_max=0 thread=memoir-poignancy (resolution=default)
+14:01:53 - daemon.services.auth_session.lifecycle - INFO - [Auth] background machinery started: sweeper task created (boot discovery fetch rides the first tick, WARN-not-fatal)
+14:01:53 - daemon - INFO - [Auth] AuthService ready (session validate is PG-only; redirect chain tier-1=set tier-2=unset)
+14:01:53 - daemon - INFO - [KbKeys] module key store ready (active_keys=0)
+14:01:53 - daemon - WARNING - [KbKeys] key store EMPTY — /api/mcp/kb and /api/mcp/kb/sse are in bootstrap pass-through (requests NOT key-gated). Mint the first key via POST /api/mcp/kb/keys to activate the guard; probe posture via GET /api/mcp/kb/keys/guard-status.
+14:01:53 - httpcore.connection - DEBUG - connect_tcp.started host='door.ensem.dev' port=443 local_address=None timeout=5.0 socket_options=None
+14:01:53 - daemon.api - INFO - AutoContinue boot pass: ContinueResult(candidates=0, scheduled=0, skipped_no_checkpoint=0, skipped_resume_refused=0, skipped_kill_switch=0, skipped_no_boot_epoch=0, skipped_multi_task_instance=0, errors=0, duration_seconds=0.07757464912720025, auto_continue_mode='on', auto_continue_raw_env='1', deferred_pipeline_busy=0, deferred_work_ids=[])
+14:01:53 - daemon.services.memoir_poignancy_worker - INFO - [MemoirPoignancy] pending=0 scored=0 failed=0 terminal=0 duration=0.0s slow_mode=False
+14:01:53 - httpcore.connection - DEBUG - connect_tcp.complete return_value=<httpcore._backends.anyio.AnyIOStream object at 0x7f5a76aac2d0>
+14:01:53 - httpcore.connection - DEBUG - start_tls.started ssl_context=<ssl.SSLContext object at 0x7f5a7bb69f30> server_hostname='door.ensem.dev' timeout=5.0
+14:01:53 - daemon.services.auto_continue_boot_pass - INFO - [BOOT_CONTINUE] orphan-sweep summary: candidates=0 scheduled=0 skipped_no_checkpoint=0 skipped_resume_refused=0 skipped_kill_switch=0 skipped_no_boot_epoch=0 errors=0 duration_s=0.035 boot_epoch=2026-11-21T14:01:45.882639 mode=on
+14:01:53 - httpcore.connection - DEBUG - start_tls.complete return_value=<httpcore._backends.anyio.AnyIOStream object at 0x7f5a76a2dcd0>
+14:01:53 - daemon.services.memoir_embedding_worker - INFO - [MemoirEmbed] pending=0 embedded=0 errors=0 terminal=0 tick_ms=103 slow_mode=False
+14:01:53 - httpcore.http11 - DEBUG - send_request_headers.started request=<Request [b'GET']>
+14:01:53 - httpcore.http11 - DEBUG - send_request_headers.complete
+14:01:53 - httpcore.http11 - DEBUG - send_request_body.started request=<Request [b'GET']>
+14:01:53 - httpcore.http11 - DEBUG - send_request_body.complete
+14:01:53 - httpcore.http11 - DEBUG - receive_response_headers.started request=<Request [b'GET']>
+14:01:53 - daemon.services.stale_pause_sweep - DEBUG - stale-pause sweep: candidates=0 resumed=0 (cutoff=2026-11-21T12:01:53.618861+00:00, age_bound=7200s)
+14:01:53 - daemon.api - INFO - Stale-pause boot sweep: {'candidates': 0, 'resumed': 0, 'skipped_protected': 0, 'errors': 0, 'instances': []}
+14:01:53 - daemon.services.upgrade_journal_sweep - INFO - UpgradeJournalSweepService started: interval=90s (default 90s), reaper_timeout=660s (default 660s), install_dir=<none — dev/unresolved>
+14:01:53 - daemon.wedge_capture.watchdog - INFO - Wedge-capture watchdog started: dir=/home/nea/ensemble-src-wt-live-defects-p1/data/wedge-captures interval=1.0s cpu>=95.0%/30.0s lag>=5.00s/15.0s concentration>=85.0%/30.0s cooldown=300.0s deadline=20.0s
+14:01:53 - daemon.api - INFO - UpgradeJournalSweepService started: interval=90s (default 90s), reaper_timeout=660s (default 660s), install_dir=<none — dev/unresolved>
+14:01:53 - httpcore.http11 - DEBUG - receive_response_headers.complete return_value=(b'HTTP/1.1', 200, b'OK', [(b'content-encoding', b'gzip'), (b'content-length', b'606'), (b'content-type', b'application/json; charset=utf-8'), (b'server', b'beegoServer:1.12.3'), (b'set-cookie', b'casdoor_session_id=a95874e7ce81c9f8038ea1be0d6ded68; Path=/; Expires=Mon, 21 Dec 2026 14:01:53 GMT; Max-Age=2592000; HttpOnly'), (b'date', b'Sat, 21 Nov 2026 14:01:53 GMT')])
+14:01:53 - httpcore.http11 - DEBUG - receive_response_body.started request=<Request [b'GET']>
+14:01:53 - httpcore.http11 - DEBUG - receive_response_body.complete
+14:01:53 - httpcore.http11 - DEBUG - response_closed.started
+14:01:53 - httpcore.http11 - DEBUG - response_closed.complete
+14:01:53 - httpcore.connection - DEBUG - close.started
+14:01:53 - httpcore.connection - DEBUG - close.complete
+14:01:53 - daemon.api - INFO - [ServiceTool] reconcile_boot_sweep alive=0 reaped=0 errors=0
+14:01:53 - daemon.api - INFO - ServiceReconciliationService started: interval=90s
+14:01:53 - daemon.api - INFO - VS Code proxy mounted at /vscode
+14:01:53 - daemon.api - DEBUG - Editor preference is 'builtin' — skipping code-server auto-start
+14:01:53 - daemon.api - INFO - Skills router wired: store=True search=True metrics=True evolution=True triggers=True dispatcher=True usage_repo=True capture_dispatcher=True
+14:01:53 - mcp.server.streamable_http_manager - INFO - StreamableHTTP session manager started
+INFO:     Application startup complete.
+14:01:53 - __main__ - INFO - Uvicorn running on http://0.0.0.0:8191 (Press CTRL+C to quit)
+14:01:54 - daemon.middleware.auth - INFO - [Auth] derived public_path_set (19): ['/', '/api/auth/callback', '/api/auth/login', '/api/auth/logout', '/api/auth/me', '/api/auth/session', '/api/health', '/api/info', '/api/maintenance/checkpoint-cleanup/availability', '/docs', '/livez', '/openapi.json', '/readyz', '/redoc', '/views/livez', '/views/public/assets/mermaid/mermaid.min.js', '/views/public/board/index.html', '/views/public/{root_name}/{rel_path:path}', '/vscode']
+14:01:54 - daemon.middleware.auth - INFO - [Auth] derived module_lane_path_set (3): ['/api/mcp/kb', '/api/mcp/kb/sse', '/api/webhooks/{source_id}']
+14:02:03 - daemon.services.metrics_query.wiring.sources - INFO - [Metrics] runtime source bundle resolved: present=census,dsn,manager,mcp_snapshot,mcps_gateway_service,readiness_composite,resource_monitor,sweeps,wedge_watchdog absent=db_connect,install_dir
+14:02:03 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 roster read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 234, in _gateway_counts
+    store = service.store()
+TypeError: 'InMemoryMachineStore' object is not callable
+14:02:03 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 tombstone read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 240, in _gateway_counts
+    tombstone_store = service.tombstones()
+TypeError: 'TombstoneStore' object is not callable
+14:02:13 - daemon.services.memoir_poignancy_worker - INFO - [MemoirPoignancy] pending=0 scored=0 failed=0 terminal=0 duration=0.0s slow_mode=False
+14:02:13 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 roster read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 234, in _gateway_counts
+    store = service.store()
+TypeError: 'InMemoryMachineStore' object is not callable
+14:02:13 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 tombstone read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 240, in _gateway_counts
+    tombstone_store = service.tombstones()
+TypeError: 'TombstoneStore' object is not callable
+14:02:23 - daemon.repositories.job_queue.repository - DEBUG - reap_legacy_mirror_zombies: no legacy candidates (created_at < 2026-09-02T00:00:00+00:00); self-extinguishing
+14:02:23 - daemon.services.job_recovery_service - INFO - reconcile_drift_states: complete — reconciled=0, details=0
+14:02:23 - daemon.services.job_recovery_service - INFO - reconcile_drift_states: complete — reconciled=0, details=0
+14:02:23 - daemon.services.job_processor - DEBUG - [TRACE] _process_loop: poll timeout, processing next job (immediate=0, polling=1)
+14:02:23 - daemon.services.job_processor - DEBUG - [TRACE] _process_next_job: waking up to check for jobs
+14:02:23 - daemon.services.job_processor - DEBUG - [TRACE] _process_next_job: 0 queue(s) with admittable work
+14:02:24 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 roster read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 234, in _gateway_counts
+    store = service.store()
+TypeError: 'InMemoryMachineStore' object is not callable
+14:02:24 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 tombstone read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 240, in _gateway_counts
+    tombstone_store = service.tombstones()
+TypeError: 'TombstoneStore' object is not callable
+14:02:33 - daemon.services.memoir_poignancy_worker - INFO - [MemoirPoignancy] pending=0 scored=0 failed=0 terminal=0 duration=0.0s slow_mode=False
+14:02:34 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 roster read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 234, in _gateway_counts
+    store = service.store()
+TypeError: 'InMemoryMachineStore' object is not callable
+14:02:34 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 tombstone read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 240, in _gateway_counts
+    tombstone_store = service.tombstones()
+TypeError: 'TombstoneStore' object is not callable
+14:02:44 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 roster read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 234, in _gateway_counts
+    store = service.store()
+TypeError: 'InMemoryMachineStore' object is not callable
+14:02:44 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 tombstone read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 240, in _gateway_counts
+    tombstone_store = service.tombstones()
+TypeError: 'TombstoneStore' object is not callable
+14:02:46 - daemon.manager - INFO - room gc: sweep complete — 0 candidate(s), 0 purged, 0 skipped
+14:02:46 - daemon.services.maintenance - INFO - Maintenance job 'room_gc_sweep' completed successfully
+14:02:46 - daemon.services.maintenance - INFO - Maintenance job 'skill_metric_scan' completed successfully
+14:02:46 - daemon.services.maintenance - INFO - Maintenance job 'skill_orphan_sweep' completed successfully
+14:02:46 - daemon.services.maintenance - INFO - Maintenance job 'skill_ab_inactivity_sweep' completed successfully
+14:02:46 - daemon.services.maintenance - INFO - Maintenance job 'project_skill_gc' completed successfully
+14:02:46 - daemon.manager - INFO - malloc_trim: glibc heap trimmed — free pages returned to OS
+14:02:46 - daemon.services.maintenance - INFO - Maintenance job 'malloc_trim' completed successfully
+14:02:46 - daemon.services.maintenance - INFO - Maintenance job 'dependency_bus_lock_reap' completed successfully
+14:02:46 - daemon.services.maintenance - INFO - Maintenance job 'anomaly_retention' completed successfully
+14:02:53 - daemon.services.job_processor - DEBUG - [TRACE] _process_loop: poll timeout, processing next job (immediate=0, polling=2)
+14:02:53 - daemon.services.job_processor - DEBUG - [TRACE] _process_next_job: waking up to check for jobs
+14:02:53 - daemon.services.job_processor - DEBUG - [TRACE] _process_next_job: 0 queue(s) with admittable work
+14:02:53 - daemon.services.memoir_poignancy_worker - INFO - [MemoirPoignancy] pending=0 scored=0 failed=0 terminal=0 duration=0.0s slow_mode=False
+14:02:53 - daemon.services.memoir_embedding_worker - INFO - [MemoirEmbed] pending=0 embedded=0 errors=0 terminal=0 tick_ms=23 slow_mode=False
+14:02:55 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 roster read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 234, in _gateway_counts
+    store = service.store()
+TypeError: 'InMemoryMachineStore' object is not callable
+14:02:55 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 tombstone read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 240, in _gateway_counts
+    tombstone_store = service.tombstones()
+TypeError: 'TombstoneStore' object is not callable
+14:03:05 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 roster read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 234, in _gateway_counts
+    store = service.store()
+TypeError: 'InMemoryMachineStore' object is not callable
+14:03:05 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 tombstone read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 240, in _gateway_counts
+    tombstone_store = service.tombstones()
+TypeError: 'TombstoneStore' object is not callable
+14:03:13 - daemon.services.memoir_poignancy_worker - INFO - [MemoirPoignancy] pending=0 scored=0 failed=0 terminal=0 duration=0.0s slow_mode=False
+14:03:15 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 roster read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 234, in _gateway_counts
+    store = service.store()
+TypeError: 'InMemoryMachineStore' object is not callable
+14:03:15 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 tombstone read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 240, in _gateway_counts
+    tombstone_store = service.tombstones()
+TypeError: 'TombstoneStore' object is not callable
+14:03:23 - daemon.services.dependency_bus - DEBUG - sweep_orphan_watchers: no orphan PENDING watchers found (after grace filter)
+14:03:23 - daemon.services.job_processor - DEBUG - [TRACE] _process_loop: poll timeout, processing next job (immediate=0, polling=3)
+14:03:23 - daemon.services.job_processor - DEBUG - [TRACE] _process_next_job: waking up to check for jobs
+14:03:23 - daemon.services.job_processor - DEBUG - [TRACE] _process_next_job: 0 queue(s) with admittable work
+14:03:26 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 roster read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 234, in _gateway_counts
+    store = service.store()
+TypeError: 'InMemoryMachineStore' object is not callable
+14:03:26 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 tombstone read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 240, in _gateway_counts
+    tombstone_store = service.tombstones()
+TypeError: 'TombstoneStore' object is not callable
+14:03:33 - daemon.services.memoir_poignancy_worker - INFO - [MemoirPoignancy] pending=0 scored=0 failed=0 terminal=0 duration=0.0s slow_mode=False
+14:03:36 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 roster read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 234, in _gateway_counts
+    store = service.store()
+TypeError: 'InMemoryMachineStore' object is not callable
+14:03:36 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 tombstone read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 240, in _gateway_counts
+    tombstone_store = service.tombstones()
+TypeError: 'TombstoneStore' object is not callable
+14:03:47 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 roster read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 234, in _gateway_counts
+    store = service.store()
+TypeError: 'InMemoryMachineStore' object is not callable
+14:03:47 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 tombstone read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 240, in _gateway_counts
+    tombstone_store = service.tombstones()
+TypeError: 'TombstoneStore' object is not callable
+14:03:53 - daemon.services.job_processor - DEBUG - [TRACE] _process_loop: poll timeout, processing next job (immediate=0, polling=4)
+14:03:53 - daemon.services.job_processor - DEBUG - [TRACE] _process_next_job: waking up to check for jobs
+14:03:53 - daemon.services.job_processor - DEBUG - [TRACE] _process_next_job: 0 queue(s) with admittable work
+14:03:53 - daemon.services.memoir_poignancy_worker - INFO - [MemoirPoignancy] pending=0 scored=0 failed=0 terminal=0 duration=0.0s slow_mode=False
+14:03:53 - daemon.services.memoir_embedding_worker - INFO - [MemoirEmbed] pending=0 embedded=0 errors=0 terminal=0 tick_ms=20 slow_mode=False
+14:03:57 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 roster read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 234, in _gateway_counts
+    store = service.store()
+TypeError: 'InMemoryMachineStore' object is not callable
+14:03:57 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 tombstone read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 240, in _gateway_counts
+    tombstone_store = service.tombstones()
+TypeError: 'TombstoneStore' object is not callable
+14:04:07 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 roster read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 234, in _gateway_counts
+    store = service.store()
+TypeError: 'InMemoryMachineStore' object is not callable
+14:04:07 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 tombstone read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 240, in _gateway_counts
+    tombstone_store = service.tombstones()
+TypeError: 'TombstoneStore' object is not callable
+14:04:13 - daemon.services.memoir_poignancy_worker - INFO - [MemoirPoignancy] pending=0 scored=0 failed=0 terminal=0 duration=0.0s slow_mode=False
+14:04:18 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 roster read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 234, in _gateway_counts
+    store = service.store()
+TypeError: 'InMemoryMachineStore' object is not callable
+14:04:18 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 tombstone read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 240, in _gateway_counts
+    tombstone_store = service.tombstones()
+TypeError: 'TombstoneStore' object is not callable
+14:04:23 - daemon.services.job_processor - DEBUG - [TRACE] _process_loop: poll timeout, processing next job (immediate=0, polling=5)
+14:04:23 - daemon.services.job_processor - DEBUG - [TRACE] _process_next_job: waking up to check for jobs
+14:04:23 - daemon.services.job_processor - DEBUG - [TRACE] _process_next_job: 0 queue(s) with admittable work
+14:04:28 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 roster read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 234, in _gateway_counts
+    store = service.store()
+TypeError: 'InMemoryMachineStore' object is not callable
+14:04:28 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 tombstone read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 240, in _gateway_counts
+    tombstone_store = service.tombstones()
+TypeError: 'TombstoneStore' object is not callable
+14:04:33 - daemon.services.memoir_poignancy_worker - INFO - [MemoirPoignancy] pending=0 scored=0 failed=0 terminal=0 duration=0.0s slow_mode=False
+14:04:39 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 roster read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 234, in _gateway_counts
+    store = service.store()
+TypeError: 'InMemoryMachineStore' object is not callable
+14:04:39 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 tombstone read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 240, in _gateway_counts
+    tombstone_store = service.tombstones()
+TypeError: 'TombstoneStore' object is not callable
+14:04:49 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 roster read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 234, in _gateway_counts
+    store = service.store()
+TypeError: 'InMemoryMachineStore' object is not callable
+14:04:49 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 tombstone read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 240, in _gateway_counts
+    tombstone_store = service.tombstones()
+TypeError: 'TombstoneStore' object is not callable
+14:04:53 - daemon.services.dependency_bus - DEBUG - sweep_orphan_watchers: no orphan PENDING watchers found (after grace filter)
+14:04:53 - daemon.services.job_processor - DEBUG - [TRACE] _process_loop: poll timeout, processing next job (immediate=0, polling=6)
+14:04:53 - daemon.services.job_processor - DEBUG - [TRACE] _process_next_job: waking up to check for jobs
+14:04:53 - daemon.services.job_processor - DEBUG - [TRACE] _process_next_job: 0 queue(s) with admittable work
+14:04:53 - daemon.services.memoir_poignancy_worker - INFO - [MemoirPoignancy] pending=0 scored=0 failed=0 terminal=0 duration=0.0s slow_mode=False
+14:04:53 - daemon.services.memoir_embedding_worker - INFO - [MemoirEmbed] pending=0 embedded=0 errors=0 terminal=0 tick_ms=21 slow_mode=False
+14:04:53 - daemon.checkpoint_perf - INFO - [CheckpointPerf] read sumup 180s: ops=18 hits=0 misses=18 bytes_total=0 last_op=aget_tuple last_bytes=0 bucket=65536
+14:04:59 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 roster read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 234, in _gateway_counts
+    store = service.store()
+TypeError: 'InMemoryMachineStore' object is not callable
+14:04:59 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 tombstone read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 240, in _gateway_counts
+    tombstone_store = service.tombstones()
+TypeError: 'TombstoneStore' object is not callable
+14:05:10 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 roster read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 234, in _gateway_counts
+    store = service.store()
+TypeError: 'InMemoryMachineStore' object is not callable
+14:05:10 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 tombstone read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 240, in _gateway_counts
+    tombstone_store = service.tombstones()
+TypeError: 'TombstoneStore' object is not callable
+14:05:13 - daemon.services.memoir_poignancy_worker - INFO - [MemoirPoignancy] pending=0 scored=0 failed=0 terminal=0 duration=0.0s slow_mode=False
+14:05:20 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 roster read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 234, in _gateway_counts
+    store = service.store()
+TypeError: 'InMemoryMachineStore' object is not callable
+14:05:20 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 tombstone read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 240, in _gateway_counts
+    tombstone_store = service.tombstones()
+TypeError: 'TombstoneStore' object is not callable
+14:05:23 - daemon.services.job_processor - DEBUG - [TRACE] _process_loop: poll timeout, processing next job (immediate=0, polling=7)
+14:05:23 - daemon.services.job_processor - DEBUG - [TRACE] _process_next_job: waking up to check for jobs
+14:05:23 - daemon.services.job_processor - DEBUG - [TRACE] _process_next_job: 0 queue(s) with admittable work
+14:05:30 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 roster read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 234, in _gateway_counts
+    store = service.store()
+TypeError: 'InMemoryMachineStore' object is not callable
+14:05:30 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 tombstone read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 240, in _gateway_counts
+    tombstone_store = service.tombstones()
+TypeError: 'TombstoneStore' object is not callable
+14:05:33 - daemon.services.memoir_poignancy_worker - INFO - [MemoirPoignancy] pending=0 scored=0 failed=0 terminal=0 duration=0.0s slow_mode=False
+14:05:41 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 roster read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 234, in _gateway_counts
+    store = service.store()
+TypeError: 'InMemoryMachineStore' object is not callable
+14:05:41 - daemon.services.metrics_query.wiring.w3 - DEBUG - metrics wiring: F18 tombstone read failed
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-live-defects-p1/daemon/services/metrics_query/wiring/w3.py", line 240, in _gateway_counts
+    tombstone_store = service.tombstones()
+TypeError: 'TombstoneStore' object is not callable
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+14:05:43 - mcp.server.streamable_http_manager - INFO - StreamableHTTP session manager shutting down
+14:05:43 - daemon.services.job_feedback_observer - INFO - JobFeedbackObserver stopped after processing 0 events
+14:05:43 - daemon.services.job_feedback_observer - INFO - JobFeedbackObserver stopped
+14:05:43 - daemon.services.orphan_watcher_sweep - INFO - OrphanWatcherSweepService stopped
+14:05:43 - daemon.services.dependency_bus - INFO - bus stop: cleared 0 cached watchers
+14:05:43 - daemon.services.dependency_bus - INFO - DependencyBus unregistered
+14:05:43 - daemon.services.job_processor - INFO - JobProcessor stopped
+14:05:43 - daemon.services.live_event_hub - INFO - LiveEventHub shutdown complete
+14:05:43 - daemon.services.notification_broadcaster - INFO - NotificationBroadcaster shutdown complete
+14:05:43 - daemon.services.llm_stream_watchdog - INFO - [StreamWatchdog] loop stopped
+14:05:43 - daemon.services.eligible_pending_sweep - INFO - EligiblePendingSweepService stopped
+14:05:43 - daemon.services.bash_spawn_reaper - INFO - BashSpawnRetentionSweepService stopped
+14:05:43 - daemon.services.tmp_image_cleanup_service - INFO - TmpImageCleanupService stopped
+14:05:43 - daemon.services.sources_gc_service - INFO - [SourcesGC] stopped
+14:05:43 - daemon.services.plane_sync_watchdog_service - INFO - PlaneSyncWatchdogService stopped
+14:05:43 - daemon.services.watch_reconcile_sweep - INFO - WatchReconcileSweepService stopped
+14:05:43 - daemon.services.mission_strand_healer - INFO - MissionStrandHealer: loop cancelled — shutting down
+14:05:43 - daemon.services.job_lock_sweep - INFO - JobLockSweepService stopped
+14:05:43 - daemon.services.upgrade_journal_sweep - INFO - UpgradeJournalSweepService stopped
+14:05:43 - daemon.api - INFO - ServiceReconciliationService stopped
+14:05:43 - daemon.manager - INFO - Starting graceful shutdown...
+14:05:43 - daemon.sources.dispatcher - INFO - Stopping ResponseDispatcher
+14:05:43 - daemon.sources.registry - INFO - Stopping all adapters...
+14:05:43 - daemon.sources.registry - INFO - All adapters stopped
+14:05:43 - daemon.sources.cleanup - INFO - SourceCleanup stopped
+14:05:43 - daemon.manager - INFO - Message sources system stopped
+14:05:43 - daemon.services.cancellation - DEBUG - All requests completed, proceeding with shutdown
+14:05:43 - daemon.services.worker_pool - INFO - Stopping WorkerPool (2 workers)...
+14:05:43 - daemon.services.worker_pool - DEBUG - Stopping worker chat-worker-0...
+14:05:43 - daemon.services.worker_pool - WARNING - Worker chat-worker-0 did not stop within 0s
+14:05:43 - daemon.services.worker_pool - DEBUG - Stopping worker chat-worker-1...
+14:05:43 - daemon.services.worker_pool - WARNING - Worker chat-worker-1 did not stop within 0s
+14:05:43 - daemon.services.worker_pool - INFO - Worker chat-worker-1 stopped: claimed=0, completed=0, failed=0
+14:05:43 - daemon.services.worker_pool - INFO - Worker chat-worker-0 stopped: claimed=0, completed=0, failed=0
+14:05:43 - daemon.services.worker_pool - INFO - WorkerPool stopped
+14:05:43 - daemon.services.pool_orchestrator - INFO - Chat worker pool stopped
+14:05:43 - daemon.services.worker_pool - INFO - Stopping WorkerPool (5 workers)...
+14:05:43 - daemon.services.worker_pool - DEBUG - Stopping worker worker-0...
+14:05:43 - daemon.services.worker_pool - WARNING - Worker worker-0 did not stop within 0s
+14:05:43 - daemon.services.worker_pool - DEBUG - Stopping worker worker-1...
+14:05:43 - daemon.services.worker_pool - WARNING - Worker worker-1 did not stop within 0s
+14:05:43 - daemon.services.worker_pool - DEBUG - Stopping worker worker-2...
+14:05:43 - daemon.services.worker_pool - WARNING - Worker worker-2 did not stop within 0s
+14:05:43 - daemon.services.worker_pool - DEBUG - Stopping worker worker-3...
+14:05:43 - daemon.services.worker_pool - WARNING - Worker worker-3 did not stop within 0s
+14:05:43 - daemon.services.worker_pool - DEBUG - Stopping worker worker-4...
+14:05:43 - daemon.services.worker_pool - WARNING - Worker worker-4 did not stop within 0s
+14:05:43 - daemon.services.worker_pool - INFO - Worker worker-4 stopped: claimed=0, completed=0, failed=0
+14:05:43 - daemon.services.worker_pool - INFO - Worker worker-3 stopped: claimed=0, completed=0, failed=0
+14:05:43 - daemon.services.worker_pool - INFO - Worker worker-2 stopped: claimed=0, completed=0, failed=0
+14:05:43 - daemon.services.worker_pool - INFO - Worker worker-1 stopped: claimed=0, completed=0, failed=0
+14:05:43 - daemon.services.worker_pool - INFO - Worker worker-0 stopped: claimed=0, completed=0, failed=0
+14:05:43 - daemon.services.worker_pool - INFO - WorkerPool stopped
+14:05:43 - daemon.services.pool_orchestrator - INFO - Worker pool stopped
+14:05:43 - daemon.services.stale_task_recovery - INFO - StaleTaskRecovery stopped
+14:05:43 - daemon.services.pool_orchestrator - INFO - Stale task recovery stopped
+14:05:43 - daemon.services.report_delivery_recovery - INFO - ReportDeliveryRecoveryService stopped
+14:05:43 - daemon.services.pool_orchestrator - INFO - Report delivery recovery stopped
+14:05:43 - daemon.services.pool_orchestrator - INFO - Stale-pause sweep stopped
+14:05:43 - daemon.services.event_bus - INFO - Shutting down EventBus
+14:05:43 - daemon.services.event_bus - INFO - EventBus shutdown complete
+14:05:43 - daemon.services.maintenance - INFO - Maintenance service stopped
+14:05:43 - daemon.checkpoint_adapter - DEBUG - PostgreSQL checkpointer asyncpg pool closed
+14:05:43 - daemon.checkpoint_adapter - DEBUG - PostgreSQL checkpointer saver resource closed (topology=pool)
+14:05:43 - daemon.manager - INFO - Checkpointer adapter closed
+14:05:43 - daemon.mcp.warmup_pool - INFO - MCP warm-up pool drained
+14:05:43 - daemon.manager - INFO - Cleaning up resources...
+14:05:43 - daemon.manager - INFO - Database engine disposed
+14:05:43 - daemon.manager - INFO - Graceful shutdown complete
+INFO:     Application shutdown complete.
+INFO:     Finished server process [2021190]

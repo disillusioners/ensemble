@@ -1,0 +1,465 @@
+[identity] current_database() = ensemble_prod   current_user = ensemble
+
+=== PENDING WATCHERS TARGETING THE PARENT (extended census) ===
++------------+----------+-------------+----------------+-------------+--------------------------------------------------------------+
+| kind       | id       | task/worker | child/lane     | state       | scope                                                        |
++------------+----------+-------------+----------------+-------------+--------------------------------------------------------------+
+| watcher    | 8a1f60d7 | 39320       | 542b49a6       | PENDING     | in_commission_scope                                          |
+| watcher    | 999efa71 | 39424       | 17efd2ef       | PENDING     | in_commission_scope                                          |
+| watcher    | 5602e91d | 39564       | 82551f59       | PENDING     | same_class_extra (source task 39564 completed — cannot fire) |
+| watcher    | c83e12a2 | 39564       | 82551f59       | PENDING     | same_class_extra (source task 39564 completed — cannot fire) |
+| commission | 0cdc0b31 | 542b49a6    | instance_nudge | outstanding | in_commission_scope                                          |
+| commission | 90493206 | 17efd2ef    | instance_nudge | outstanding | in_commission_scope                                          |
+| commission | 06001f88 | 82551f59    | instance_nudge | outstanding | same_class_extra                                             |
+| commission | a1561f19 | 82551f59    | instance_nudge | outstanding | same_class_extra                                             |
++------------+----------+-------------+----------------+-------------+--------------------------------------------------------------+
+
+=== ASSERTIONS A1-A9 ===
++----+------------------------------------------------------------------------+--------------------------------------------------------------------------------------------+----------------------------------------------------+---------+
+| id | assertion                                                              | observed                                                                                   | expected                                           | verdict |
++----+------------------------------------------------------------------------+--------------------------------------------------------------------------------------------+----------------------------------------------------+---------+
+| A1 | parent exists AND status == waiting_children                           | exists=True, status=running                                                                | exists=True, status=waiting_children               | FAIL    |
+| A2 | watcher 8a1f60d7 resolves uniquely; PENDING; target==parent; source_ta | matches=1, state=PENDING, target=17efd2ef-9f98-46d4-b41b-60e3e32b2d13, source_task=39320   | matches=1, state=PENDING, target=parent, source_ta | PASS    |
+| A3 | task 39320 exists and is in a terminal status                          | exists=True, status=completed, completed_at=2026-11-17 18:08:26.230850                     | exists=True, status in {completed,failed,cancelled | PASS    |
+| A4 | watched worker 542b49a6 exists and is terminal                         | exists=True, status=completed, updated_at=2026-11-17T19:04:27.795218+00:00                 | exists=True, status in {completed,terminated,error | PASS    |
+| A5 | watcher 999efa71 unique; PENDING; target==parent; source_task==39424;  | matches=1, state=PENDING, target=17efd2ef-9f98-46d4-b41b-60e3e32b2d13, source_task=39424,  | matches=1, state=PENDING, target=parent, source_ta | PASS    |
+| A6 | task 39424 exists and is terminal                                      | exists=True, status=completed                                                              | exists=True, status in {completed,failed,cancelled | PASS    |
+| A7 | both commissions exist; state==outstanding; commissioner==parent       | a_matches=1(outstanding), b_matches=1(outstanding), commissioners=['17efd2ef-9f98-46d4-b41 | matches=1+1, state=outstanding, commissioner=paren | PASS    |
+| A8 | PENDING-watcher count for the parent == exactly 2 (these are the only  | count=4                                                                                    | count=2                                            | FAIL    |
+| A9 | parent status IS waiting_children (a re-run never clobbers an unknown  | status=running                                                                             | status=waiting_children                            | FAIL    |
++----+------------------------------------------------------------------------+--------------------------------------------------------------------------------------------+----------------------------------------------------+---------+
+
+classification = unexpected
+divergences:
+  - A1 parent exists AND status == waiting_children: observed=exists=True, status=running expected=exists=True, status=waiting_children
+  - A8 PENDING-watcher count for the parent == exactly 2 (these are the only two): observed=count=4 expected=count=2
+  - A9 parent status IS waiting_children (a re-run never clobbers an unknown world): observed=status=running expected=status=waiting_children
+  - EXTRA PENDING watcher 5602e91d source_task=39564 child=82551f59 [same_class_extra (source task 39564 completed — cannot fire)]
+  - EXTRA PENDING watcher c83e12a2 source_task=39564 child=82551f59 [same_class_extra (source task 39564 completed — cannot fire)]
+  - EXTRA outstanding commission 06001f88 worker=82551f59 lane=instance_nudge
+  - EXTRA outstanding commission a1561f19 worker=82551f59 lane=instance_nudge
+
+count_pending_for_target(parent)        = 4
+count_outstanding_commissions(parent)   = 4
+inventory parent_scoped_sha256          = d79ccfce2b78988cae740815933784453e56c9e01b1018fee12128c263ebfa19
+  (2 other parent watchers, 2 other parent commissions)
+inventory global_sha256                 = 9743fdc8979b894c8dfbacabaa9ef9054c16723aed82d13857f3773e1d6b1a75
+  (12152 watcher rows, 4755 commission rows)
+
+=== OUT-OF-SCOPE (observational only — NEVER in a repair statement) ===
+  9c2094ac commissioner=4e261d34 worker=804085bf lane=instance_nudge state=satisfied created=2026-11-11T13:55:08.579001+00:00
+  98d963c9 commissioner=4e261d34 worker=a16dc01c lane=instance_nudge state=abandoned created=2026-11-11T15:05:26.492063+00:00
+  b081856e commissioner=4e261d34 worker=a16dc01c lane=instance_nudge state=abandoned created=2026-11-11T23:31:55.727034+00:00
+  f4abf712 commissioner=4e261d34 worker=a16dc01c lane=instance_nudge state=outstanding created=2026-11-12T06:57:50.935273+00:00
+  2fc563f9 commissioner=4e261d34 worker=a16dc01c lane=instance_nudge state=outstanding created=2026-11-12T06:57:50.986032+00:00
+  6f529835 commissioner=4e261d34 worker=804085bf lane=instance_nudge state=outstanding created=2026-11-12T07:43:17.995909+00:00
+
+=== JSON ===
+{
+  "assertions": [
+    {
+      "expected": "exists=True, status=waiting_children",
+      "id": "A1",
+      "name": "parent exists AND status == waiting_children",
+      "note": "running",
+      "observed": "exists=True, status=running",
+      "ok": false
+    },
+    {
+      "expected": "matches=1, state=PENDING, target=parent, source_task=39320",
+      "id": "A2",
+      "name": "watcher 8a1f60d7 resolves uniquely; PENDING; target==parent; source_task==39320",
+      "note": "",
+      "observed": "matches=1, state=PENDING, target=17efd2ef-9f98-46d4-b41b-60e3e32b2d13, source_task=39320",
+      "ok": true
+    },
+    {
+      "expected": "exists=True, status in {completed,failed,cancelled}",
+      "id": "A3",
+      "name": "task 39320 exists and is in a terminal status",
+      "note": "",
+      "observed": "exists=True, status=completed, completed_at=2026-11-17 18:08:26.230850",
+      "ok": true
+    },
+    {
+      "expected": "exists=True, status in {completed,terminated,error,failed}",
+      "id": "A4",
+      "name": "watched worker 542b49a6 exists and is terminal",
+      "note": "",
+      "observed": "exists=True, status=completed, updated_at=2026-11-17T19:04:27.795218+00:00",
+      "ok": true
+    },
+    {
+      "expected": "matches=1, state=PENDING, target=parent, source_task=39424, child_id=parent",
+      "id": "A5",
+      "name": "watcher 999efa71 unique; PENDING; target==parent; source_task==39424; child_id==parent",
+      "note": "self-referential shape (commissioner == worker == target)",
+      "observed": "matches=1, state=PENDING, target=17efd2ef-9f98-46d4-b41b-60e3e32b2d13, source_task=39424, child_id=17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+      "ok": true
+    },
+    {
+      "expected": "exists=True, status in {completed,failed,cancelled}",
+      "id": "A6",
+      "name": "task 39424 exists and is terminal",
+      "note": "",
+      "observed": "exists=True, status=completed",
+      "ok": true
+    },
+    {
+      "expected": "matches=1+1, state=outstanding, commissioner=parent",
+      "id": "A7",
+      "name": "both commissions exist; state==outstanding; commissioner==parent",
+      "note": "",
+      "observed": "a_matches=1(outstanding), b_matches=1(outstanding), commissioners=['17efd2ef-9f98-46d4-b41b-60e3e32b2d13', '17efd2ef-9f98-46d4-b41b-60e3e32b2d13']",
+      "ok": true
+    },
+    {
+      "expected": "count=2",
+      "id": "A8",
+      "name": "PENDING-watcher count for the parent == exactly 2 (these are the only two)",
+      "note": "MIRROR of repository.py:506-515 (target_instance_id + state='PENDING')",
+      "observed": "count=4",
+      "ok": false
+    },
+    {
+      "expected": "status=waiting_children",
+      "id": "A9",
+      "name": "parent status IS waiting_children (a re-run never clobbers an unknown world)",
+      "note": "",
+      "observed": "status=running",
+      "ok": false
+    }
+  ],
+  "classification": "unexpected",
+  "database": "ensemble_prod",
+  "divergences": [
+    "A1 parent exists AND status == waiting_children: observed=exists=True, status=running expected=exists=True, status=waiting_children",
+    "A8 PENDING-watcher count for the parent == exactly 2 (these are the only two): observed=count=4 expected=count=2",
+    "A9 parent status IS waiting_children (a re-run never clobbers an unknown world): observed=status=running expected=status=waiting_children",
+    "EXTRA PENDING watcher 5602e91d source_task=39564 child=82551f59 [same_class_extra (source task 39564 completed \u2014 cannot fire)]",
+    "EXTRA PENDING watcher c83e12a2 source_task=39564 child=82551f59 [same_class_extra (source task 39564 completed \u2014 cannot fire)]",
+    "EXTRA outstanding commission 06001f88 worker=82551f59 lane=instance_nudge",
+    "EXTRA outstanding commission a1561f19 worker=82551f59 lane=instance_nudge"
+  ],
+  "extended_census": {
+    "anchor_outstanding_commissions": [
+      {
+        "commission_id": "0cdc0b31-8c80-4cf7-8c39-40c1ff508956",
+        "commissioner_instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+        "created_at": "2026-11-17T18:06:07.951608+00:00",
+        "lane": "instance_nudge",
+        "mission_id": "cb904c16-a982-41d4-9d33-2a04c7c2d6c0",
+        "scope": "in_commission_scope",
+        "state": "outstanding",
+        "worker_instance_id": "542b49a6-8334-4703-96a8-6628dfb2ab06"
+      },
+      {
+        "commission_id": "90493206-7e82-4602-aa4c-70964e50d51c",
+        "commissioner_instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+        "created_at": "2026-11-17T20:30:46.971252+00:00",
+        "lane": "instance_nudge",
+        "mission_id": "cb904c16-a982-41d4-9d33-2a04c7c2d6c0",
+        "scope": "in_commission_scope",
+        "state": "outstanding",
+        "worker_instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13"
+      },
+      {
+        "commission_id": "06001f88-9e00-4720-8e59-88959d8faa75",
+        "commissioner_instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+        "created_at": "2026-11-17T22:51:59.855255+00:00",
+        "lane": "instance_nudge",
+        "mission_id": "cb904c16-a982-41d4-9d33-2a04c7c2d6c0",
+        "scope": "same_class_extra",
+        "state": "outstanding",
+        "worker_instance_id": "82551f59-4603-4b88-bbce-c9bccfa6fcd5"
+      },
+      {
+        "commission_id": "a1561f19-2338-4053-9b7d-ea85c9d92613",
+        "commissioner_instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+        "created_at": "2026-11-17T22:53:05.912797+00:00",
+        "lane": "instance_nudge",
+        "mission_id": "cb904c16-a982-41d4-9d33-2a04c7c2d6c0",
+        "scope": "same_class_extra",
+        "state": "outstanding",
+        "worker_instance_id": "82551f59-4603-4b88-bbce-c9bccfa6fcd5"
+      }
+    ],
+    "extra_outstanding_commissions": [
+      {
+        "commission_id": "06001f88-9e00-4720-8e59-88959d8faa75",
+        "commissioner_instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+        "created_at": "2026-11-17T22:51:59.855255+00:00",
+        "lane": "instance_nudge",
+        "mission_id": "cb904c16-a982-41d4-9d33-2a04c7c2d6c0",
+        "scope": "same_class_extra",
+        "state": "outstanding",
+        "worker_instance_id": "82551f59-4603-4b88-bbce-c9bccfa6fcd5"
+      },
+      {
+        "commission_id": "a1561f19-2338-4053-9b7d-ea85c9d92613",
+        "commissioner_instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+        "created_at": "2026-11-17T22:53:05.912797+00:00",
+        "lane": "instance_nudge",
+        "mission_id": "cb904c16-a982-41d4-9d33-2a04c7c2d6c0",
+        "scope": "same_class_extra",
+        "state": "outstanding",
+        "worker_instance_id": "82551f59-4603-4b88-bbce-c9bccfa6fcd5"
+      }
+    ],
+    "extra_pending_watchers": [
+      {
+        "child_id": "82551f59-4603-4b88-bbce-c9bccfa6fcd5",
+        "created_at": "2026-11-17T22:51:59.886304+00:00",
+        "kind": "nudge_complete",
+        "scope": "same_class_extra (source task 39564 completed \u2014 cannot fire)",
+        "source_task_id": "39564",
+        "state": "PENDING",
+        "task_status": "completed",
+        "watch_id": "5602e91d-5d4c-4fb6-9e2b-8f351d203f52"
+      },
+      {
+        "child_id": "82551f59-4603-4b88-bbce-c9bccfa6fcd5",
+        "created_at": "2026-11-17T22:53:05.940442+00:00",
+        "kind": "nudge_complete",
+        "scope": "same_class_extra (source task 39564 completed \u2014 cannot fire)",
+        "source_task_id": "39564",
+        "state": "PENDING",
+        "task_status": "completed",
+        "watch_id": "c83e12a2-83b8-46ce-9213-f5a24a5060f6"
+      }
+    ],
+    "outstanding_commission_count": 4,
+    "pending_watchers_for_parent": [
+      {
+        "child_id": "542b49a6-8334-4703-96a8-6628dfb2ab06",
+        "created_at": "2026-11-17T18:06:07.999373+00:00",
+        "kind": "nudge_complete",
+        "scope": "in_commission_scope",
+        "source_task_id": "39320",
+        "state": "PENDING",
+        "watch_id": "8a1f60d7-c164-4b6a-8901-271152d4001b"
+      },
+      {
+        "child_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+        "created_at": "2026-11-17T20:30:47.131454+00:00",
+        "kind": "nudge_complete",
+        "scope": "in_commission_scope",
+        "source_task_id": "39424",
+        "state": "PENDING",
+        "watch_id": "999efa71-8ce3-4fd5-b19e-1627e0018205"
+      },
+      {
+        "child_id": "82551f59-4603-4b88-bbce-c9bccfa6fcd5",
+        "created_at": "2026-11-17T22:51:59.886304+00:00",
+        "kind": "nudge_complete",
+        "scope": "same_class_extra (source task 39564 completed \u2014 cannot fire)",
+        "source_task_id": "39564",
+        "state": "PENDING",
+        "task_status": "completed",
+        "watch_id": "5602e91d-5d4c-4fb6-9e2b-8f351d203f52"
+      },
+      {
+        "child_id": "82551f59-4603-4b88-bbce-c9bccfa6fcd5",
+        "created_at": "2026-11-17T22:53:05.940442+00:00",
+        "kind": "nudge_complete",
+        "scope": "same_class_extra (source task 39564 completed \u2014 cannot fire)",
+        "source_task_id": "39564",
+        "state": "PENDING",
+        "task_status": "completed",
+        "watch_id": "c83e12a2-83b8-46ce-9213-f5a24a5060f6"
+      }
+    ]
+  },
+  "generated_at": "2026-11-17T23:55:40.827549+00:00",
+  "inventory": {
+    "global_counts": {
+      "commissions": 4755,
+      "watchers": 12152
+    },
+    "global_sha256": "9743fdc8979b894c8dfbacabaa9ef9054c16723aed82d13857f3773e1d6b1a75",
+    "parent_keys": {
+      "agent_id": "ari",
+      "created_at": "2026-11-14T21:54:59.848480+00:00",
+      "instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+      "parent_id": null,
+      "status": "running",
+      "updated_at": "2026-11-17T23:30:03.666775+00:00",
+      "version": 98
+    },
+    "parent_scoped_counts": {
+      "commissions": 2,
+      "watchers": 2
+    },
+    "parent_scoped_rows": {
+      "5602e91d-5d4c-4fb6-9e2b-8f351d203f52": "watch_id='5602e91d-5d4c-4fb6-9e2b-8f351d203f52'\tsource_task_id='39564'\ttarget_instance_id='17efd2ef-9f98-46d4-b41b-60e3e32b2d13'\tstate='PENDING'\tcreated_at='2026-11-17T22:51:59.886304+00:00'\tfired_at=None\tenqueued_at=None",
+      "c83e12a2-83b8-46ce-9213-f5a24a5060f6": "watch_id='c83e12a2-83b8-46ce-9213-f5a24a5060f6'\tsource_task_id='39564'\ttarget_instance_id='17efd2ef-9f98-46d4-b41b-60e3e32b2d13'\tstate='PENDING'\tcreated_at='2026-11-17T22:53:05.940442+00:00'\tfired_at=None\tenqueued_at=None",
+      "c:06001f88-9e00-4720-8e59-88959d8faa75": "commission_id='06001f88-9e00-4720-8e59-88959d8faa75'\tmission_id='cb904c16-a982-41d4-9d33-2a04c7c2d6c0'\tcommissioner_instance_id='17efd2ef-9f98-46d4-b41b-60e3e32b2d13'\tworker_instance_id='82551f59-4603-4b88-bbce-c9bccfa6fcd5'\tlane='instance_nudge'\tstate='outstanding'\tcreated_at='2026-11-17T22:51:59.855255+00:00'\tsatisfied_at=None\tabandon_reason=None\tresolved_at=None\tadvisory='false'",
+      "c:a1561f19-2338-4053-9b7d-ea85c9d92613": "commission_id='a1561f19-2338-4053-9b7d-ea85c9d92613'\tmission_id='cb904c16-a982-41d4-9d33-2a04c7c2d6c0'\tcommissioner_instance_id='17efd2ef-9f98-46d4-b41b-60e3e32b2d13'\tworker_instance_id='82551f59-4603-4b88-bbce-c9bccfa6fcd5'\tlane='instance_nudge'\tstate='outstanding'\tcreated_at='2026-11-17T22:53:05.912797+00:00'\tsatisfied_at=None\tabandon_reason=None\tresolved_at=None\tadvisory='false'"
+    },
+    "parent_scoped_sha256": "d79ccfce2b78988cae740815933784453e56c9e01b1018fee12128c263ebfa19"
+  },
+  "out_of_scope": [
+    {
+      "commission_id": "9c2094ac-cb74-4c4d-a432-69b51b4a5fe8",
+      "commissioner_instance_id": "4e261d34-b350-4315-a8bb-1ae96205ab3a",
+      "created_at": "2026-11-11T13:55:08.579001+00:00",
+      "lane": "instance_nudge",
+      "mission_id": "e6c3abee-3192-4f85-937b-3a2ebd482a83",
+      "scope": "OUT-OF-SCOPE (terminated Maintenancer commissioner; never in a repair statement)",
+      "state": "satisfied",
+      "worker_instance_id": "804085bf-8b43-4475-8c05-0b5b63df4e3f"
+    },
+    {
+      "commission_id": "98d963c9-843f-4b6b-82e1-3786b194eaca",
+      "commissioner_instance_id": "4e261d34-b350-4315-a8bb-1ae96205ab3a",
+      "created_at": "2026-11-11T15:05:26.492063+00:00",
+      "lane": "instance_nudge",
+      "mission_id": "e6c3abee-3192-4f85-937b-3a2ebd482a83",
+      "scope": "OUT-OF-SCOPE (terminated Maintenancer commissioner; never in a repair statement)",
+      "state": "abandoned",
+      "worker_instance_id": "a16dc01c-3b43-477c-a08b-15a08b7d8921"
+    },
+    {
+      "commission_id": "b081856e-6d28-4e90-857e-e177f6333d12",
+      "commissioner_instance_id": "4e261d34-b350-4315-a8bb-1ae96205ab3a",
+      "created_at": "2026-11-11T23:31:55.727034+00:00",
+      "lane": "instance_nudge",
+      "mission_id": "e6c3abee-3192-4f85-937b-3a2ebd482a83",
+      "scope": "OUT-OF-SCOPE (terminated Maintenancer commissioner; never in a repair statement)",
+      "state": "abandoned",
+      "worker_instance_id": "a16dc01c-3b43-477c-a08b-15a08b7d8921"
+    },
+    {
+      "commission_id": "f4abf712-92a9-5037-936f-558b57f5f9b8",
+      "commissioner_instance_id": "4e261d34-b350-4315-a8bb-1ae96205ab3a",
+      "created_at": "2026-11-12T06:57:50.935273+00:00",
+      "lane": "instance_nudge",
+      "mission_id": "e6c3abee-3192-4f85-937b-3a2ebd482a83",
+      "scope": "OUT-OF-SCOPE (terminated Maintenancer commissioner; never in a repair statement)",
+      "state": "outstanding",
+      "worker_instance_id": "a16dc01c-3b43-477c-a08b-15a08b7d8921"
+    },
+    {
+      "commission_id": "2fc563f9-eb69-59e8-8218-23733966d7c3",
+      "commissioner_instance_id": "4e261d34-b350-4315-a8bb-1ae96205ab3a",
+      "created_at": "2026-11-12T06:57:50.986032+00:00",
+      "lane": "instance_nudge",
+      "mission_id": "e6c3abee-3192-4f85-937b-3a2ebd482a83",
+      "scope": "OUT-OF-SCOPE (terminated Maintenancer commissioner; never in a repair statement)",
+      "state": "outstanding",
+      "worker_instance_id": "a16dc01c-3b43-477c-a08b-15a08b7d8921"
+    },
+    {
+      "commission_id": "6f529835-77c4-5315-a82d-fdc16b334267",
+      "commissioner_instance_id": "4e261d34-b350-4315-a8bb-1ae96205ab3a",
+      "created_at": "2026-11-12T07:43:17.995909+00:00",
+      "lane": "instance_nudge",
+      "mission_id": "e6c3abee-3192-4f85-937b-3a2ebd482a83",
+      "scope": "OUT-OF-SCOPE (terminated Maintenancer commissioner; never in a repair statement)",
+      "state": "outstanding",
+      "worker_instance_id": "804085bf-8b43-4475-8c05-0b5b63df4e3f"
+    }
+  ],
+  "parent_instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+  "rows": {
+    "commission_a": [
+      {
+        "abandon_reason": null,
+        "advisory_backfill": false,
+        "commission_id": "0cdc0b31-8c80-4cf7-8c39-40c1ff508956",
+        "commissioner_instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+        "created_at": "2026-11-17T18:06:07.951608+00:00",
+        "lane": "instance_nudge",
+        "mission_id": "cb904c16-a982-41d4-9d33-2a04c7c2d6c0",
+        "resolved_at": null,
+        "satisfied_at": null,
+        "state": "outstanding",
+        "work_id": null,
+        "worker_instance_id": "542b49a6-8334-4703-96a8-6628dfb2ab06"
+      }
+    ],
+    "commission_b": [
+      {
+        "abandon_reason": null,
+        "advisory_backfill": false,
+        "commission_id": "90493206-7e82-4602-aa4c-70964e50d51c",
+        "commissioner_instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+        "created_at": "2026-11-17T20:30:46.971252+00:00",
+        "lane": "instance_nudge",
+        "mission_id": "cb904c16-a982-41d4-9d33-2a04c7c2d6c0",
+        "resolved_at": null,
+        "satisfied_at": null,
+        "state": "outstanding",
+        "work_id": null,
+        "worker_instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13"
+      }
+    ],
+    "parent": {
+      "agent_id": "ari",
+      "agent_name": "Ari",
+      "created_at": "2026-11-14T21:54:59.848480+00:00",
+      "instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+      "parent_id": null,
+      "status": "running",
+      "updated_at": "2026-11-17T23:30:03.666775+00:00",
+      "version": 98
+    },
+    "pending_count": 4,
+    "task_a": {
+      "completed_at": "2026-11-17 18:08:26.230850",
+      "created_at": "2026-11-17 18:06:07.306915",
+      "id": 39320,
+      "instance_id": "542b49a6-8334-4703-96a8-6628dfb2ab06",
+      "status": "completed",
+      "task_type": "process_message"
+    },
+    "task_b": {
+      "completed_at": "2026-11-17 20:31:27.098101",
+      "created_at": "2026-11-17 20:30:01.747450",
+      "id": 39424,
+      "instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+      "status": "completed",
+      "task_type": "process_message"
+    },
+    "watched_worker": {
+      "agent_id": "sonic-leader",
+      "agent_name": "Sonic-Leader",
+      "created_at": "2026-11-15T01:00:56.629079+00:00",
+      "instance_id": "542b49a6-8334-4703-96a8-6628dfb2ab06",
+      "parent_id": null,
+      "status": "completed",
+      "updated_at": "2026-11-17T19:04:27.795218+00:00",
+      "version": 12
+    },
+    "watcher_a": [
+      {
+        "child_id": "542b49a6-8334-4703-96a8-6628dfb2ab06",
+        "created_at": "2026-11-17T18:06:07.999373+00:00",
+        "enqueued_at": null,
+        "fired_at": null,
+        "kind": "nudge_complete",
+        "message_id": "67fbe861-0df8-4b0e-9720-8934bced6b9f",
+        "payload_mission_id": "cb904c16-a982-41d4-9d33-2a04c7c2d6c0",
+        "source_task_id": "39320",
+        "state": "PENDING",
+        "target_instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+        "watch_id": "8a1f60d7-c164-4b6a-8901-271152d4001b"
+      }
+    ],
+    "watcher_b": [
+      {
+        "child_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+        "created_at": "2026-11-17T20:30:47.131454+00:00",
+        "enqueued_at": null,
+        "fired_at": null,
+        "kind": "nudge_complete",
+        "message_id": null,
+        "payload_mission_id": "cb904c16-a982-41d4-9d33-2a04c7c2d6c0",
+        "source_task_id": "39424",
+        "state": "PENDING",
+        "target_instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+        "watch_id": "999efa71-8ce3-4fd5-b19e-1627e0018205"
+      }
+    ]
+  }
+}

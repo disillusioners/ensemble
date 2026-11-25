@@ -32,16 +32,111 @@ Error Handling:
 - A failure in one operation does NOT prevent subsequent operations from running.
 - job.last_run is only updated when the entire execute() completes successfully.
 
-Size rationale (tidier fix pass 2026-09-27, ~1.8k lines): this module
-predates the Maintenance Console and hosts TWO concerns by design —
-the generic ``MaintenanceService`` scheduler and the
+Size rationale (tidier fix pass 2026-09-27, 3451 lines post-range): this
+module predates the Maintenance Console and hosts TWO concerns by
+design — the generic ``MaintenanceService`` scheduler and the
 ``CheckpointCleanupJob`` Op A–E engine whose three instance-sweep ops
 (A/B/C) share ``_cleanup_instance`` + the pinned-subtree protection
 set. Splitting the job out would fork those shared helpers or force
 an import cycle; the Section-1 additions (run-lock gate, audit rows,
 dual entry points) deliberately landed IN this file so the auto and
 manual paths stay textually adjacent for the INV-1/INV-9 AST pins.
-Revisit only if a third cleanup section arrives.
+The third cleanup section has now landed (the starvation composite
+below), so this module is FLAGGED FOR REFACTOR: extract
+``DbMaintenanceStateStore`` + ``IdlePolicy`` + skip-streak telemetry
+into a dedicated ``daemon/services/maintenance_state.py`` (text-only
+flag; no code movement this pass).
+
+Starvation composite (wi-4d1fa093, 2026-11-18): the per-job
+``IdlePolicy`` tiering, the persisted ``max_staleness_hours``
+guarantee, the restart-clock hydration seam and the skip-streak
+telemetry all live in this file because they are properties of the
+SCHEDULER (not of any one job) — the Section-0b state store is the
+narrow persistence seam they share (EXISTING storage surfaces only:
+the ``maintenance_runs`` audit table + the project-metadata KV; ZERO
+new migrations).
+
+RETENTION ESCAPE — THE MEASURED DIAGNOSIS (SCOPE (c), 2026-11-24)
+==============================================================
+The churn class is "finished-but-unreaped threads": the prod census
+(read-only, ``ensemble_prod`` @ 10.44.0.2, 2026-11-24T08:1xZ) found
+1,139 checkpoint threads, 11,273 ``checkpoints`` rows — of which
+**7,829 rows sit on 93 TERMINAL instances** whose newest checkpoint
+was written AFTER the last cleanup cycle ran (the cycle ran
+03:25:25Z–03:38:32Z and deleted 56,312 checkpoint rows / 148,569
+writes / 37,585 blobs; by 08:12Z the table had grown back to 11,273
+rows across 1,139 threads ≈ **30–40 rows/min**).
+
+WHY THE EXISTING LEGS DO NOT REACH THAT CLASS (the escape):
+
+1. **Op D (keep-N per thread) is enforced only at the CYCLE
+   CADENCE.** The per-thread cap is the ONLY bound on a thread's
+   checkpoint/blob mass, and it is applied once per cycle (24h by
+   default). Between cycles a thread accumulates without limit — the
+   measured maximum was 909 versions for one pair at the census and
+   572 for one thread within a single 4.5h window.
+2. **Op B (the 168h TTL on ``instances.updated_at``) cannot touch the
+   class by construction.** ``updated_at`` on a terminal instance is
+   its COMPLETION time (measured: a 572-checkpoint thread's instance
+   carried ``updated_at`` = 07:37:54, the same minute as its newest
+   checkpoint), so a thread that finished an hour ago is 167h59m
+   away from being TTL-reaped. The TTL is an AGE-OF-THE-INSTANCE
+   bound, and the churn class is BY DEFINITION the newest rows.
+3. **Op C (the history cap) is age-ordered, so the churn class is
+   LAST in line.** The cap prunes the OLDEST terminal instances
+   first; the churn class is the most recently finished set. The cap
+   also runs over the ``exclude_kb=True`` candidate set (4,356 of the
+   5,505 terminal instances are KB agents), so the effective cap
+   applies to 1,148 rows, not 5,505.
+
+So the escape is a CADENCE + AGE-ORDERING escape, not a missing
+DELETE: the rows that grow fastest are precisely the ones every
+age-ordered reap leg treats as "too recent".
+
+WHAT THIS MODULE NOW DOES ABOUT IT (two bounded legs):
+
+* **Op B2 — the terminal-thread full reap** (this file,
+  ``_reap_terminal_threads``): a TIGHTER age bound than Op B's 168h
+  (default 24h, env-tunable) on the same thread→instance join, whose
+  disposition is the FULL checkpoint-footprint delete
+  (``adelete_thread`` → checkpoints + writes + blobs). The instance
+  ROW is deliberately preserved — the conversation lives in
+  ``message_queue``; only the checkpoint footprint is expendable.
+* **The backstop job** (``run_backstop_prune``, registered
+  UN_GATED as ``checkpoint_backstop_prune``): a bounded per-thread
+  prune + blob reclaim on a WALL-CLOCK cadence that does NOT consult
+  the idle gate — the anti-starvation path for the growth itself.
+
+POLICY OPTIONS — SURFACED FOR THE LEADER'S ADJUDICATION, NOT BAKED
+==================================================================
+These are the retention knobs this commission deliberately did NOT
+decide. The implementation ships the conservative default of each and
+exposes it as an env-tunable; the leader adjudicates the aggressiveness.
+
+* **Keep-N depth (the per-thread history depth).** Today
+  ``CHECKPOINT_MAX_PER_THREAD`` defaults to 3 — three checkpoints
+  (and their blobs) per thread survive every prune. The measured
+  blob mass floor is therefore ~3 blobs per live thread. Options:
+  keep 3 (today, the default), keep 1 (the floor drops ~3×; a revive
+  loses the deeper checkpoint history), or keep 5 (more revive
+  fidelity, a proportionally larger floor). THIS MODULE CHANGES
+  NOTHING HERE — the knob is untouched.
+* **Per-thread vs global caps.** Today the only cap is per-thread
+  (keep-N). There is NO global cap on the number of threads or on
+  the total checkpoint/blob mass. Options: a global thread cap (the
+  oldest N threads are reaped regardless of per-thread state), a
+  global BYTE cap (the guard in ITEM 2 alerts on it, but nothing
+  enforces it), or the status quo. THIS MODULE CHANGES NOTHING HERE
+  — the byte guard ALERTS, it does not enforce.
+* **Terminal-thread full-reap aggressiveness.** The age bound that
+  makes a finished thread's checkpoint footprint expendable. Options:
+  24h (the shipped default — a full day, 7× tighter than the 168h
+  TTL, and safely outside any realistic revive window), 12h, 6h, or
+  2h (progressively tighter; each step reclaims the finished-work
+  floor sooner and makes a revive of an old conversation start
+  without its checkpoint). THE DEFAULT IS 24h
+  (``ENSEMBLE_CHECKPOINT_TERMINAL_REAP_HOURS``); the leader sets the
+  policy.
 """
 
 import asyncio
@@ -50,7 +145,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
-from typing import Any, Callable, Coroutine, NamedTuple
+from typing import Any, Callable, Coroutine, NamedTuple, Protocol
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
@@ -89,6 +184,301 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _env_int(name: str, default: int) -> int:
+    """Read an integer env knob, falling back to ``default``.
+
+    A malformed value falls back to the default (never raises) — a
+    typo in an operator's env must not take the maintenance lane down.
+    """
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "maintenance knob %s=%r is not an integer — using the default %s",
+            name, raw, default,
+        )
+        return default
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    """Read a boolean env knob (the house ``=0`` disables convention).
+
+    ``0`` / ``false`` / ``no`` / ``off`` (case-insensitive) ⇒ False;
+    anything else present ⇒ True; absent ⇒ ``default``.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
+class IdlePolicy:
+    """Per-job idle-gate policy (2026-11-18, wi-4d1fa093).
+
+    ``IDLE_GATED``
+        The job only runs when the system-wide idle probe reports no
+        in-flight work (the pre-2026-11-18 behaviour of EVERY job).
+    ``UN_GATED``
+        The job runs on its own cadence regardless of system
+        busyness.
+
+    WHY the tiering exists
+    ----------------------
+    The global idle gate was never satisfiable on a continuously busy
+    nest (live evidence 2026-11-14 → 2026-11-18: 25/25 hourly buckets
+    non-idle, zero ``maintenance_runs`` rows for 4d10h). One
+    never-satisfiable gate therefore starved ALL eleven registered
+    jobs — including the bounded, idempotent ones whose work does not
+    compete with live traffic for the DB resources in-flight work
+    holds.
+
+    The gate is now kept ONLY where the contention is real — the two
+    reclaim jobs (the checkpoint reclaim, the VACUUM) — and BOTH of
+    those carry a persisted ``max_staleness_hours`` override, so they
+    keep their guaranteed eventual execution even on a permanently
+    busy nest (see :meth:`MaintenanceService._is_stale`).
+
+    The table below is the SINGLE source of the classification; a job
+    name that is absent from it is treated as ``IDLE_GATED`` (the
+    conservative default — an unknown job never runs unattended).
+    """
+
+    IDLE_GATED = "idle_gated"
+    UN_GATED = "un_gated"
+
+
+#: The per-job idle-gate policy for every registered maintenance job.
+#:
+#: The classification principle: **the idle gate is retained only for
+#: work that genuinely contends for the resources live traffic holds**
+#: — the DB write path / WAL / IO bandwidth that an in-flight agent
+#: turn needs. Bounded, idempotent bookkeeping (metric aggregation,
+#: orphan reaping, usage-counter sweeps), in-process work (heap trim,
+#: lock-map reap) and dispatch-only work (the scans that enqueue into
+#: the normal worker queue) do NOT contend with live traffic and are
+#: therefore un-gated.
+#:
+#: ``skill_ab_inactivity_sweep`` may only be un-gated in the same
+#: change set as the A/B resolve CAS — the CAS landed FIRST (commit
+#: ``fix(skill-evolution): atomic CAS resolve for the sanctioned A/B
+#: path``), so the sweep can never resolve the same pair twice.
+JOB_IDLE_POLICIES: dict[str, str] = {
+    # ── the two reclaim jobs — the contention is real ─────────────
+    # The checkpoint reclaim deletes from the checkpoint tables (28 GB
+    # / 137k rows in the live incident) and runs ANALYZE: it competes
+    # for exactly the write path live checkpointing needs. It ALSO
+    # carries the persisted ``max_staleness_hours`` guarantee below.
+    "checkpoint_cleanup": IdlePolicy.IDLE_GATED,
+    # Plain VACUUM's entire contract is "do not run under load" — the
+    # whole point of the threshold gate is that it never fights live
+    # traffic for the table. It ALSO carries the persisted
+    # ``max_staleness_hours`` guarantee below.
+    "vacuum_maintenance": IdlePolicy.IDLE_GATED,
+    # ── bounded, idempotent bookkeeping — no real contention ─────
+    # The room purge's selection predicate is DORMANCY-based (closed
+    # > 14d, idle > 72h, zero living participants) — its write set is
+    # disjoint from the rows live traffic touches, and each room is
+    # purged in its own transaction.
+    "room_gc_sweep": IdlePolicy.UN_GATED,
+    # Bounded metric aggregation over the skill usage records.
+    "skill_metric_scan": IdlePolicy.UN_GATED,
+    # Bounded delete of usage records that escaped finalization.
+    "skill_orphan_sweep": IdlePolicy.UN_GATED,
+    # The A/B inactivity sweep (the ONE sanctioned resolution
+    # mechanism's periodic leg). Un-gated ONLY because the resolve
+    # path is now atomic + CAS-guarded (the sweep can no longer
+    # double-resolve a pair).
+    "skill_ab_inactivity_sweep": IdlePolicy.UN_GATED,
+    # Bounded purge of a deleted project's skill files + embeddings.
+    "project_skill_gc": IdlePolicy.UN_GATED,
+    # Dispatch-only: it enqueues rebuild work into the NORMAL worker
+    # queue (the same path a user-dispatched job takes).
+    "blueprint_daily_scan": IdlePolicy.UN_GATED,
+    # ── in-process only — no DB, no contention ───────────────────
+    # glibc heap trim (returns free pages to the OS).
+    "malloc_trim": IdlePolicy.UN_GATED,
+    # DependencyBus lock-map reap (in-memory map, no DB).
+    "dependency_bus_lock_reap": IdlePolicy.UN_GATED,
+    # Bounded batched age DELETEs over the anomaly tables.
+    "anomaly_retention": IdlePolicy.UN_GATED,
+    # POK librarian (pok-write-gate Phase 10, T10.4 — the H3 pick):
+    # a bounded, idempotent, READ-HEAVY pass over the POK store's
+    # metrics (it reads the active rows + the ledger and writes ONE
+    # metadata row per project). Its write set (the project-metadata
+    # soft-max key + the ledger's ASK_EXPIRED audit rows) is disjoint
+    # from the rows live traffic touches, so it does NOT contend with
+    # the DB write path an in-flight turn needs ⇒ UN_GATED. An
+    # IDLE_GATED job would starve on a continuously busy nest.
+    "pok_librarian": IdlePolicy.UN_GATED,
+    # SCOPE (c) — the checkpoint BACKSTOP. UN_GATED on purpose: this is
+    # the anti-starvation path for the checkpoint growth itself, and it
+    # runs on its OWN wall-clock cadence with a small pair budget. Its
+    # work (a bounded per-thread prune + blob reclaim) touches only
+    # rows the daily cycle would have touched anyway, and the pair
+    # budget is what keeps each run cheap on a busy nest.
+    #
+    # It is NOT IDLE_GATED because the idle gate is exactly the
+    # condition this lane exists to survive: the measured recurrence
+    # (the third bloat-class recurrence — 13GB / 94k rows after 47h of
+    # missed cycles) happened on a continuously busy nest, where the
+    # gate was never satisfiable.
+    "checkpoint_backstop_prune": IdlePolicy.UN_GATED,
+}
+
+#: The built-in ``max_staleness_hours`` guarantee per job (hours).
+#:
+#: The guarantee is the anti-starvation escape hatch: a job that has
+#: not even ATTEMPTED for longer than this many hours runs EVEN when
+#: the system is busy (the attempt clock — see ``_is_stale``). It is
+#: set ONLY for the two jobs that keep the idle gate — without it
+#: they could starve forever on a permanently busy nest (the live
+#: incident: 4d10h with zero runs).
+#:
+#: The value is PERSISTED (see
+#: :class:`DbMaintenanceStateStore`) so an operator can tune it; the
+#: persisted override WINS over this default. A persisted ``0``
+#: explicitly disables the guarantee for that job.
+JOB_MAX_STALENESS_HOURS: dict[str, float] = {
+    "checkpoint_cleanup": 24.0,
+    "vacuum_maintenance": 24.0,
+}
+
+#: The maintenance_runs SECTION for the backstop job. It is a
+#: SEPARATE section from ``checkpoint-cleanup`` on purpose: the audit
+#: table's partial unique index claims one RUNNING row per section, so
+#: a distinct section lets the backstop claim its own lane (the
+#: process-wide ``MaintenanceRunLock`` still serialises the two lanes
+#: against each other).
+BACKSTOP_SECTION = "checkpoint-backstop"
+
+#: ``maintenance_runs.section`` per job name — the persisted
+#: last-success source. Only the jobs that write Section-1 audit rows
+#: have an entry; every other job falls back to the process-start
+#: anchor.
+JOB_MAINTENANCE_SECTIONS: dict[str, str] = {
+    "checkpoint_cleanup": "checkpoint-cleanup",
+    "vacuum_maintenance": "vacuum-maintenance",
+    # POK librarian (pok-write-gate Phase 10, T10.4): the pass writes
+    # its audit row under this section — the persisted last-success
+    # source for the librarian lane.
+    "pok_librarian": "pok-librarian",
+    # The backstop (SCOPE (c)) — its OWN section. The mapping is what
+    # gives the backstop the RESTART-CLOCK INVARIANT: its persisted
+    # last-success hydrates at boot, so a daemon restart does not make
+    # the job due immediately (the in-memory clock alone would).
+    "checkpoint_backstop_prune": BACKSTOP_SECTION,
+}
+
+#: The system-default project id — the bookkeeping home of the
+#: persisted maintenance job state (the same KV the blueprint daily
+#: scan uses for its persisted last-run).
+MAINTENANCE_SYSTEM_PROJECT_ID = "71931ae0-0f25-5fbf-853b-2a78cc978d7e"
+
+
+# ── Retention knobs (SCOPE (c), 2026-11-24) ──────────────────────────────
+#
+# The knobs below are the OPERATOR surface of the two new retention
+# legs. Every one of them is an env var (no new config field, no new
+# migration) and every one of them has a SAFE default.
+
+#: Kill-switch for the Op B2 terminal-thread full reap. ``=0``
+#: disables the leg entirely (the house ``ENSEMBLE_*`` kill-switch
+#: precedent). Default: ON.
+TERMINAL_REAP_KILL_SWITCH_ENV = "ENSEMBLE_CHECKPOINT_TERMINAL_REAP"
+
+#: The Op B2 age bound, in hours — how long a TERMINAL instance's
+#: checkpoint footprint is kept before the full-thread reap may take
+#: it. Default 24h (a full day; 7x tighter than the 168h TTL). The
+#: floor is 1h (a 0 or negative value would reap everything at once).
+TERMINAL_REAP_HOURS_ENV = "ENSEMBLE_CHECKPOINT_TERMINAL_REAP_HOURS"
+
+#: The Op B2 per-cycle batch bound — the maximum number of threads one
+#: cycle may reap. Default 50.
+TERMINAL_REAP_BATCH_ENV = "ENSEMBLE_CHECKPOINT_TERMINAL_REAP_BATCH"
+
+#: The default Op B2 age bound (hours).
+DEFAULT_TERMINAL_REAP_HOURS = 24
+
+#: The default Op B2 per-cycle batch bound (threads).
+DEFAULT_TERMINAL_REAP_BATCH = 50
+
+#: Kill-switch for the backstop job. ``=0`` disables the job's
+#: registration path at boot. Default: ON.
+BACKSTOP_KILL_SWITCH_ENV = "ENSEMBLE_CHECKPOINT_BACKSTOP"
+
+#: The backstop's wall-clock interval, in MINUTES. The backstop runs on
+#: its own cadence and does NOT consult the idle gate — that is its
+#: whole point (the anti-starvation path for the growth itself).
+BACKSTOP_INTERVAL_ENV = "ENSEMBLE_CHECKPOINT_BACKSTOP_INTERVAL_MINUTES"
+
+#: The backstop's per-run PAIR budget — the maximum number of
+#: (thread, namespace) pairs one backstop run may prune. Deliberately
+#: SMALL: the backstop runs on a busy nest, so each run must be cheap.
+BACKSTOP_PAIR_BUDGET_ENV = "ENSEMBLE_CHECKPOINT_BACKSTOP_PAIR_BUDGET"
+
+#: The default backstop interval (minutes).
+DEFAULT_BACKSTOP_INTERVAL_MINUTES = 60
+
+
+def backstop_registration_params() -> tuple[bool, int]:
+    """``(enabled, interval_minutes)`` for the backstop job's registration.
+
+    A tiny, EXECUTABLE seam: the manager's registration block calls
+    this instead of reading the env knobs inline, so the knob shape
+    (the arity of the flag/int reads, the interval floor) is pinned by
+    a test that CALLS it rather than by a source-grep.
+
+    * ``enabled`` is False when ``ENSEMBLE_CHECKPOINT_BACKSTOP`` is
+      ``0``/``false``/``no``/``off`` — the kill switch that keeps the
+      job unregistered.
+    * ``interval_minutes`` is floored at 1 (a 0 or negative interval
+      would mean "never due" under the service's ``min_interval_hours
+      <= 0`` disable convention — the wrong way to express "off").
+    """
+    enabled = _env_flag(BACKSTOP_KILL_SWITCH_ENV, True)
+    interval = max(
+        1, _env_int(BACKSTOP_INTERVAL_ENV, DEFAULT_BACKSTOP_INTERVAL_MINUTES)
+    )
+    return enabled, interval
+
+#: The default backstop pair budget (pairs per run).
+DEFAULT_BACKSTOP_PAIR_BUDGET = 25
+
+
+# ── The checkpoint_blobs BYTES guard (ITEM 2, SCOPE (c)) ───────────────────
+#
+# The checkpoint-blob bloat class is DEAD-TUP-BLIND: the measured
+# incident (2026-11-23) found ``n_dead_tup`` reading ZERO on BOTH
+# ``checkpoint_blobs`` and its TOAST relation while the relation
+# carried ~29MB of heap + ~39.1GiB of TOAST (~87% of the TOAST pages
+# empty). Autovacuum runs on the table without reclaiming: the space
+# is the physical footprint of a table whose LIVE rows are large, not
+# dead tuples waiting to be reused. A dead-tuple threshold therefore
+# reads "healthy" on exactly the class it must catch.
+#
+# The guard measures BYTES (``pg_total_relation_size`` + the TOAST
+# size via ``reltoastrelid`` — the house SQL precedent,
+# ``docs/runbooks/checkpoint-maintenance.md`` §P6b) and ALERTS. It
+# does not reclaim and it does not enforce: the space returns only via
+# a REWRITE (see ``docs/runbooks/checkpoint-escalation-lane.md``).
+
+#: Kill-switch for the bytes guard. ``=0`` disables the measurement
+#: entirely. Default: ON.
+BLOB_BYTES_GUARD_KILL_SWITCH_ENV = "ENSEMBLE_CHECKPOINT_BLOB_BYTES_GUARD"
+
+#: The alert threshold, in BYTES. Default 32 GiB — the measured prod
+#: state (~40GB total, ~39.1GiB of it TOAST) is ABOVE it, so the
+#: guard fires on the class it exists to surface.
+BLOB_BYTES_ALERT_THRESHOLD_ENV = "ENSEMBLE_CHECKPOINT_BLOB_BYTES_ALERT"
+
+#: The default alert threshold in bytes (32 GiB).
+DEFAULT_BLOB_BYTES_ALERT_THRESHOLD = 32 * 1024 * 1024 * 1024
+
+
+
 @dataclass
 class MaintenanceJob:
     """Represents a registered maintenance job."""
@@ -97,14 +487,38 @@ class MaintenanceJob:
     min_interval_hours: float
     last_run: datetime | None
     execute_fn: Callable[[], Coroutine[Any, Any, None]]
+    # ── wi-4d1fa093 (2026-11-18) — the starvation composite ───────
+    #: Per-job idle-gate policy (``IdlePolicy.IDLE_GATED`` /
+    #: ``IdlePolicy.UN_GATED``). Resolved at registration time from
+    #: :data:`JOB_IDLE_POLICIES` unless the caller passes one
+    #: explicitly.
+    idle_policy: str = IdlePolicy.IDLE_GATED
+    #: The anti-starvation guarantee, in hours. ``None`` ⇒ no
+    #: guarantee; ``<= 0`` ⇒ the guarantee is explicitly disabled.
+    max_staleness_hours: float | None = None
+    #: The persisted last SUCCESSFUL run (hydrated from storage at
+    #: boot). ``None`` until a success is observed.
+    last_success_ts: datetime | None = None
+    #: The last ATTEMPT (successful or not) — in memory only. It is
+    #: the starvation reference: a job that keeps ATTEMPTING (even
+    #: failing) is not starved, so the ``max_staleness_hours`` escape
+    #: hatch must not turn a persistently failing job into an
+    #: every-tick runner on a busy system.
+    last_attempt_ts: datetime | None = None
+    #: The current idle-gate skip streak — reset on every success.
+    consecutive_skips: int = 0
 
 
 class MaintenanceService:
     """Generic background service for running periodic maintenance tasks.
 
     The service runs in a background loop, checking if registered jobs are due
-    based on their minimum interval. Jobs only run when the system is idle
-    (no active jobs AND no active LLM requests).
+    based on their minimum interval. Whether a DUE job then waits for system
+    idleness is PER JOB (:class:`IdlePolicy`): bounded/idempotent jobs run
+    un-gated, and only the two jobs whose work contends with live traffic
+    (the checkpoint reclaim and the VACUUM) consult the idle probe (no active
+    jobs AND no active LLM requests) — and both carry a persisted
+    ``max_staleness_hours`` escape hatch so they cannot starve forever.
 
     Usage:
         service = MaintenanceService(check_interval_minutes=15)
@@ -124,6 +538,17 @@ class MaintenanceService:
         self._check_interval = check_interval_minutes * 60
         self._task: asyncio.Task | None = None
         self._running = False
+        # wi-4d1fa093 (2026-11-18): the process-start anchor. The
+        # staleness guarantee falls back to it when a job has neither a
+        # persisted last-success nor an in-memory ``last_run`` — so a
+        # fresh install still gets its guaranteed eventual execution
+        # (measured from boot), and never fires heavy work instantly.
+        self._started_at = utcnow()
+        # wi-4d1fa093: the persisted-state seam (last-success clock +
+        # the per-job ``max_staleness_hours`` override). ``None`` means
+        # no persistence — the service then behaves exactly as before
+        # (in-memory clock only).
+        self._state_store: "MaintenanceStateStore | None" = None
 
         # References for idle check
         self._job_queue_service: Any = None
@@ -144,6 +569,8 @@ class MaintenanceService:
         min_interval_hours: float,
         execute_fn: Callable[[], Coroutine[Any, Any, None]],
         last_run: datetime | None = None,
+        idle_policy: str | None = None,
+        max_staleness_hours: float | None = None,
     ) -> None:
         """Register a maintenance job.
 
@@ -157,15 +584,48 @@ class MaintenanceService:
                 execution does not fire immediately on restart. Defaults
                 to ``None`` (job is due on first check, which matches
                 the original "fresh-process" semantics).
+            idle_policy: Optional explicit idle-gate policy
+                (``IdlePolicy.IDLE_GATED`` / ``IdlePolicy.UN_GATED``).
+                ``None`` (the default) resolves the policy from
+                :data:`JOB_IDLE_POLICIES` by job name; a job name that
+                is absent from that table is treated as
+                ``IdlePolicy.IDLE_GATED`` (the conservative default).
+            max_staleness_hours: Optional explicit anti-starvation
+                guarantee (hours). ``None`` (the default) resolves the
+                value from :data:`JOB_MAX_STALENESS_HOURS` by job name.
         """
         job = MaintenanceJob(
             name=name,
             min_interval_hours=min_interval_hours,
             last_run=last_run,
             execute_fn=execute_fn,
+            idle_policy=(
+                idle_policy
+                if idle_policy is not None
+                else JOB_IDLE_POLICIES.get(name, IdlePolicy.IDLE_GATED)
+            ),
+            max_staleness_hours=(
+                max_staleness_hours
+                if max_staleness_hours is not None
+                else JOB_MAX_STALENESS_HOURS.get(name)
+            ),
         )
         self._jobs.append(job)
         logger.debug(f"Registered maintenance job: {name} (interval={min_interval_hours}h)")
+
+    def set_state_store(self, store: "MaintenanceStateStore | None") -> None:
+        """Wire the persisted-state seam (the restart-clock invariant).
+
+        The store supplies the persisted last-success (hydrated at
+        boot, so a daemon restart never resets the interval clock) and
+        reads/writes the per-job ``max_staleness_hours`` override.
+
+        Args:
+            store: A :class:`MaintenanceStateStore` implementation, or
+                ``None`` to disable persistence (in-memory clock only —
+                the pre-2026-11-18 behaviour).
+        """
+        self._state_store = store
 
     def set_job_queue_service(self, service: Any) -> None:
         """Set the JobQueueService reference for idle checking.
@@ -212,6 +672,20 @@ class MaintenanceService:
             return
 
         self._running = True
+        # wi-4d1fa093 (2026-11-18) — hydrate the persisted clock BEFORE
+        # the first tick. THE RESTART-CLOCK INVARIANT: ``last_run``
+        # used to live ONLY in the in-memory job dict, so every daemon
+        # restart reset the clock (the freshly re-registered job looked
+        # "never run" and its 24h interval restarted from zero — the
+        # live 2026-11-14 artifact). The persisted last-success is now
+        # the source of truth; the in-memory value is only its cache.
+        #
+        # Fail-soft: a hydration problem must never stop the service.
+        try:
+            await self.hydrate_persisted_state()
+        except Exception as e:  # noqa: BLE001 — hydration MUST NOT break boot
+            logger.warning(f"Maintenance state hydration failed: {e}")
+
         self._task = asyncio.create_task(self._loop())
         logger.info("Maintenance service started")
 
@@ -252,25 +726,272 @@ class MaintenanceService:
             await asyncio.sleep(self._check_interval)
 
     async def _run_pending_jobs(self) -> None:
-        """Check each job and run those that are due and system is idle."""
+        """Check each job and run those that are due, subject to the job's own idle policy.
+
+        The idle gate is now PER JOB (see :class:`IdlePolicy`):
+
+        * an ``UN_GATED`` job runs on its own cadence — no idle probe
+          at all (the pre-2026-11-18 behaviour starved EVERY job on a
+          continuously busy nest);
+        * an ``IDLE_GATED`` job keeps the idle probe, UNLESS its
+          ``max_staleness_hours`` guarantee has been exceeded — the
+          escape hatch that restores the guaranteed eventual execution
+          for the two reclaim jobs (the checkpoint reclaim and the
+          VACUUM), whose contention with live traffic is real.
+        """
         for job in self._jobs:
             if not self._is_due(job):
                 continue
 
-            # ``_is_idle`` is async because it wraps a sync ``list_all_pending``
-            # DB call in ``asyncio.to_thread`` to keep the event loop responsive
-            # under SQLite WAL write contention.
-            if not await self._is_idle():
-                logger.info(f"Skipping {job.name}: system not idle")
-                continue
+            # ITEM 2 (review cycle 1): ``forced`` is computed ONLY for
+            # idle-gated jobs. An override on an UN_GATED job is inert
+            # (set_max_staleness_hours refuses it, and hydration skips
+            # it) — but even if a stale attribute ever survived, the
+            # policy conjunction below keeps the "despite a busy
+            # system" line TRUTHFUL: it must never print for a job
+            # that was never waiting on the gate.
+            gated = job.idle_policy == IdlePolicy.IDLE_GATED
+            forced = gated and self._is_stale(job)
+            if gated and not forced:
+                # ``_is_idle`` is async because it wraps a sync ``list_all_pending``
+                # DB call in ``asyncio.to_thread`` to keep the event loop responsive
+                # under SQLite WAL write contention.
+                if not await self._is_idle():
+                    self._record_skip(job, "system not idle")
+                    continue
+            elif forced:
+                logger.warning(
+                    "Maintenance job '%s' running despite a busy system: "
+                    "max_staleness_hours=%s exceeded (last_success_ts=%s) "
+                    "— the guaranteed-execution override fired",
+                    job.name,
+                    job.max_staleness_hours,
+                    (
+                        job.last_success_ts.isoformat()
+                        if job.last_success_ts is not None
+                        else "never"
+                    ),
+                )
 
             try:
+                # Stamp the ATTEMPT before the call: a job that keeps
+                # attempting (even failing) is not starved, so the
+                # staleness escape hatch must not turn a persistently
+                # failing job into an every-tick runner.
+                job.last_attempt_ts = utcnow()
                 await job.execute_fn()
                 job.last_run = utcnow()
+                job.last_success_ts = job.last_run
+                job.consecutive_skips = 0
                 logger.info(f"Maintenance job '{job.name}' completed successfully")
             except Exception as e:
                 logger.error(f"Maintenance job '{job.name}' failed: {e}")
                 # Don't update last_run — will retry next cycle
+
+    def _is_stale(self, job: MaintenanceJob) -> bool:
+        """Has this job exceeded its ``max_staleness_hours`` guarantee?
+
+        The guarantee is the anti-starvation escape hatch: a job that
+        has not even ATTEMPTED for longer than ``max_staleness_hours``
+        runs EVEN when the system is busy. The reference clock is the
+        last attempt (in memory), then the persisted last-success,
+        then the in-memory ``last_run``, then the process-start anchor
+        (so a fresh install gets its guaranteed execution measured
+        from boot instead of firing heavy work instantly under load).
+
+        The ATTEMPT clock comes first on purpose: a job that keeps
+        attempting (even failing) is not starved, and the escape hatch
+        must not turn a persistently failing job into an every-tick
+        runner on a busy system.
+
+        ``max_staleness_hours`` of ``None`` means "no guarantee"
+        (⇒ never stale); a value ``<= 0`` disables the guarantee
+        explicitly (the persisted override can set 0 to switch the
+        escape hatch off for one job).
+        """
+        if job.max_staleness_hours is None or job.max_staleness_hours <= 0:
+            return False
+        reference = (
+            job.last_attempt_ts
+            or job.last_success_ts
+            or job.last_run
+            or self._started_at
+        )
+        elapsed_hours = (utcnow() - reference).total_seconds() / 3600
+        return elapsed_hours >= job.max_staleness_hours
+
+    def _record_skip(self, job: MaintenanceJob, reason: str) -> None:
+        """Record one idle-gate skip (the skip-streak telemetry).
+
+        The FIRST skip of a streak logs at WARNING (carrying the
+        consecutive-skip count and the last-success timestamp); every
+        LATER skip of the same streak logs at DEBUG — the streak itself
+        is the signal, and an hour of identical WARNING lines would
+        only dilute it. The counter resets on the next success.
+        """
+        job.consecutive_skips += 1
+        last_success = (
+            job.last_success_ts.isoformat()
+            if job.last_success_ts is not None
+            else "never"
+        )
+        if job.consecutive_skips == 1:
+            logger.warning(
+                "Maintenance job '%s' skipped (%s): consecutive_skips=1 "
+                "last_success_ts=%s",
+                job.name,
+                reason,
+                last_success,
+            )
+        else:
+            logger.debug(
+                "Maintenance job '%s' skipped (%s): consecutive_skips=%d "
+                "last_success_ts=%s",
+                job.name,
+                reason,
+                job.consecutive_skips,
+                last_success,
+            )
+
+    def job_metrics(self) -> dict[str, dict[str, Any]]:
+        """One metric block per registered job.
+
+        ``last_success_ts`` (ISO-8601 UTC; ``None`` when the job has
+        never succeeded) + ``consecutive_skips`` (the current idle-gate
+        skip streak). This is the standing observability surface for
+        the starvation class: a job whose ``consecutive_skips`` keeps
+        climbing while ``last_success_ts`` stays old is starving.
+        """
+        return {
+            job.name: {
+                "last_success_ts": (
+                    job.last_success_ts.isoformat()
+                    if job.last_success_ts is not None
+                    else None
+                ),
+                "consecutive_skips": job.consecutive_skips,
+            }
+            for job in self._jobs
+        }
+
+    async def hydrate_persisted_state(self) -> None:
+        """Hydrate the per-job clock + staleness override from storage.
+
+        THE RESTART-CLOCK INVARIANT (wi-4d1fa093): ``last_run`` lived
+        ONLY in the in-memory job dict, so a daemon restart reset the
+        clock — the re-registered job looked "never run" and its
+        interval restarted from zero. The persisted last-success (the
+        ``maintenance_runs`` audit rows) is now the source of truth.
+
+        The persisted ``max_staleness_hours`` override WINS over the
+        built-in default (:data:`JOB_MAX_STALENESS_HOURS`).
+
+        Fail-soft per job: a storage problem leaves that job's
+        in-memory state untouched (it then behaves exactly as before
+        this change).
+        """
+        store = self._state_store
+        if store is None:
+            return
+        for job in self._jobs:
+            try:
+                last_success = await asyncio.to_thread(
+                    store.load_last_success, job.name
+                )
+            except Exception as e:  # noqa: BLE001 — hydration MUST NOT break boot
+                logger.warning(
+                    f"Maintenance state hydration failed for "
+                    f"{job.name} (last_success): {e}"
+                )
+                last_success = None
+            if last_success is not None:
+                job.last_success_ts = last_success
+                # An explicitly seeded ``last_run`` (register(last_run=))
+                # wins — it is a more specific signal than the audit row.
+                if job.last_run is None:
+                    job.last_run = last_success
+            try:
+                persisted = await asyncio.to_thread(
+                    store.load_max_staleness_hours, job.name
+                )
+            except Exception as e:  # noqa: BLE001 — hydration MUST NOT break boot
+                logger.warning(
+                    f"Maintenance state hydration failed for "
+                    f"{job.name} (max_staleness_hours): {e}"
+                )
+                persisted = None
+            if persisted is not None:
+                # ITEM 2 (review cycle 1): the staleness guarantee is
+                # meaningful ONLY for an idle-gated job (it is the
+                # escape hatch from a gate the job actually waits on).
+                # Applying it to an UN_GATED job would be inert at
+                # best — and, before the policy conjunction in
+                # ``_run_pending_jobs``, could emit a false "despite a
+                # busy system" line. The policy is therefore part of
+                # the application predicate, not merely of the log.
+                if job.idle_policy == IdlePolicy.IDLE_GATED:
+                    job.max_staleness_hours = persisted
+                else:
+                    logger.debug(
+                        "maintenance state hydration: ignoring a "
+                        "persisted max_staleness_hours override for "
+                        "un-gated job '%s' (inert by design)",
+                        job.name,
+                    )
+
+    async def set_max_staleness_hours(
+        self, job_name: str, hours: float | None
+    ) -> bool:
+        """Persist a ``max_staleness_hours`` override for one job.
+
+        ``hours=None`` clears the override (the built-in default
+        applies again); ``hours=0`` disables the guarantee for that
+        job.
+
+        Returns ``True`` only when the job exists AND the value was
+        genuinely applied: with a store wired, the persisted override
+        must have actually been written — a store-side raise (or a
+        ``set_metadata`` that silently no-ops because the system
+        project is absent) returns ``False`` and leaves the in-memory
+        value untouched, rather than reporting a persistence that did
+        not happen.
+
+        The staleness guarantee is the escape hatch from the IDLE
+        gate, so it is meaningful only for an ``IDLE_GATED`` job: an
+        override targeting an ``UN_GATED`` job is refused (``False``,
+        nothing persisted, nothing applied) rather than accepted as
+        inert configuration that would later invite a false
+        "running despite a busy system" log line.
+        """
+        job = next((j for j in self._jobs if j.name == job_name), None)
+        if job is None:
+            return False
+        if job.idle_policy != IdlePolicy.IDLE_GATED:
+            logger.warning(
+                "Refusing max_staleness_hours override for '%s': the "
+                "job is UN_GATED, so the staleness escape hatch is "
+                "inert (nothing persisted, nothing applied)",
+                job_name,
+            )
+            return False
+        store = self._state_store
+        if store is not None:
+            try:
+                await asyncio.to_thread(
+                    store.save_max_staleness_hours, job_name, hours
+                )
+            except Exception as e:  # noqa: BLE001 — a failed write MUST NOT lie
+                logger.warning(
+                    f"Failed to persist max_staleness_hours for "
+                    f"{job_name}: {e}"
+                )
+                return False
+        job.max_staleness_hours = (
+            hours
+            if hours is not None
+            else JOB_MAX_STALENESS_HOURS.get(job_name)
+        )
+        return True
 
     async def is_idle(self) -> bool:
         """Public idle probe — thin wrapper over :meth:`_is_idle`.
@@ -288,6 +1009,12 @@ class MaintenanceService:
         ``None`` returns from the inner probe (e.g. a missing
         ``_task_repository``) collapse to ``True`` (idle — no
         refusal). Same fail-soft semantics as the private method.
+
+        NOTE (fix/idle-gate-recency, 2026-11-24): the private probe now
+        fails CLOSED on an undeterminable idle state (a probe error ⇒
+        "not idle"), so the exception branch here is reached only for an
+        error raised OUTSIDE the probe itself. The advisory signal stays
+        advisory either way — a busy signal does NOT refuse an execute.
         """
         try:
             return await self._is_idle()
@@ -324,96 +1051,158 @@ class MaintenanceService:
         return elapsed_hours >= job.min_interval_hours
 
     async def _is_idle(self) -> bool:
-        """Check if the system is idle (no active work).
+        """Check if the system is idle (no RECENT work).
 
         System is considered idle when ALL of the following hold:
-        - No non-deferred tasks in PENDING or RUNNING status, system-wide
-          (shared ``TaskRepository.has_active_non_deferred_work`` predicate;
-          also folded into ``claim_pending_task`` so the gate and the
-          claim path never disagree — Phase 1 of the defer-seam bugfix,
+        - No RECENT non-deferred tasks in PENDING or RUNNING status,
+          system-wide (shared ``TaskRepository.has_active_non_deferred_work``
+          predicate; also folded into ``claim_pending_task`` so the gate and
+          the claim path never disagree — Phase 1 of the defer-seam bugfix,
           2026-06-30).
-        - No JobItems with ``admission_state`` in ('queued', 'active')
+        - No RECENT JobItems with ``admission_state`` in ('queued', 'active')
           (covers the full admission lifecycle: work waiting to start AND
           work in-flight that holds the queue lock — ``list_all_pending``
           alone missed the 'active' bucket).
         - No active LLM requests in the request registry.
 
+        **RECENCY-BOUNDED witness set (fix/idle-gate-recency,
+        2026-11-24):** "idle" now means "no RECENT meaningful activity",
+        not "no non-terminal row exists". The production path consults
+        ``JobRepository.has_recent_active_work`` — the same work shapes
+        (queued/active job rows on ANY queue, settled ``message`` mirrors
+        of non-terminal instances, in-flight non-deferred tasks) but each
+        witness only counts when the work item itself was created within
+        the activity window (``ENSEMBLE_IDLE_GATE_ACTIVITY_WINDOW_MINUTES``,
+        default 30 minutes, read per evaluation; ``0`` disables the bound
+        and restores the pre-2026-11-24 unbounded semantics).
+
+        WHY (measured on live ensemble_prod, 2026-11-23/24): the
+        unbounded witness set was held forever by the nest's NORMAL SHAPE —
+        always-on sessions whose settled mirrors and long-settled job rows
+        never stop counting — so EVERY idle-gated sweep was starved (the
+        background queue had not drained since 2026-11-14T17:44:35Z and the
+        blueprint pending-lease reaper could never fire: it is registered
+        without an ``idle_policy`` ⇒ ``IDLE_GATED``, and it carries no
+        ``max_staleness_hours`` escape hatch).
+
+        The legacy unbounded probes below are kept for the mock / partial
+        wiring path (a non-``bool`` probe result ⇒ the legacy probes run).
+
+        Fail-CLOSED: a probe error returns False (BUSY) — the safe
+        direction for a gate that protects live work.
+
         Returns:
             True if system is idle and can run maintenance tasks.
         """
-        # 1. Check for active non-deferred tasks (system-wide).
-        # This is the shared ``has_active_non_deferred_work`` predicate
-        # used by ``claim_pending_task`` and other defer-queue call sites
-        # — keeping the gate in sync with the claim path is the whole
-        # point of the Phase 1 refactor (Category B in the bugfix plan).
-        # Wrapped in ``asyncio.to_thread`` because the predicate is a sync
-        # SQLModel/SQLAlchemy call that takes a connection from the engine
-        # pool under SQLite WAL — same rationale as ``list_all_pending``
-        # below. If ``_task_repository`` was never wired (e.g. partial
-        # init or test setup that doesn't care about tasks), the probe is
-        # skipped, matching the existing "missing dependency ⇒ skip the
-        # check" pattern.
+        # 0. RECENCY-BOUNDED busy probe (production path).
         #
-        # Phase 2 (defer-queue idle gate, 2026-07-23): check both
-        # work-tracking tables. The job predicate catches active admission
-        # lifecycle rows, while the task predicate below catches active Tasks
-        # that have no backing JobItem. A non-bool job result is ignored so a
-        # loosely configured Mock cannot make the system look busy.
+        # fix/idle-gate-recency (2026-11-24): the probe that replaced the
+        # unbounded witness set. It covers the job rows AND the task rows
+        # in one query and is recency-bounded (a witness counts only when
+        # the work item was created within the activity window).
+        #
+        # A non-``bool`` result means the repository is a test double
+        # (a ``MagicMock`` returns a truthy Mock) — the legacy probes
+        # below then decide, exactly as before this change.
+        recency_probe_used = False
         if self._job_queue_service is not None:
             repo = getattr(self._job_queue_service, "_repository", None)
-            if repo is not None and hasattr(repo, "has_active_non_deferred_work"):
+            if repo is not None and hasattr(repo, "has_recent_active_work"):
+                try:
+                    busy = await asyncio.to_thread(repo.has_recent_active_work)
+                except Exception as e:
+                    # FAIL-CLOSED on ambiguity: an undeterminable idle
+                    # state must be treated as BUSY (the sweeps defer).
+                    logger.warning(
+                        f"Maintenance idle probe failed: {e} — failing "
+                        "CLOSED (system treated as BUSY; sweeps defer)"
+                    )
+                    return False
+                if isinstance(busy, bool):
+                    recency_probe_used = True
+                    if busy:
+                        return False
+        if not recency_probe_used:
+            # The LEGACY unbounded probes (job defer-predicate + task
+            # defer-predicate + queued/active JobItem probes). They run
+            # ONLY when the recency-bounded probe above did not answer
+            # (a test double / partial wiring). Running them in the
+            # production path would re-introduce the starvation: they
+            # treat the mere EXISTENCE of a non-terminal row as busy.
+            #
+            # 1. Check for active non-deferred tasks (system-wide).
+            # This is the shared ``has_active_non_deferred_work`` predicate
+            # used by ``claim_pending_task`` and other defer-queue call sites
+            # — keeping the gate in sync with the claim path is the whole
+            # point of the Phase 1 refactor (Category B in the bugfix plan).
+            # Wrapped in ``asyncio.to_thread`` because the predicate is a sync
+            # SQLModel/SQLAlchemy call that takes a connection from the engine
+            # pool under SQLite WAL — same rationale as ``list_all_pending``
+            # below. If ``_task_repository`` was never wired (e.g. partial
+            # init or test setup that doesn't care about tasks), the probe is
+            # skipped, matching the existing "missing dependency ⇒ skip the
+            # check" pattern.
+            #
+            # Phase 2 (defer-queue idle gate, 2026-07-23): check both
+            # work-tracking tables. The job predicate catches active admission
+            # lifecycle rows, while the task predicate below catches active Tasks
+            # that have no backing JobItem. A non-bool job result is ignored so a
+            # loosely configured Mock cannot make the system look busy.
+            if self._job_queue_service is not None:
+                repo = getattr(self._job_queue_service, "_repository", None)
+                if repo is not None and hasattr(repo, "has_active_non_deferred_work"):
+                    try:
+                        has_work = await asyncio.to_thread(
+                            repo.has_active_non_deferred_work, None
+                        )
+                        if isinstance(has_work, bool) and has_work:
+                            return False
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to check job repository: has_active_non_deferred_work: {e}"
+                        )
+            if self._task_repository is not None:
                 try:
                     has_work = await asyncio.to_thread(
-                        repo.has_active_non_deferred_work, None
+                        self._task_repository.has_active_non_deferred_work, None
                     )
-                    if isinstance(has_work, bool) and has_work:
+                    if has_work:
                         return False
                 except Exception as e:
-                    logger.warning(
-                        f"Failed to check job repository: has_active_non_deferred_work: {e}"
-                    )
-        if self._task_repository is not None:
-            try:
-                has_work = await asyncio.to_thread(
-                    self._task_repository.has_active_non_deferred_work, None
-                )
-                if has_work:
-                    return False
-            except Exception as e:
-                logger.warning(f"Failed to check task repository: {e}")
+                    logger.warning(f"Failed to check task repository: {e}")
 
-        # 2. Check for queued or active JobItems (queue-policy state).
-        # ``list_all_pending`` only sees ``admission_state='queued'``;
-        # ``find_processing_jobs`` only sees ``admission_state='active'``.
-        # Both must be checked to cover the full admission lifecycle — a
-        # job that has been claimed and is executing still holds the queue
-        # lock and must keep the maintenance job from running. Each call
-        # is wrapped in ``asyncio.to_thread`` so SQLite WAL write
-        # contention cannot block the event loop. This loop runs every
-        # ``check_interval_minutes`` (default 15); if a pending query
-        # deadlocks the event loop, the entire daemon freezes — same
-        # root cause as the ``notify_watchers`` / ``enqueue_message``
-        # deadlock chain.
-        #
-        # ``len(...)`` is used for the truthiness check (not ``if x:``)
-        # so the gate remains correct under ``MagicMock`` test doubles
-        # that don't explicitly stub ``find_processing_jobs`` — a
-        # bare ``MagicMock()`` is truthy via ``__bool__`` but reports
-        # ``len() == 0`` via ``__len__``, matching the production
-        # "empty list ⇒ idle" semantics. ``list_all_pending`` is already
-        # explicitly stubbed by every test (``MagicMock(return_value=[])``)
-        # so plain truthiness is safe for it.
-        if self._job_queue_service is not None:
-            try:
-                repo = self._job_queue_service._repository
-                pending = await asyncio.to_thread(repo.list_all_pending)
-                if pending:
-                    return False
-                processing = await asyncio.to_thread(repo.find_processing_jobs)
-                if len(processing) > 0:
-                    return False
-            except Exception as e:
-                logger.warning(f"Failed to check job queue: {e}")
+            # 2. Check for queued or active JobItems (queue-policy state).
+            # ``list_all_pending`` only sees ``admission_state='queued'``;
+            # ``find_processing_jobs`` only sees ``admission_state='active'``.
+            # Both must be checked to cover the full admission lifecycle — a
+            # job that has been claimed and is executing still holds the queue
+            # lock and must keep the maintenance job from running. Each call
+            # is wrapped in ``asyncio.to_thread`` so SQLite WAL write
+            # contention cannot block the event loop. This loop runs every
+            # ``check_interval_minutes`` (default 15); if a pending query
+            # deadlocks the event loop, the entire daemon freezes — same
+            # root cause as the ``notify_watchers`` / ``enqueue_message``
+            # deadlock chain.
+            #
+            # ``len(...)`` is used for the truthiness check (not ``if x:``)
+            # so the gate remains correct under ``MagicMock`` test doubles
+            # that don't explicitly stub ``find_processing_jobs`` — a
+            # bare ``MagicMock()`` is truthy via ``__bool__`` but reports
+            # ``len() == 0`` via ``__len__``, matching the production
+            # "empty list ⇒ idle" semantics. ``list_all_pending`` is already
+            # explicitly stubbed by every test (``MagicMock(return_value=[])``)
+            # so plain truthiness is safe for it.
+            if self._job_queue_service is not None:
+                try:
+                    repo = self._job_queue_service._repository
+                    pending = await asyncio.to_thread(repo.list_all_pending)
+                    if pending:
+                        return False
+                    processing = await asyncio.to_thread(repo.find_processing_jobs)
+                    if len(processing) > 0:
+                        return False
+                except Exception as e:
+                    logger.warning(f"Failed to check job queue: {e}")
 
         # 3. Check for active LLM requests
         if self._request_registry is not None:
@@ -423,6 +1212,222 @@ class MaintenanceService:
         return True
 
 
+# ── Section 0b: persisted maintenance job state (wi-4d1fa093) ─────────
+#
+# The restart-clock invariant needs a persistence seam: the per-job
+# last-success (hydrated from storage at boot) and the per-job
+# ``max_staleness_hours`` override. The seam is deliberately narrow
+# (three methods) so the unit pack can drive it with a fake, and the
+# production implementation is backed by EXISTING storage surfaces
+# only — ZERO new migrations.
+
+
+class MaintenanceStateStore(Protocol):
+    """Persistence seam for the per-job maintenance state.
+
+    All methods are SYNCHRONOUS — the service calls them through
+    ``asyncio.to_thread`` (the project-wide pattern for the sync
+    SQLAlchemy repositories).
+    """
+
+    def load_last_success(self, job_name: str) -> datetime | None:
+        """The persisted last SUCCESSFUL run of ``job_name``.
+
+        ``None`` when the job has never succeeded (or has no persisted
+        audit trail).
+        """
+        ...
+
+    def load_max_staleness_hours(self, job_name: str) -> float | None:
+        """The persisted ``max_staleness_hours`` override, or ``None``."""
+        ...
+
+    def save_max_staleness_hours(
+        self, job_name: str, hours: float | None
+    ) -> None:
+        """Persist (or clear) the ``max_staleness_hours`` override."""
+        ...
+
+
+class DbMaintenanceStateStore:
+    """The production state store — EXISTING storage surfaces only.
+
+    * **last-success** → the ``maintenance_runs`` audit table (the
+      Section-1 table; migration
+      ``20260927_000001_create_maintenance_runs_table.sql``). Only the
+      jobs that write Section-1 audit rows have a persisted
+      last-success (:data:`JOB_MAINTENANCE_SECTIONS`); every other
+      job falls back to the process-start anchor.
+    * **max_staleness_hours** → the project-metadata KV
+      (``maintenance.job_state`` on the system default project) — the
+      SAME existing KV surface the blueprint daily scan uses for its
+      persisted last-run (``blueprint_scan_last_run``).
+
+    Both surfaces already exist: this class adds NO table, NO column
+    and NO migration.
+
+    Every method is fail-soft: a missing table, an absent project or
+    a corrupt value degrades to "no persisted state" (never raises
+    into the maintenance loop).
+    """
+
+    #: The project-metadata KV key holding the per-job state blob.
+    KV_KEY = "maintenance.job_state"
+
+    def __init__(
+        self,
+        engine: Engine | None = None,
+        project_repository: Any = None,
+        system_project_id: str | None = None,
+    ) -> None:
+        self._engine = engine
+        self._project_repository = project_repository
+        self._system_project_id = system_project_id or MAINTENANCE_SYSTEM_PROJECT_ID
+
+    # ── last-success (maintenance_runs) ───────────────────────────
+
+    def load_last_success(self, job_name: str) -> datetime | None:
+        """The persisted last SUCCESSFUL run of ``job_name``.
+
+        ``None`` when the job has never succeeded (or has no persisted
+        audit trail).
+
+        AM-9 kind semantics (the module convention —
+        ``MaintenanceRunsRepository.latest_completed_for_section``):
+        the persisted LAST SUCCESS is the latest ``succeeded`` row of a kind in
+        ``{auto, manual_execute}``; **``manual_dry_run`` NEVER
+        surfaces**. A dry run mutates nothing, so its ``succeeded``
+        row must not hydrate as a success — otherwise a newer dry-run
+        row would push the real last-success forward and delay the
+        next auto reclaim by up to ``max_staleness_hours``. A real
+        ``manual_execute`` IS a genuine run and counts alongside
+        ``auto``.
+        """
+        section = JOB_MAINTENANCE_SECTIONS.get(job_name)
+        if section is None or self._engine is None:
+            return None
+        try:
+            with self._engine.connect() as conn:
+                row = conn.execute(
+                    text(
+                        "SELECT completed_at FROM maintenance_runs "
+                        "WHERE section = :section "
+                        "AND status = 'succeeded' "
+                        # AM-9: manual_dry_run NEVER surfaces (it
+                        # mutates nothing — it is not a run).
+                        "AND kind IN ('auto', 'manual_execute') "
+                        "AND completed_at IS NOT NULL "
+                        "ORDER BY completed_at DESC LIMIT 1"
+                    ),
+                    {"section": section},
+                ).first()
+        except Exception as e:  # noqa: BLE001 — a missing table is not fatal
+            logger.warning(
+                f"maintenance last-success lookup failed for "
+                f"{job_name} (section={section}): {e}"
+            )
+            return None
+        if row is None:
+            return None
+        return _parse_iso_utc(row[0])
+
+    # ── max_staleness_hours override (project metadata KV) ────────
+
+    def _read_state_blob(self) -> dict:
+        if self._project_repository is None:
+            return {}
+        try:
+            blob = self._project_repository.get_metadata(
+                self._system_project_id, self.KV_KEY
+            )
+        except Exception as e:  # noqa: BLE001 — degrade to "no state"
+            logger.warning(
+                f"maintenance job-state KV read failed: {e}"
+            )
+            return {}
+        return blob if isinstance(blob, dict) else {}
+
+    def load_max_staleness_hours(self, job_name: str) -> float | None:
+        blob = self._read_state_blob()
+        entry = blob.get(job_name)
+        if not isinstance(entry, dict):
+            return None
+        raw = entry.get("max_staleness_hours")
+        if raw is None:
+            return None
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                f"maintenance job-state KV holds a non-numeric "
+                f"max_staleness_hours for {job_name}: {raw!r}"
+            )
+            return None
+
+    def save_max_staleness_hours(
+        self, job_name: str, hours: float | None
+    ) -> None:
+        """Persist (or clear) the ``max_staleness_hours`` override.
+
+        Raises when the write did NOT apply — a missing project
+        repository, or a ``set_metadata`` that returned ``None`` (the
+        system-default project row is absent, so nothing was written).
+        The caller (:meth:`MaintenanceService.set_max_staleness_hours`)
+        turns the raise into an honest ``False`` — a silently dropped
+        override must never be reported as persisted.
+        """
+        if self._project_repository is None:
+            raise RuntimeError(
+                "no project repository wired — max_staleness_hours "
+                "override not persisted"
+            )
+        blob = self._read_state_blob()
+        entry = blob.get(job_name)
+        if not isinstance(entry, dict):
+            entry = {}
+        if hours is None:
+            entry.pop("max_staleness_hours", None)
+        else:
+            entry["max_staleness_hours"] = float(hours)
+        blob[job_name] = entry
+        try:
+            result = self._project_repository.set_metadata(
+                self._system_project_id, self.KV_KEY, blob
+            )
+        except Exception as e:  # noqa: BLE001 — a failed write is not fatal
+            logger.warning(
+                f"maintenance job-state KV write failed for "
+                f"{job_name}: {e}"
+            )
+            raise
+        if result is None:
+            # ``set_metadata`` returns None when the system-default
+            # project row is absent — the write was a silent no-op.
+            raise RuntimeError(
+                f"set_metadata returned None (system project "
+                f"{self._system_project_id!r} absent) — override not "
+                f"persisted"
+            )
+
+
+def _parse_iso_utc(raw: Any) -> datetime | None:
+    """Parse an ISO-8601 timestamp into an aware UTC datetime.
+
+    Text ISO timestamps sort lexicographically (the repository
+    convention), so a naive value is assumed to be UTC. An unparsable
+    value degrades to ``None`` (never raises).
+    """
+    if raw is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 # ── Section 1: CheckpointCleanup summary shape ──────────────────────────────────
 #
 # T1.2/1.3 — Section 1 of the Maintenance Console surfaces structured
@@ -430,6 +1435,151 @@ class MaintenanceService:
 # the per-cycle numbers, plus a ``to_summary_dict`` that emits the
 # FROZEN wire shape (plan-overview §2 — ``/status`` ``last_run.summary``
 # block + the dry-run response shape; see INV-5 / AM-11).
+
+
+@dataclass
+class TerminalReapSummary:
+    """One cycle's Op B2 (terminal-thread full reap) counters.
+
+    Op B2 is the TIGHTER-age sibling of Op B: a terminal instance
+    whose ``updated_at`` is older than the reap bound loses its whole
+    CHECKPOINT FOOTPRINT (``checkpoints`` + ``checkpoint_writes`` +
+    ``checkpoint_blobs`` for that thread) while its instance ROW and
+    its conversation (``message_queue``) survive.
+
+    The counters are the audit surface — a cycle that reaps nothing
+    and a cycle that was switched off must be distinguishable from
+    the row alone, so ``skipped_reason`` names the latter explicitly.
+    """
+
+    #: The age bound the cycle applied (hours).
+    age_hours: int = 0
+    #: The per-cycle batch bound the cycle applied (threads).
+    batch_bound: int = 0
+    #: Terminal instances past the bound (before the batch bound).
+    candidates: int = 0
+    #: Threads whose checkpoint footprint was reaped.
+    reaped_threads: int = 0
+    #: Candidates skipped because the instance was no longer terminal
+    #: at the TOCTOU re-read (a revive landed between the listing and
+    #: the delete).
+    skipped_not_terminal: int = 0
+    #: Candidates skipped because the instance is in a PINNED subtree.
+    skipped_pinned: int = 0
+    #: Per-candidate failures (never raised — the leg is isolated).
+    errors: int = 0
+    #: Why the leg did nothing at all (``None`` when it ran):
+    #: ``"kill_switch"`` / ``"protected_set_unavailable"`` /
+    #: ``"candidate_listing_failed"``.
+    skipped_reason: str | None = None
+
+    def to_summary_dict(self) -> dict[str, Any]:
+        """The ``terminal_reap`` block of ``maintenance_runs.summary_json``."""
+        return {
+            "age_hours": self.age_hours,
+            "batch_bound": self.batch_bound,
+            "candidates": self.candidates,
+            "reaped_threads": self.reaped_threads,
+            "skipped_not_terminal": self.skipped_not_terminal,
+            "skipped_pinned": self.skipped_pinned,
+            "errors": self.errors,
+            "skipped_reason": self.skipped_reason,
+        }
+
+
+@dataclass
+class BackstopPruneSummary:
+    """One backstop run's counters.
+
+    The backstop is the ANTI-STARVATION path: a bounded per-thread
+    prune + blob reclaim on a wall-clock cadence that does NOT consult
+    the idle gate. It is deliberately SMALL per run (the pair budget)
+    so that running it on a continuously busy nest stays cheap.
+    """
+
+    #: The pair budget this run applied.
+    pair_budget: int = 0
+    #: Pairs found over the retention cap (before the budget).
+    excess_pairs: int = 0
+    #: Pairs actually pruned this run.
+    pruned_pairs: int = 0
+    #: Checkpoint rows deleted this run.
+    deleted_checkpoints: int = 0
+    #: Write rows deleted this run.
+    deleted_writes: int = 0
+    #: Blob rows deleted this run.
+    deleted_blobs: int = 0
+    #: Bytes freed by the blob delete (the adapter's measured value).
+    bytes_freed: int = 0
+    #: Per-pair failures (never raised).
+    errors: int = 0
+    #: Why the run did nothing (``None`` when it ran):
+    #: ``"kill_switch"`` / ``"pair_scan_failed"``.
+    skipped_reason: str | None = None
+
+    def to_summary_dict(self) -> dict[str, Any]:
+        """The ``backstop`` block of ``maintenance_runs.summary_json``."""
+        return {
+            "pair_budget": self.pair_budget,
+            "excess_pairs": self.excess_pairs,
+            "pruned_pairs": self.pruned_pairs,
+            "deleted_checkpoints": self.deleted_checkpoints,
+            "deleted_writes": self.deleted_writes,
+            "deleted_blobs": self.deleted_blobs,
+            "bytes_freed": self.bytes_freed,
+            "errors": self.errors,
+            "skipped_reason": self.skipped_reason,
+        }
+
+
+@dataclass
+class BlobBytesGuard:
+    """The checkpoint_blobs BYTES guard of one maintenance cycle.
+
+    THE SIGNAL IS BYTES, NOT DEAD TUPS: the bloat class this guard
+    exists to surface is dead-tuple-BLIND (the measured incident:
+    ``n_dead_tup`` = 0 on a relation carrying ~39.1GiB of TOAST).
+
+    The guard ALERTS and COUNTS. It never reclaims — the space returns
+    only via a rewrite (the escalation lane's decision), and the
+    guard's promise is "relieve growth", never "return the space".
+    """
+
+    #: The measurement reached the server.
+    ran: bool = False
+    #: Why it did not run (``None`` when it ran): ``kill_switch`` /
+    #: ``no_shared_engine`` / ``not_postgresql`` /
+    #: ``engine_build_failed`` / ``query_failed``.
+    skipped_reason: str | None = None
+    #: The alert threshold the cycle applied (bytes).
+    threshold_bytes: int = 0
+    #: ``pg_total_relation_size`` of ``checkpoint_blobs`` (heap + TOAST
+    #: + indexes).
+    total_bytes: int = 0
+    #: The heap alone.
+    heap_bytes: int = 0
+    #: The TOAST relation (``reltoastrelid``) — where the mass lives.
+    toast_bytes: int = 0
+    #: The total is ABOVE the threshold.
+    over_threshold: bool = False
+    #: The operator-visible alert was emitted this cycle.
+    alerted: bool = False
+    #: The measurement timestamp.
+    captured_at: str = ""
+
+    def to_summary_dict(self) -> dict[str, Any]:
+        """The ``blob_bytes_guard`` block of ``maintenance_runs.summary_json``."""
+        return {
+            "ran": self.ran,
+            "skipped_reason": self.skipped_reason,
+            "threshold_bytes": self.threshold_bytes,
+            "total_bytes": self.total_bytes,
+            "heap_bytes": self.heap_bytes,
+            "toast_bytes": self.toast_bytes,
+            "over_threshold": self.over_threshold,
+            "alerted": self.alerted,
+            "captured_at": self.captured_at,
+        }
 
 
 @dataclass
@@ -744,6 +1894,14 @@ class CheckpointRunResult:
     # docstring). ``None`` ⇒ the cycle took no census (the key is
     # absent from the summary — an absent census is NOT a zero census).
     version_census: "CheckpointVersionCensus | None" = None
+    # SCOPE (c) — the Op B2 (terminal-thread full reap) block. ADDITIVE
+    # (no existing key is renamed or removed). ``None`` ⇒ the cycle
+    # took no terminal reap (the key is absent from the summary).
+    terminal_reap: "TerminalReapSummary | None" = None
+    # ITEM 2 (SCOPE (c)) — the checkpoint_blobs BYTES guard block.
+    # ADDITIVE. ``None`` ⇒ the cycle took no measurement (the key is
+    # absent from the summary).
+    blob_bytes_guard: "BlobBytesGuard | None" = None
 
     def to_summary_dict(self) -> dict[str, Any]:
         """The FROZEN wire shape (plan-overview §2 — last_run.summary)."""
@@ -766,6 +1924,18 @@ class CheckpointRunResult:
             # took a census. Additive only: no existing key is renamed
             # or removed.
             summary["version_census"] = self.version_census.to_summary_dict()
+        if self.terminal_reap is not None:
+            # SCOPE (c) — additive key: the Op B2 (terminal-thread full
+            # reap) counters. An absent block means the cycle took no
+            # reap; a present block with ``skipped_reason`` names why.
+            summary["terminal_reap"] = self.terminal_reap.to_summary_dict()
+        if self.blob_bytes_guard is not None:
+            # ITEM 2 (SCOPE (c)) — additive key: the checkpoint_blobs
+            # BYTES guard. The occupancy signal is bytes, NOT dead
+            # tuples (the bloat class is dead-tuple-blind).
+            summary["blob_bytes_guard"] = (
+                self.blob_bytes_guard.to_summary_dict()
+            )
         return summary
 
 
@@ -1035,6 +2205,24 @@ class CheckpointCleanupJob:
             # Operation B: Cleanup expired terminal instances
             await self._cleanup_expired_terminal()
 
+            # Operation B2 (SCOPE (c), 2026-11-24): the terminal-thread
+            # FULL reap — the TIGHTER-age sibling of Op B. It closes the
+            # measured escape (the churn class = the MOST RECENT rows,
+            # which every age-ordered leg treats as "too recent"): a
+            # terminal instance past the (default 24h) bound loses its
+            # whole checkpoint footprint — checkpoints + writes + blobs
+            # — while its instance row and its conversation survive.
+            #
+            # Isolated like every other op: a failure here never stops
+            # the ops that follow.
+            try:
+                terminal_reap = await self._reap_terminal_threads()
+            except Exception as e:  # noqa: BLE001 — an op never breaks the cycle
+                logger.error(
+                    f"Terminal-thread reap operation failed: {e}", exc_info=True
+                )
+                terminal_reap = TerminalReapSummary()
+
             # Operation C: Enforce history cap
             await self._enforce_history_cap()
 
@@ -1087,11 +2275,25 @@ class CheckpointCleanupJob:
                 )
                 version_census = None
 
+            # ITEM 2 (SCOPE (c)) — the checkpoint_blobs BYTES guard.
+            # Taken AFTER the prune ops so the number describes the
+            # post-prune relation. Never wedges: a failed measurement is
+            # reported in the block itself.
+            try:
+                blob_bytes_guard = await self._collect_blob_bytes_guard()
+            except Exception as e:  # noqa: BLE001 — a guard never breaks a cycle
+                logger.error(
+                    f"Blob bytes guard failed: {e}", exc_info=True
+                )
+                blob_bytes_guard = BlobBytesGuard()
+
             result = CheckpointRunResult(
                 rows=rows_summary,
                 blobs=blobs_summary,
                 skipped_truncated=len(blobs_summary.skipped) > 1000,
                 version_census=version_census,
+                terminal_reap=terminal_reap,
+                blob_bytes_guard=blob_bytes_guard,
             )
 
             # T3 — terminal write on success.
@@ -1371,6 +2573,173 @@ class CheckpointCleanupJob:
 
         except Exception as e:
             logger.error(f"Expired terminal cleanup failed: {e}")
+
+    async def _reap_terminal_threads(self) -> TerminalReapSummary:
+        """(B2) Full checkpoint-footprint reap for AGED terminal instances.
+
+        THE ESCAPE THIS LEG CLOSES (SCOPE (c), measured 2026-11-24):
+        the churn class is "finished-but-unreaped threads" — the
+        fastest-growing rows are, by definition, the MOST RECENT ones,
+        and every instance-level reap leg in this job is AGE-ORDERED:
+        Op B's 168h TTL reads ``instances.updated_at`` (a terminal
+        instance's ``updated_at`` is its COMPLETION time, so a thread
+        that finished an hour ago is 167h59m from being reaped) and
+        Op C's history cap prunes the OLDEST first. Meanwhile the only
+        bound on a thread's mass — Op D's keep-N — is applied once per
+        CYCLE, so between cycles a thread grows without limit (the
+        measured prod census: 7,829 checkpoint rows on 93 terminal
+        instances, all written after the last cycle ran ≈ 30–40
+        rows/min).
+
+        THE PREDICATE (the Operation B shape, a TIGHTER bound):
+
+        * the candidate set is TERMINAL instances whose ``updated_at``
+          is older than ``now - ENSEMBLE_CHECKPOINT_TERMINAL_REAP_HOURS``
+          (default 24h — 7x tighter than the 168h TTL; the leader
+          adjudicates the aggressiveness, see the module docstring's
+          policy-options block);
+        * the join is the thread→instance join ALONE — the thread id IS
+          the instance id (no ``checkpoint_ns``, no ``version``, no
+          blob join: ``checkpoint_ns`` is ``''`` on every row by
+          construction, and ``version`` is a channel-mint string, so
+          neither is a usable join key);
+        * the PINNED subtree is excluded (the same protected set Op B
+          and Op C honour).
+
+        THE DISPOSITION: ``adelete_thread`` — the adapter's whole-thread
+        delete (checkpoints + checkpoint_writes + checkpoint_blobs, one
+        transaction). The INSTANCE ROW IS PRESERVED: the conversation
+        lives in ``message_queue`` and the UI keeps showing it; only
+        the checkpoint footprint (the resumable state + the blob mass)
+        is expendable. Op B still owns the instance-row deletion at
+        168h.
+
+        THE POSTURE (the Op D/E pattern):
+
+        * BOUNDED — a per-cycle batch bound (default 50 threads);
+        * NEVER RAISES — per-candidate and outer isolation;
+        * TOCTOU-GUARDED — the instance is re-read immediately before
+          the delete and a non-terminal row (a revive landed in
+          between) is SKIPPED, never reaped;
+        * PINNED-SAFE — the protected set is honoured, and a failure to
+          resolve it fails CLOSED (the leg does nothing rather than
+          reaping a pinned subtree);
+        * KILL-SWITCHED — ``ENSEMBLE_CHECKPOINT_TERMINAL_REAP=0``
+          disables the leg;
+        * COUNTED — the counters ride the ``terminal_reap`` block of the
+          cycle's audit row.
+
+        Returns:
+            The :class:`TerminalReapSummary` for this cycle.
+        """
+        summary = TerminalReapSummary()
+        summary.age_hours = max(
+            1, _env_int(TERMINAL_REAP_HOURS_ENV, DEFAULT_TERMINAL_REAP_HOURS)
+        )
+        summary.batch_bound = max(
+            1, _env_int(TERMINAL_REAP_BATCH_ENV, DEFAULT_TERMINAL_REAP_BATCH)
+        )
+
+        if not _env_flag(TERMINAL_REAP_KILL_SWITCH_ENV, True):
+            summary.skipped_reason = "kill_switch"
+            logger.info(
+                "checkpoint_cleanup: terminal-thread reap SKIPPED "
+                "(kill switch %s=0)",
+                TERMINAL_REAP_KILL_SWITCH_ENV,
+            )
+            return summary
+
+        try:
+            # The protected set FIRST, and fail-CLOSED: a pinned
+            # subtree must never be reaped, so an unreadable prefs
+            # store means the leg does nothing at all.
+            protected = self._get_protected_instance_ids()
+        except Exception as e:
+            summary.skipped_reason = "protected_set_unavailable"
+            logger.warning(
+                "checkpoint_cleanup: terminal-thread reap SKIPPED — the "
+                "pinned set could not be resolved (fail-closed; a pinned "
+                "subtree must never be reaped): %s",
+                e, exc_info=True,
+            )
+            return summary
+
+        cutoff = utcnow() - timedelta(hours=summary.age_hours)
+        try:
+            expired = self._find_expired_terminal_instances(cutoff)
+        except Exception as e:
+            summary.skipped_reason = "candidate_listing_failed"
+            logger.error(
+                "checkpoint_cleanup: terminal-thread reap candidate listing "
+                "failed: %s", e, exc_info=True,
+            )
+            return summary
+
+        summary.candidates = len(expired)
+        if not expired:
+            logger.info(
+                "checkpoint_cleanup: terminal-thread reap — no terminal "
+                "instance is older than %dh",
+                summary.age_hours,
+            )
+            return summary
+
+        candidates = [i for i in expired if i not in protected]
+        summary.skipped_pinned = len(expired) - len(candidates)
+        if not candidates:
+            logger.info(
+                "checkpoint_cleanup: terminal-thread reap — all %d "
+                "candidates are in pinned subtrees (skipped)",
+                len(expired),
+            )
+            return summary
+
+        reaped = 0
+        for instance_id in candidates[: summary.batch_bound]:
+            # TOCTOU re-read — a revive may have landed between the
+            # listing and this delete. A non-terminal row is NEVER
+            # reaped (the revive would lose its checkpoint mid-turn).
+            try:
+                inst = self._instance_repo.get(instance_id)
+            except Exception as e:
+                summary.errors += 1
+                logger.error(
+                    "checkpoint_cleanup: terminal-thread reap TOCTOU "
+                    "re-read failed for %s: %s",
+                    instance_id[:8], e, exc_info=True,
+                )
+                continue
+            if inst is None:
+                summary.skipped_not_terminal += 1
+                continue
+            if inst.status not in TERMINAL_STATUSES:
+                summary.skipped_not_terminal += 1
+                logger.info(
+                    "checkpoint_cleanup: terminal-thread reap SKIP %s — "
+                    "no longer terminal (status=%s)",
+                    instance_id[:8], inst.status,
+                )
+                continue
+            try:
+                await self._checkpointer.adelete_thread(instance_id)
+                reaped += 1
+            except Exception as e:
+                summary.errors += 1
+                logger.error(
+                    "checkpoint_cleanup: terminal-thread reap FAILED for "
+                    "%s: %s", instance_id[:8], e, exc_info=True,
+                )
+
+        summary.reaped_threads = reaped
+        logger.info(
+            "checkpoint_cleanup: terminal-thread reap — age_hours=%d "
+            "candidates=%d batch_bound=%d reaped=%d skipped_not_terminal=%d "
+            "skipped_pinned=%d errors=%d",
+            summary.age_hours, summary.candidates, summary.batch_bound,
+            summary.reaped_threads, summary.skipped_not_terminal,
+            summary.skipped_pinned, summary.errors,
+        )
+        return summary
 
     async def _enforce_history_cap(self) -> None:
         """(C) Keep only max_instance_history terminal instances.
@@ -1667,6 +3036,263 @@ class CheckpointCleanupJob:
             destructive=destructive if destructive is not None else True,
         )
 
+    async def run_backstop_prune(self) -> BackstopPruneSummary:
+        """The BACKSTOP run — the anti-starvation path for the growth.
+
+        WHY THIS EXISTS (SCOPE (c), 2026-11-24): the retention lane's
+        whole bound on a thread's mass is Op D's keep-N, and Op D is
+        applied only when the maintenance CYCLE runs. The cycle is
+        IDLE-GATED (``checkpoint_cleanup`` is one of the two jobs that
+        keeps the idle gate — its work genuinely contends with live
+        traffic for the write path). On a continuously busy nest the
+        gate can be unsatisfiable for days — the measured recurrence
+        (the third bloat-class recurrence: 13GB / 94k rows after 47h of
+        missed cycles) — and the growth is unbounded in the meantime.
+
+        So the BACKSTOP is a SECOND, bounded lane that:
+
+        * runs on its OWN WALL-CLOCK cadence (default 60 min) and does
+          NOT consult the idle gate (it is registered UN_GATED);
+        * prunes only a BOUNDED number of pairs per run (default 25) —
+          the pair budget is what keeps it cheap enough to run on a
+          busy nest;
+        * does the same work as Op D + Op E for those pairs (prune to
+          keep-N, then reclaim the blobs the prune orphaned), so the
+          per-thread mass stays bounded between the daily cycles;
+        * NEVER touches an instance row (no Op A/B/C semantics — the
+          backstop is a prune, not a reap: it never deletes a
+          conversation);
+        * is SINGLE-FLIGHT per section (its own ``maintenance_runs``
+          section, ``checkpoint-backstop``; the process-wide
+          ``MaintenanceRunLock`` serialises it against the daily
+          cycle);
+        * is KILL-SWITCHED (``ENSEMBLE_CHECKPOINT_BACKSTOP=0``) and
+          NEVER RAISES.
+
+        The counters ride the ``backstop`` block of the run's audit
+        row, so an operator can see the lane's effect (and its
+        starvation) without reading logs.
+
+        Returns:
+            The :class:`BackstopPruneSummary` for this run.
+        """
+        summary = BackstopPruneSummary()
+        summary.pair_budget = max(
+            1, _env_int(BACKSTOP_PAIR_BUDGET_ENV, DEFAULT_BACKSTOP_PAIR_BUDGET)
+        )
+
+        if not _env_flag(BACKSTOP_KILL_SWITCH_ENV, True):
+            summary.skipped_reason = "kill_switch"
+            logger.info(
+                "checkpoint_backstop: SKIPPED (kill switch %s=0)",
+                BACKSTOP_KILL_SWITCH_ENV,
+            )
+            return summary
+
+        # Lazy imports (the same cold-import-cycle rationale as the
+        # auto cycle's claim block).
+        from daemon.services.maintenance_run_identity import new_maintenance_run_id
+        from daemon.services.timestamps import now_utc_iso
+        from daemon.services.maintenance_run_lock import MaintenanceRunContext
+        from daemon.repositories.maintenance_runs.models import MaintenanceRun
+
+        ctx: MaintenanceRunContext | None = None
+        if self._run_lock is not None:
+            ctx = MaintenanceRunContext(
+                run_id=new_maintenance_run_id(),
+                kind="auto",
+                started_at=now_utc_iso(),
+                triggered_by="system",
+            )
+            if not await self._run_lock.acquire(ctx):
+                summary.skipped_reason = "in_flight"
+                logger.debug(
+                    "checkpoint_backstop: skipped — a maintenance run is "
+                    "in flight",
+                )
+                return summary
+
+        try:
+            if self._runs_repo is not None and ctx is not None:
+                inserted = True
+                try:
+                    inserted = self._runs_repo.insert(
+                        MaintenanceRun(
+                            run_id=ctx.run_id,
+                            section=BACKSTOP_SECTION,
+                            kind=ctx.kind,
+                            started_at=ctx.started_at,
+                            status="running",
+                            triggered_by=ctx.triggered_by,
+                            env_flags_json={
+                                "destructive": True,
+                                "pair_budget": summary.pair_budget,
+                            },
+                        )
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"maintenance_runs insert failed (backstop run_id="
+                        f"{ctx.run_id}): {type(e).__name__}: {e}; "
+                        f"continuing without audit row",
+                        exc_info=True,
+                    )
+                if not inserted:
+                    summary.skipped_reason = "db_claim_held"
+                    logger.debug(
+                        "checkpoint_backstop: skipped — the DB claim is "
+                        "held by another run",
+                    )
+                    return summary
+
+            try:
+                await self._backstop_prune_pairs(summary)
+            except Exception as e:
+                summary.errors += 1
+                logger.error(
+                    "checkpoint_backstop: run failed: %s", e, exc_info=True,
+                )
+                if self._runs_repo is not None and ctx is not None:
+                    try:
+                        self._runs_repo.mark_terminal(
+                            ctx.run_id,
+                            "failed",
+                            now_utc_iso(),
+                            error_json={
+                                "code": "execution_error",
+                                "message": f"{type(e).__name__}: {e}",
+                            },
+                        )
+                    except Exception as mark_err:
+                        logger.warning(
+                            f"maintenance_runs failed-mark failed "
+                            f"(backstop run_id={ctx.run_id}): "
+                            f"{type(mark_err).__name__}: {mark_err}",
+                            exc_info=True,
+                        )
+                return summary
+
+            logger.info(
+                "checkpoint_backstop: pairs=%d/%d deleted_checkpoints=%d "
+                "deleted_writes=%d deleted_blobs=%d bytes_freed=%d errors=%d",
+                summary.pruned_pairs, summary.pair_budget,
+                summary.deleted_checkpoints, summary.deleted_writes,
+                summary.deleted_blobs, summary.bytes_freed, summary.errors,
+            )
+
+            if self._runs_repo is not None and ctx is not None:
+                try:
+                    self._runs_repo.mark_terminal(
+                        ctx.run_id,
+                        "succeeded",
+                        now_utc_iso(),
+                        summary_json=summary.to_summary_dict(),
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"maintenance_runs succeeded-mark failed (backstop "
+                        f"run_id={ctx.run_id}): {type(e).__name__}: {e}",
+                        exc_info=True,
+                    )
+            return summary
+        finally:
+            if self._run_lock is not None:
+                self._run_lock.release()
+
+    async def _backstop_prune_pairs(self, summary: BackstopPruneSummary) -> None:
+        """The backstop's work — prune up to ``pair_budget`` excess pairs.
+
+        Per pair: the Op D prune (keep the newest N checkpoints +
+        their writes) followed by the Op E per-pair blob reclaim. The
+        blob arm runs AFTER the row prune so the reference set it reads
+        is the POST-prune one (the blobs the prune orphaned are exactly
+        the ones the anti-join frees).
+        """
+        max_per_thread = self._config.checkpoint_max_per_thread
+        try:
+            excess_pairs = await self._checkpointer.find_excess_checkpoint_groups(
+                max_per_thread
+            )
+        except Exception as e:
+            summary.skipped_reason = "pair_scan_failed"
+            logger.error(
+                "checkpoint_backstop: pair scan failed: %s", e, exc_info=True,
+            )
+            return
+
+        summary.excess_pairs = len(excess_pairs)
+        if not excess_pairs:
+            logger.debug(
+                "checkpoint_backstop: no thread exceeds the retention cap"
+            )
+            return
+
+        # The adapter returns the pairs WORST-FIRST (the SCOPE (c)
+        # ordering change), so a bounded run always attacks the
+        # biggest offenders.
+        reclaimed: list[tuple[str, str, int]] = []
+        for thread_id, checkpoint_ns, _cnt in excess_pairs[: summary.pair_budget]:
+            try:
+                ids_to_keep = set(
+                    await self._checkpointer.get_checkpoint_ids(
+                        thread_id, checkpoint_ns, max_per_thread
+                    )
+                )
+                if not ids_to_keep:
+                    # No keep-set ⇒ nothing is safe to delete (the
+                    # silent-no-op wedge the keep-N docstring warns
+                    # about). Skip the pair.
+                    logger.warning(
+                        "checkpoint_backstop: pair %s/%s has no keep-set — "
+                        "skipping (no rows deleted)",
+                        thread_id[:8], checkpoint_ns,
+                    )
+                    continue
+                deleted_cps = await self._checkpointer.delete_checkpoints_excluding(
+                    thread_id, checkpoint_ns, ids_to_keep
+                )
+                deleted_writes = await self._checkpointer.delete_writes_excluding(
+                    thread_id, checkpoint_ns, ids_to_keep
+                )
+                summary.pruned_pairs += 1
+                summary.deleted_checkpoints += int(deleted_cps)
+                summary.deleted_writes += int(deleted_writes)
+                reclaimed.append((thread_id, checkpoint_ns, 0))
+            except Exception as e:
+                summary.errors += 1
+                logger.warning(
+                    "checkpoint_backstop: pair %s/%s failed: %s: %s",
+                    thread_id[:8], checkpoint_ns, type(e).__name__, e,
+                )
+
+        # The blob reclaim for EXACTLY the pairs this run pruned — the
+        # same single-owner algorithm as Op E (the anti-join DELETE with
+        # its zero-refs fail-safe and its chunked, bounded delete), with
+        # the BOUNDED candidate set so the backstop never pays for the
+        # all-pairs enumeration.
+        if not reclaimed:
+            return
+        try:
+            blob_summary = await prune_unreferenced_blobs(
+                self._checkpointer,
+                destructive=True,
+                candidate_pairs=reclaimed,
+            )
+            summary.deleted_blobs += blob_summary.total_deleted
+            summary.bytes_freed += blob_summary.total_bytes_freed
+            for skipped_thread, skipped_ns, reason in blob_summary.skipped:
+                logger.warning(
+                    "checkpoint_backstop: blob reclaim skipped for pair "
+                    "%s/%s (%s) — the row prune already landed",
+                    skipped_thread[:8], skipped_ns, reason,
+                )
+        except Exception as e:
+            summary.errors += 1
+            logger.warning(
+                "checkpoint_backstop: blob reclaim failed: %s: %s",
+                type(e).__name__, e,
+            )
+
     @staticmethod
     def _apply_version_census_fields(
         summary: CheckpointRowPruneSummary,
@@ -1769,6 +3395,93 @@ class CheckpointCleanupJob:
             len(census.blob_bytes_by_channel),
         )
         return census
+
+    async def _collect_blob_bytes_guard(self) -> BlobBytesGuard:
+        """The checkpoint_blobs BYTES guard (ITEM 2, SCOPE (c)).
+
+        Measures the RELATION size — ``pg_total_relation_size`` plus
+        the TOAST size via ``reltoastrelid`` — and ALERTS when the
+        total is above the threshold.
+
+        WHY BYTES AND NOT ``n_dead_tup``: the bloat class is
+        dead-tuple-BLIND (the measured incident: ``n_dead_tup`` = 0 on
+        BOTH the table and its TOAST relation while the relation
+        carried ~39.1GiB of TOAST). A dead-tuple threshold reads
+        "healthy" on exactly the class it must catch.
+
+        The guard ALERTS; it does not reclaim and it does not enforce.
+        The space returns only via a rewrite, and the rewrite is the
+        escalation lane's (operator-nudged, never automatic) decision.
+
+        NEVER WEDGES: the measurement runs on the dedicated per-cycle
+        maintenance engine with the VACUUM lane's timeouts, and every
+        failure is reported in the block itself.
+        """
+        from daemon.services.timestamps import now_utc_iso
+
+        guard = BlobBytesGuard()
+        guard.captured_at = now_utc_iso()
+        guard.threshold_bytes = max(
+            0,
+            _env_int(
+                BLOB_BYTES_ALERT_THRESHOLD_ENV,
+                DEFAULT_BLOB_BYTES_ALERT_THRESHOLD,
+            ),
+        )
+
+        if not _env_flag(BLOB_BYTES_GUARD_KILL_SWITCH_ENV, True):
+            guard.skipped_reason = "kill_switch"
+            logger.info(
+                "checkpoint_cleanup: blob-bytes guard SKIPPED "
+                "(kill switch %s=0)",
+                BLOB_BYTES_GUARD_KILL_SWITCH_ENV,
+            )
+            return guard
+
+        from daemon.services.checkpoint_prune import collect_blob_relation_bytes
+
+        try:
+            measured = await collect_blob_relation_bytes(self._shared_engine)
+        except Exception as exc:  # noqa: BLE001 — belt-and-braces
+            logger.warning(
+                "[CheckpointPerf] blob relation-bytes guard raised "
+                "(%s: %s) — the occupancy signal is unavailable this cycle",
+                type(exc).__name__,
+                exc,
+            )
+            guard.skipped_reason = "query_failed"
+            return guard
+
+        guard.ran = measured.ran
+        guard.skipped_reason = measured.skipped_reason
+        guard.total_bytes = measured.total_bytes
+        guard.heap_bytes = measured.heap_bytes
+        guard.toast_bytes = measured.toast_bytes
+
+        if measured.ran and guard.threshold_bytes > 0:
+            guard.over_threshold = guard.total_bytes >= guard.threshold_bytes
+            if guard.over_threshold:
+                # The OPERATOR-VISIBLE alert. One WARNING line per
+                # cycle (the cycle runs at most daily; the backstop
+                # does not run this measurement) — the numbers are in
+                # the line AND in the audit row.
+                guard.alerted = True
+                logger.warning(
+                    "[CheckpointPerf] CHECKPOINT_BLOB_BYTES_OVER_THRESHOLD "
+                    "total_bytes=%d (%.2f GiB) threshold_bytes=%d "
+                    "(%.2f GiB) heap_bytes=%d toast_bytes=%d (%.2f GiB) — "
+                    "the checkpoint-blob relation is above the alert "
+                    "threshold (the space returns only via a rewrite; "
+                    "see docs/runbooks/checkpoint-escalation-lane.md)",
+                    guard.total_bytes,
+                    guard.total_bytes / (1024 ** 3),
+                    guard.threshold_bytes,
+                    guard.threshold_bytes / (1024 ** 3),
+                    guard.heap_bytes,
+                    guard.toast_bytes,
+                    guard.toast_bytes / (1024 ** 3),
+                )
+        return guard
 
     async def _analyze_after_destructive_prune(
         self,

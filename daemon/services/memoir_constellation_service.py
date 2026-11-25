@@ -23,7 +23,7 @@ EXTRACTION (Suggestion #3 / V2-D 3.9):
 DETERMINISTIC CANONICALIZATION: the canonical identity is the casefolded
 surface form (``strip().casefold()``); the FIRST occurrence's casing is
 preserved as the display name; alternative surface forms are linked via
-``memoir_star_alias`` so "the Emperor"/"my dear"/the real name resolve
+``memoir_star_alias`` so "the user"/"the operator"/the real name resolve
 to ONE star.
 
 TWO-TIER DESCRIPTIONS (V2-D 3.2 / LightRAG M4):

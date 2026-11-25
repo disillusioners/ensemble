@@ -51,11 +51,13 @@ import sys
 import logging
 import threading
 import asyncio
+import gzip
 import json
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from fastapi import FastAPI, Request, APIRouter
+from starlette.datastructures import Headers, MutableHeaders
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from types import SimpleNamespace
@@ -117,6 +119,8 @@ from daemon.routers import (
     metrics_router,         # /api/metrics (checkpoint read instrumentation surface)
     nest_reports_router,    # /api/nest-reports (nest-anomaly-report lane: the anomaly domain route)
     rooms_router,           # /api/rooms/* + /api/instances/{id}/rooms (P6 group-chat observability modal)
+    tool_usage_router,      # /api/tool-usage (tool-usage-metrics-p1: ledger read door)
+    maintenance_reports_router,  # /api/maintenance-reports (Central Maintenance System: the run list)
 )
 from daemon.routers.workspace import router as workspace_router
 from daemon.routers.plane import router as plane_router  # /api/plane (Phase 3: plane-integration-revival — sync retry endpoint)
@@ -165,6 +169,13 @@ from daemon.services.readiness import (
 )
 from daemon.constants import SSE_TIMEOUT_S, SSE_PING_INTERVAL, SSE_QUEUE_MAXSIZE
 from daemon.repositories.instance.models import InstanceStatus
+from daemon.config import LiveViewsRootConfig
+from daemon.routers.maintenance_reports import (
+    LIVE_VIEW_ALLOWED_EXTENSIONS,
+    LIVE_VIEW_FILENAME_PATTERNS,
+    LIVE_VIEW_ROOT_NAME,
+    RESULTS_ROOT,
+)
 from daemon import constants
 
 # Determine the base path (use working directory for production)
@@ -461,8 +472,6 @@ def inject_reports_live_view_root(config, data_dir) -> bool:
     Returns:
         True iff the root was injected by this call.
     """
-    from daemon.config import LiveViewsRootConfig
-
     roots = getattr(getattr(config, "live_views", None), "roots", None)
     if not isinstance(roots, dict):
         return False
@@ -478,6 +487,77 @@ def inject_reports_live_view_root(config, data_dir) -> bool:
         description=(
             "Agent-written report pages (view_write). "
             "Daemon-injected — do not declare it in config.yaml."
+        ),
+    )
+    return True
+
+
+def inject_maintenance_results_live_view_root(config) -> bool:
+    """Inject the daemon-managed ``maintenance-reports`` live-view root.
+
+    BR-18 (Central Maintenance System — ``phase4-plan.md:56``).  All
+    FOUR pinned elements of the registration:
+
+    1. **Mechanism** — a daemon-injected LIFESPAN registration (this
+       helper is called from ``lifespan``, mirroring
+       :func:`inject_reports_live_view_root`).  NOT a static
+       ``config.yaml`` absolute path: an operator ``live_views.roots:``
+       block REPLACES the seed dict, so a config-declared root would
+       silently vanish.
+    2. **Root name** — ``maintenance-reports`` (a named root, sibling of
+       ``designer-artifact`` / ``planning`` / ``tmp-images``).
+    3. **Form** — the RELATIVE root ``.agents/maintenancer/RESULTS/``
+       resolved at daemon startup against the PROMOTE-STABLE
+       LIVE-INSTALL project root (host-portable; no absolute path lives
+       in the config).  The resolution goes through the seeder's OWN
+       helper (``maintenance_results_dir``), which the BE list route
+       (BR-17) resolves ONCE at its module import; this registration
+       SHARES that already-resolved value (``RESULTS_ROOT``) rather
+       than resolving a second time, so the seeder (P1), the BE list
+       route (BR-17) and this registration share ONE root basis AND ONE
+       resolution moment BY CONSTRUCTION (plan Task 4.8 root-resolution
+       note).  The basis is the INSTALL DIR (the ancestor that owns
+       ``releases/``), NOT the release dir: a promote must never MOVE the
+       artifact root.
+    4. **Allowlist** — the ``.md`` renderer only (the extension gate on
+       the root entry below), restricted to the ``run-*.md`` /
+       ``receipt-*.md`` / ``INDEX.md`` filename patterns (the per-root
+       FILENAME gate is wired on the live-views service at the same
+       lifespan site; both gates read the same constants).
+
+    Injection is IDEMPOTENT and NEVER overrides an operator-declared
+    ``maintenance-reports`` entry (the same posture as the ``reports``
+    root above).
+
+    Fail-soft: the artifact root's absence is NOT a boot failure — the
+    seeder creates the directory at first boot, and an install with no
+    runs simply has no content to serve.
+    """
+    roots = getattr(getattr(config, "live_views", None), "roots", None)
+    if not isinstance(roots, dict):
+        return False
+    if LIVE_VIEW_ROOT_NAME in roots:
+        # An operator-declared entry is honoured verbatim.
+        return False
+    # ONE resolution moment: the router's already-resolved RESULTS_ROOT
+    # (the router resolves it ONCE, at its module import, through the
+    # seeder's OWN helper).  Re-resolving here would be the second
+    # moment the two-moments question asks about; the BASIS logic stays
+    # in the seeder helper and the VALUE is shared.
+    root_dir = RESULTS_ROOT
+    if not root_dir.is_absolute():
+        # The filesystem resolver refuses a relative root — leave the
+        # root ABSENT rather than publishing a path that can never
+        # resolve (the uniform-404 posture, never a boot failure).
+        return False
+    roots[LIVE_VIEW_ROOT_NAME] = LiveViewsRootConfig(
+        type="filesystem",
+        path=str(root_dir.resolve()),
+        allowed_extensions=list(LIVE_VIEW_ALLOWED_EXTENSIONS),
+        description=(
+            "Central Maintenance System run artifacts "
+            "(.agents/maintenancer/RESULTS/). Daemon-injected — do not "
+            "declare it in config.yaml."
         ),
     )
     return True
@@ -561,6 +641,122 @@ def _poignancy_llm_config(config: Any) -> dict[str, Any]:
         :class:`~daemon.services.memoir_poignancy_service.MemoirPoignancyService`.
     """
     return _memoir_lane_llm_config(config)
+
+
+def _make_scheduled_fire_redrive(manager: Any):
+    """Build the scheduled-fire supervisor's re-drive callback.
+
+    Module-level (NOT nested in ``lifespan``) so the pin can drive the
+    REAL callback path: the lifespan wiring below passes THIS callable to
+    the supervisor, so a pin against it is a pin against production — not
+    against a test-side copy (the copy-goes-green failure mode).
+
+    Two legs, both TRUTHFUL:
+
+    * **instance-bearing** → the F2 entry ``manager.resume_processing_job``
+      (make-claimable + wake, then the single-consumer CAS). NOT
+      ``manager._schedule_explicit_handle_resume``: that method is
+      KEYWORD-ONLY with FOUR MORE required kwargs, so the old positional
+      call raised ``TypeError`` on EVERY attempt and the leg never
+      repaired anything (the supervisor logged a refusal and moved on).
+      The truthful outcomes are handled as they are:
+      ``pending_redrive`` (the durable task was found + made claimable),
+      the paused-resume legs (``resuming`` / ``already_resuming`` /
+      ``wake_enqueued``) and the no-work cases (``None`` →
+      ``no_task_found``; a refusal dict → surfaced as-is).
+
+    * **instance-less** → the adapter's GUARDED re-dispatch entrypoint
+      (``adapter.redrive_execution``): the same slot discipline as the
+      fire path (the execution semaphore is acquired — the concurrency
+      cap is never inflated by a re-drive) plus the age-cap and
+      deferrable-target coverage the direct call skipped.
+    """
+
+    async def _scheduled_fire_redrive(candidate: dict) -> dict:
+        """F2 make-claimable + wake, or adapter re-dispatch for no-instance.
+
+        NIT-3: ``asyncio.CancelledError`` is a ``BaseException`` and
+        escapes both legs' ``except Exception`` nets. The house
+        discriminator (``sup._caller_cancel_requested`` — mirrors
+        ``daemon/mcp/stdio_wrapper.py::_is_caller_cancelled``) splits the
+        two cases: an OUTER cancel (this sweep task is being cancelled —
+        shutdown) PROPAGATES; an INNER cancellation that escaped a nested
+        await is logged LOUD and returned as a truthful refusal so the
+        supervisor's per-candidate leg records it and the sweep continues.
+        """
+        import daemon.services.scheduled_fire_supervisor as _sup
+
+        instance_id = candidate.get("instance_id")
+        if instance_id:
+            try:
+                resumed = await manager.resume_processing_job(
+                    instance_id, message="", silent=True, images=None,
+                )
+            except asyncio.CancelledError:
+                if _sup._caller_cancel_requested():
+                    raise
+                logger.error(
+                    "[SCHEDULED_SUPERVISOR_REDRIVE_CANCELLED] execution=%s "
+                    "instance=%s leg=resume — an inner CancelledError "
+                    "escaped ``resume_processing_job`` while this sweep task "
+                    "is NOT being cancelled; returned as a refusal (the "
+                    "cancel is NOT swallowed silently)",
+                    str(candidate.get("execution_id"))[:8],
+                    str(instance_id)[:8],
+                )
+                return {
+                    "status": "refused",
+                    "error": "cancelled_in_redrive",
+                    "instance_id": instance_id,
+                }
+            except Exception as exc:  # noqa: BLE001 — fail-soft into supervisor
+                return {"status": "refused", "error": str(exc)}
+            if resumed is None:
+                # ``invalid_or_missing_handle`` — there is no durable work
+                # to re-drive. The row keeps its prior truthful status
+                # (never-started stays never-started, count+1, bounded by
+                # the cap) — a refusal, never a fake dispatch.
+                return {
+                    "status": "refused",
+                    "error": "no_task_found",
+                    "instance_id": instance_id,
+                }
+            if isinstance(resumed, dict):
+                return resumed
+            return {"status": "resuming", "instance_id": instance_id}
+        # No instance handle — re-dispatch the fire through the adapter. The
+        # source registry owns the adapters; find the one for this schedule.
+        try:
+            registry = manager.get_source_registry()
+            adapter = registry.get(candidate.get("schedule_id"))
+            if adapter is None or not hasattr(adapter, "redrive_execution"):
+                return {"status": "refused", "error": "no_adapter"}
+            outcome = await adapter.redrive_execution(
+                candidate["execution_id"]
+            )
+            if isinstance(outcome, dict):
+                return outcome
+            return {"status": "refused", "error": "bad_adapter_outcome"}
+        except asyncio.CancelledError:
+            if _sup._caller_cancel_requested():
+                raise
+            logger.error(
+                "[SCHEDULED_SUPERVISOR_REDRIVE_CANCELLED] execution=%s "
+                "leg=adapter — an inner CancelledError escaped "
+                "``redrive_execution`` while this sweep task is NOT being "
+                "cancelled; returned as a refusal (the cancel is NOT "
+                "swallowed silently)",
+                str(candidate.get("execution_id"))[:8],
+            )
+            return {
+                "status": "refused",
+                "error": "cancelled_in_redrive",
+                "execution_id": candidate.get("execution_id"),
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"status": "refused", "error": str(exc)}
+
+    return _scheduled_fire_redrive
 
 
 def _wire_skills_router_services(manager: Any) -> None:
@@ -848,6 +1044,15 @@ async def lifespan(app: FastAPI):
         f"[Config] reasoning_echo_disabled_models={ThinkingChatOpenAI.reasoning_echo_disabled_models} "
         f"(models matching these patterns will NOT echo reasoning_content; all others echo)"
     )
+    # Release-pointer invariant boot check (relcur-pointer M2): CHEAP, LOUD,
+    # NON-BLOCKING. Mirrors daemon/__main__.py — detects a dangling/mismatched
+    # releases/current alias vs journal current without ever gating boot
+    # (metadata drift != outage). Flag readable via last_boot_check().
+    from daemon.services.release_pointer_check import (
+        run_boot_check as _boot_release_pointer_check,
+    )
+
+    _boot_release_pointer_check()
     # Wire the OPENAI_STREAMING operator knob (CF-125s 524 fix). The
     # chokepoint ``clean_llm_config`` reads this class var when callers
     # don't pass an explicit streaming flag — see daemon/graph.py.
@@ -1222,6 +1427,51 @@ async def lifespan(app: FastAPI):
         daemon_logger.warning(
             f"[Startup] bash spawn reconcile scheduling failed (non-fatal): "
             f"{type(bash_reconcile_err).__name__}: {bash_reconcile_err}"
+        )
+
+    # ─────────────────────────────────────────────────────────────
+    # bash-spawn registry retention sweep (census A2 fix,
+    # 2026-11-21) — PERIODIC companion lane. The five piggyback
+    # lanes left closed-row retention boot-only (prune ran solely
+    # inside the one-shot reconcile) and reaping cadence ==
+    # instance-terminalization cadence (stall mode), so the
+    # registry grew unbounded between boots. This lane ticks
+    # every ENSEMBLE_BASH_REAPER_RETENTION_INTERVAL_SECONDS
+    # (default 900s): prunes REAPED rows past the 30d window and
+    # sweeps OPEN rows whose owning instance is TERMINAL through
+    # the existing ``sweep_instance`` machinery (all D8/D9 guards
+    # inherited). Honors the master switch
+    # (ENSEMBLE_BASH_ORPHAN_REAPER) BEFORE any repository touch —
+    # OFF ⇒ counted + rate-limited-logged no-op, never silent.
+    # ALWAYS-ON wiring (enabled hardcoded True — the constructor
+    # kwarg is an internal test seam, same shape as the
+    # tmp-image sweep). First tick runs IMMEDIATELY inside the
+    # loop, so the boot-time state gets its first prune without a
+    # separate synchronous pre-tick.
+    # ─────────────────────────────────────────────────────────────
+    try:
+        from daemon.services.bash_spawn_reaper import (
+            BashSpawnRetentionSweepService,
+        )
+
+        bash_spawn_retention = BashSpawnRetentionSweepService(
+            repo=bash_spawn_repo,
+            instance_repo=SQLModelInstanceRepository(
+                engine=manager.engine
+            ),
+        )
+        bash_spawn_retention.start()
+        app.state.bash_spawn_retention = bash_spawn_retention
+        daemon_logger.info(
+            "[Startup] bash spawn retention sweep started "
+            f"(interval="
+            f"{bash_spawn_retention._interval_seconds}s)"
+        )
+    except Exception as bash_retention_err:  # noqa: BLE001
+        daemon_logger.warning(
+            "[Startup] bash spawn retention sweep wiring failed "
+            f"(non-fatal): {type(bash_retention_err).__name__}: "
+            f"{bash_retention_err}"
         )
 
     # Create queue repository for job queue management
@@ -1908,7 +2158,12 @@ async def lifespan(app: FastAPI):
     from daemon.services.orphan_watcher_sweep import (
         DEFAULT_ORPHAN_SWEEP_GRACE_SECONDS,
         DEFAULT_ORPHAN_SWEEP_INTERVAL_SECONDS,
+        ORPHAN_WATCHER_ENGINE_FLAG,
+        ORPHAN_WATCHER_ENGINE_JOB_ID,
         OrphanWatcherSweepService,
+        build_engine_executor,
+        engine_owns_execution,
+        rearm_legacy_loop,
     )
     orphan_sweep_interval = (
         config.services.orphan_watcher_sweep_interval_seconds
@@ -1917,7 +2172,14 @@ async def lifespan(app: FastAPI):
         config.services.orphan_watcher_sweep_grace_seconds
     )
     orphan_watcher_sweep = OrphanWatcherSweepService(
-        dependency_bus=get_dependency_bus(),
+        # D-9 (review hardening, 2026-11-21): explicit ``None``, NOT
+        # ``get_dependency_bus()``. This constructor runs BEFORE
+        # ``init_dependency_bus`` registers the singleton, so a
+        # construction-time read froze ``None`` forever (the born-dead
+        # trap pattern). The service late-binds — it re-reads the
+        # singleton per tick — so None here documents the intent
+        # instead of simulating a capture that never succeeds.
+        dependency_bus=None,
         interval_seconds=orphan_sweep_interval,
         min_watcher_age_seconds=orphan_sweep_grace,
     )
@@ -1925,10 +2187,33 @@ async def lifespan(app: FastAPI):
     # (defensive — the config Field constraint enforces the bound,
     # this is a second line of defence for legacy test fixtures
     # that construct the service directly).
+    # C1 (fail-stuck fix): the construct site may suppress the legacy loop,
+    # but ONLY on the full ownership CONJUNCT (flag ON ∧ engine enabled ∧
+    # engine shadow OFF). When the conjunct does not hold, the legacy loop
+    # owns and the engine merely shadow-observes (SKIPPED_SHADOW rows keep
+    # accumulating — the correct greenlight posture). If the engine's boot
+    # block later fails, the except handler RE-ARMS the legacy loop.
+    _orphan_legacy_suppressed = False
     if orphan_sweep_interval < 1:
         logger.error(
             f"OrphanWatcherSweepService DISABLED — interval="
             f"{orphan_sweep_interval}s below the floor of 1s"
+        )
+    elif engine_owns_execution(engine_config=getattr(config, "engine", None)):
+        # Engine Arc Phase-2 pilot: the engine owns execution (the full
+        # conjunct holds). The legacy loop is SUPPRESSED — single-executor
+        # by construction. The service object is retained on app.state so
+        # the existing shutdown path's ``stop()`` stays a harmless no-op.
+        # EFFECTIVE FLIP RECIPE: flag ON + ENSEMBLE_ENGINE_SHADOW_MODE=false
+        # (+ engine enabled). ROLLBACK: flag OFF (or shadow ON, or engine
+        # disabled) ⇒ the legacy loop owns again.
+        _orphan_legacy_suppressed = True
+        app.state.orphan_watcher_sweep = orphan_watcher_sweep
+        logger.info(
+            "OrphanWatcherSweepService legacy loop SUPPRESSED — engine owns "
+            "execution (%s=1, engine enabled, shadow off); sweep object "
+            "retained for shutdown",
+            ORPHAN_WATCHER_ENGINE_FLAG,
         )
     else:
         orphan_watcher_sweep.start()
@@ -2087,6 +2372,92 @@ async def lifespan(app: FastAPI):
     )
 
     # ─────────────────────────────────────────────────────────────
+    # StaleRunningSweepService (fix/post-outage-recovery SCOPE b4,
+    # Shape B) — the STEADY-STATE terminalizer for the status-stale
+    # defect class: an instance whose work is FINISHED (every task
+    # row terminal, every message row proven-terminal, nothing holds
+    # the posture) but whose row still reads ``running`` with a frozen
+    # last_activity. The existing seams are EVENT-DRIVEN (the
+    # child_reports drive + the observer finalize both need a
+    # completion event), the b2 boot reconciler is BOOT-ONLY, and the
+    # healer's running-zombie anchor requires a terminal-COMPLETED
+    # task row on a ROOT — the measured specimens (no task row /
+    # non-root) fall outside all three. This lane is the missing
+    # steady-state firing point: it drives the PRODUCTION completion
+    # chain (child_reports, reason finalize_gap_steady_state), never a
+    # raw status write, gated on the strand-healer's holding-conditions
+    # vocabulary (no non-terminal task, no unproven-terminal message —
+    # unknown statuses HOLD, no open injection, no bus-pending watcher,
+    # no live-tree member, no pending question) plus an age bound on
+    # the newest completion evidence. D14/D21 respected:
+    # ``waiting_children`` stays bus-owned; ``paused`` untouched.
+    # Kill-switch ``ENSEMBLE_STALE_RUNNING_SWEEP`` (default ON, ``=0``
+    # disables) — same precedent as ENSEMBLE_SCHEDULED_FIRE_SUPERVISOR.
+    from daemon.services.stale_running_sweep import (
+        DEFAULT_INTERVAL_SECONDS as _SRS_DEFAULT_INTERVAL,
+        StaleRunningSweepService,
+    )
+    # Defensive coercion (the ScheduledFireSupervisor knob discipline):
+    # a non-numeric interval env must never crash the boot.
+    try:
+        stale_running_sweep_interval = int(
+            os.environ.get("ENSEMBLE_STALE_RUNNING_SWEEP_INTERVAL_SECONDS",
+                           str(_SRS_DEFAULT_INTERVAL)),
+        )
+    except (TypeError, ValueError):
+        stale_running_sweep_interval = _SRS_DEFAULT_INTERVAL
+        logger.warning(
+            "StaleRunningSweepService: non-numeric "
+            "ENSEMBLE_STALE_RUNNING_SWEEP_INTERVAL_SECONDS=%r — using the "
+            "default %ss",
+            os.environ.get("ENSEMBLE_STALE_RUNNING_SWEEP_INTERVAL_SECONDS"),
+            _SRS_DEFAULT_INTERVAL,
+        )
+    stale_running_sweep = StaleRunningSweepService(
+        manager,
+        interval_seconds=stale_running_sweep_interval,
+    )
+    stale_running_sweep.start()
+    app.state.stale_running_sweep = stale_running_sweep
+    manager._stale_running_sweep = stale_running_sweep
+    logger.info(
+        "StaleRunningSweepService started: interval=%ss (default %ss) "
+        "kill_switch=%s",
+        stale_running_sweep_interval,
+        _SRS_DEFAULT_INTERVAL,
+        "on" if os.environ.get("ENSEMBLE_STALE_RUNNING_SWEEP", "1")
+        .strip().lower() not in ("0", "false", "no", "off") else "off",
+    )
+
+    # ─────────────────────────────────────────────────────────────
+    # ScheduledFireSupervisor (Addendum A.4, 2026-11-24) — consumes the
+    # execution receipt to re-drive fires that began no turn (never-started /
+    # failed-to-dispatch) or whose dispatched row is stale past a bounded
+    # deadline. Always-on, interval-driven, first tick IMMEDIATE; kill-switch
+    # ENSEMBLE_SCHEDULED_FIRE_SUPERVISOR (default ON, =0 disables). Wired after
+    # the infrastructure sweeps; the re-drive callback (the module-level
+    # ``_make_scheduled_fire_redrive`` — the REAL callback path the pin
+    # drives) uses the F2 make-claimable + wake path
+    # (manager.resume_processing_job) for instance-bearing rows and
+    # re-dispatches through the adapter's GUARDED entrypoint
+    # (adapter.redrive_execution) for instance-less rows. Never a direct
+    # claim (single consumer CAS).
+    from daemon.services.scheduled_fire_supervisor import (
+        ScheduledFireSupervisor,
+        kill_switch_enabled as _scheduled_supervisor_enabled,
+    )
+
+    scheduled_fire_supervisor = ScheduledFireSupervisor(
+        manager,
+        redrive_callback=_make_scheduled_fire_redrive(manager),
+    )
+    scheduled_fire_supervisor.start()
+    app.state.scheduled_fire_supervisor = scheduled_fire_supervisor
+    manager._scheduled_fire_supervisor = scheduled_fire_supervisor
+    logger.info("ScheduledFireSupervisor started: kill_switch=%s",
+                "on" if _scheduled_supervisor_enabled() else "off")
+
+    # ─────────────────────────────────────────────────────────────
     # clipboard-image-chat Phase 3 (Tasks 4-5) — tmp-image retention
     # sweep. ALWAYS-ON infrastructure (NO kill-switch env var — per
     # the project owner's HARD POLICY on Batch A, architect amendment
@@ -2237,10 +2608,33 @@ async def lifespan(app: FastAPI):
         config, getattr(app.state, "data_dir", None)
     )
 
+    # ─────────────────────────────────────────────────────────────
+    # BR-18 (Central Maintenance System): the ``maintenance-reports``
+    # root is DAEMON-INJECTED, exactly like the ``reports`` root above
+    # — never a static config.yaml absolute path.  Its path derives
+    # from the LIVE-INSTALL project root (``.agents/maintenancer/
+    # RESULTS/``) through the seeder's OWN helper, so the seeder, the
+    # BE list route and this registration share ONE root basis BY
+    # CONSTRUCTION (plan Task 4.8 root-resolution note).
+    #
+    # The root's FILENAME allowlist (``run-*.md`` / ``receipt-*.md`` /
+    # ``INDEX.md``) is wired on the live-views service below; the
+    # extension allowlist (``.md`` only → the markdown renderer) rides
+    # the root entry itself.
+    # ─────────────────────────────────────────────────────────────
+    inject_maintenance_results_live_view_root(config)
+
     live_views_service = LiveViewsService(
         config=config.live_views,
         tmp_image_store=tmp_image_store,
         project_workdir_by_shortname_resolver=_resolve_project_workdir_by_shortname,
+        # BR-18 element 4 — the per-root FILENAME allowlist: the
+        # ``maintenance-reports`` root serves the three artifact shapes
+        # and NOTHING else.  Every other root keeps the pre-existing
+        # behaviour (extension allowlist only).
+        root_filename_patterns={
+            LIVE_VIEW_ROOT_NAME: LIVE_VIEW_FILENAME_PATTERNS,
+        },
         # Phase 2: bind evidence is the third-tier fallback in
         # the URL base-resolution chain (operator override >
         # Host-capture auto-detect > bind evidence > path-relative).
@@ -2475,6 +2869,15 @@ async def lifespan(app: FastAPI):
             # is preferred for diagnosability (a missing-repo warning
             # would be noise in prod).
             task_repository=getattr(manager, "_task_repo", None),
+            # Wake-source gate (anomaly a370b036): the JOB-watcher
+            # repository — the armed watch rows are the "this parent
+            # still has a live wake source" evidence for an event-watch
+            # root. The repository is built ONCE above (the
+            # job-notification lanes share it) and handed to the
+            # watchdog explicitly; the manager also carries it as
+            # ``_watcher_repo`` (the tools access seam) as the
+            # watchdog's fallback.
+            watcher_repository=watcher_repo,
         )
     except Exception as watchdog_boot_exc:
         app.state.waiting_children_watchdog_task = None
@@ -2961,6 +3364,14 @@ async def lifespan(app: FastAPI):
         project_repo=manager._project_repository,
         instance_manager=manager,
     )
+    # Addendum A (b3): wire the delivery-completed callback. When a spawned
+    # Task/JobItem reaches terminal, the observer closes the matching
+    # schedule_executions receipt (dispatched -> executed + outcome) via the
+    # durable job_item_id handle. Bounded + fail-soft (never wedges the job).
+    from daemon.services.execution_receipt import make_execution_receipt_callback
+    job_feedback_observer.set_execution_receipt_callback(
+        make_execution_receipt_callback(manager._source_repository)
+    )
     await job_feedback_observer.start()
     logger.info("JobFeedbackObserver started")
 
@@ -2970,6 +3381,27 @@ async def lifespan(app: FastAPI):
     # it is the SOLE completion authority (CM was removed in Phase 5).
     # See ``daemon/services/dependency_bus.py`` for the bus API.
     await init_dependency_bus(app, manager)
+
+    # Boot wiring assertion (born-dead fix, 2026-11-21): this call is
+    # the ONLY site that registers the bus singleton
+    # (``set_dependency_bus``). Services constructed EARLIER in this
+    # lifespan — notably ``OrphanWatcherSweepService`` (the C2 wiring
+    # above) — used to capture the singleton at construction time and
+    # never re-read it, leaving the periodic lane permanently on its
+    # bus-is-None branch ("born dead"). The sweep now late-binds, but
+    # a bus that failed to start here must be LOUD at boot, not
+    # DEBUG-quiet forever: if the singleton is still None, every
+    # bus-dependent lane (completion authority included) is degraded
+    # this boot. Log ERROR and continue — the boot-without-bus
+    # continuation is init_dependency_bus's own design decision.
+    if get_dependency_bus() is None:
+        logger.error(
+            "BOOT WIRING ASSERTION FAILED: DependencyBus singleton is "
+            "None after init_dependency_bus — every bus-dependent "
+            "lane (orphan-watcher sweep, completion authority) is "
+            "non-functional this boot. See the init_dependency_bus "
+            "warning above for the underlying cause."
+        )
 
     # Bootstrap system default project (Phase 1 of system_default_project feature)
     # This ensures the system project exists and has its queues provisioned
@@ -3593,6 +4025,23 @@ async def lifespan(app: FastAPI):
             sweep_result = await sweep_orphaned_live_turns(
                 manager=manager, boot_epoch=get_boot_epoch(),
             )
+            # Stranded-running surfacing pass (boot-recovery hole closure):
+            # retires RUNNING instances stranded by a daemon death whose
+            # checkpoint predates the boot epoch (or which have no
+            # checkpoint at all). NEVER resumes (idempotency). Never raises.
+            try:
+                from daemon.services.auto_continue_boot_pass import (
+                    surface_stranded_running_instances,
+                )
+                stranded_result = await surface_stranded_running_instances(
+                    manager=manager, boot_epoch=get_boot_epoch(),
+                )
+                logger.info("Stranded-running surfacing pass: %s", stranded_result)
+            except Exception as stranded_exc:  # noqa: BLE001
+                logger.warning(
+                    "Stranded-running surfacing pass failed (backstop "
+                    "continues): %s", stranded_exc,
+                )
             # The boot record — the effective-mode carrier (D16). The
             # mode comes from the PASS RESULT; the recorder never
             # re-reads the environment (A8's single-read rule).
@@ -3626,6 +4075,32 @@ async def lifespan(app: FastAPI):
                 "AutoContinue boot pass failed (StaleTaskRecovery "
                 "backstop will catch orphans at boot+10min): %s",
                 cont_boot_exc,
+            )
+        # ── Boot-consistency reconciler (fix/post-outage-recovery SCOPE b) ──
+        # Runs IMMEDIATELY AFTER the orphan sweep above (sibling of the
+        # auto-continue / orphan-sweep passes in the lifespan BODY block —
+        # NOT nested in the upgrade-install-dir if). Reconciles RUNNING
+        # instances left with no durable work by the boot-window queue GC
+        # leg (the 2026-11-23 outage RCA). 100% PG-derived selection; the
+        # lane has its own three-layer never-wedge isolation and NEVER
+        # raises — this third (lifespan) envelope is belt-and-suspenders.
+        # The kill-switch is the shared
+        # ENSEMBLE_AUTO_CONTINUE_RUNNING_ON_RESTART (same logical action).
+        try:
+            from daemon.services.boot_consistency_reconciler import (
+                reconcile_boot_consistency,
+            )
+
+            reconcile_result = await reconcile_boot_consistency(
+                manager=manager, boot_epoch=get_boot_epoch(),
+            )
+            logger.info("BootConsistency reconciler: %s", reconcile_result)
+        except Exception as boot_reconcile_exc:  # noqa: BLE001 — never wedge
+            logger.error(
+                "[BOOT_RECOVERY_DB_ERROR] pass=lifespan: boot-consistency "
+                "reconciler raised (never-wedge holds; readyz leg may be "
+                "stale): %s: %s",
+                type(boot_reconcile_exc).__name__, boot_reconcile_exc,
             )
         # Stale-pause backstop boot pass (feature/fix/question-pause-
         # resume-asymmetry, R3). Placement: AFTER ``setup_worker_pool``
@@ -3727,6 +4202,262 @@ async def lifespan(app: FastAPI):
         f"(default {DEFAULT_REAPER_TIMEOUT_SECONDS}s), install_dir="
         f"{upgrade_install_dir or '<none — dev/unresolved>'}"
     )
+
+    # ─────────────────────────────────────────────────────────────
+    # P4 — central engine boot wiring (Engine Arc Phase 1 / T4.4–T4.6).
+    # ONE contiguous try/except-guarded block. DORMANT POSTURE (CS-1): N
+    # observer specs registered (execute_fn withheld), zero executables,
+    # shadow rows present, ALL SERVICES_*_USE_ENGINE unset — registration for
+    # observation is NOT migration. Off the readyz-green critical path (D4.3:
+    # after init_dependency_bus and the readiness refresher task creation).
+    # F-16: disjoint from the live-defects api.py regions. F-8/F-12/F-13/
+    # F-14/F-15 untouched. A failure logs WARNING and boot CONTINUES.
+    # ─────────────────────────────────────────────────────────────
+    _engine_block_entry_t0 = time.perf_counter()  # UNGATED whole-block telemetry (D4.9)
+    _engine_svc = None  # C1: pre-bound so the except handler can drop a partial executor
+    try:
+        from daemon.services.engine.boot import (
+            build_observer_specs,
+            describe_use_engine_flags,
+            run_boot_pass,
+        )
+        from daemon.services.engine.engine import EngineService
+        from daemon.services.engine.guardrails import (
+            DependencyRef,
+            assert_dependencies_resolvable,
+        )
+        from daemon.services.engine.killswitch import EngineSwitchResolver
+        from daemon.services.engine.registry import EngineRegistry
+        from daemon.services.engine.watchdog import (
+            EngineWatchdog,
+            make_direct_db_rearm,
+        )
+        from daemon.repositories.engine.repository import EngineRepository
+        from daemon.services.event_registry.emit import set_event_sink
+
+        _engine_cfg = config.engine
+        _engine_repo = EngineRepository(manager.engine)
+        _engine_registry = EngineRegistry(_engine_repo)
+        _engine_switch = EngineSwitchResolver(resolver=os.environ.get)
+        _engine_svc = EngineService(
+            _engine_repo,
+            _engine_registry,
+            _engine_cfg,
+            shadow_mode=_engine_cfg.shadow_mode,
+            # D3.12 — the kill-switch resolver is INJECTED into the engine.
+            # The tick path consults it AT TICK TIME (D3.6) on every
+            # dispatch, so a flip of the switch takes effect on the next
+            # tick, with no restart. It caches nothing and the tick never
+            # reads os.environ itself.
+            switch_resolver=_engine_switch,
+        )
+
+        # N dormant observer specs — execute_fn withheld by construction.
+        _observer_specs = build_observer_specs(config)
+
+        _engine_gated_t0 = time.perf_counter()
+
+        async def _engine_registration_pass():
+            for _spec in _observer_specs:
+                await _engine_registry.aregister(_spec)
+
+        # Deadlined registration pass (BOOT_PASS; expire ⇒ ERROR + CONTINUE).
+        await run_boot_pass(
+            _engine_registration_pass(),
+            float(_engine_cfg.boot_pass_deadline_seconds),
+            "engine_registration",
+        )
+
+        # Engine Arc Phase-2 pilot — the FIRST executable registration.
+        # The SAME ownership CONJUNCT as the construct site (same
+        # ``config.engine`` object ⇒ no divergent resolution):
+        #   flag ON ∧ engine enabled ∧ engine shadow OFF.
+        # Flag OFF/unset (or shadow ON, or engine disabled): NO executor
+        # (this job stays shadow-skipped; the legacy loop owns).
+        # Conjunct true: executor registered here AND the legacy loop
+        # suppressed at the construct site — exactly one executor, no
+        # double-execution window.
+        if engine_owns_execution(engine_config=_engine_cfg):
+            from daemon.services.dependency_bus import (
+                get_dependency_bus as _get_pilot_bus,
+            )
+
+            _engine_svc.set_executor(
+                "orphan-watcher",
+                build_engine_executor(min_watcher_age_seconds=orphan_sweep_grace),
+            )
+            # Born-dead trap impossibility: the bus is a declared singleton
+            # getter resolved at EVERY due-time (never ctor-captured). The
+            # boot wiring assertion below now checks it for a REAL adopter.
+            _engine_svc.set_dependencies(
+                "orphan-watcher",
+                [
+                    DependencyRef(
+                        label="dependency_bus", getter=_get_pilot_bus
+                    )
+                ],
+            )
+            logger.info(
+                "orphan-watcher pilot: engine executor registered, legacy "
+                "loop suppressed (%s=1); dependency_bus late-bound at tick",
+                ORPHAN_WATCHER_ENGINE_FLAG,
+            )
+
+        # T4.6 — boot wiring assertion immediately after the registration pass.
+        _engine_wiring_report = assert_dependencies_resolvable(
+            [
+                (_spec, _engine_svc.get_dependencies(_spec.id))
+                for _spec in _observer_specs
+            ]
+        )
+        if not _engine_wiring_report.ok:
+            for _jid, _labels in _engine_wiring_report.unresolved.items():
+                for _label in _labels:
+                    logger.error(
+                        "engine boot wiring: unresolved dependency %s -> %s",
+                        _jid,
+                        _label,
+                    )
+            logger.error(
+                "engine boot wiring summary: %s", _engine_wiring_report.summary()
+            )
+
+        # AMD-5 — the set_event_sink composition line (ONE owner: P4 T4.4).
+        set_event_sink(_engine_svc.ingest_event)
+
+        # Start the tick task and the engine-independent watchdog (AMD-2:
+        # watchdog start is OUTSIDE the construction try, owns this envelope).
+        await _engine_svc.start()
+        _engine_watchdog = EngineWatchdog(
+            _engine_svc,
+            _engine_cfg,
+            rearm=make_direct_db_rearm(_engine_repo),
+        )
+        _engine_watchdog.start()
+
+        # Store both handles on app.state (shutdown clears them).
+        app.state.engine_service = _engine_svc
+        app.state.engine_watchdog = _engine_watchdog
+
+        # P6 mount (coordination addendum): assemble the observability adapter
+        # consumed by daemon/routers/engine.py. Read-only; no router change.
+        from types import SimpleNamespace as _SN
+
+        from daemon.services.dependency_bus import get_dependency_bus
+
+        _engine_dep_bus = get_dependency_bus()  # None-safe (unwired boot ⇒ live=None)
+
+        app.state.engine_observability = _SN(
+            repository=_engine_repo,
+            engine_service=_engine_svc,
+            maintenance_service=getattr(manager, "_maintenance_service", None),
+            switch_resolver=_engine_switch,
+            # D5.4 second live source: dependency_bus bound into the snapshot
+            # call (projection.event_view only forwards `bus=`).
+            event_snapshot=(
+                lambda bus=None, _dep=_engine_dep_bus: __import__(
+                    "daemon.services.event_registry.metrics", fromlist=["snapshot"]
+                ).snapshot(bus=bus, dependency_bus=_dep)
+            ),
+            dependency_bus=_engine_dep_bus,
+            runs_reader=None,  # router default (bounded tail via repository.engine)
+        )
+
+        # Exactly ONE posture INFO line. SLO-1 GATED number (registration pass +
+        # engine start + watchdog start) must be <=250ms. The UNGATED total
+        # (block entry incl. imports/construction/build_observer_specs through
+        # watchdog start) is reported as telemetry (D4.9 concern visibility).
+        #
+        # HONESTY (Phase-2 pilot, 2026-11-23): ``executable_specs`` states
+        # how many registered specs have an executor ATTACHED right now.
+        # Without it the line says "observer specs (execute_fn withheld)"
+        # even in the pilot's OWNED posture, where the engine really does
+        # execute the orphan watcher — the ceremony reads this line, so it
+        # must not understate the posture. The field is ADDITIVE: the pinned
+        # substrings ("...registrations=%d" / "specs (execute_fn withheld);
+        # use_engine_flags=%s;") are unchanged.
+        _executable_job_ids = sorted(
+            getattr(_engine_svc, "_executors", {}) or {}
+        )
+        _executable_specs = f"{len(_executable_job_ids)}"
+        if _executable_job_ids:
+            _executable_specs += f" ({', '.join(_executable_job_ids)})"
+        _engine_gated_elapsed_ms = (time.perf_counter() - _engine_gated_t0) * 1000.0
+        _engine_block_total_elapsed_ms = (
+            time.perf_counter() - _engine_block_entry_t0
+        ) * 1000.0
+        logger.info(
+            "engine boot posture: enabled=%s shadow=%s registrations=%d observer "
+            "specs (execute_fn withheld); use_engine_flags=%s; "
+            "executable_specs=%s; "
+            "block_elapsed_ms_gated=%.3f block_elapsed_ms_total=%.3f",
+            _engine_cfg.enabled,
+            _engine_cfg.shadow_mode,
+            len(_observer_specs),
+            describe_use_engine_flags(_observer_specs),
+            _executable_specs,
+            _engine_gated_elapsed_ms,
+            _engine_block_total_elapsed_ms,
+        )
+    except Exception as _engine_boot_exc:  # noqa: BLE001 — never abort boot
+        app.state.engine_service = None
+        app.state.engine_watchdog = None
+        logger.warning(
+            "engine boot wiring failed (boot CONTINUES): %s", _engine_boot_exc
+        )
+        # C1 FAIL-TO-LEGACY: the construct site may have suppressed the
+        # legacy loop on the strength of the pilot conjunct. The engine never
+        # took ownership (registration + start did not complete), so the
+        # legacy path MUST get the sweep back — otherwise the lane is DEAD.
+        # The executor is dropped first so a half-started engine cannot
+        # double-run the sweep next to the re-armed legacy loop.
+        if _engine_svc is not None:
+            try:
+                # F-2: the IMPORTED constant (never a retyped literal — a
+                # retyped key would silently pop nothing) and the drop's
+                # RESULT, so the log says what actually happened.
+                dropped = _engine_svc._executors.pop(
+                    ORPHAN_WATCHER_ENGINE_JOB_ID, None
+                )
+                if dropped is not None:
+                    # R5 — the drop is LOUD: an executor silently discarded
+                    # here is the difference between "the engine owns the
+                    # sweep" and "nobody owns the sweep".
+                    logger.warning(
+                        "orphan-watcher pilot FAIL-TO-LEGACY: dropped the engine executor for job_id=%s (engine boot wiring failed: %s) — execution returns to the legacy path",
+                        ORPHAN_WATCHER_ENGINE_JOB_ID,
+                        _engine_boot_exc,
+                    )
+                else:
+                    logger.warning(
+                        "orphan-watcher pilot FAIL-TO-LEGACY: no engine executor was registered for job_id=%s (nothing to drop; engine boot wiring failed: %s) — execution returns to the legacy path",
+                        ORPHAN_WATCHER_ENGINE_JOB_ID,
+                        _engine_boot_exc,
+                    )
+            except Exception as _pop_err:  # noqa: BLE001 — best effort
+                # 🟢(c) — the last silent except now says something.
+                logger.error(
+                    "orphan-watcher pilot FAIL-TO-LEGACY: dropping the engine executor for job_id=%s raised (%s); boot CONTINUES",
+                    ORPHAN_WATCHER_ENGINE_JOB_ID,
+                    _pop_err,
+                )
+        if _orphan_legacy_suppressed:
+            _orphan_legacy_suppressed = False
+            app.state.orphan_watcher_sweep = orphan_watcher_sweep
+            # R2 — the re-arm itself must NEVER abort the boot: this handler
+            # runs in the "never abort boot" path, so a raise here would be
+            # strictly worse than the dead lane it prevents.
+            try:
+                rearm_legacy_loop(
+                    orphan_watcher_sweep,
+                    reason=f"engine boot wiring failed: {_engine_boot_exc}",
+                )
+            except Exception as _rearm_err:  # noqa: BLE001 — never abort boot
+                logger.error(
+                    "orphan-watcher pilot FAIL-TO-LEGACY re-arm raised (%s); "
+                    "the legacy sweep loop may still be down — boot CONTINUES",
+                    _rearm_err,
+                )
 
     # ─────────────────────────────────────────────────────────────
     # service-tool Phase 1 (1.C.14) — ServiceReconciliationService.
@@ -4072,6 +4803,28 @@ async def lifespan(app: FastAPI):
     # Stop JobFeedbackObserver before processor
     if hasattr(app.state, '_job_feedback_observer'):
         await app.state._job_feedback_observer.stop()
+
+    # Batch C — C2 (2026-09-11) orphan-watcher sweep — stop it HERE,
+    # BEFORE ``shutdown_dependency_bus`` (D-10, review hardening
+    # 2026-11-21). Same lifecycle as the eligible-pending sweep (the
+    # ``stop()`` method cancels + awaits the asyncio task). The hoist
+    # is REQUIRED by the late-bind fix: the lane re-reads the bus
+    # singleton on EVERY tick, so leaving the stop in its old slot
+    # (after ``shutdown_dependency_bus`` cleared the singleton) left a
+    # window in which a tick could only resolve ``None`` and no-op.
+    # ``stop()`` depends on nothing but its own task, so ordering it
+    # first is dependency-free.
+    orphan_sweep = getattr(
+        app.state, "orphan_watcher_sweep", None
+    )
+    if orphan_sweep is not None:
+        try:
+            await orphan_sweep.stop()
+        except Exception as e:
+            logger.warning(
+                f"OrphanWatcherSweepService shutdown error: {e}"
+            )
+        app.state.orphan_watcher_sweep = None
 
     # Stop the DependencyBus. The bus is flag-agnostic (always wired),
     # so this stops it whenever it was started. Safe to call when the
@@ -4448,21 +5201,20 @@ async def lifespan(app: FastAPI):
             )
         app.state.eligible_pending_sweep = None
 
-    # Batch C — C2 (2026-09-11): stop the orphan-watcher sweep.
-    # Same lifecycle as the eligible-pending sweep above; the
-    # ``stop()`` method cancels + awaits the asyncio task so the
-    # shutdown branch stays compact.
-    orphan_sweep = getattr(
-        app.state, "orphan_watcher_sweep", None
+    # bash-spawn registry retention sweep (census A2 fix, 2026-11-21)
+    # — stop the periodic lane BEFORE the durable shutdown sweep, so
+    # the two reaper surfaces never race each other on the way down.
+    bash_spawn_retention = getattr(
+        app.state, "bash_spawn_retention", None
     )
-    if orphan_sweep is not None:
+    if bash_spawn_retention is not None:
         try:
-            await orphan_sweep.stop()
+            await bash_spawn_retention.stop()
         except Exception as e:
             logger.warning(
-                f"OrphanWatcherSweepService shutdown error: {e}"
+                f"BashSpawnRetentionSweepService shutdown error: {e}"
             )
-        app.state.orphan_watcher_sweep = None
+        app.state.bash_spawn_retention = None
 
     # --- TmpImageCleanupService shutdown (clipboard-image-chat phase 3) ---
     # Stop the retention sweep BEFORE the JobLockSweepService
@@ -4495,6 +5247,26 @@ async def lifespan(app: FastAPI):
             logger.warning(f"SourcesGcService shutdown error: {e}")
         app.state.sources_gc = None
 
+    # --- Central engine shutdown (Engine Arc P4 / T4.5) ---
+    # Stop the engine BEFORE the sweep cluster (no engine tick can touch a
+    # service the sweeps are stopping). Stop the watchdog first so it cannot
+    # fire on a stopping engine, then stop the tick task, then clear BOTH
+    # app.state handles. Both stops are idempotent (P2 T2.5).
+    _engine_watchdog = getattr(app.state, "engine_watchdog", None)
+    if _engine_watchdog is not None:
+        try:
+            _engine_watchdog.stop()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("EngineWatchdog shutdown error: %s", e)
+        app.state.engine_watchdog = None
+    _engine_service = getattr(app.state, "engine_service", None)
+    if _engine_service is not None:
+        try:
+            await _engine_service.stop()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("EngineService shutdown error: %s", e)
+        app.state.engine_service = None
+
     # --- PlaneSyncWatchdogService shutdown (Phase 3) ---
     # Stop the periodic re-drive sweep BEFORE the manager shuts down
     # so any in-flight Plane HTTP call completes before the DB
@@ -4509,6 +5281,17 @@ async def lifespan(app: FastAPI):
                 f"PlaneSyncWatchdogService shutdown error: {e}"
             )
         app.state.plane_sync_watchdog = None
+
+    # --- ScheduledFireSupervisor shutdown (Addendum A.4) ---
+    _sched_fire_supervisor = getattr(
+        app.state, "scheduled_fire_supervisor", None
+    )
+    if _sched_fire_supervisor is not None:
+        try:
+            await _sched_fire_supervisor.stop()
+        except Exception as e:
+            logger.warning(f"ScheduledFireSupervisor shutdown error: {e}")
+        app.state.scheduled_fire_supervisor = None
 
     # --- WatchReconcileSweepService shutdown (U1-SLICE) ---
     # Stop the held-watcher reconcile + zombie-GC sweep BEFORE
@@ -4548,6 +5331,19 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"MissionStrandHealer shutdown error: {e}")
         app.state.mission_strand_healer = None
+
+    # --- StaleRunningSweepService shutdown (b4 Shape B) ---
+    # Stop the steady-state stale-running terminalizer BEFORE the
+    # manager shuts down (same shutdown contract as the strand healer
+    # above: graceful stop with WARNING on failure, getattr-guarded so
+    # a partial startup failure is a silent no-op).
+    stale_running_sweep = getattr(app.state, "stale_running_sweep", None)
+    if stale_running_sweep is not None:
+        try:
+            await stale_running_sweep.stop()
+        except Exception as e:
+            logger.warning(f"StaleRunningSweepService shutdown error: {e}")
+        app.state.stale_running_sweep = None
 
     # --- JobLockSweepService shutdown (F3) ---
     # Stop the periodic reclaim sweep BEFORE the manager shuts down
@@ -4613,6 +5409,18 @@ async def lifespan(app: FastAPI):
         await _db_offload.shutdown()
     except Exception as _dbo_exc:
         logger.warning("db_offload shutdown failed: %s", _dbo_exc)
+
+    # tool-usage P1 (A-5c): bounded 10 s drain of the counter flusher BEFORE
+    # dispose_db_pools (which runs inside manager.shutdown() below). The
+    # flusher is an independent task — it does NOT ride
+    # manager._background_tasks (cancel-without-drain would truncate the
+    # day counters). A drain failure is contained; shutdown continues.
+    try:
+        _tu_flusher = getattr(manager, "_tool_usage_flusher", None)
+        if _tu_flusher is not None:
+            await _tu_flusher.drain()
+    except Exception as _tu_exc:  # noqa: BLE001 — shutdown must never fail
+        logger.warning("tool-usage flusher drain failed: %s", _tu_exc)
 
     # Call manager shutdown for graceful shutdown
     await manager.shutdown()
@@ -5815,6 +6623,260 @@ def _tag_route_classes(app: FastAPI) -> None:
     logger.info("[Auth] route classes tagged (public/module-lane/protected)")
 
 
+# ── Response compression (cpu-throughput-arc2 L1 row #2b) ─────────────
+#
+# WHY NOT THE STOCK ``starlette.middleware.gzip.GZipMiddleware``
+# (VERIFIED against the SHIPPED starlette 0.52.1, read in the worktree
+# venv, not from docs):
+#
+#   * 0.52.1 DOES exclude ``text/event-stream`` by default
+#     (``DEFAULT_EXCLUDED_CONTENT_TYPES``), so the SSE lane survives —
+#     but its exclusion list is exactly that ONE entry. It compresses
+#     every other content type above ``minimum_size``, including
+#     ``application/octet-stream``, ``image/*``, ``video/*`` (the
+#     ``/views`` media + mermaid-asset lanes and the vscode proxy's
+#     byte-faithful pass-through) — the opposite of this module's
+#     fence, and a live CPU regression on exactly the media lanes.
+#   * its default ``compresslevel=9``. Measured on a 2.6 MB instances
+#     payload: level 9 = 98.4 ms / 46.2x, level 1 = 6.2 ms / 31.1x —
+#     the same ~31-46x ratio class for 1/16th of the on-loop CPU. On a
+#     CPU-reduction commission, level 9 would be a regression.
+#   * it compresses STREAMING bodies chunk-by-chunk through a shared
+#     ``gzip.GzipFile``, whose internal zlib buffer holds sub-64 KB
+#     chunks — i.e. an unbounded-buffering hazard for any
+#     ``StreamingResponse`` whose content type is not
+#     ``text/event-stream`` (e.g. the vscode byte-faithful pass-through
+#     and SPA asset streaming, both ``more_body=True``).
+#
+# So this module ships a FILTERED equivalent: stock's responder pattern
+# (hold ``http.response.start`` until the first body message, decide
+# then) plus an ALLOWLIST and a streaming guard. Everything it declines
+# to touch is forwarded byte-identically: no header mutation, no
+# buffering, no added latency.
+#
+# Contract pinned by ``tests/unit/test_gzip_middleware.py``:
+#   * compressed ONLY when: client accepts gzip AND the method is not
+#     HEAD AND content type is ``application/json`` /
+#     ``application/<x>+json`` / ``text/*`` (minus ``text/event-stream``)
+#     AND no ``Content-Encoding`` is already present AND no ``ETag`` is
+#     present AND the response is single-shot (``more_body``
+#     absent/False) AND the body is >= ``minimum_size`` AND gzip
+#     actually shrinks it.
+#   * identity (wire bytes untouched) for: small bodies, streaming /
+#     chunked responses, SSE, binary/media, already-encoded responses,
+#     ETag-bearing responses, HEAD, and clients that did not offer gzip.
+#   * ``Vary: Accept-Encoding`` is added only when we compress
+#     (mirrors the stock behaviour; keeps the identity wire shape of
+#     every existing pin identical).
+#
+# ``minimum_size`` is MEASURED, not the stock 500: at level 1 the gzip
+# cost is ~0.1-0.2 ms of on-loop CPU for a 2-8 KB body while the ratio
+# only becomes interesting above ~8 KB (measured 19x at 8 KB, 28x at
+# 14 KB, 66x at 109 KB, 87x at 436 KB, 105x at 1.7 MB). Below 8 KB the
+# absolute wire saving is < 8 KB — noise next to HTTP framing — so
+# small poll/heartbeat JSON stays byte-identical and costs zero extra
+# CPU. The routes this row targets are 60-320x above the threshold
+# (``/api/instances`` ~2.6 MB, ``/openapi.json`` ~513 KB, ``/metrics``).
+GZIP_RESPONSE_MINIMUM_SIZE = 8192
+GZIP_RESPONSE_COMPRESS_LEVEL = 1
+# Content types we are willing to compress. Prefix match; the
+# ``text/event-stream`` exclusion is applied first so SSE always wins.
+_GZIP_COMPRESSIBLE_PREFIXES: tuple[str, ...] = (
+    "application/json",
+    "text/",
+)
+_GZIP_COMPRESSIBLE_SUFFIXES: tuple[str, ...] = ("+json",)
+_GZIP_EXCLUDED_PREFIXES: tuple[str, ...] = ("text/event-stream",)
+
+
+class ResponseGzipMiddleware:
+    """Allowlisted response gzip (see the module comment above).
+
+    ASGI middleware. Per-request state lives in a fresh responder
+    object, never on ``self`` — a middleware instance is shared by every
+    concurrent request.
+    """
+
+    def __init__(
+        self,
+        app,
+        minimum_size: int = GZIP_RESPONSE_MINIMUM_SIZE,
+        compresslevel: int = GZIP_RESPONSE_COMPRESS_LEVEL,
+    ):
+        self.app = app
+        self.minimum_size = minimum_size
+        self.compresslevel = compresslevel
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            # websocket / lifespan: never touched.
+            await self.app(scope, receive, send)
+            return
+
+        # HEAD keeps the identity header shape: RFC 9110 lets a HEAD
+        # response carry the GET headers, but every HEAD pin in this
+        # repo pairs ``Content-Length`` with the IDENTITY body size
+        # (e.g. ``tests/unit/routers/test_live_views_media.py``) — a
+        # compressed Content-Length on a bodiless response is a trap
+        # worth one line to avoid.
+        accepts_gzip = scope.get("method", "").upper() != "HEAD" and (
+            _accepts_gzip(Headers(scope=scope).get("accept-encoding", ""))
+        )
+        responder = _ResponseGzipResponder(
+            self.app,
+            minimum_size=self.minimum_size,
+            compresslevel=self.compresslevel,
+            accepts_gzip=accepts_gzip,
+        )
+        await responder(scope, receive, send)
+
+
+def _accepts_gzip(value: str) -> bool:
+    """Does ``Accept-Encoding`` actually permit gzip?
+
+    Stricter than stock starlette 0.52.1 (which does a bare
+    ``"gzip" in value`` substring test): an explicit ``gzip;q=0`` is a
+    REFUSAL and must be honoured, and a bare ``*`` covers gzip. An
+    unparsable ``q`` degrades to ``q=1`` for that token.
+    """
+    lowered = (value or "").lower()
+    if not lowered:
+        return False
+    wildcard_ok: bool | None = None
+    for part in lowered.split(","):
+        token, _, params = part.partition(";")
+        token = token.strip()
+        q = 1.0
+        for param in params.split(";"):
+            name, _, raw = param.partition("=")
+            if name.strip() == "q":
+                try:
+                    q = float(raw.strip())
+                except ValueError:
+                    q = 1.0
+        if token == "gzip":
+            return q > 0
+        if token == "*":
+            wildcard_ok = q > 0
+    return bool(wildcard_ok)
+
+
+class _ResponseGzipResponder:
+    """One request's decision state."""
+
+    def __init__(self, app, *, minimum_size: int, compresslevel: int, accepts_gzip: bool):
+        self.app = app
+        self.minimum_size = minimum_size
+        self.compresslevel = compresslevel
+        self.accepts_gzip = accepts_gzip
+        self.send = None
+        # ``start`` is held only while the body's size is still unknown
+        # (compressible content type + gzip offered).
+        self.start_message: dict | None = None
+        self.decided = False
+
+    async def __call__(self, scope, receive, send):
+        self.send = send
+        await self.app(scope, receive, self._send)
+
+    # -- helpers -----------------------------------------------------
+    @staticmethod
+    def _content_type(headers) -> str:
+        return headers.get("content-type", "").split(";")[0].strip().lower()
+
+    def _is_compressible_type(self, content_type: str) -> bool:
+        if not content_type:
+            return False
+        if content_type.startswith(_GZIP_EXCLUDED_PREFIXES):
+            return False
+        if content_type.startswith(_GZIP_COMPRESSIBLE_PREFIXES):
+            return True
+        return content_type.endswith(_GZIP_COMPRESSIBLE_SUFFIXES)
+
+    def _should_consider(self, message: dict) -> bool:
+        """Should the start message be held to inspect the first body?"""
+        if not self.accepts_gzip:
+            return False
+        headers = Headers(raw=message["headers"])
+        if "content-encoding" in headers:
+            # Already encoded upstream (e.g. the vscode proxy's
+            # pass-through) — never double-compress.
+            return False
+        if "etag" in headers:
+            # VALIDATOR SAFETY (RFC 9110 §8.8.3.2): a strong ETag must
+            # identify ONE representation's bytes. Serving a gzip and an
+            # identity body under the same strong ETag is a validator
+            # lie; the nginx-style cure is to weaken or drop the tag, and
+            # the zero-risk cure here is to leave cached/conditional
+            # surfaces alone. That means the live-view text/html wrapper
+            # pages and the mermaid asset, plus EVERY ``FileResponse``
+            # (starlette sets ``etag``/``last-modified`` unconditionally,
+            # so SPA asset serving is excluded too — and it is streaming
+            # anyway). The CPU targets of this row (/api/instances,
+            # /openapi.json, /api/metrics) carry no validator.
+            return False
+        return self._is_compressible_type(self._content_type(headers))
+
+    # -- ASGI send interception --------------------------------------
+    async def _send(self, message):
+        message_type = message["type"]
+
+        if message_type == "http.response.start":
+            if not self._should_consider(message):
+                # Not a candidate: forward the headers NOW so streaming
+                # responses (SSE included) never gain a header delay.
+                await self.send(message)
+                self.decided = True
+                return
+            # Candidate: hold the headers until we see the first body
+            # chunk — its size and ``more_body`` decide the outcome.
+            self.start_message = message
+            return
+
+        if (
+            message_type == "http.response.body"
+            and not self.decided
+            and self.start_message is not None
+        ):
+            self.decided = True
+            body = message.get("body", b"")
+            more_body = message.get("more_body", False)
+            if more_body or len(body) < self.minimum_size:
+                # Streaming or small: byte-identical identity.
+                await self.send(self.start_message)
+                await self.send(message)
+                return
+
+            compressed = gzip.compress(
+                body, self.compresslevel, mtime=0
+            )
+            if len(compressed) >= len(body):
+                # Incompressible: sending the identity bytes is smaller
+                # (and avoids a pointless Content-Encoding).
+                await self.send(self.start_message)
+                await self.send(message)
+                return
+
+            headers = MutableHeaders(raw=self.start_message["headers"])
+            headers["Content-Encoding"] = "gzip"
+            headers["Content-Length"] = str(len(compressed))
+            headers.add_vary_header("Accept-Encoding")
+            message["body"] = compressed
+            await self.send(self.start_message)
+            await self.send(message)
+            return
+
+        # Any other message type (pathsend / a start that was already
+        # forwarded) passes through untouched. If a held start is still
+        # pending — a response that never sent a body message — flush it
+        # so the client is not left hanging.
+        if self.start_message is not None and not self.decided:
+            self.decided = True
+            await self.send(self.start_message)
+            self.start_message = None
+        await self.send(message)
+
+
 def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -5980,6 +7042,21 @@ def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+    )
+
+    # cpu-throughput-arc2 L1 #2b — response compression, registered
+    # immediately AFTER CORS so LIFO execution order is
+    # route → CORS → ResponseGzip: compression sits INSIDE the CORS
+    # decoration, so the CORS headers are already on the response when
+    # gzip decides (they are untouched; gzip only adds
+    # Content-Encoding/Content-Length/Vary) and an OPTIONS preflight
+    # (which CORS answers itself, tiny body) is never compressed.
+    # Filtered allowlist + streaming guard — see the class/comment
+    # block above for the measured 0.52.1 findings.
+    app.add_middleware(
+        ResponseGzipMiddleware,
+        minimum_size=GZIP_RESPONSE_MINIMUM_SIZE,
+        compresslevel=GZIP_RESPONSE_COMPRESS_LEVEL,
     )
 
     # Add selective access log middleware
@@ -6150,6 +7227,19 @@ def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
     # Mounted HERE (inside api_router, BEFORE the SPA catch-all) — the
     # same placement precedent as the nest-reports door above.
     api_router.include_router(rooms_router)             # /api/rooms/*
+    # tool-usage-metrics-p1 (ENSEMBLE-37 Phase 1): the read-only ledger
+    # door (GET /api/tool-usage/summary + /daily). Mounted HERE inside
+    # api_router, BEFORE the SPA catch-all — the metrics/nest-reports
+    # domain-route placement precedent. Fail-closed auth posture + the
+    # any-of read scope set replicate the metrics door verbatim.
+    api_router.include_router(tool_usage_router)        # /api/tool-usage
+    # Central Maintenance System (BR-17): the READ-ONLY run-list door
+    # (GET/HEAD /api/maintenance-reports).  Mounted HERE — inside
+    # api_router, BEFORE the SPA catch-all — the tool-usage door's
+    # placement precedent.  The door carries the EXISTING
+    # ``maintenance:read`` scope (no new scope is minted) and the
+    # fail-closed auth-OFF gate; it exposes NO write verb.
+    api_router.include_router(maintenance_reports_router)  # /api/maintenance-reports
     # Phase 3 / plane-integration-revival — POST /api/plane/sync/{project_id}.
     # The router is mounted BEFORE the SPA catch-all (the catch-all
     # only fires for unmatched paths; the prefix /api/plane is owned
@@ -6181,6 +7271,16 @@ def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
     # first-match-wins resolves /api/prompts/* to this router.
     api_router.include_router(prompts_router)         # /api/prompts (Phase B T5)
     api_router.include_router(memoir_router)          # /api/memoir/persona (Phase 5: JEV persona approval)
+
+    # Engine Arc Phase 6 (P6-prepared, landed by P4): observability door.
+    # Read-only /api/engine/* surface — three GETs, no mutating verb
+    # (D6.8). Mounted inside api_router BEFORE the SPA catch-all (F-15)
+    # so Starlette first-match-wins resolves /api/engine/* to this router.
+    # The adapter is assembled in the P4 lifespan wiring block
+    # (app.state.engine_observability). F-15 + F-5 anchors untouched.
+    from daemon.routers.engine import router as engine_router
+
+    api_router.include_router(engine_router)          # /api/engine/*
 
     # OAuth2 Phase 3 (T3.12 / FR-41): the MCP-KB key-management CRUD —
     # the ONE new OAuth2-human-lane family (§5.6: 30 legacy + 1 new).

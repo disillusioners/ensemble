@@ -1,6 +1,11 @@
 import { signal } from '@angular/core';
+import { TestBed } from '@angular/core/testing';
 import { Observable, of, throwError, firstValueFrom } from 'rxjs';
 import { InstanceInfo, InstanceStatus } from '../models';
+import { ApiService } from './api.service';
+import { SseService } from './sse.service';
+import { InstanceService } from './instance.service';
+import { InstancesViewStateService } from './instances-view-state.service';
 
 const PAGE_SIZE = 10;
 
@@ -1286,3 +1291,253 @@ describe('InstanceService', () => {
 function flushPromises(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
+
+// ── The visibility gate (hidden tab stops polling) ─────────────────────
+//
+// The house gate (jobs page #3 / nest-reports #7 / room #12): a HIDDEN
+// browser tab issues NO request, a REFOCUS produces EXACTLY ONE immediate
+// refresh (debounced 2 s — never a catch-up burst), and the teardown
+// detaches the listener.
+//
+// These specs drive the PRODUCTION service (the mirror above covers the
+// pagination/merge logic; the gate lives in the production class).
+//
+// jsdom's ``document.visibilityState`` is a prototype getter — the test
+// shadows it with an own property so the production code reads the
+// simulated value.
+function setVisibility(state: 'visible' | 'hidden'): void {
+  Object.defineProperty(document, 'visibilityState', {
+    configurable: true,
+    get: () => state,
+  });
+}
+
+function fireVisibilityChange(): void {
+  document.dispatchEvent(new Event('visibilitychange'));
+}
+
+describe('InstanceService — the visibility gate (hidden tab stops polling)', () => {
+  const gateApiMock = {
+    listInstances: jest.fn(
+      (): Observable<{ instances: InstanceInfo[]; total: number; has_more: boolean }> =>
+        of({ instances: [], total: 0, has_more: false }),
+    ),
+    getInstance: jest.fn(() => throwError(() => ({ status: 404 }))),
+  };
+  const gateSseMock = {
+    statusChange: signal<{ instance_id: string; status: string; agent_id?: string } | null>(null),
+    instanceCreatedQueue: signal<InstanceInfo[]>([]),
+  };
+  let service: InstanceService;
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    gateApiMock.listInstances.mockClear();
+    setVisibility('visible');
+    TestBed.configureTestingModule({
+      providers: [
+        { provide: ApiService, useValue: gateApiMock },
+        { provide: SseService, useValue: gateSseMock },
+      ],
+    });
+    service = TestBed.inject(InstanceService);
+  });
+
+  afterEach(() => {
+    service.stopPolling();
+    setVisibility('visible');
+    jest.useRealTimers();
+  });
+
+  it('a HIDDEN tab issues NO request — the poll tick is gated', () => {
+    service.startPolling();
+    expect(gateApiMock.listInstances).toHaveBeenCalledTimes(1); // the immediate load
+
+    setVisibility('hidden');
+    fireVisibilityChange();
+
+    jest.advanceTimersByTime(60_000);
+    expect(gateApiMock.listInstances).toHaveBeenCalledTimes(1);
+    jest.advanceTimersByTime(60_000);
+    expect(gateApiMock.listInstances).toHaveBeenCalledTimes(1);
+  });
+
+  it('a REFOCUS issues EXACTLY ONE refresh (no catch-up burst)', () => {
+    service.startPolling();
+    expect(gateApiMock.listInstances).toHaveBeenCalledTimes(1);
+
+    setVisibility('hidden');
+    fireVisibilityChange();
+    jest.advanceTimersByTime(60_000);
+    expect(gateApiMock.listInstances).toHaveBeenCalledTimes(1);
+
+    setVisibility('visible');
+    fireVisibilityChange();
+    // The refresh is DEBOUNCED (2 s) — before the window elapses, none.
+    jest.advanceTimersByTime(1999);
+    expect(gateApiMock.listInstances).toHaveBeenCalledTimes(1);
+    jest.advanceTimersByTime(1);
+    expect(gateApiMock.listInstances).toHaveBeenCalledTimes(2);
+  });
+
+  it('a rapid hide/show storm collapses into ONE refresh', () => {
+    service.startPolling();
+
+    setVisibility('hidden');
+    fireVisibilityChange();
+    setVisibility('visible');
+    fireVisibilityChange();
+    setVisibility('hidden');
+    fireVisibilityChange();
+    setVisibility('visible');
+    fireVisibilityChange();
+
+    jest.advanceTimersByTime(2000);
+    expect(gateApiMock.listInstances).toHaveBeenCalledTimes(2); // immediate load + ONE refocus
+  });
+
+  it('stopPolling detaches the visibility listener and clears the interval', () => {
+    service.startPolling();
+    expect(gateApiMock.listInstances).toHaveBeenCalledTimes(1);
+
+    const removeSpy = jest.spyOn(document, 'removeEventListener');
+    service.stopPolling();
+    expect(removeSpy).toHaveBeenCalledWith('visibilitychange', expect.any(Function));
+    removeSpy.mockRestore();
+
+    jest.advanceTimersByTime(120_000);
+    expect(gateApiMock.listInstances).toHaveBeenCalledTimes(1);
+
+    // A visibilitychange after the teardown issues NO request either.
+    setVisibility('hidden');
+    fireVisibilityChange();
+    setVisibility('visible');
+    fireVisibilityChange();
+    jest.advanceTimersByTime(2000);
+    expect(gateApiMock.listInstances).toHaveBeenCalledTimes(1);
+  });
+
+  it('the 60 s cadence is UNCHANGED — the gate suppresses ticks, it does not slow them', () => {
+    service.startPolling();
+    expect(gateApiMock.listInstances).toHaveBeenCalledTimes(1);
+
+    jest.advanceTimersByTime(60_000);
+    expect(gateApiMock.listInstances).toHaveBeenCalledTimes(2);
+    jest.advanceTimersByTime(60_000);
+    expect(gateApiMock.listInstances).toHaveBeenCalledTimes(3);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Anchor threading — the REAL InstanceService (not the mirror above) reads
+// the anchor from InstancesViewStateService INSIDE loadInstances() at fetch
+// time. Pins: initial load, detailVisible=false drop, no-id drop, the 60 s
+// poll tick, and pagination. Mock ApiService; assert call args.
+// ─────────────────────────────────────────────────────────────────────────
+describe('InstanceService — anchor threading (selected instance + subtree)', () => {
+  type ListResp = { instances: InstanceInfo[]; total: number; has_more: boolean };
+  const anchorApiMock = {
+    listInstances: jest.fn(
+      (
+        _limit?: number,
+        _offset?: number,
+        _projectId?: string,
+        _excludeKb?: boolean,
+        _search?: string,
+        _order?: string,
+        _includeDescendants?: boolean,
+        _source?: string,
+        _anchor?: string,
+      ): Observable<ListResp> => of({ instances: [], total: 0, has_more: false }),
+    ),
+    getInstance: jest.fn(() => throwError(() => ({ status: 404 }))),
+  };
+  const anchorSseMock = {
+    statusChange: signal<{ instance_id: string; status: string; agent_id?: string } | null>(null),
+    instanceCreatedQueue: signal<InstanceInfo[]>([]),
+  };
+  let service: InstanceService;
+  let viewState: InstancesViewStateService;
+
+  // The 9th positional arg of api.listInstances is the anchor.
+  const lastAnchorArg = (): string | undefined => {
+    const calls = anchorApiMock.listInstances.mock.calls;
+    return calls[calls.length - 1][8];
+  };
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    anchorApiMock.listInstances.mockClear();
+    anchorApiMock.listInstances.mockReturnValue(of({ instances: [], total: 0, has_more: false }));
+    TestBed.configureTestingModule({
+      providers: [
+        { provide: ApiService, useValue: anchorApiMock },
+        { provide: SseService, useValue: anchorSseMock },
+      ],
+    });
+    service = TestBed.inject(InstanceService);
+    viewState = TestBed.inject(InstancesViewStateService);
+    viewState.detailVisible.set(false);
+    viewState.activeInstanceId.set(null);
+  });
+
+  afterEach(() => {
+    service.stopPolling();
+    jest.useRealTimers();
+  });
+
+  it('passes the anchor when detailVisible + activeInstanceId are set', async () => {
+    viewState.activeInstanceId.set('anchor-inst-123');
+    viewState.detailVisible.set(true);
+
+    await service.loadInstances();
+
+    expect(anchorApiMock.listInstances).toHaveBeenCalledTimes(1);
+    expect(lastAnchorArg()).toBe('anchor-inst-123');
+  });
+
+  it('drops the anchor when detailVisible=false even if an id is cached', async () => {
+    viewState.activeInstanceId.set('anchor-inst-123');
+    viewState.detailVisible.set(false);
+
+    await service.loadInstances();
+
+    expect(anchorApiMock.listInstances).toHaveBeenCalledTimes(1);
+    expect(lastAnchorArg()).toBeUndefined();
+  });
+
+  it('drops the anchor when detailVisible=true but no id is cached', async () => {
+    viewState.activeInstanceId.set(null);
+    viewState.detailVisible.set(true);
+
+    await service.loadInstances();
+
+    expect(lastAnchorArg()).toBeUndefined();
+  });
+
+  it('the 60 s poll tick keeps passing the anchor (read at fetch time)', async () => {
+    viewState.activeInstanceId.set('anchor-poll-456');
+    viewState.detailVisible.set(true);
+
+    service.startPolling();
+    expect(anchorApiMock.listInstances).toHaveBeenCalledTimes(1);
+    expect(lastAnchorArg()).toBe('anchor-poll-456');
+
+    jest.advanceTimersByTime(60_000);
+    expect(anchorApiMock.listInstances).toHaveBeenCalledTimes(2);
+    expect(lastAnchorArg()).toBe('anchor-poll-456');
+  });
+
+  it('pagination (loadMore) keeps passing the anchor', async () => {
+    viewState.activeInstanceId.set('anchor-more-789');
+    viewState.detailVisible.set(true);
+    anchorApiMock.listInstances.mockReturnValue(of({ instances: [], total: 100, has_more: true }));
+
+    await service.loadInstances();
+    service.loadMore();
+    await Promise.resolve();
+
+    expect(anchorApiMock.listInstances).toHaveBeenCalledTimes(2);
+    expect(lastAnchorArg()).toBe('anchor-more-789');
+  });
+});

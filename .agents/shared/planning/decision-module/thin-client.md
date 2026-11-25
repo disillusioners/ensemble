@@ -1,6 +1,6 @@
 # Thin Client — `POST /v1/decisions`
 
-> **Status:** **RATIFIED P1 SHADOW-ONLY — Emperor ratification 2026-11-09: "yeah, look good, go ahead, shadow only for now".** Design of record. P1 implementation authorised (client + registry + shadow instrumentation); seams 2/3/4 unregistered; S4 shadow-only. (The leader's giter commits at finalize.)
+> **Status:** **RATIFIED P1 SHADOW-ONLY — user ratification 2026-11-09: "yeah, look good, go ahead, shadow only for now".** Design of record. P1 implementation authorised (client + registry + shadow instrumentation); seams 2/3/4 unregistered; S4 shadow-only. (The leader's giter commits at finalize.)
 > **Scope item:** 1 of 7 (the client). **Normative source:** `scope-and-doctrine.md` — this doc cites it by §id and re-quotes nothing.
 > **Base:** `docs/decision-module` @ `5da1021f2`
 
@@ -218,7 +218,7 @@ Every mapping is **one call per consult**. In **C2 (deciding)** the overlay *rep
 - **"Reject all" is fail-open, never an empty selection.** Today `_llm_select` can return `[]` to reject every candidate; a `choice` question **always** selects an option, so the overlay **cannot express rejection at all**. That is the correct shape: "none of these are relevant" is expressed as **falling back to the heuristic order** — never as an empty result, which is the fail-closed-to-empty defect (`:667-669`).
 - **Fail-open is identical.** Every failure in §6 returns `None`; the seam turns `None` into a **failure** so the existing `:410-415` branch is reached and the fused stage-2 order is used. The overlay's "no answer" **must never** be surfaced as an empty selection — today that path returns `[]` and is **fail-closed-to-empty**, contradicting two docstrings (`:27-28`, `:790-792`). An overlay that returned "no decision" as an empty result would **replicate the defect on the success path**.
 - **Content exposure is unchanged.** The typed call carries the same candidate evidence the chat call carries today; the change is the transport and the typing, **not** the data. The shadow log still records **ids only** (`controls-and-phasing.md` §2.6).
-- **Two variants — the pilot runs A0.** `choices[]` entries are `{value, description?}`, so the deterministic fused score that today's prompt **discards** (`:629`) can ride along in each option's `description` at **zero extra call cost**. **A0** (the pilot) carries *exactly today's evidence* — id, title, tags, summary — so the shadow A/B compares like-for-like. **A1** carries the fused score as an additive prior, which is strictly **more informed** than today's prompt and therefore **changes the comparison basis**: A1 must run **its own shadow cycle and its own Emperor gate**, not ride A0's.
+- **Two variants — the pilot runs A0.** `choices[]` entries are `{value, description?}`, so the deterministic fused score that today's prompt **discards** (`:629`) can ride along in each option's `description` at **zero extra call cost**. **A0** (the pilot) carries *exactly today's evidence* — id, title, tags, summary — so the shadow A/B compares like-for-like. **A1** carries the fused score as an additive prior, which is strictly **more informed** than today's prompt and therefore **changes the comparison basis**: A1 must run **its own shadow cycle and its own user gate**, not ride A0's.
 
 ### §8.2.1 The confidence floor — per seam and per configuration
 

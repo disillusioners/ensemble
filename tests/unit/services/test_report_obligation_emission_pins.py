@@ -392,6 +392,8 @@ def make_gate_service(engine):
     )
     service = ChildReportsService(manager=manager)
     service._bus_count_pending_for_target_sync = lambda iid: 0
+    # F-1: the QUALIFIED (S3/D-1) helper is the one the gate reads.
+    service._bus_count_fulfillable_pending_for_target_sync = lambda iid: 0
     service._count_outstanding_mission_commissions = lambda iid: 0
     service._gate_wedge_resolver = AsyncMock(return_value=(True, None, False))
     return service

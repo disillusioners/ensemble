@@ -1,0 +1,92 @@
+=== Test Pack: engine_execution_unit_test ===
+
+--- unit legs ---
+============================= test session starts ==============================
+platform linux -- Python 3.14.7, pytest-9.0.2, pluggy-1.6.0 -- /home/nea/ensemble-src-wt-engine-flipprep/.venv/bin/python
+cachedir: .pytest_cache
+hypothesis profile 'default'
+rootdir: /home/nea/ensemble-src-wt-engine-flipprep
+configfile: pyproject.toml
+plugins: anyio-4.12.1, hypothesis-6.165.10, asyncio-1.3.0, mock-3.15.1, xdist-3.8.0, langsmith-0.7.7, timeout-2.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+timeout: 280.0s
+timeout method: thread
+timeout func_only: False
+collecting ... collected 52 items
+
+tests/unit/services/test_engine_honest_state.py::test_stamp_terminal_writes_run_row_and_stamps_job PASSED [  1%]
+tests/unit/services/test_engine_honest_state.py::test_skip_path_stamps_and_appends_run PASSED [  3%]
+tests/unit/services/test_engine_honest_state.py::test_every_terminal_outcome_appends_exactly_one_run PASSED [  5%]
+tests/unit/services/test_engine_honest_state.py::test_skip_reasons_closed_vocabulary PASSED [  7%]
+tests/unit/services/test_engine_honest_state.py::test_effective_interval_backoff_and_reset PASSED [  9%]
+tests/unit/services/test_engine_honest_state.py::test_hydration_preserves_last_run_at PASSED [ 11%]
+tests/unit/services/test_engine_honest_state.py::test_retry_arithmetic_no_jitter PASSED [ 13%]
+tests/unit/services/test_engine_honest_state.py::test_retry_exhaustion_lands_failed_backoff PASSED [ 15%]
+tests/unit/services/test_engine_honest_state.py::test_allowed_transitions_table PASSED [ 17%]
+tests/unit/services/test_engine_honest_state.py::test_failed_write_logs_dedicated_error PASSED [ 19%]
+tests/unit/services/test_engine_honest_state.py::test_failing_repo_stamp_leaves_loop_alive_w7 PASSED [ 21%]
+tests/unit/services/test_engine_honest_state.py::test_idempotent_skip_reason_normalization PASSED [ 23%]
+tests/unit/services/test_engine_single_flight.py::test_single_flight_overlap_returns_false_without_awaiting PASSED [ 25%]
+tests/unit/services/test_engine_single_flight.py::test_lock_released_in_finally_on_exception PASSED [ 26%]
+tests/unit/services/test_engine_single_flight.py::test_two_concurrent_ticks_produce_one_overlap PASSED [ 28%]
+tests/unit/services/test_engine_single_flight.py::test_timeout_cancel_policy PASSED [ 30%]
+tests/unit/services/test_engine_single_flight.py::test_timeout_extend_policy_records_pending_and_awaits_completion PASSED [ 32%]
+tests/unit/services/test_engine_single_flight.py::test_extend_then_eventual_success_honest_state PASSED [ 34%]
+tests/unit/services/test_engine_single_flight.py::test_extend_held_across_ticks_stamps_tpe_not_overlap PASSED [ 36%]
+tests/unit/services/test_engine_single_flight.py::test_extend_final_state_has_no_self_contradiction PASSED [ 38%]
+tests/unit/services/test_engine_single_flight.py::test_off_loop_thread_discipline_db_offload PASSED [ 40%]
+tests/unit/services/test_engine_single_flight.py::test_db_offload_refuses_coroutine_function PASSED [ 42%]
+tests/unit/services/test_engine_single_flight.py::test_off_loop_thread_discipline_dedicated_executor PASSED [ 44%]
+tests/unit/services/test_engine_single_flight.py::test_main_loop_runs_on_loop_thread PASSED [ 46%]
+tests/unit/services/test_engine_single_flight.py::test_engine_start_stop_idempotent PASSED [ 48%]
+tests/unit/services/test_engine_single_flight.py::test_engine_task_name PASSED [ 50%]
+tests/unit/services/test_engine_single_flight.py::test_engine_stop_bounded PASSED [ 51%]
+tests/unit/services/test_engine_single_flight.py::test_extend_then_raise_records_failed_backoff PASSED [ 53%]
+tests/unit/services/test_engine_single_flight.py::test_extend_wedge_escalates_to_dead PASSED [ 55%]
+tests/unit/services/test_engine_due_skip_backoff.py::test_shadow_zero_execution PASSED [ 57%]
+tests/unit/services/test_engine_due_skip_backoff.py::test_due_boundary PASSED [ 59%]
+tests/unit/services/test_engine_due_skip_backoff.py::test_metrics_snapshot_key_set PASSED [ 61%]
+tests/unit/services/test_engine_due_skip_backoff.py::test_dead_observer_carveout PASSED [ 63%]
+tests/unit/services/test_engine_due_skip_backoff.py::test_dead_observer_stale_evidence_outside_window PASSED [ 65%]
+tests/unit/services/test_engine_due_skip_backoff.py::test_shadow_stamp_records_timestamped_evidence PASSED [ 67%]
+tests/unit/services/test_engine_due_skip_backoff.py::test_project_merged_purity PASSED [ 69%]
+tests/unit/services/test_engine_due_skip_backoff.py::test_hydration_restart_clock PASSED [ 71%]
+tests/unit/services/test_engine_due_skip_backoff.py::test_ingest_event_sets_pending_latch PASSED [ 73%]
+tests/unit/services/test_engine_due_skip_backoff.py::test_loop_does_not_silently_return_on_unexpected_error PASSED [ 75%]
+tests/unit/services/test_engine_due_skip_backoff.py::test_consecutive_skips_survives_hydration PASSED [ 76%]
+tests/unit/services/engine/test_kill_switch_exec_wiring.py::test_resolver_is_injected_into_the_engine_at_boot PASSED [ 78%]
+tests/unit/services/engine/test_kill_switch_exec_wiring.py::test_tick_path_consults_the_resolver_on_every_dispatch PASSED [ 80%]
+tests/unit/services/engine/test_kill_switch_exec_wiring.py::test_tick_never_reads_os_environ_directly PASSED [ 82%]
+tests/unit/services/engine/test_kill_switch_exec_wiring.py::test_resolver_absent_means_no_switch_opinion_not_a_trip PASSED [ 84%]
+tests/unit/services/engine/test_kill_switch_exec_wiring.py::test_per_job_trip_skips_only_that_job_and_restores PASSED [ 86%]
+tests/unit/services/engine/test_kill_switch_exec_wiring.py::test_engine_wide_trip_skips_every_job_and_restores PASSED [ 88%]
+tests/unit/services/engine/test_kill_switch_exec_wiring.py::test_unreadable_engine_wide_switch_is_fail_to_legacy PASSED [ 90%]
+tests/unit/services/engine/test_kill_switch_exec_wiring.py::test_unreadable_per_job_switch_skips_that_job PASSED [ 92%]
+tests/unit/services/engine/test_kill_switch_exec_wiring.py::test_absent_switch_sources_leave_the_engine_owning_execution PASSED [ 94%]
+tests/unit/services/engine/test_kill_switch_exec_wiring.py::test_shadow_tier_is_read_at_tick_time PASSED [ 96%]
+tests/unit/services/engine/test_kill_switch_exec_wiring.py::test_absent_shadow_key_does_not_override_the_config_tier PASSED [ 98%]
+tests/unit/services/engine/test_kill_switch_exec_wiring.py::test_real_tick_loop_re_arms_on_flip_without_restart PASSED [100%]
+
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-engine-flipprep/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+tests/unit/services/test_engine_honest_state.py: 2 warnings
+tests/unit/services/test_engine_single_flight.py: 8 warnings
+tests/unit/services/engine/test_kill_switch_exec_wiring.py: 17 warnings
+  /home/nea/ensemble-src-wt-engine-flipprep/daemon/services/engine/dispatch.py:51: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    if asyncio.iscoroutinefunction(fn):
+
+tests/unit/services/test_engine_single_flight.py::test_off_loop_thread_discipline_dedicated_executor
+  /home/nea/ensemble-src-wt-engine-flipprep/daemon/services/engine/dispatch.py:66: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    if asyncio.iscoroutinefunction(fn):
+
+tests/unit/services/test_engine_single_flight.py::test_main_loop_runs_on_loop_thread
+  /home/nea/ensemble-src-wt-engine-flipprep/daemon/services/engine/dispatch.py:33: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    if asyncio.iscoroutinefunction(fn):
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+======================= 52 passed, 30 warnings in 13.57s =======================
+SUMMARY: ======================= 52 passed, 30 warnings in 13.57s =======================
+RESULT: PASS

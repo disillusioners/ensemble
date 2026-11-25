@@ -1,0 +1,48 @@
+============================= test session starts ==============================
+platform linux -- Python 3.14.7, pytest-9.0.2, pluggy-1.6.0 -- /home/nea/ensemble-src-wt-engine-flipprep/.venv/bin/python
+cachedir: .pytest_cache
+hypothesis profile 'default'
+rootdir: /home/nea/ensemble-src-wt-engine-flipprep
+configfile: pyproject.toml
+plugins: anyio-4.12.1, hypothesis-6.165.10, asyncio-1.3.0, mock-3.15.1, xdist-3.8.0, langsmith-0.7.7, timeout-2.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+timeout: 30.0s
+timeout method: thread
+timeout func_only: False
+collecting ... collected 21 items
+
+tests/unit/services/engine/test_wiring.py::test_observer_specs_dormant_posture PASSED [  4%]
+tests/unit/services/engine/test_wiring.py::test_all_use_engine_flags_unset_in_dormant_posture PASSED [  9%]
+tests/unit/services/engine/test_wiring.py::test_set_event_sink_composition_line_present PASSED [ 14%]
+tests/unit/services/engine/test_wiring.py::test_single_posture_info_line PASSED [ 19%]
+tests/unit/services/engine/test_wiring.py::test_wiring_guarded_failure_continues PASSED [ 23%]
+tests/unit/services/engine/test_wiring.py::test_wiring_forced_raise_red PASSED [ 28%]
+tests/unit/services/engine/test_wiring.py::test_boot_assertion_call_site_present PASSED [ 33%]
+tests/unit/services/engine/test_wiring.py::test_assert_dependencies_resolvable_pure PASSED [ 38%]
+tests/unit/services/engine/test_wiring.py::test_shutdown_order_engine_before_sweeps PASSED [ 42%]
+tests/unit/services/engine/test_wiring.py::test_second_stop_is_noop PASSED [ 47%]
+tests/unit/services/engine/test_wiring.py::test_slo2_engine_block_after_readiness_task PASSED [ 52%]
+tests/unit/services/engine/test_wiring.py::test_f5_anchors_unperturbed PASSED [ 57%]
+tests/unit/services/engine/test_wiring.py::test_canary_pair_single_owner PASSED [ 61%]
+tests/unit/services/engine/test_boot.py::test_boot_classes_and_sweep_alias PASSED [ 66%]
+tests/unit/services/engine/test_boot.py::test_deadlined_pass_expires_and_continues PASSED [ 71%]
+tests/unit/services/engine/test_boot.py::test_deadlined_pass_returns_result_when_fast PASSED [ 76%]
+tests/unit/services/engine/test_boot.py::test_run_boot_sweep_isolates_one_slow_pass PASSED [ 80%]
+tests/unit/services/engine/test_boot.py::test_first_tick_immediate_and_delayed_offsets PASSED [ 85%]
+tests/unit/services/engine/test_boot.py::test_jitter_stable_within_boot_differs_across_jobs PASSED [ 90%]
+tests/unit/services/engine/test_boot.py::test_jitter_removed_is_red PASSED [ 95%]
+tests/unit/services/engine/test_boot.py::test_compute_initial_due_times PASSED [100%]
+
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-engine-flipprep/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+======================== 21 passed, 1 warning in 1.20s =========================
+SUMMARY: ======================== 21 passed, 1 warning in 1.20s =========================
+LEG unit: PASS
+LEG doc-equality: PASS (WARM=250 COLD=360; doc=.agents/shared/planning/engine-arc-phase1/boot-slo-measurement.md §9.7)
+LEG warm-boot: PASS (gated=149.218ms <= bound=250ms; posture fields present; livez=28727ms readyz=28727ms; transcript=/home/nea/ensemble-src-wt-engine-flipprep/.f2gate-transcripts/warm-20261122T184731Z-512731.txt)
+LEG cold-class: DISCLOSED (bound=360ms; constant pinned by LEG 2; fresh-PG/contended boots are tester-lane — no pack measurement leg)
+RESULT: PASS

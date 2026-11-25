@@ -1,0 +1,12 @@
+SCOPE-2 LIVE REPAIR RECEIPT — releases/current re-point — 2026-11-23T12:08:44Z (executed by sonic-developer, integration owner)
+Script: /tmp/repair-relcur.sh (copy: .agents/shared/planning/sonic-team/relcur-pointer/repair-relcur.sh)
+===== RUN 1 (the repair) =====
+PRECONDITIONS-PROVEN: journal current=v0.31.42; releases/v0.31.42 is a dir; livez version=0.31.42 == journal current
+RECEIPT-PRE: path=/home/nea/agents-ensemble/releases/current old_target=v0.31.10 owner=nea:nea mtime=2026-11-19 17:10:28.031188982 +0000 inode=5037304
+RECEIPT-POST: path=/home/nea/agents-ensemble/releases/current new_target=v0.31.42 owner=nea:nea mtime=2026-11-23 12:08:44.239857592 +0000 inode=4982607
+FENCE-PROVEN: state.json sha unchanged (0e3a006f602419195b0a9e8088e5a2c34309b444cd9d0022618f960007c67c39); top-level current -> releases/v0.31.42 unchanged; nothing deleted
+REPAIRED: releases/current -> v0.31.42 == journal current; resolves to existing dir; livez=0.31.42
+===== RUN 2 (idempotency proof) =====
+IDEMPOTENT-NOOP: releases/current already -> v0.31.42 (inode 4982607 — UNCHANGED by run 2)
+FENCE-CHECK: state.json sha unchanged; top-level current -> releases/v0.31.42 (untouched)
+Independent post-state: inode 4982607, target v0.31.42, nea:nea

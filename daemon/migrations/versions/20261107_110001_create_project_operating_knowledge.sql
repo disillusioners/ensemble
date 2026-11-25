@@ -1,7 +1,7 @@
 -- Migration: create the project_operating_knowledge table (POK Phase 1, T1)
 -- Created: 2026-11-07
 -- Phase: Phase 1 core surface of the project-operating-knowledge (POK)
---        commission (Emperor GO 2026-11-07; branch
+--        commission (user GO 2026-11-07; branch
 --        feature/project-operating-knowledge, base 6b571771d).
 --
 -- What lives here:
@@ -12,7 +12,7 @@
 --     ``uq_pok_active_slug`` makes a dual-active slug STRUCTURALLY
 --     impossible — append-with-supersede is the only mutation path.
 --
--- AUDIENCE DIMENSION (Emperor ruling ER-1, 2026-11-07):
+-- AUDIENCE DIMENSION (user ruling ER-1, 2026-11-07):
 --   ``audience`` ∈ {operation, implementation, both} — stated at
 --   capture (default ``operation``), curator-adjustable via
 --   ``pok_curate``. ``audience_agents`` (nullable) is the curator-set
@@ -41,7 +41,7 @@
 -- CHECK-CLOSED VOCABULARIES (mirrored in BOTH this file AND the
 -- SQLModel tables — readiness constraint 1; keep both sides in sync):
 --   domain    ∈ artifact|deploy|verify|environment|catalog|other
---   audience  ∈ operation|implementation|both   [Emperor ruling]
+--   audience  ∈ operation|implementation|both   [user ruling]
 --   provenance ∈ declared|observed
 --   status    ∈ active|superseded|archived     (archived REACHABLE
 --                                               via pok_curate only)

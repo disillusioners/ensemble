@@ -394,6 +394,191 @@ assert_contains "stage.sh records the daemon-slice per-file map" '"daemon_slice_
 assert_contains "stage.sh re-hashes the daemon slice post-stage" \
     'post-stage daemon-slice tree hash MISMATCH' "$STAGE_SRC"
 
+# ─── 7. D4 (self-service-promote Wave 5, §2.6): the STAGE-TIME pin advance
+# and the manifest's source_commit / scripts_pin_commit (AC-D4-5/-7) ────────
+section "D4 stage-time scripts-pin advance + manifest fields"
+
+# 7a. AC-D4-5 (wiring half): the manifest carries BOTH new fields.
+assert_contains "stage.sh records the release source commit" '"source_commit"' "$STAGE_SRC"
+assert_contains "stage.sh records the advanced pin commit" '"scripts_pin_commit"' "$STAGE_SRC"
+assert_contains "stage.sh resolves the pin via the shared helper" 'scripts_pin_from_env' "$STAGE_SRC"
+assert_contains "stage.sh refuses (78) when a configured pin cannot advance" 'REFUSING TO STAGE: scripts-pin advance impossible' "$STAGE_SRC"
+assert_contains "stage.sh journals the ownership transfer" 'stage-scripts-advance' "$STAGE_SRC"
+
+# 7b. the PYTHON family mirror (daemon/tools/upgrade_journal.py
+#     EXECUTOR_FAMILY_PATHS) must equal the shell list BYTE FOR BYTE —
+#     the daemon-side coverage + parity gates consume the mirror.
+D4_PY=""
+for _cand in "$REPO_ROOT/.venv/bin/python" \
+             "$REPO_ROOT/../ensemble-src/.venv/bin/python" \
+             "$(command -v python3 || true)"; do
+    [ -n "$_cand" ] && [ -x "$_cand" ] || continue
+    if ( cd "$REPO_ROOT" && "$_cand" -c 'from daemon.tools.upgrade_journal import EXECUTOR_FAMILY_PATHS' ) >/dev/null 2>&1; then
+        D4_PY="$_cand"
+        break
+    fi
+done
+if [ -n "$D4_PY" ]; then
+    PY_FAMILY="$( cd "$REPO_ROOT" && "$D4_PY" -c 'from daemon.tools.upgrade_journal import EXECUTOR_FAMILY_PATHS; print("\n".join(EXECUTOR_FAMILY_PATHS))' 2>/dev/null )"
+    assert_eq "the python family mirror equals the shell list" \
+        "$(executor_family_paths)" "$PY_FAMILY"
+else
+    _fail "7b no interpreter can import the daemon family mirror (EXECUTOR_FAMILY_PATHS)"
+fi
+
+# 7c. FUNCTIONAL: the guarded advance against a synthetic pin repo shaped
+#     like the real one — an OLDER family copy on HEAD (behind the floor)
+#     and the floor→target line on an orphan branch.
+d4_repo="$FIXTURE/d4-pin-repo"
+d4_populate() { # <root> <stamp>
+    local root="$1" stamp="$2" p
+    while IFS= read -r p; do
+        [ -n "$p" ] || continue
+        mkdir -p "$root/$(dirname "$p")"
+        if [ "$p" = "scripts/upgrade/lib.sh" ]; then
+            printf '#!/usr/bin/env bash\nPIPELINE_SCRIPTS_REV=%s\n' "$stamp" > "$root/$p"
+        else
+            printf '#!/usr/bin/env bash\n# d4 fixture %s\n' "$p" > "$root/$p"
+        fi
+        chmod +x "$root/$p"
+    done <<EOF
+$(executor_family_paths)
+EOF
+}
+d4_gc() { ( cd "$1" && git -c user.email=d4@t -c user.name=d4 "${@:2}" ) >/dev/null 2>&1; }
+mkdir -p "$d4_repo"
+d4_populate "$d4_repo" "0000000000000000000000000000000000000000"
+d4_gc "$d4_repo" init -q -b main
+d4_gc "$d4_repo" add -A
+d4_gc "$d4_repo" commit -q -m "stale base (older family copy)"
+d4_gc "$d4_repo" checkout -q --orphan lane
+d4_populate "$d4_repo" "1111111111111111111111111111111111111111"
+d4_gc "$d4_repo" add -A
+d4_gc "$d4_repo" commit -q -m "floor"
+D4_FLOOR="$(git -C "$d4_repo" rev-parse HEAD)"
+printf '#!/usr/bin/env bash\n# d4 fixture target change\n' > "$d4_repo/scripts/upgrade/promote.sh"
+d4_gc "$d4_repo" add -A
+d4_gc "$d4_repo" commit -q -m "target"
+D4_TARGET="$(git -C "$d4_repo" rev-parse HEAD)"
+d4_gc "$d4_repo" checkout -q main
+
+# 7c-pos: behind + local ⇒ advance, HEAD == T, T_old/T_new named
+ADV_OUT="$(stage_scripts_pin_advance "$d4_repo/scripts/upgrade" "$D4_TARGET" "$D4_FLOOR" "$FIXTURE/definitely-not-the-pin" 2>&1)"
+ADV_RC=$?
+assert_eq "7c the advance succeeds on a behind pin with a local target" "0" "$ADV_RC"
+assert_contains "7c the advance names T_old and T_new" "T_old=" "$ADV_OUT"
+assert_eq "7c pin HEAD moved to the target" "$D4_TARGET" "$(git -C "$d4_repo" rev-parse HEAD)"
+if [ ! -e "${d4_repo}.scripts-advance.lock.d" ]; then _pass; else _fail "7c the advance left the lock dir behind"; fi
+
+# 7c-neg1: target absent locally ⇒ refusal names the exact hand command
+ADV_OUT2="$(stage_scripts_pin_advance "$d4_repo/scripts/upgrade" "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" "$D4_FLOOR" "$FIXTURE/nope" 2>&1)"
+ADV_RC2=$?
+assert_eq "7c an absent target refuses (rc 1)" "1" "$ADV_RC2"
+assert_contains "7c the refusal names the fetch+checkout hand command" "fetch origin" "$ADV_OUT2"
+
+# 7c-neg2 (AC-D4-7): a target missing a family path ⇒ coverage refusal
+d4_gc "$d4_repo" checkout -q lane
+d4_gc "$d4_repo" rm -q scripts/upgrade/status.sh
+d4_gc "$d4_repo" commit -q -m "drop a member"
+D4_HOLED="$(git -C "$d4_repo" rev-parse HEAD)"
+d4_gc "$d4_repo" checkout -q main
+ADV_OUT3="$(stage_scripts_pin_advance "$d4_repo/scripts/upgrade" "$D4_HOLED" "$D4_FLOOR" "$FIXTURE/nope" 2>&1)"
+ADV_RC3=$?
+assert_eq "7c a target with a family hole refuses (rc 1)" "1" "$ADV_RC3"
+assert_contains "7c the refusal names the missing family path" "scripts/upgrade/status.sh" "$ADV_OUT3"
+
+# 7c-neg3: the self-guard — the pin must not BE the staging tree
+ADV_OUT4="$(stage_scripts_pin_advance "$d4_repo/scripts/upgrade" "$D4_TARGET" "$D4_FLOOR" "$d4_repo" 2>&1)"
+ADV_RC4=$?
+assert_eq "7c advancing the staging tree itself refuses (rc 1)" "1" "$ADV_RC4"
+assert_contains "7c the self-guard refusal is named" "staging tree itself" "$ADV_OUT4"
+
+# 7d. CYCLE-3 E2 (2026-11-20): the STAGE-TIME dirty guard — the arm-time
+#     python twin (upgrade_tools.py review-fix d11) refused a dirty pin
+#     worktree but this lane did NOT (RR2's asymmetry gap): a dirty tree
+#     would fold local edits into the advanced HEAD or lose them.
+#     §2.6(b) fail-closed: refuse, never move, release the lock.
+D7D_HEAD_BEFORE="$(git -C "$d4_repo" rev-parse HEAD)"
+printf '\n# operator local edit\n' >> "$d4_repo/scripts/upgrade/lib.sh"
+ADV_OUT5="$(stage_scripts_pin_advance "$d4_repo/scripts/upgrade" "$D4_TARGET" "$D4_FLOOR" "$FIXTURE/definitely-not-the-pin" 2>&1)"
+ADV_RC5=$?
+assert_eq "7d a DIRTY pin worktree refuses (rc 1)" "1" "$ADV_RC5"
+assert_contains "7d the refusal names the DIRTY tree" "DIRTY" "$ADV_OUT5"
+assert_eq "7d the dirty refusal leaves HEAD unmoved" "$D7D_HEAD_BEFORE" "$(git -C "$d4_repo" rev-parse HEAD)"
+if [ ! -e "${d4_repo}.scripts-advance.lock.d" ]; then _pass; else _fail "7d the dirty refusal released the advance lock"; fi
+git -C "$d4_repo" checkout -q -- scripts/upgrade/lib.sh
+
+# 7e. CYCLE-3 A2 (2026-11-20): the TRUE-CAS concurrent steal — the
+#     pre-A2 rename-aside measured 2–3 CONCURRENT WINNERS (both lanes;
+#     RR3-SC4 additionally proved the bash steal path had NO pin at
+#     all). Race N REAL concurrent stealers (subshells behind a go-file
+#     barrier) against one planted stale lock: EXACTLY ONE winner, the
+#     losers refuse with a reason, no CAS debris survives.
+E7_LOCK="${d4_repo}.scripts-advance.lock.d"
+E7_DEAD="$(bash -c 'echo $$; exec true')"   # a pid that is gone by construction
+mkdir "$E7_LOCK"
+printf '%s\n' "$E7_DEAD" > "$E7_LOCK/owner"
+printf '0\n' > "$E7_LOCK/heartbeat"
+touch -d '400 seconds ago' "$E7_LOCK/owner" "$E7_LOCK/heartbeat" "$E7_LOCK"
+E7_N=8
+E7_GO="$FIXTURE/e7-go.$$"
+rm -f "$E7_GO"
+for _i in $(seq 1 $E7_N); do
+    (
+        while [ ! -e "$E7_GO" ]; do :; done
+        if _stage_advance_lock_acquire "$E7_LOCK" > "$FIXTURE/e7-out.$$.${_i}" 2>&1; then
+            echo WIN > "$FIXTURE/e7-res.$$.${_i}"
+        else
+            echo LOSE > "$FIXTURE/e7-res.$$.${_i}"
+        fi
+    ) &
+done
+: > "$E7_GO"
+wait
+E7_WIN=0; E7_LOSE=0
+for _i in $(seq 1 $E7_N); do
+    if [ "$(cat "$FIXTURE/e7-res.$$.${_i}" 2>/dev/null)" = "WIN" ]; then
+        E7_WIN=$((E7_WIN + 1))
+    else
+        E7_LOSE=$((E7_LOSE + 1))
+    fi
+done
+assert_eq "7e N-stealer race: EXACTLY ONE winner" "1" "$E7_WIN"
+assert_eq "7e N-stealer race: the other stealers refused" "$((E7_N - 1))" "$E7_LOSE"
+E7_LOSER_SILENT=0
+for _i in $(seq 1 $E7_N); do
+    if [ "$(cat "$FIXTURE/e7-res.$$.${_i}" 2>/dev/null)" = "LOSE" ] && [ ! -s "$FIXTURE/e7-out.$$.${_i}" ]; then
+        E7_LOSER_SILENT=$((E7_LOSER_SILENT + 1))
+    fi
+done
+assert_eq "7e every loser carries a refusal reason" "0" "$E7_LOSER_SILENT"
+case "$(cat "$E7_LOCK/owner" 2>/dev/null)" in
+    ''|*[!0-9]*|????????*) _fail "7e the winner wrote a valid in-range owner pid" "numeric<=7digits" "$(cat "$E7_LOCK/owner" 2>/dev/null)" ;;
+    *) _pass ;;
+esac
+E7_STRAYS="$(find "$(dirname "$E7_LOCK")" -maxdepth 1 -name 'd4-pin-repo.scripts-advance.lock.d.*' | head -5)"
+assert_eq "7e no CAS debris (claim/marker/retired) survives" "" "$E7_STRAYS"
+rm -rf "$E7_LOCK" "$E7_GO" "$FIXTURE"/e7-out.$$.* "$FIXTURE"/e7-res.$$.*
+
+# 7f. CYCLE-3 A3 (2026-11-20): an OUT-OF-RANGE owner pid is
+#     unattributable — kill -0 misreports a 20-digit pid as dead (bash
+#     kill errors without "not permitted"), which without the bound
+#     made a nonsense lock stale-breakable. Bounded at the kernel
+#     pid_max ceiling (2^22): refuse, never steal.
+for E7_BAD_PID in 99999999999999999999 4194305 0004194305; do
+    E7_LOCK="$FIXTURE/a3-pinroot.scripts-advance.lock.d"
+    rm -rf "$E7_LOCK"
+    mkdir "$E7_LOCK"
+    printf '%s\n' "$E7_BAD_PID" > "$E7_LOCK/owner"
+    printf '0\n' > "$E7_LOCK/heartbeat"
+    touch -d '400 seconds ago' "$E7_LOCK/heartbeat" "$E7_LOCK"
+    E7_OUT="$(_stage_advance_lock_acquire "$E7_LOCK" 2>&1)"; E7_RC=$?
+    assert_eq "7f out-of-range pid ($E7_BAD_PID) refuses (rc 1)" "1" "$E7_RC"
+    assert_contains "7f the refusal names the out-of-range pid ($E7_BAD_PID)" "out-of-range owner pid" "$E7_OUT"
+    if [ -d "$E7_LOCK" ]; then _pass; else _fail "7f the unattributable lock ($E7_BAD_PID) survives"; fi
+done
+rm -rf "$FIXTURE/a3-pinroot.scripts-advance.lock.d"
+
 # ─── summary ────────────────────────────────────────────────────────────────
 printf '\n========================================\n'
 printf 'executor family payload tests: %d passed, %d failed\n' "$PASS" "$FAIL"

@@ -758,3 +758,282 @@ class TestErrorHandling:
         })
         
         assert "error" in result
+
+
+# ---------------------------------------------------------------------------
+# project_get resolution ladder — tool-level directional pins
+#
+# COMMISSION: project-get-resolution
+# LANE:       feature/projres-tool-pins (this module; tests only)
+# BASE SHA:   8894f86a853c5fcba2173ab29405f02c71c1f3ef
+#
+# FROZEN CONTRACT (implementation-owned; read as spec — the implementation
+# lands in the sibling module feature/projres-repo-core, so the ladder cases
+# below are EXPECTED RED in this worktree):
+#
+#   project_get(project_id=None, name=None, shortname=None) -> dict | None
+#   - project_id -> exact PK lookup, unchanged.
+#   - name -> ladder:
+#       L1 exact name (case-sensitive)
+#       L2 exact shortname (case-sensitive)
+#       L3 CI exact name
+#       L4 CI exact shortname
+#       L5 CI substring over NAME + SHORTNAMES ONLY
+#       L5: exactly 1 candidate -> that project; >1 -> refusal with
+#           error_code "AMBIGUOUS_PROJECT" listing the candidates;
+#           0 -> refusal with error_code "NOT_FOUND".
+#   - shortname= -> shortname-only ladder (never matches the project NAME).
+#   - no args -> {"error": "Must provide either project_id, name, or shortname"}
+#   - success -> the project dict (shape unchanged).
+#   - NOT_FOUND -> {"error": "Project not found", "error_code": "NOT_FOUND",
+#                   "query": ..., "candidates": []} — "not found" MUST be present.
+#   - AMBIGUOUS -> {"error": ..., "error_code": "AMBIGUOUS_PROJECT",
+#                   "candidates": [{"project_id","name","shortnames"}...],
+#                   "candidate_count": N} and NO top-level project_id/name.
+#   - The fuzzy tier MUST NOT match a project's description.
+#   - No status filter: a paused/archived project stays resolvable.
+#
+# The tests exercise the ladder THROUGH THE TOOL (tool_map["project_get"]
+# .invoke({...})) against the REAL SQLModelProjectRepository on in-memory
+# SQLite — no PG, no live daemon, no network.
+# ---------------------------------------------------------------------------
+
+
+class TestProjectGetResolutionLadder:
+    """Tool-level directional pins for the project_get resolution ladder."""
+
+    @staticmethod
+    def _seed(tool_map, name, shortnames=None, description=None, status=None):
+        """Create a project, then attach shortnames / status via the tools.
+
+        project_create has NO shortnames parameter — shortnames are set
+        afterwards through project_set_shortnames / project_add_shortname.
+        """
+        created = tool_map["project_create"].invoke({
+            "name": name,
+            "description": description,
+        })
+        assert "error" not in created, created
+        project_id = created["project_id"]
+        if shortnames:
+            tool_map["project_set_shortnames"].invoke({
+                "project_id": project_id,
+                "shortnames": list(shortnames),
+            })
+        if status:
+            tool_map["project_set_status"].invoke({
+                "project_id": project_id,
+                "status": status,
+            })
+        return created
+
+    # -- CASE 1 — a SHORTNAME resolves to the right project_id ---------------
+
+    def test_get_by_shortname_resolves_the_right_project(self, tool_map):
+        """CASE 1 — an exact shortname resolves to the right project_id."""
+        created = self._seed(tool_map, "agents-ensemble")
+        tool_map["project_add_shortname"].invoke({
+            "project_id": created["project_id"],
+            "shortname": "ensemble",
+        })
+
+        result = tool_map["project_get"].invoke({"shortname": "ensemble"})
+
+        assert "error" not in result, result
+        assert result["project_id"] == created["project_id"]
+        assert result["name"] == "agents-ensemble"
+        assert "ensemble" in result["shortnames"]
+
+    # -- CASE 2 — the exact name still resolves ------------------------------
+
+    def test_get_by_exact_name_still_resolves(self, tool_map):
+        """CASE 2 — the exact name still resolves (L1 unchanged)."""
+        created = self._seed(tool_map, "agents-ensemble", shortnames=["ensemble"])
+
+        result = tool_map["project_get"].invoke({"name": "agents-ensemble"})
+
+        assert "error" not in result, result
+        assert result["project_id"] == created["project_id"]
+        assert result["name"] == "agents-ensemble"
+
+    # -- CASE 3 — case-insensitivity -----------------------------------------
+
+    def test_get_by_name_is_case_insensitive(self, tool_map):
+        """CASE 3 — "ENSEMBLE" and "Ensemble" resolve the same project."""
+        created = self._seed(tool_map, "Ensemble")
+
+        upper = tool_map["project_get"].invoke({"name": "ENSEMBLE"})
+        mixed = tool_map["project_get"].invoke({"name": "Ensemble"})
+
+        assert "error" not in upper, upper
+        assert "error" not in mixed, mixed
+        assert upper["project_id"] == created["project_id"]
+        assert mixed["project_id"] == created["project_id"]
+        assert upper["project_id"] == mixed["project_id"]
+
+    def test_get_by_name_ci_exact_shortname(self, tool_map):
+        """L4 — a case-insensitive EXACT shortname resolves via the name ladder."""
+        created = self._seed(tool_map, "agents-ensemble", shortnames=["ensemble"])
+
+        result = tool_map["project_get"].invoke({"name": "ENSEMBLE"})
+
+        assert "error" not in result, result
+        assert result["project_id"] == created["project_id"]
+
+    # -- CASE 4 — "ens" (shortname) hits -------------------------------------
+
+    def test_get_by_shortname_partial_hits(self, tool_map):
+        """CASE 4a — the shortname-only ladder substring tier: "ens" hits."""
+        created = self._seed(tool_map, "agents-ensemble", shortnames=["ensemble"])
+
+        result = tool_map["project_get"].invoke({"shortname": "ens"})
+
+        assert "error" not in result, result
+        assert result["project_id"] == created["project_id"]
+
+    def test_get_by_name_partial_matches_name(self, tool_map):
+        """L5 — the name ladder substring tier matches over the project NAME."""
+        created = self._seed(tool_map, "agents-ensemble", shortnames=["ae"])
+
+        result = tool_map["project_get"].invoke({"name": "ens"})
+
+        assert "error" not in result, result
+        assert result["project_id"] == created["project_id"]
+
+    def test_get_by_name_partial_matches_shortname(self, tool_map):
+        """L5 — the name ladder substring tier also matches over SHORTNAMES."""
+        created = self._seed(tool_map, "orchestrator", shortnames=["ens-suite"])
+
+        result = tool_map["project_get"].invoke({"name": "ens"})
+
+        assert "error" not in result, result
+        assert result["project_id"] == created["project_id"]
+
+    # -- CASE 5 — ambiguous partial -> refusal listing the candidates --------
+
+    def test_get_ambiguous_partial_lists_candidates(self, tool_map):
+        """CASE 5 — an ambiguous partial refuses and LISTS the candidates."""
+        first = self._seed(tool_map, "alpha-service")
+        second = self._seed(tool_map, "alpha-worker")
+
+        result = tool_map["project_get"].invoke({"name": "alpha"})
+
+        assert "error" in result, result
+        assert result["error_code"] == "AMBIGUOUS_PROJECT", result
+        # A refusal NEVER returns a project.
+        assert "project_id" not in result, result
+        assert "name" not in result, result
+        # The candidates ARE listed.
+        candidates = result["candidates"]
+        assert len(candidates) == 2, result
+        assert result["candidate_count"] == 2, result
+        assert {c["project_id"] for c in candidates} == {
+            first["project_id"], second["project_id"],
+        }, result
+        for candidate in candidates:
+            assert "project_id" in candidate, result
+            assert "name" in candidate, result
+            assert "shortnames" in candidate, result
+        assert {c["name"] for c in candidates} == {"alpha-service", "alpha-worker"}
+
+    # -- CASE 6 — unknown name -> NOT_FOUND refusal -------------------------
+
+    def test_get_unknown_name_refuses_not_found(self, tool_map):
+        """CASE 6 — an unknown name refuses with "not found" + NOT_FOUND."""
+        result = tool_map["project_get"].invoke({"name": "no-such-project-xyz"})
+
+        assert "error" in result, result
+        assert "not found" in result["error"].lower(), result
+        assert result["error_code"] == "NOT_FOUND", result
+        # A refusal NEVER returns a project.
+        assert "project_id" not in result, result
+
+    def test_get_unknown_name_refusal_carries_query_and_empty_candidates(self, tool_map):
+        """NOT_FOUND refusal shape — carries the query and an empty candidate list."""
+        result = tool_map["project_get"].invoke({"name": "no-such-project-xyz"})
+
+        assert "error" in result, result
+        assert result["error_code"] == "NOT_FOUND", result
+        assert "query" in result, result
+        assert "no-such-project-xyz" in str(result["query"]), result
+        assert result["candidates"] == [], result
+
+    # -- CASE 7 — a substring matching exactly ONE candidate resolves -------
+
+    def test_get_substring_with_single_candidate_resolves(self, tool_map):
+        """CASE 7 — a substring matching exactly ONE candidate returns it."""
+        wanted = self._seed(tool_map, "alpha-service")
+        self._seed(tool_map, "beta-worker")
+
+        result = tool_map["project_get"].invoke({"name": "alpha"})
+
+        assert "error" not in result, result
+        assert result["project_id"] == wanted["project_id"]
+        assert result["name"] == "alpha-service"
+
+    # -- CASE 8 — NEGATIVE: description-only text creates NO fuzzy hit ------
+
+    def test_get_ignores_description_only_text(self, tool_map):
+        """CASE 8 — the fuzzy tier MUST NOT match a project's description."""
+        self._seed(
+            tool_map,
+            "agents-ensemble",
+            shortnames=["ensemble"],
+            description="orchestration platform for multi-agent systems",
+        )
+
+        result = tool_map["project_get"].invoke({"name": "orchestration"})
+
+        assert "error" in result, result
+        assert result["error_code"] == "NOT_FOUND", result
+        assert "project_id" not in result, result
+
+    # -- contract: no status filter ------------------------------------------
+
+    def test_paused_project_stays_resolvable(self, tool_map):
+        """No status filter — a paused project stays resolvable."""
+        created = self._seed(tool_map, "agents-ensemble", shortnames=["ensemble"], status="paused")
+
+        by_name = tool_map["project_get"].invoke({"name": "agents-ensemble"})
+        by_shortname = tool_map["project_get"].invoke({"shortname": "ensemble"})
+
+        assert "error" not in by_name, by_name
+        assert by_name["project_id"] == created["project_id"]
+        assert "error" not in by_shortname, by_shortname
+        assert by_shortname["project_id"] == created["project_id"]
+
+
+class TestProjectGetResolutionRegression:
+    """CASE 9 — the pre-existing project_get surfaces still behave."""
+
+    def test_project_get_legacy_paths_unchanged(self, tool_map):
+        """CASE 9 — id / exact-name / not-found / requires-args paths unchanged."""
+        created = tool_map["project_create"].invoke({"name": "Legacy Path Project"})
+
+        by_id = tool_map["project_get"].invoke({"project_id": created["project_id"]})
+        assert by_id["name"] == "Legacy Path Project"
+
+        by_name = tool_map["project_get"].invoke({"name": "Legacy Path Project"})
+        assert by_name["project_id"] == created["project_id"]
+
+        missing = tool_map["project_get"].invoke({"project_id": "nonexistent-id"})
+        assert "error" in missing
+        assert "not found" in missing["error"].lower()
+
+        no_args = tool_map["project_get"].invoke({})
+        assert "error" in no_args
+        assert no_args["error"] == "Must provide either project_id, name, or shortname"
+
+    def test_tool_registration_still_21_tools(self, tools):
+        """CASE 9 — the 21-tool registration census is unchanged."""
+        tool_names = [t.name for t in tools]
+
+        assert len(tools) == 21
+        for name in (
+            "project_get",
+            "project_create",
+            "project_set_shortnames",
+            "project_add_shortname",
+            "project_remove_shortname",
+        ):
+            assert name in tool_names

@@ -207,10 +207,17 @@ class TestKBWriterResolvedToolSet:
         allow-list must also update this test deliberately. The fourth
         tool is ``report_anomaly`` — the nest-report category the
         ALL-AGENTS grant ceremony appended (2026-11-05).
+
+        THE ``pok`` GRANT IS GONE (2026-11-24, the Emperor's ruling):
+        kb-writer is a KNOWLEDGE writer — it keeps its RAG-side routing
+        only and the POK capture duty moved to the operational agents
+        (Phase 4 of the write-gate lane, commit ``fd7dc6480``). This
+        pin is re-pinned to the post-rider set; the grant census lives
+        in ``tests/unit/test_pok_grant_pins.py`` (the kb-writer
+        ABSENCE pin) — this file pins the RESOLVED TOOL SET, not the
+        grant census.
         """
-        # "pok" re-point 2026-11-08 (POK B4 sweep 16b4e70b2): kb-writer's
-        # allow gained "pok"; the probe registry carries it as a LITERAL
-        # (fall-through shape — same as the 2026-11-05 nest-report note).
         assert kb_writer_resolved_tools == {
-            "rag_insert_text", "tool_help", "time", "report_anomaly", "pok",
+            "rag_insert_text", "tool_help", "time", "report_anomaly",
         }
+        assert "pok" not in kb_writer_resolved_tools

@@ -73,8 +73,11 @@ def test_the_seed_constant_is_byte_equal_to_the_design_block():
 
 def test_the_seed_constant_carries_the_design_heading():
     assert MEMOIR_PERSONA_SEED.startswith("# Who We Are\n")
-    assert "Empyrea" in MEMOIR_PERSONA_SEED
-    assert "wi-30d19abe" in MEMOIR_PERSONA_SEED
+    assert "Empyrea" not in MEMOIR_PERSONA_SEED
+    assert "Emperor" not in MEMOIR_PERSONA_SEED
+    assert "wi-30d19abe" not in MEMOIR_PERSONA_SEED
+    assert "the user" in MEMOIR_PERSONA_SEED
+    assert "No persona is imposed" in MEMOIR_PERSONA_SEED
 
 
 # ── the seeded row ────────────────────────────────────────────────────────

@@ -99,6 +99,7 @@ __all__ = [
     "ViewEntry",
     "admit_view",
     "effective_audience_agents",
+    "make_retrieval_recorder",
     "pok_block_present",
     "render_pok_block",
     "row_is_visible",
@@ -140,7 +141,7 @@ POK_FAMILY_RE = re.compile(POK_FAMILY_SLUG_PATTERN)
 
 #: Default audiences for ACTIVE injection (§4.5.1 — design-time
 #: constants in code; ER-1 ruling: leader INCLUDED in operation —
-#: it runs the ops lanes). v0.30.5 sonic-routing amendment (Emperor
+#: it runs the ops lanes). v0.30.5 sonic-routing amendment (user
 #: ruling 2026-11-14): the sonic team is the DEFAULT project-work lane,
 #: so sonic-leader + sonic-developer join `operation` and sonic-developer
 #: joins `implementation` — ops + implementation knowledge reaches the
@@ -152,6 +153,7 @@ DEFAULT_AUDIENCE_SETS: dict[str, frozenset[str]] = {
 }
 
 
+# CANONICAL: models.py::POK_FAMILY_SLUG_PATTERN + pok_service.py::_slug_family — do not drift
 def _slug_family(slug: str) -> str | None:
     m = POK_FAMILY_RE.match(slug)
     return m.group(1) if m else None
@@ -216,6 +218,11 @@ def effective_audience_agents(row: ProjectOperatingKnowledge) -> set[str] | None
             parsed = json.loads(row.audience_agents)
             if isinstance(parsed, list):
                 return {str(a) for a in parsed if str(a).strip()}
+            logger.warning(
+                "[POK:Degraded] non-list audience_agents on %s — "
+                "falling back to the default set",
+                row.slug,
+            )
         except (ValueError, TypeError):
             logger.warning(
                 "[POK:Degraded] malformed audience_agents on %s — "
@@ -318,6 +325,7 @@ def admit_view(
     now: datetime | None = None,
     project_id: str | None = None,
     embeddings_map: dict[str, list[float]] | None = None,
+    on_retrieval: Callable[[list["ViewEntry"]], None] | None = None,
 ) -> AdmissionResult:
     """THE per-view admission (audience filter FIRST — ER-1.2).
 
@@ -327,6 +335,30 @@ def admit_view(
     ``POKService._rank_with_selector``-shaped function; ``None``
     degrades to slug order (the deterministic fallback — the pin
     tier and F5 arithmetic are unaffected).
+
+    ``on_retrieval`` is the RETRIEVAL-EVENT CAPTURE HOOK
+    (pok-write-gate Phase 1, T1.5): it is called with the
+    :class:`ViewEntry` list that was actually ADMITTED to this view,
+    so the caller can record a ledger RETRIEVAL event per injected
+    row (each entry carries its ``row``). The ledger's retrieval
+    counts SUPERSEDE ``access_count`` for the librarian — they
+    disambiguate query-vs-injection, which ``access_count`` alone
+    cannot (design-amendments-v2 §13.2 fork J, amendment 1). The hook
+    is OPTIONAL and NEVER raises into the admission path: a failed
+    capture degrades to a WARNING, never to a missing POK block
+    (§4.9 never-raise discipline).
+
+    ── RETRIEVAL EVENTS: BOTH sides are WIRED ──────────────────────
+    Both live ``admit_view`` call sites (the context-block seam and
+    the ari seam) pass ``on_retrieval=make_retrieval_recorder(...)``
+    (pok-write-gate Phase 10, T10.13 — the W-1 close), so an injected
+    row lands a ledger RETRIEVAL row with ``source="injection"``. The
+    READ side is wired too (pok-write-gate Phase 12):
+    :meth:`POKService.query
+    <daemon.services.pok_service.POKService.query>` appends one
+    ``source="query"`` RETRIEVAL row per returned row — the ``source``
+    column is the query-vs-injection disambiguator the librarian's
+    J-metric chain reads.
 
     NEVER RAISES (§4.9): any failure degrades to an empty result
     with ``degraded=True`` (no block this turn; the once-flag stays
@@ -547,6 +579,19 @@ def admit_view(
             result.omitted += sum(1 for m in members if m.id not in admitted_ids)
 
         result.entries = admitted
+        # RETRIEVAL-EVENT CAPTURE (T1.5): the rows that were actually
+        # admitted to THIS view. The capture is best-effort and NEVER
+        # raises into the admission path (§4.9) — a failed capture
+        # costs a metric, not the POK block.
+        if on_retrieval is not None and admitted:
+            try:
+                on_retrieval(admitted)
+            except Exception as exc:  # noqa: BLE001 — §4.9 never-raise
+                logger.warning(
+                    "[POK:Degraded] retrieval capture failed (%s) — the "
+                    "ledger event is lost; the POK block is unaffected",
+                    exc,
+                )
         return result
     except Exception as exc:  # noqa: BLE001 — §4.9 never-raise (the :5083 swallow family)
         logger.warning(
@@ -595,3 +640,70 @@ def pok_block_present(messages: list[Any]) -> bool:
         if isinstance(msg_id, str) and msg_id.startswith("pok:"):
             return True
     return False
+
+
+def make_retrieval_recorder(
+    repo: Any,
+    project_id: str,
+    *,
+    agent_id: str | None = None,
+    source: str = "injection",
+) -> Callable[[list["ViewEntry"]], None]:
+    """Build the ``on_retrieval`` callback that RECORDS the retrieval.
+
+    The retrieval-event capture hook (pok-write-gate Phase 1, T1.5).
+    It appends ONE ledger row per retrieved row with
+    ``phase = "RETRIEVAL"`` and ``source = <source>``.
+
+    WHY THE LEDGER AND NOT ``access_count``: the ledger's retrieval
+    counts SUPERSEDE ``access_count`` for the librarian because they
+    DISAMBIGUATE query-vs-injection — ``access_count`` cannot say
+    whether a row was read by a search or injected into a context
+    block, and the two demand opposite treatments (design-amendments-v2
+    §13.2 fork J, amendment 1).
+
+    The recorder is deliberately LAZY about failures: it never raises
+    into the admission path (§4.9 never-raise) — a capture that fails
+    logs a WARNING and costs a metric, never a POK block. The
+    ``admit_view`` hook site also guards the call, so a raising
+    recorder is contained twice over.
+
+    ── RETRIEVAL EVENTS: the INJECTION side is WIRED ───────────────
+    Both live ``admit_view`` call sites (the context-block seam and
+    the ari seam) pass this recorder (pok-write-gate Phase 10, T10.13
+    — the W-1 close), so an injected row lands a ledger RETRIEVAL row
+    with ``source="injection"``. The READ side is wired by
+    :meth:`POKService.query
+    <daemon.services.pok_service.POKService.query>` (pok-write-gate
+    Phase 12): one ``source="query"`` RETRIEVAL row per returned row,
+    appended through ``POKService._record_query_retrievals`` with the
+    same never-raise posture.
+    """
+    from daemon.repositories.pok.models import (  # noqa: PLC0415 — cycle-neutral
+        POKWriteGateLedger,
+    )
+
+    def _record(entries: list["ViewEntry"]) -> None:
+        for entry in entries:
+            row = entry.row
+            try:
+                repo.append_ledger(
+                    POKWriteGateLedger(
+                        project_id=project_id,
+                        phase="RETRIEVAL",
+                        entry_id=row.id,
+                        candidate_slug=row.slug,
+                        source=source,
+                        agent_id=agent_id,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 — §4.9 never-raise
+                logger.warning(
+                    "[POK:Degraded] retrieval ledger append failed for "
+                    "%s (%s) — the retrieval metric is lost; the POK "
+                    "block is unaffected",
+                    row.slug,
+                    exc,
+                )
+
+    return _record

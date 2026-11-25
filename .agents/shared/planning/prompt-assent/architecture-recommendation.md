@@ -1,4 +1,4 @@
-# Architecture Recommendation — `prompt-assent` (The Emperor's Word / Assent)
+# Architecture Recommendation — `prompt-assent` (The user's Word / Assent)
 
 | Field | Value |
 |---|---|
@@ -104,7 +104,7 @@ A disabled lane refuses cleanly with a typed code naming the env var — never s
 fall-back-to-FE confusion.
 
 **Default OFF for the initial landing.** This is the first lane in the tree that can change a
-live agent's own guardrails through a chat message; the house's most recent Emperor-ratified
+live agent's own guardrails through a chat message; the house's most recent user-ratified
 posture for a novel authority surface (Decision Module P1, 2026-11-09: *dormant by default,
 nothing decides anything*) is exactly this shape; the FE lane fully covers approvals meanwhile;
 the flip to ON is one env var + restart per environment. **The planner's P2/P4 default split
@@ -222,7 +222,7 @@ Bind the token to the **named canonical render**, not to a content re-read:
 2. `render_sha256 = sha256(canonical_render)` — computed at mint **from the exact bytes placed
    in the mint response**, re-checked at approve **inside the D-4 hook's transaction** (O-L).
    Surfaced to the human in the mint response and carried in the audit payload.
-3. **The effective side IS included** in the render. Rationale: the Emperor approves "pending
+3. **The effective side IS included** in the render. Rationale: the user approves "pending
    vs effective-X"; if the effective side moves underneath (a newer version approved), the
    pending row's meaning changes and the outstanding token MUST invalidate
    (`token-content-mismatch`) rather than silently approve against a different baseline. The
@@ -251,7 +251,7 @@ closes the seam with FOUR conjunctive legs:
    `(source_id, channel_id, is_dm, user_id, external_user_id)` is derived **from the window's
    message row** (`manager.py:6126-6133` stamp → message `metadata["discord"]`) — **NEVER from
    tool args**. Without this, a prompt-injected ari mints for any CORE pending row, renders
-   diff+token into any reachable surface, and supersedes the Emperor's live token (DoS +
+   diff+token into any reachable surface, and supersedes the user's live token (DoS +
    authority-fabrication primitive). With it, a mint can only occur inside a genuine user turn
    in a private channel; a supersede-DoS degenerates into a re-show of the same diff in the
    same DM. `list` remains ungated-by-window (read-only, ari-gated only).
@@ -490,7 +490,7 @@ reddens it (house mutation rule):
 ### The channel+user seam (closed by AR-1, pass 1)
 Original council seam (channel-authenticates-not-the-human) is now closed twice over: 1:1-DM
 discrimination (K-3) + daemon-derived user equality (K-8). Residual after AR-1: someone with
-control of the **Emperor's own Discord account** can approve — that is account compromise, not
+control of the **the user's own Discord account** can approve — that is account compromise, not
 a lane defect; the ledger records exactly who echoed the token (detection story). **K-8 is
 CLOSED, not an accepted residual** (lane-owner ruling upheld).
 
@@ -538,11 +538,11 @@ stand (planned, not executed — human-session-only artifact writes; ceremony-ga
 
 ---
 
-## 8. Decisions pending (Emperor-owned, non-blocking for the developer lane)
+## 8. Decisions pending (user-owned, non-blocking for the developer lane)
 
 1. **Kill-switch default.** Ruled OFF for landing (D-2). Flip at/after the ceremony is one env
    var per environment — no code change. The council's dissenting ON-position is recorded in D-2.
-2. **Guild-channel approval.** Phase 1 is 1:1-DM-only (AR-1). If the Emperor intends to approve
+2. **Guild-channel approval.** Phase 1 is 1:1-DM-only (AR-1). If the user intends to approve
    from guild channels, the pinned-approver design must be commissioned BEFORE Phase 1 ships.
 3. **Persona surface (D-7).** Phase 1 covers classic `prompt_versions` only; extension is a
    separate commission (own ledger — persona rows write no `prompt_audit_events`).
@@ -553,7 +553,7 @@ stand (planned, not executed — human-session-only artifact writes; ceremony-ga
 the strongest remaining assumptions are operational, not architectural: (i) the adapter
 `is_group_dm` discriminator classifies group DMs correctly at runtime (pre-ship confirmation
 task; the fail-closed-absent rule bounds a miss to availability, not authority); (ii) the
-Emperor's real approval workflow is DM-based (decision 2). If (ii) is false, AR-1's scope
+the user's real approval workflow is DM-based (decision 2). If (ii) is false, AR-1's scope
 escalates from pending to blocking. Multi-daemon correctness rests on D-1's PG-table choice —
 already the ruling of five options considered.
 

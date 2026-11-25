@@ -1,0 +1,100 @@
+=== Test Pack: engine_orphan_pilot_parity_test ===
+
+--- Phase-2 pilot parity + adjacent dormant pins ---
+============================= test session starts ==============================
+platform linux -- Python 3.14.7, pytest-9.0.2, pluggy-1.6.0 -- /home/nea/ensemble-src-wt-pilot-orphanwatcher/.venv/bin/python
+cachedir: .pytest_cache
+hypothesis profile 'default'
+rootdir: /tmp/pgcer_pilot_4050466
+configfile: pyproject.toml
+plugins: anyio-4.12.1, hypothesis-6.165.10, asyncio-1.3.0, mock-3.15.1, xdist-3.8.0, langsmith-0.7.7, timeout-2.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+timeout: 280.0s
+timeout method: thread
+timeout func_only: False
+collecting ... collected 59 items
+
+tests/unit/services/test_orphan_watcher_engine_parity.py::test_dualpath_identity_flag_and_spec_key_agree PASSED
+tests/unit/services/test_orphan_watcher_engine_parity.py::test_ownership_conjunct_is_fail_to_legacy PASSED
+tests/unit/services/test_orphan_watcher_engine_parity.py::test_construct_site_and_boot_block_share_the_conjunct PASSED
+tests/unit/services/test_orphan_watcher_engine_parity.py::test_spec_shape_first_tick_and_class PASSED
+tests/unit/services/test_orphan_watcher_engine_parity.py::test_parity_swept_rows_and_skip_reasons 
+[PARITY] fixture-shape × comparison-dimension
+[PARITY] shape            legacy            engine             verdict
+[PARITY] old-orphan       CANCELLED        CANCELLED        SWEPT
+[PARITY] young-orphan     PENDING          PENDING          SKIP_GRACE_WINDOW
+[PARITY] live-parent      PENDING          PENDING          SKIP_LIVE_PARENT
+[PARITY] already-cancelled CANCELLED        CANCELLED        SKIP_NOT_PENDING
+[PARITY] fired            FIRED            FIRED            SKIP_NOT_PENDING
+[PARITY] cancelled       1                1                MATCH
+PASSED
+tests/unit/services/test_orphan_watcher_engine_parity.py::test_parity_state_stamp_mapping PASSED
+tests/unit/services/test_orphan_watcher_engine_parity.py::test_bridge_failure_stamps_failed_backoff_and_maps_to_legacy_errors PASSED
+tests/unit/services/test_orphan_watcher_engine_parity.py::test_production_bridge_getter_raise_stamps_failed_backoff PASSED
+tests/unit/services/test_orphan_watcher_engine_parity.py::test_production_bridge_sweep_raise_stamps_failed_backoff PASSED
+tests/unit/services/test_orphan_watcher_engine_parity.py::test_engine_due_ticks_equal_legacy_ticks PASSED
+tests/unit/services/test_orphan_watcher_engine_parity.py::test_real_service_rearm_leaves_a_live_loop_and_is_idempotent PASSED
+tests/unit/services/test_orphan_watcher_engine_parity.py::test_rearm_never_raises_when_start_fails PASSED
+tests/unit/services/test_orphan_watcher_engine_parity.py::test_flag_unset_no_executor_engine_stays_shadow PASSED
+tests/unit/services/test_orphan_watcher_engine_parity.py::test_manual_executor_plus_flag_unset_still_shadow PASSED
+tests/unit/services/test_orphan_watcher_engine_parity.py::test_flag_on_engine_executes_legacy_suppressed PASSED
+tests/unit/services/test_orphan_watcher_engine_parity.py::test_one_flag_rollback_end_to_end PASSED
+tests/unit/services/test_orphan_watcher_engine_parity.py::test_fail_to_legacy_rearm_on_boot_block_failure PASSED
+tests/unit/services/test_orphan_watcher_engine_parity.py::test_boot_block_except_handler_calls_the_rearm PASSED
+tests/unit/services/test_orphan_watcher_engine_parity.py::test_flag_on_shipped_shadow_default_legacy_owns PASSED
+tests/unit/services/test_orphan_watcher_engine_parity.py::test_real_shaped_bus_through_the_sync_bridge PASSED
+tests/unit/services/test_orphan_watcher_engine_parity.py::test_shadow_row_cadence_for_orphan_watcher 
+[EVIDENCE][CODE-LEVEL PROBE] orphan-watcher SKIPPED_SHADOW rows over 2× interval: 3 — IN-PROCESS 1s cadence probe (code-level). This is NOT the operational greenlight criterion (≥2× the 90s interval on a real boot); the tester's boot smokes produce that evidence.
+PASSED
+tests/unit/services/test_orphan_watcher_engine_parity.py::test_posture_line_stable_across_ownership PASSED
+tests/unit/services/test_orphan_watcher_engine_parity.py::test_first_tick_immediate_in_both_paths PASSED
+tests/unit/services/engine/test_dormant_posture.py::test_dormant_posture_in_process PASSED
+tests/unit/services/engine/test_dormant_posture.py::test_posture_line_present_in_boot_wiring PASSED
+tests/unit/services/engine/test_dormant_posture.py::test_all_use_engine_flags_unset PASSED
+tests/unit/services/engine/test_wiring.py::test_observer_specs_dormant_posture PASSED
+tests/unit/services/engine/test_wiring.py::test_all_use_engine_flags_unset_in_dormant_posture PASSED
+tests/unit/services/engine/test_wiring.py::test_set_event_sink_composition_line_present PASSED
+tests/unit/services/engine/test_wiring.py::test_single_posture_info_line PASSED
+tests/unit/services/engine/test_wiring.py::test_wiring_guarded_failure_continues PASSED
+tests/unit/services/engine/test_wiring.py::test_wiring_forced_raise_red PASSED
+tests/unit/services/engine/test_wiring.py::test_boot_assertion_call_site_present PASSED
+tests/unit/services/engine/test_wiring.py::test_assert_dependencies_resolvable_pure PASSED
+tests/unit/services/engine/test_wiring.py::test_shutdown_order_engine_before_sweeps PASSED
+tests/unit/services/engine/test_wiring.py::test_second_stop_is_noop PASSED
+tests/unit/services/engine/test_wiring.py::test_slo2_engine_block_after_readiness_task PASSED
+tests/unit/services/engine/test_wiring.py::test_f5_anchors_unperturbed PASSED
+tests/unit/services/engine/test_wiring.py::test_canary_pair_single_owner PASSED
+tests/unit/services/test_engine_kill_switch_dualpath.py::test_normalize_switch_value PASSED
+tests/unit/services/test_engine_kill_switch_dualpath.py::test_fail_to_legacy_unreadable_engine_disabled PASSED
+tests/unit/services/test_engine_kill_switch_dualpath.py::test_explicit_off_values_disable PASSED
+tests/unit/services/test_engine_kill_switch_dualpath.py::test_explicit_truthy_enables PASSED
+tests/unit/services/test_engine_kill_switch_dualpath.py::test_absent_engine_defaults_true PASSED
+tests/unit/services/test_engine_kill_switch_dualpath.py::test_per_job_unreadable_killed PASSED
+tests/unit/services/test_engine_kill_switch_dualpath.py::test_per_job_explicit_off_killed PASSED
+tests/unit/services/test_engine_kill_switch_dualpath.py::test_per_job_absent_not_killed PASSED
+tests/unit/services/test_engine_kill_switch_dualpath.py::test_resolve_job_killed_returns_skip_reason PASSED
+tests/unit/services/test_engine_kill_switch_dualpath.py::test_shadow_mode_default_true_and_safe_on_malformed PASSED
+tests/unit/services/test_engine_kill_switch_dualpath.py::test_kill_switch_from_env_reaper_pattern PASSED
+tests/unit/services/test_engine_kill_switch_dualpath.py::test_use_engine_enabled_default_off PASSED
+tests/unit/services/test_engine_kill_switch_dualpath.py::test_use_engine_enabled_on PASSED
+tests/unit/services/test_engine_kill_switch_dualpath.py::test_use_engine_enabled_off_explicit PASSED
+tests/unit/services/test_engine_kill_switch_dualpath.py::test_ownership_record PASSED
+tests/unit/services/test_engine_kill_switch_dualpath.py::test_fixture_module_off_legacy_climbs PASSED
+tests/unit/services/test_engine_kill_switch_dualpath.py::test_fixture_module_on_engine_climbs PASSED
+tests/unit/services/test_engine_kill_switch_dualpath.py::test_fixture_module_runtime_flip PASSED
+tests/unit/services/test_engine_diff_audit.py::TestEngineDiffAudit::test_daemon_diff_is_confined_to_ownership_map PASSED
+tests/unit/services/test_engine_diff_audit.py::TestEngineDiffAudit::test_containment_logic_can_fail PASSED
+
+=============================== warnings summary ===============================
+../../home/nea/ensemble-src-wt-pilot-orphanwatcher/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-pilot-orphanwatcher/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+tests/unit/services/test_orphan_watcher_engine_parity.py: 19 warnings
+  /tmp/pgcer_pilot_4050466/daemon/services/engine/dispatch.py:51: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    if asyncio.iscoroutinefunction(fn):
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+======================= 59 passed, 20 warnings in 34.09s =======================
+SUMMARY: ======================= 59 passed, 20 warnings in 34.09s =======================
+RESULT: PASS

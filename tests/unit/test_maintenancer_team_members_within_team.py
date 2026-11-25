@@ -345,3 +345,130 @@ class TestRegexWidening:
             "captures a following word — the shape risk is now "
             "different (false negative, not false positive)."
         )
+
+
+# ── P5 T5.5 — effective spawnable set (BR-10 / P2-BR-8) ─────────────────────
+#
+# Home of the "effective spawnable set == 4" pin: this file already owns
+# the team-membership surface, so the spawnable-set shape belongs here.
+# The seat-GRANT rows (allow four literals / deny byte-equality /
+# resolved-surface exclusions) live in
+# ``tests/unit/test_maintenance_acceptance_map.py`` — one owner per pin.
+
+
+def test_effective_spawnable_set_is_four() -> None:
+    """BR-10 — the seat's effective spawnable set is FOUR.
+
+    The seat's ``team_members`` are three (``explorer``, ``worker``,
+    ``coder``); the ``knowledge`` capability IMPLIES ``kb-writer`` through
+    the daemon's ``TOOL_REQUIRED_AGENTS`` map — so the effective spawnable
+    set is four.
+
+    The pin asserts the MECHANISM, not just the count: the fourth member
+    must come from ``TOOL_REQUIRED_AGENTS`` (the daemon's single source of
+    truth for category-implied agents), so a silent ``team_members`` edit
+    can neither quietly shrink nor quietly grow the set.
+    """
+    from daemon.tools._auth import TOOL_REQUIRED_AGENTS
+
+    meta = _load_meta()
+    team_members = set(meta["team_members"])
+    assert team_members == set(EXPECTED_TEAM_MEMBERS), (
+        f"meta.json team_members drift: expected {sorted(EXPECTED_TEAM_MEMBERS)}; "
+        f"got {sorted(team_members)}"
+    )
+
+    # The mechanism: the `knowledge` capability requires these agents.
+    required = set(TOOL_REQUIRED_AGENTS["knowledge"])
+    assert required == {"explorer", "kb-writer"}, (
+        "TOOL_REQUIRED_AGENTS['knowledge'] must imply exactly "
+        f"{sorted({'explorer', 'kb-writer'})}; got {sorted(required)}"
+    )
+
+    # The seat holds the `knowledge` category — that is what implies
+    # `kb-writer` (the seat is never granted `kb-writer` directly).
+    allow = meta["tools"]["allow"]
+    assert "knowledge" in allow, (
+        "the seat must hold the `knowledge` category — it is the implication "
+        f"that yields the fourth spawnable member. allow={allow}"
+    )
+    assert "kb-writer" not in allow, (
+        "`kb-writer` is IMPLIED by the knowledge capability, not granted "
+        f"literally. allow={allow}"
+    )
+
+    effective = team_members | required
+    assert effective == {"explorer", "worker", "coder", "kb-writer"}, (
+        f"effective spawnable set drift: expected "
+        f"{sorted({'explorer', 'worker', 'coder', 'kb-writer'})}; got "
+        f"{sorted(effective)}"
+    )
+    assert len(effective) == 4, (
+        f"the effective spawnable set must be exactly 4; got {len(effective)} "
+        f"({sorted(effective)})"
+    )
+
+    # The prompt states the same number (the operator-visible contract).
+    workflow = _read(PROJECT_ROOT / "agents" / "maintenancer" / "workflow.md")
+    assert "Effective spawnable set is 4" in workflow, (
+        "workflow.md must state the effective spawnable set is 4 "
+        "(BR-10 — the kb-writer implication must be visible)"
+    )
+    for member in sorted(effective):
+        assert f"`{member}`" in workflow, (
+            f"workflow.md must name the effective spawnable member {member!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# P5B F6 — the lane dispatch matches the member to the required tool
+# families (the staged-boot proof, 2026-11-22)
+# ---------------------------------------------------------------------------
+
+
+def _agent_allow(agent: str) -> list[str]:
+    meta = json.loads((PROJECT_ROOT / "agents" / agent / "meta.json").read_text())
+    return list(meta.get("tools", {}).get("allow", []))
+
+
+def test_explorer_surface_lacks_the_metrics_and_skill_families() -> None:
+    """WHY the mapping moved the lanes: the explorer surface carries NO
+    ``metrics-read`` and NO ``dynamic-skill`` (``skill_*``) family — a
+    metrics-watch / skill-check child on the explorer seat fails at the
+    child and burns orchestrator supplements (P5B F6, RESULTS :605)."""
+    allow = _agent_allow("explorer")
+    assert "metrics-read" not in allow
+    assert "dynamic-skill" not in allow
+
+
+def test_worker_surface_carries_the_families_the_lanes_need() -> None:
+    """The worker seat carries the families explorer lacks: bash (the
+    metrics REST pull) and dynamic-skill (skill_search/list/view)."""
+    allow = _agent_allow("worker")
+    assert "bash" in allow
+    assert "dynamic-skill" in allow
+
+
+def test_workflow_carries_the_family_matched_lane_member_mapping() -> None:
+    """workflow.md names the required family per lane child and routes
+    each lane to the member whose surface carries it (BR-10 discipline
+    unchanged — the spawnable set stays 4)."""
+    workflow = _read(PROJECT_ROOT / "agents" / "maintenancer" / "workflow.md")
+    assert "REQUIRED TOOL FAMILIES" in workflow
+    for lane, member in (
+        ("lane-pok-sweep", "explorer"),
+        ("lane-metrics-watch", "worker"),
+        ("lane-skill-check", "worker"),
+        ("lane-abnormality-check", "explorer"),
+        ("lane-disk-sweep", "worker"),
+    ):
+        assert f"`{lane}`" in workflow, f"workflow.md must name {lane}"
+        row = f"`{lane}` → `{member}`"
+        assert row in workflow, f"lane→member mapping missing: {row}"
+
+
+def test_workflow_states_the_explorer_family_gap_explicitly() -> None:
+    """The mapping records the gap that caused the live failure."""
+    workflow = _read(PROJECT_ROOT / "agents" / "maintenancer" / "workflow.md")
+    assert "NO `metrics-read`" in workflow
+    assert "`skill_*`" in workflow

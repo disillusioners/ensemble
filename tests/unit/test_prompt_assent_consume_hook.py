@@ -286,7 +286,7 @@ class TestHookInTransaction:
         token_row, att, relay, hook = _mint_with_real_render(
             pv_repo, row, token_repo
         )
-        human = ActorContext(subject="emperor", auth_method=AUTH_METHOD_SESSION)
+        human = ActorContext(subject="the user", auth_method=AUTH_METHOD_SESSION)
         pv_repo.approve(row.version_id, human)  # FE wins the race
         with pytest.raises(Exception):
             pv_repo.approve_assent(

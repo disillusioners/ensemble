@@ -1,8 +1,8 @@
 # HANDOFF — ari-instance-stop-grant (sonic lane) — REFRESHED for re-dispatch #1 / v0.30.9
 
-Commission: Emperor directive 2026-11-14 ("check if devops have it, if it exist add it, or you can craft new one") + clarification ("maintenancer agent have it not devops"). Reuse-first locked; craft-new not used.
+Commission: user directive 2026-11-14 ("check if devops have it, if it exist add it, or you can craft new one") + clarification ("maintenancer agent have it not devops"). Reuse-first locked; craft-new not used.
 
-**Release vehicle: v0.30.9** (supersedes v0.30.8 — see `## Supersede / disposal` below). NO PROMOTE — the Emperor's 3-factor nonce ceremony owns the flip.
+**Release vehicle: v0.30.9** (supersedes v0.30.8 — see `## Supersede / disposal` below). NO PROMOTE — the user's 3-factor nonce ceremony owns the flip.
 Feature branch: `feature/ari-instance-stop-grant` (base `3a3d1fb3d`). Re-dispatch fix branches: `feature/ari-stop-fix-comments` @ `85fe8209e`, `feature/ari-stop-fix-rel` @ `4e0295c58` (both merged, pushed).
 
 ## Supersede / disposal

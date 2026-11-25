@@ -587,6 +587,17 @@ _js_now_iso() {
     date -u +%Y-%m-%dT%H:%M:%SZ
 }
 
+# _js_now — UTC epoch seconds (the wrongful-window arithmetic twin of
+# _js_now_iso; `_js_now_iso_minus` consumes it). Plain `date -u +%s` is
+# portable across GNU/BSD. REVIEW-FIX M3 (2026-11-20): this helper was
+# MISSING — `_js_now_iso_minus` called an undefined `_js_now`, bash's
+# command-substitution-inside-$(( )) coerced the empty output to 0, and
+# the cutoff collapsed to epoch-minus-86400 (1969-12-31) on every host:
+# the 24h wrongful window never bounded anything.
+_js_now() {
+    date -u +%s
+}
+
 # _js_iso_to_epoch <iso-ts> — parse journal ISO timestamps; nonzero on
 # garbage (callers fail CLOSED: the sweep never fires on an unparseable
 # started_at — it might be a fresh txn we cannot age).
@@ -2433,6 +2444,246 @@ _js_manifest_field() {
     _js_json_field "$json" "$3"
 }
 
+# ── D5 (self-service-promote Wave 3): the rollback-target chain, the
+# LAUNCHER TWIN of lib.sh's _rollback_target_resolve ─────────────────────────
+# launcher.sh is staged standalone into INSTALL_DIR and never sources
+# lib.sh — the PROTOCOL (not the code) is the shared contract, so this is
+# a deliberate re-implementation, pinned byte-equivalent in OUTCOME by
+# tests/packs/rollback_target_chain_parity_test.sh (AC-D5-12: lib.sh,
+# launcher.sh, and the Python resolver resolve IDENTICALLY over
+# tests/fixtures/rollback_target_chain_cases.tsv). Semantics: the §2.5
+# table — R0 capture > R1 to= > R2 current > R3 displaced > R4 previous;
+# present-but-invalid R0 ⇒ halt capture_invalid (NEVER fall through, F3);
+# a to= failing VALID ⇒ absent (F5); resolution short-circuits at the
+# highest VALID rung (clarification (i)); R3-vs-R2 conflict halts only
+# when no higher rung resolved; R4 null/==target ⇒ no_previous_release
+# (the CALLER maps it to the EXISTING "journal has no previous release"
+# halt, VERBATIM). See lib.sh's twin for the full rung commentary.
+_js_rollback_target_valid() {
+    # <releases_dir> <ver> <target> <live_link>
+    local rel="$1" ver="$2" target="$3" live="$4"
+    [ -n "$ver" ] || return 1
+    [ "$ver" != "$target" ] || return 1
+    [ "$ver" != "$live" ] || return 1
+    [ -d "$rel/$ver" ] || return 1
+    return 0
+}
+
+# CYCLE-2 MAJOR-1 (2026-11-20): the launcher twin of lib.sh's
+# _rollback_rung_absent — the shell seam's mirror of the Python
+# resolver's _clean fold (the _js_json_field extraction strips quotes, so
+# a JSON number and its stringified form arrive identically; parity
+# treats such tokens as ABSENT — documented in rollback_target_chain.py).
+# Folds: '' / null / none (the R1 sentinel) / the JSON booleans / every
+# strict JSON-number grammar token (see lib.sh's twin for the rationale).
+_js_rollback_rung_absent() {
+    # rc 0 = the token folds to ABSENT; rc 1 = a present candidate token
+    case "$1" in
+        ''|null|none|true|false) return 0 ;;
+    esac
+    printf '%s' "$1" | grep -Eq '^-?(0|[1-9][0-9]*)([.][0-9]+)?([eE][+-]?[0-9]+)?$'
+}
+
+_js_rollback_target_resolve() {
+    # <releases_dir> <target> <live_link> <capture> <r1_to> <r2_current>
+    # <r3_displaced> <r4_previous>
+    # stdout: "resolve <ver> <source>" (rc 0) | "halt <reason>" (rc 1)
+    local rel="$1" target="$2" live="$3" cap="$4" r1to="$5"
+    local r2="$6" r3="$7" r4="$8"
+    local cand="" src=""
+    # MAJOR-1: entry fold — mirrors the Python resolver's _clean on every
+    # rung input (a numeric/none capture folds ABSENT; a present-but-
+    # INVALID string capture still halts capture_invalid below, F3
+    # unchanged).
+    _js_rollback_rung_absent "$live" && live=""
+    _js_rollback_rung_absent "$cap" && cap=""
+    _js_rollback_rung_absent "$r1to" && r1to=""
+    _js_rollback_rung_absent "$r2" && r2=""
+    _js_rollback_rung_absent "$r3" && r3=""
+    _js_rollback_rung_absent "$r4" && r4=""
+    case "$cap" in
+        ''|null)
+            ;;
+        *)
+            if _js_rollback_target_valid "$rel" "$cap" "$target" "$live"; then
+                cand="$cap"; src="captured"
+            else
+                printf 'halt capture_invalid'
+                return 1
+            fi
+            ;;
+    esac
+    case "$r1to" in
+        ''|null|none)
+            ;;
+        *)
+            if [ -n "$r1to" ] && [ "$r1to" != "$target" ] && [ -d "$rel/$r1to" ]; then
+                if [ -n "$cand" ] && [ "$r1to" != "$cand" ]; then
+                    printf 'halt rollback_target_ambiguous'
+                    return 1
+                fi
+                [ -n "$cand" ] || { cand="$r1to"; src="requested"; }
+            fi
+            ;;
+    esac
+    if [ -n "$cand" ]; then
+        printf 'resolve %s %s' "$cand" "$src"
+        return 0
+    fi
+    local r2_cand=""
+    case "$r2" in
+        ''|null)
+            ;;
+        *)
+            if [ "$r2" != "$target" ] && [ "$r2" != "$live" ] && [ -d "$rel/$r2" ]; then
+                r2_cand="$r2"
+                cand="$r2"; src="current"
+            fi
+            ;;
+    esac
+    case "$r3" in
+        ''|null)
+            ;;
+        *)
+            if [ -n "$r2_cand" ] && [ "$r3" != "$r2_cand" ]; then
+                printf 'halt rollback_target_ambiguous'
+                return 1
+            fi
+            if [ -z "$cand" ] && _js_rollback_target_valid "$rel" "$r3" "$target" "$live"; then
+                cand="$r3"; src="displaced"
+            fi
+            ;;
+    esac
+    if [ -z "$cand" ]; then
+        case "$r4" in
+            ''|null)
+                printf 'halt no_previous_release'
+                return 1
+                ;;
+        esac
+        if [ "$r4" != "$target" ] && [ "$r4" != "$live" ] && [ -d "$rel/$r4" ]; then
+            cand="$r4"; src="previous"
+        else
+            printf 'halt no_previous_release'
+            return 1
+        fi
+    fi
+    printf 'resolve %s %s' "$cand" "$src"
+    return 0
+}
+
+# _js_rollback_request_to <journal> <target> <run_id> — the R1 reader
+# (lib.sh _rollback_request_to twin): extract the `to <DEST>` token from
+# the rollback_requested history row for this (target, run_id), anchored
+# on the PAIR `to <v> to_source` (a pre-Wave-3 row carries no to= ⇒
+# absent). rc 0 + value on stdout ("none"/version/empty); rc 1 = no row.
+# ONE bounded awk pass — the SAME entry-splitting discipline as
+# _js_history_has_event_for_target (split on the literal `{"ts":` marker;
+# literal index() conjuncts; parameters via the ENVIRONMENT, never
+# `awk -v`), extended to PRINT the matched entry's to= token.
+_js_rollback_request_to() {
+    local jp="$1" target="$2" run_id="$3"
+    local rc=0 json hist out
+    [ -n "$target" ] || return 1
+    [ -n "$run_id" ] || return 1
+    _js_awk_rc_begin
+    json="$(_js_journal_read "$jp")" || rc=$?
+    _js_awk_rc_end
+    [ "$rc" -eq 0 ] || return 1
+    hist="$(_js_json_sub "$json" "history" 2>/dev/null)" || return 1
+    case "$hist" in ''|null|'[]') return 1 ;; esac
+    local _JS_RRT_TARGET="$target" _JS_RRT_RUN_ID="$run_id"
+    export _JS_RRT_TARGET _JS_RRT_RUN_ID
+    rc=0
+    out="$(_js_awk_bounded '
+        BEGIN { buf = ""; first = 1 }
+        {
+            if (first == 1) { buf = $0; first = 0 }
+            else buf = buf "\n" $0
+        }
+        END {
+            tg = ENVIRON["_JS_RRT_TARGET"]
+            rid = ENVIRON["_JS_RRT_RUN_ID"]
+            n = split(buf, seg, /\{"ts":/)
+            for (i = 2; i <= n; i++) {
+                e = seg[i]
+                if (index(e, "\"event\":\"rollback_requested\"") == 0 && \
+                    index(e, "\"event\": \"rollback_requested\"") == 0) continue
+                if (index(e, "target " tg " ") == 0 && \
+                    index(e, "target " tg "\"") == 0) continue
+                if (index(e, "run_id " rid " ") == 0 && \
+                    index(e, "run_id " rid "\"") == 0) continue
+                # the matched entry: extract the token IMMEDIATELY BEFORE
+                # ` to_source` (pair-anchored; a lone " to " inside the
+                # reason text can never nominate a destination)
+                m = index(e, " to_source")
+                if (m == 0) { print ""; exit 0 }
+                pre = substr(e, 1, m - 1)
+                sub(/ +$/, "", pre)
+                k = 0
+                for (j = length(pre); j >= 1; j--) {
+                    if (substr(pre, j, 1) == " ") { k = j; break }
+                }
+                if (k >= 4 && substr(pre, k - 3, 4) == " to ") {
+                    print substr(pre, k + 1)
+                } else {
+                    print ""
+                }
+                exit 0
+            }
+            exit 1
+        }
+    ' <<<"$hist" 2>/dev/null)" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        return 1
+    fi
+    printf '%s' "$out"
+    return 0
+}
+
+# _js_history_entries_split <history_array> — the per-entry splitter
+# (lib.sh _journal_history_entries twin): one line per history entry,
+# split on the literal `{"ts":` marker. Used by the wrongful-rollback
+# 24h counter (a whole-window ISO lex compare — NOT a conjunction over
+# the raw document).
+_js_history_entries_split() {
+    local rest="$1" entry
+    while :; do
+        case "$rest" in
+            *'{"ts":'*) rest="${rest#*'{"ts":'}" ;;
+            *) break ;;
+        esac
+        case "$rest" in
+            *'{"ts":'*) entry="${rest%%'{"ts":'*}" ;;
+            *) entry="$rest" ;;
+        esac
+        printf '%s\n' "$entry"
+    done
+}
+
+# _js_now_iso_minus <seconds> — an ISO-8601 Z timestamp N seconds in the
+# past (uname-dispatched, the same portable-primitives discipline as
+# _js_iso_to_epoch; fail-closed to an EMPTY string on an unrecognized
+# platform, which makes every wrongful-window compare miss — the count
+# under-reports, never over-reports).
+_js_now_iso_minus() {
+    local secs="$1" until_epoch
+    case "$secs" in *[!0-9]*|'') return 1 ;; esac
+    until_epoch=$(( $(_js_now) - secs ))
+    case "$(uname -s)" in
+        Darwin|*BSD*|*bsd*)
+            date -jur "$until_epoch" +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || return 1
+            ;;
+        Linux|GNU*|*GNU*)
+            date -u -d "@$until_epoch" +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || return 1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    return 0
+}
+
 # ── The sweep itself ────────────────────────────────────────────────────────
 #
 # AXIS NOTE (cause ①, upgrade-resilience 2026-10-07): this sweep
@@ -2654,7 +2905,19 @@ _js_serving_defer() {
 _js_serving_commit_close() {
     local install_dir="$1" journal="$2" target="$3" prev="$4" displaced="$5"
     local run_id="$6" age="$7" owner="$8" probe="$9" reason="${10}"
-    local quarantined
+    local quarantined cap_inf inf_raw
+    # D5 (self-service-promote Wave 3, AC-D5-11): `previous` is
+    # republished from the FLIP-PREP CAPTURE (in_flight.captured_previous,
+    # LD-5's transactional source of truth) — NOT displaced_version. The
+    # displaced param remains the OLD-FORMAT fallback (a txn with no
+    # capture: pre-Wave-3 journals), so the no-displaced_version halt
+    # fires only when BOTH are absent — byte-unchanged for old-format.
+    inf_raw="$(_js_json_sub "$(_js_journal_read "$journal" 2>/dev/null)" "in_flight" 2>/dev/null)" || inf_raw=""
+    cap_inf="$(_js_json_field "$inf_raw" "captured_previous" 2>/dev/null)" || cap_inf=""
+    case "$cap_inf" in ''|null) cap_inf="" ;; esac
+    if [ -n "$cap_inf" ]; then
+        displaced="$cap_inf"
+    fi
     if [ -z "$displaced" ] || [ "$displaced" = "null" ]; then
         _notify_once "sweep-halt-old-format" \
             "HALT-FOR-HUMAN: stale flipped txn (target=$target) has no in_flight.displaced_version field (old-format txn) — no silent commit; boot proceeds on current; see $install_dir/releases/state.json"
@@ -2733,26 +2996,217 @@ _js_serving_commit_close() {
 # The EXISTING sweep-rollback disposition (ADR-012 / ADR-024 / D-FA4.2),
 # EXTRACTED verbatim so the new ladder has exactly ONE implementation of
 # it (the ladder reaches it from three places: the BROKEN class, the
-# daemon's rollback REQUEST, and the bounded absent-ceiling). The body is
-# the pre-Phase-2 chain; the only changes are (a) the history detail
-# carries the disposition marker and (b) the lock release is conditional
-# on the caller.
+# daemon's rollback REQUEST, and the bounded absent-ceiling). The only
+# changes are (a) the history detail carries the disposition marker and
+# (b) the lock release is conditional on the caller.
+#
+# D5 (self-service-promote Wave 3) — THREE structural changes, all at the
+# HEAD, the execution body below them unchanged in guard order:
+#   1. THE CHAIN (§2.5): the rollback target is resolved by
+#      _js_rollback_target_resolve (R0 capture > R1 to= > R2 current >
+#      R3 displaced > R4 previous) — the passed $prev parameter (the
+#      OLD selector: journal.previous, the stale-field class the C-4
+#      census named) is IGNORED. Halts: capture_invalid /
+#      rollback_target_ambiguous (new rows, txn left in place) and
+#      no_previous_release (mapped to the EXISTING "journal has no
+#      previous release" halt, byte-verbatim).
+#   2. VERIFY-BEFORE-ROLLBACK (V1/V2/V3): a serving_green_commit /
+#      quarantine_cleared_serving_green row (V1) or a fresh green probe
+#      (V2) ⇒ the GREEN PATH (commit-close when authorized, defer
+#      otherwise) — never a rollback of a serving-green release; a fresh
+#      unprobeable probe ⇒ refuse (halt, txn open); absent|mismatch|
+#      unready ⇒ Tier-B ONLY through the bounded absent-ceiling (a
+#      serving_unhealthy row is affirmative corroboration — V3 — and
+#      upgrades the evidence to tierA).
+#   3. CREDITS (§2.5 credit rule): only an EXECUTED repoint consumes the
+#      anti-flap credit, journaled with its evidence tier (tierA genuine
+#      / tierB suspected); a wrongful execution (green evidence present
+#      at credit time — the residual V1 bypass) is journaled
+#      wrongful_rollback + a SEPARATE wrongful_rollback_count (NOT the
+#      flapping cap), and a second within 24h arms a tighter halt.
 _js_sweep_rollback_chain() {
     local install_dir="$1" journal="$2" json="$3" inf="$4" target="$5"
-    local prev="$6" age="$7" owner="$8" kind="$9" disposition="${10}"
+    local _prev_ignored="$6" age="$7" owner="$8" kind="$9" disposition="${10}"
     local lock_held="${11:-1}"
     local rc=0 prev_q prev_safe new_cnt=""
-    case "$prev" in ''|null)
-        _notify_once "sweep-halt" \
-            "HALT-FOR-HUMAN: stale flipped $kind txn (target=${target:-?}) but journal has no previous release — cannot sweep-rollback; boot proceeds on current; see $install_dir/releases/state.json"
-        _js_history_append "$journal" "halt" \
-            "sweep: stale flipped $kind txn target=${target:-?} has no previous to roll back to — halt-for-human, txn left in place" \
-            || rc=1
-        _log "HALT: journal sweep: flipped txn (age ${age}s) with no previous — halt-for-human, boot proceeds on current"
+    local run_id live_link cap r1to r2cur r3disp r4prev res_line res_ver res_src
+    local probe_port probe_out probe_class probe_detail tier="" grc2=0
+    # ── 1. THE CHAIN: resolve the rollback target ─────────────────────────
+    run_id="$(_js_serving_txn_identity "$inf" "$target")"
+    live_link="$(readlink "$install_dir/current" 2>/dev/null)" || live_link=""
+    case "$live_link" in releases/*) live_link="${live_link#releases/}" ;; esac
+    cap="$(_js_json_field "$inf" "captured_previous" 2>/dev/null)" || cap=""
+    case "$cap" in null) cap="" ;; esac
+    r1to=""
+    if _js_rollback_request_to "$journal" "$target" "$run_id" >/dev/null 2>&1; then
+        r1to="$(_js_rollback_request_to "$journal" "$target" "$run_id")"
+    fi
+    r2cur="$(_js_json_field "$json" "current" 2>/dev/null)" || r2cur=""
+    case "$r2cur" in null) r2cur="" ;; esac
+    r3disp="$(_js_json_field "$inf" "displaced_version" 2>/dev/null)" || r3disp=""
+    case "$r3disp" in null) r3disp="" ;; esac
+    r4prev="$(_js_json_field "$json" "previous" 2>/dev/null)" || r4prev=""
+    case "$r4prev" in null) r4prev="" ;; esac
+    res_line="$(_js_rollback_target_resolve "$install_dir/releases" "$target" "$live_link" "$cap" "$r1to" "$r2cur" "$r3disp" "$r4prev")"
+    if [ "$?" -ne 0 ]; then
+        case "$res_line" in
+            'halt no_previous_release')
+                # the EXISTING halt arm — byte-verbatim (guard preservation)
+                _notify_once "sweep-halt" \
+                    "HALT-FOR-HUMAN: stale flipped $kind txn (target=${target:-?}) but journal has no previous release — cannot sweep-rollback; boot proceeds on current; see $install_dir/releases/state.json"
+                _js_history_append "$journal" "halt" \
+                    "sweep: stale flipped $kind txn target=${target:-?} has no previous to roll back to — halt-for-human, txn left in place" \
+                    || rc=1
+                _log "HALT: journal sweep: flipped txn (age ${age}s) with no previous — halt-for-human, boot proceeds on current"
+                _js_sweep_release "$install_dir" "$lock_held"
+                return 0
+                ;;
+            'halt capture_invalid')
+                _notify_once "sweep-halt-capture-invalid" \
+                    "HALT-FOR-HUMAN: stale flipped $kind txn (target=${target:-?}) has a present-but-INVALID in_flight.captured_previous ('$cap') — corrupted txn evidence (F3); NO rollback, NO fall-through; boot proceeds on current; see $install_dir/releases/state.json"
+                _js_history_append "$journal" "halt" \
+                    "sweep: stale flipped $kind txn target=${target:-?} capture_invalid (captured_previous='$cap' fails VALID: string ∧ non-empty ∧ ≠ target ∧ ≠ live symlink ∧ releases/<v> exists) — halt-for-human, txn left in place (F3: never fall through)" \
+                    || rc=1
+                _log "HALT: journal sweep: capture_invalid (captured_previous='$cap') — halt-for-human, txn left in place"
+                _js_sweep_release "$install_dir" "$lock_held"
+                return 0
+                ;;
+            'halt rollback_target_ambiguous')
+                _notify_once "sweep-halt-target-ambiguous" \
+                    "HALT-FOR-HUMAN: stale flipped $kind txn (target=${target:-?}) has CONFLICTING valid rollback-target candidates (chain: capture='$cap' to='$r1to' current='$r2cur' displaced='$r3disp' previous='$r4prev') — never a wrong rollback; boot proceeds on current; see $install_dir/releases/state.json"
+                _js_history_append "$journal" "halt" \
+                    "sweep: stale flipped $kind txn target=${target:-?} rollback_target_ambiguous (capture='$cap' to='$r1to' current='$r2cur' displaced='$r3disp' previous='$r4prev') — halt-for-human, txn left in place (two VALID candidates disagree — never a wrong rollback)" \
+                    || rc=1
+                _log "HALT: journal sweep: rollback_target_ambiguous — halt-for-human, txn left in place"
+                _js_sweep_release "$install_dir" "$lock_held"
+                return 0
+                ;;
+            *)
+                _log "WARN: journal sweep: rollback-target resolver returned an unrecognized verdict ('$res_line') — refusing to act (fail-closed); txn left OPEN"
+                _js_sweep_release "$install_dir" "$lock_held"
+                return 0
+                ;;
+        esac
+    fi
+    res_ver="${res_line#resolve }"
+    res_src="${res_ver##* }"
+    res_ver="${res_ver% *}"
+    _log "journal sweep: rollback target resolved -> $res_ver (source=$res_src; chain: capture='$cap' to='$r1to' current='$r2cur' displaced='$r3disp' previous='$r4prev')"
+    # ── 2. VERIFY-BEFORE-ROLLBACK (V1/V2/V3) ─────────────────────────────
+    # V1 — green evidence in the journal for THIS target ⇒ the green path.
+    _js_history_has_event_for_target "$journal" "serving_green_commit" "$target" "" || grc2=$?
+    if [ "$grc2" -eq 1 ]; then
+        grc2=0
+        _js_history_has_event_for_target "$journal" "quarantine_cleared_serving_green" "$target" "" || grc2=$?
+    fi
+    if [ "$grc2" -eq 2 ]; then
+        _log "WARN: journal sweep: the serving-green evidence could not be read (extractor UNAVAILABLE) at the chain head — the verdict is UNKNOWN; the txn is left OPEN (a green release is never rolled back on an unknown verdict)"
         _js_sweep_release "$install_dir" "$lock_held"
         return 0
-        ;;
+    fi
+    # V2 — the fresh classified probe (independent of the caller's class).
+    probe_port="$(_js_sweep_probe_port)" || probe_port=""
+    probe_out="$(_js_serving_probe "$probe_port" "$target")" || true
+    probe_class="${probe_out%% *}"
+    probe_detail="${probe_out#* }"
+    if [ "$probe_class" = "$probe_out" ]; then
+        probe_detail=""
+    fi
+    # V3 — a serving_unhealthy row is affirmative corroboration.
+    local unhealthy=1
+    _js_history_has_event_for_target "$journal" "serving_unhealthy" "$target" "$run_id" && unhealthy=0
+    if [ "$unhealthy" -ne 0 ]; then
+        _js_history_has_event_for_target "$journal" "serving_unhealthy" "$target" "" && unhealthy=0
+    fi
+    case "$probe_class" in
+        green)
+            # V2-green ⇒ the green path — NEVER a rollback of a serving
+            # green release (AC-D5-8: no sweep_rollback, no quarantine
+            # entry, no counter increment).
+            if [ "$grc2" -eq 0 ]; then
+                _log "journal sweep: chain head — target=$target is serving green (fresh probe) AND carries green evidence — the green path replaces the rollback (verify-before-rollback V1/V2)"
+            else
+                _log "journal sweep: chain head — target=$target is serving green (fresh probe; V2) — the green path replaces the rollback"
+            fi
+            local ifrc2=0 intent2=0
+            _js_history_has_event_for_target "$journal" "intent_flip" "$target" "" || ifrc2=$?
+            [ "$ifrc2" -eq 0 ] && intent2=1
+            if [ "$intent2" = "1" ]; then
+                _js_serving_commit_close "$install_dir" "$journal" "$target" "$r4prev" \
+                    "$r3disp" "$run_id" "$age" "$owner" "$probe_detail" \
+                    "serving-green (verify-before-rollback at the chain head)"
+            else
+                _js_serving_defer "$journal" "$target" "$run_id" "$age" \
+                    "green-without-intent-flip" \
+                    "the target is serving green but there is NO intent_flip evidence — the flip is unauthorized: never commit-close an unauthorized flip, never roll back a serving-green release"
+                _notify_once "sweep-defer-unauthorized" \
+                    "DEFERRED: stale flipped txn (target=$target) is SERVING GREEN but the journal carries NO intent_flip evidence for it — the flip is unauthorized: not committed and not rolled back. The txn stays OPEN for operator resolution — see $install_dir/releases/state.json"
+            fi
+            _js_sweep_release "$install_dir" "$lock_held"
+            return 0
+            ;;
+        unprobeable)
+            # a probe-CONFIGURATION failure is NOT evidence — refuse the
+            # rollback (F3: an UNVERIFIED execution is tonight's
+            # punishment class); the txn stays OPEN, boot proceeds.
+            _log "WARN: journal sweep: chain head — the fresh serving probe is UNPROBEABLE ($probe_detail) — refusing the rollback (halt-for-human, txn left OPEN)"
+            _notify_once "sweep-halt-unprobeable" \
+                "HALT-FOR-HUMAN: rollback of target=${target:-?} refused — the fresh serving probe is UNPROBEABLE ($probe_detail — a probe-configuration failure, not a serving observation); txn left OPEN; see $install_dir/releases/state.json"
+            _js_history_append "$journal" "halt" \
+                "sweep: rollback of target=${target:-?} refused — the fresh serving probe is UNPROBEABLE ($probe_detail): a probe-configuration failure is never rollback evidence — halt-for-human, txn left in place" \
+                || rc=1
+            _js_sweep_release "$install_dir" "$lock_held"
+            return 0
+            ;;
+        broken)
+            tier="tierA"
+            ;;
+        absent|mismatch|unready)
+            if [ "$unhealthy" -eq 0 ]; then
+                # V3 — affirmative corroboration: the daemon's unhealthy
+                # verdict + a non-green fresh observation ⇒ genuine (tierA)
+                tier="tierA"
+                _log "journal sweep: chain head — $probe_class observation corroborated by a serving_unhealthy row (V3) — evidence tierA"
+            elif [ "$disposition" = "absent-ceiling" ]; then
+                # the caller already counted this observation toward the
+                # bounded ceiling — this IS the Tier-B execution
+                tier="tierB"
+            else
+                # Tier-B ONLY through the bounded absent-ceiling — a bare
+                # absent-class observation (e.g. the launcher boot's
+                # daemon-not-yet-listening window) must NEVER fire the
+                # chain immediately. Count it + defer.
+                local cp2 abs2 mis2 un2 brk2 tot2 ceil2
+                cp2="$(_js_defer_counter_path "$install_dir" "$run_id")"
+                abs2="$(_js_defer_counter_read "$cp2" absent)"
+                mis2="$(_js_defer_counter_read "$cp2" mismatch)"
+                un2="$(_js_defer_counter_read "$cp2" unready)"
+                brk2="$(_js_defer_counter_read "$cp2" broken)"
+                case "$probe_class" in
+                    absent) abs2=$(( abs2 + 1 )) ;;
+                    mismatch) mis2=$(( mis2 + 1 )) ;;
+                    unready) un2=$(( un2 + 1 )) ;;
+                esac
+                tot2=$(( abs2 + mis2 + un2 ))
+                _js_defer_counter_write "$cp2" "$abs2" "$mis2" "$un2" "$brk2" \
+                    || _log "WARN: journal sweep: defer counter write FAILED ($cp2) — the tally restarts (bounded, not unbounded)"
+                ceil2="${SWEEP_DEFER_CEILING}"
+                case "$ceil2" in ''|*[!0-9]*) ceil2=3 ;; esac
+                _js_serving_defer "$journal" "$target" "$run_id" "$age" \
+                    "chain-head-$probe_class" \
+                    "qualifying observations=$tot2 of ceiling=$ceil2 at the chain head — the absent-class rollback is Tier-B and fires ONLY through the bounded absent-ceiling (verify-before-rollback V2)"
+                _js_sweep_release "$install_dir" "$lock_held"
+                return 0
+            fi
+            ;;
+        *)
+            # an unrecognized probe class at the chain head — fail-closed
+            _log "WARN: journal sweep: chain head — unrecognized probe class '$probe_class' — refusing to act; txn left OPEN"
+            _js_sweep_release "$install_dir" "$lock_held"
+            return 0
+            ;;
     esac
+    local prev="$res_ver"
     # M4 quarantine gate: a QUARANTINED previous is a known-bad release
     # (it failed a gate before) — the sweep must never flip onto it.
     prev_q="$(_js_json_sub "$json" "quarantined" 2>/dev/null)" || prev_q=""
@@ -2805,10 +3259,86 @@ _js_sweep_rollback_chain() {
         || { _log "WARN: journal sweep: quarantine append failed"; rc=1; }
     _js_journal_update "$journal" "current" "\"$prev\"" \
         || { _log "WARN: journal sweep: journal current update failed"; rc=1; }
-    new_cnt="$(_js_count_rollback "$journal")" \
-        || { _log "WARN: journal sweep: rollback counter/cooldown update failed"; rc=1; }
+    # D5 — normalize `previous` for the new current: leave unchanged iff
+    # VALID for the new current (non-null ∧ ≠ the new current ∧ the
+    # release dir exists ∧ NOT quarantined — the M4 no-strand rule: a
+    # quarantined previous is exactly the stranded pairing the old guard
+    # existed to prevent), else null + a `previous_invalidated` history
+    # row. Stops the compounding (the old path never touched previous —
+    # launcher's rollback wrote current only).
+    local jnow prev_now prev_ok=0 prev_q2
+    jnow="$(_js_journal_read "$journal" 2>/dev/null)" || jnow=""
+    prev_now="$(_js_json_field "$jnow" "previous" 2>/dev/null)" || prev_now=""
+    case "$prev_now" in ''|null) prev_ok=1 ;; esac
+    prev_q2="$(_js_json_sub "$jnow" "quarantined" 2>/dev/null)" || prev_q2=""
+    case "$prev_q2" in
+        *"\"$prev_now\""*) [ -n "$prev_now" ] && prev_ok=1 ;;
+    esac
+    if [ "$prev_ok" -eq 0 ] && [ "$prev_now" != "$prev" ] \
+       && [ -d "$install_dir/releases/$prev_now" ]; then
+        : # VALID for the new current — left unchanged (the G1 record)
+    else
+        _js_journal_update "$journal" "previous" "null" \
+            || { _log "WARN: journal sweep: previous normalization write failed"; rc=1; }
+        _js_history_append "$journal" "previous_invalidated" \
+            "sweep: journal previous='$prev_now' was not VALID for the new current=$prev — set null (the old pairing no longer describes the release order)" \
+            || true
+    fi
+    # D5 credits — the wrongful residual first (V1's paranoid double-
+    # check AT CREDIT TIME): green evidence present at the moment the
+    # repoint executed ⇒ the flapping cap is NOT charged; the separate
+    # wrongful machinery journals + counts, and a second within 24h arms
+    # a tighter halt.
+    new_cnt=""
+    if [ "$grc2" -eq 0 ]; then
+        _js_history_append "$journal" "wrongful_rollback" \
+            "sweep: WRONGFUL rollback residue — target=$target carried serving-green evidence at execution (source=$res_src disposition=$disposition); NOT charged to the flapping cap; counted in wrongful_rollback_count" \
+            || rc=1
+        local wcnt wrow
+        wcnt=0
+        # count wrongful_rollback rows in the last 24h (ISO lex compare)
+        local wcutoff wjson whist wentry
+        wcutoff="$(_js_now_iso_minus 86400)"
+        wjson="$(_js_journal_read "$journal" 2>/dev/null)" || wjson=""
+        whist="$(_js_json_sub "$wjson" "history" 2>/dev/null)" || whist=""
+        if [ -n "$whist" ] && [ "$whist" != "null" ] && [ "$whist" != "[]" ]; then
+            while IFS= read -r wrow; do
+                [ -n "$wrow" ] || continue
+                case "$wrow" in
+                    *"\"event\":\"wrongful_rollback\""*|*"\"event\": \"wrongful_rollback\""*) ;;
+                    *) continue ;;
+                esac
+                # REVIEW-FIX M3 (2026-11-20): `_js_history_entries_split`
+                # yields rows whose `{"ts":` MARKER (key included) was the
+                # split boundary — the row begins with the quoted ISO
+                # VALUE, so the old `'"ts":"…"'` grep NEVER matched, the
+                # extraction came back empty, every row was skipped, and
+                # the count was structurally 0 (the tighter second-offense
+                # halt could never arm). Extract the LEADING quoted ISO
+                # stamp of the split row instead.
+                wts="$(printf '%s' "$wrow" | grep -oE '^"[0-9]{4}-[0-9]{2}-[0-9]{2}T[^"]+"' | head -1 | tr -d '"')"
+                [ -n "$wts" ] || continue
+                if [ "$wts" \> "$wcutoff" ] 2>/dev/null || [ "$wts" = "$wcutoff" ]; then
+                    wcnt=$(( wcnt + 1 ))
+                fi
+            done < <(_js_history_entries_split "$whist")
+        fi
+        _log "HALT: journal sweep: WRONGFUL rollback executed (target=$target serving-green evidence present) — wrongful_rollback_count=$wcnt in 24h (NOT the flapping cap)"
+        if [ "$wcnt" -ge 2 ]; then
+            _js_history_append "$journal" "halt" \
+                "sweep: wrongful_rollback_count=$wcnt within 24h (second wrongful residue) — TIGHTER HALT armed: every automatic rollback disposition is refused until an operator inspects; halt-for-human" \
+                || rc=1
+            _notify_once "sweep-halt-wrongful-repeat" \
+                "HALT-FOR-HUMAN: a SECOND wrongful rollback residue within 24h (count=$wcnt) — automatic rollback dispositions refused until operator inspection; see $install_dir/releases/state.json"
+        fi
+    else
+        # C1/C2/C4 — only an EXECUTED repoint consumes the anti-flap
+        # credit; C3 — the evidence tier is journaled distinctly.
+        new_cnt="$(_js_count_rollback "$journal")" \
+            || { _log "WARN: journal sweep: rollback counter/cooldown update failed"; rc=1; }
+    fi
     _js_history_append "$journal" "sweep_rollback" \
-        "sweep: orphaned flipped $kind txn (target=${target:-?}, owner pid ${owner:-?}, age ${age}s) rolled back to $prev; counted as auto-rollback (ADR-024) disposition=${disposition}" \
+        "sweep: orphaned flipped $kind txn (target=${target:-?}, owner pid ${owner:-?}, age ${age}s) rolled back to $prev source=$res_src evidence=${tier:-tierA}; counted as auto-rollback (ADR-024) disposition=${disposition}" \
         || { _log "WARN: journal sweep: history append failed"; rc=1; }
     _js_journal_update "$journal" "in_flight" "null" \
         || { _log "WARN: journal sweep: in_flight clear failed"; rc=1; }
@@ -2823,7 +3353,7 @@ _js_sweep_rollback_chain() {
         _log "HALT: sweep-rollback reached rollback cap ($new_cnt/$SWEEP_ROLLBACK_CAP_24H in 24h) — next promotes refused (entry-side)"
     fi
     _notify_once "sweep-rollback" \
-        "sweep-rollback executed: orphaned flipped txn (age ${age}s) rolled current back to $prev (from target ${target:-?}); counted toward the 3/24h cap + cooldown armed (ADR-024, disposition=${disposition})"
+        "sweep-rollback executed: orphaned flipped txn (age ${age}s) rolled current back to $prev (from target ${target:-?}; source=$res_src evidence=${tier:-tierA}); counted toward the 3/24h cap + cooldown armed (ADR-024, disposition=${disposition})"
     # AM-P2-20 — the counter file's lifecycle: the txn is CLOSED ⇒ the
     # tally is meaningless ⇒ the file is deleted (on ANY rollback path).
     _js_defer_counter_delete "$install_dir" "$(_js_serving_txn_identity "$inf" "$target")"
@@ -3148,11 +3678,54 @@ _js_sweep_flipped_disposition() {
                     "request-probe-unprobeable-$probe_detail" \
                     "a rollback_requested was seen but the serving probe cannot run ($probe_detail — a probe-configuration failure): the request is NOT executed unverified; no count, no rollback"
                 ;;
-            *)
-                # BROKEN / AMBIGUOUS — the daemon's post-grace verdict is the
-                # affirmative evidence ⇒ the EXISTING chain executes.
+            broken)
+                # BROKEN — the daemon's post-grace verdict + a probe that
+                # ANSWERED broken is affirmative evidence ⇒ the EXISTING
+                # chain executes (tierA at the chain head).
                 _js_sweep_rollback_chain "$install_dir" "$journal" "$json" "$inf" "$target" \
                     "$prev" "$age" "$owner" "$kind" "rollback_requested" "$lock_held"
+                ;;
+            absent|mismatch|unready)
+                # D5 (self-service-promote Wave 3, AC-D5-9): an absent-class
+                # observation under a rollback REQUEST is Tier-B evidence —
+                # it defers and counts toward the bounded absent-ceiling and
+                # fires the chain ONLY when the ceiling predicate holds (the
+                # old `*` arm fired IMMEDIATELY — the launcher-boot
+                # daemon-not-yet-listening window was tonight's most likely
+                # trigger).
+                local rqp_counter rqp_absent rqp_mismatch rqp_unready rqp_broken rqp_total rqp_ceiling
+                rqp_counter="$(_js_defer_counter_path "$install_dir" "$run_id")"
+                rqp_absent="$(_js_defer_counter_read "$rqp_counter" absent)"
+                rqp_mismatch="$(_js_defer_counter_read "$rqp_counter" mismatch)"
+                rqp_unready="$(_js_defer_counter_read "$rqp_counter" unready)"
+                rqp_broken="$(_js_defer_counter_read "$rqp_counter" broken)"
+                case "$probe_class" in
+                    absent) rqp_absent=$(( rqp_absent + 1 )) ;;
+                    mismatch) rqp_mismatch=$(( rqp_mismatch + 1 )) ;;
+                    unready) rqp_unready=$(( rqp_unready + 1 )) ;;
+                esac
+                rqp_total=$(( rqp_absent + rqp_mismatch + rqp_unready ))
+                _js_defer_counter_write "$rqp_counter" "$rqp_absent" "$rqp_mismatch" "$rqp_unready" "$rqp_broken" \
+                    || _log "WARN: journal sweep: defer counter write FAILED ($rqp_counter) — the tally restarts (bounded, not unbounded)"
+                rqp_ceiling="${SWEEP_DEFER_CEILING}"
+                case "$rqp_ceiling" in ''|*[!0-9]*) rqp_ceiling=3 ;; esac
+                if [ "$rqp_total" -ge "$rqp_ceiling" ]; then
+                    _log "journal sweep: rollback REQUEST + $probe_class — the BOUNDED ABSENT-CEILING reached (qualifying observations=$rqp_total ≥ ceiling=$rqp_ceiling) — the chain fires (Tier-B)"
+                    _js_sweep_rollback_chain "$install_dir" "$journal" "$json" "$inf" "$target" \
+                        "$prev" "$age" "$owner" "$kind" "absent-ceiling" "$lock_held"
+                else
+                    _js_serving_defer "$journal" "$target" "$run_id" "$age" \
+                        "request-$probe_class" \
+                        "a rollback_requested was seen with a $probe_class probe — Tier-B evidence: deferred + counted ($rqp_total of ceiling=$rqp_ceiling); the rollback fires only when the ceiling predicate holds"
+                fi
+                ;;
+            *)
+                # an unrecognized class under a request — fail-closed defer
+                # (never an unverified execution); the txn stays OPEN.
+                _log "WARN: journal sweep: rollback REQUEST with an unrecognized probe class '$probe_class' — deferring (fail-closed); the txn is left OPEN"
+                _js_serving_defer "$journal" "$target" "$run_id" "$age" \
+                    "request-unrecognized-$probe_class" \
+                    "a rollback_requested was seen but the probe class '$probe_class' is unrecognized — defer (fail-closed), no execution"
                 ;;
         esac
         # F1: rung 0's GREEN arms commit-close / defer — BOTH must release

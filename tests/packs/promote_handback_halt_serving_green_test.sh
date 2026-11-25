@@ -43,6 +43,18 @@ set -u
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 . "$REPO_ROOT/tests/upgrade_test_lib.sh"
 
+# ── hbk-err inode-churn containment (2026-11-22) ──────────────────────────
+# scripts/upgrade/lib.sh mints its hand-back side-channels into
+# ${TMPDIR:-/tmp}. This pack sources lib.sh 10 times; give the run a
+# scratch TMPDIR so the channels (and every other fixture that honours
+# TMPDIR) stay OUT of the shared /tmp root.
+HBK_SCRATCH_DIR="$(mktemp -d "${TMPDIR:-/tmp}/hbk-scratch.XXXXXX")"
+export TMPDIR="$HBK_SCRATCH_DIR"
+# W1 (review 2026-11-22): this pack's own EXIT trap calls _cleanup_fixtures,
+# so registering the scratch here is enough (the later trap REPLACES the
+# helper's one but chains the call explicitly).
+_register_fixture "$TMPDIR"
+
 PASS=0
 FAIL=0
 FAILED_TESTS=""
@@ -73,14 +85,41 @@ TARGET="v9.9.9-test-target"
 PREV="v9.9.9-test-prev"
 LISTENER_PIDS=""
 
+# LISTENER PID REGISTRY FILE (self-service-promote Wave-1 verify, 2026-11-19):
+# start_listener is invoked inside `$( )` command substitutions at nearly
+# every call site (`P_PORT="$(start_listener green 0.28.5)"`), and a variable
+# update CANNOT cross the subshell boundary — the parent shell's
+# LISTENER_PIDS never learned those pids and `cleanup_listeners` left every
+# command-substitution listener RUNNING (19 leaked fixtures observed on a
+# single GREEN 140/0 run; their never-answer handler threads sleep 3600s).
+# A file survives the boundary, and `$$` inside a bash subshell is still
+# the PACK shell's pid, so the name is stable for every start_listener
+# call in this run and unique across concurrent runs.
+LISTENER_PID_FILE="/tmp/ens-serving-probe-pids-$$.list"
+: > "$LISTENER_PID_FILE" 2>/dev/null || true
+
 cleanup_listeners() {
     local pid
-    for pid in $LISTENER_PIDS; do
+    # `$()`-free kill loop: word-split both sources (the variable covers
+    # same-shell starts, the file covers the command-substitution starts).
+    for pid in $LISTENER_PIDS $(cat "$LISTENER_PID_FILE" 2>/dev/null); do
         kill "$pid" 2>/dev/null || true
     done
     LISTENER_PIDS=""
+    : > "$LISTENER_PID_FILE" 2>/dev/null || true
 }
-trap 'cleanup_listeners; _cleanup_fixtures' EXIT
+trap 'cleanup_listeners; _cleanup_fixtures; rm -f "$LISTENER_PID_FILE" "${TMP_LISTENER_LOG:-}"' EXIT
+# TERM/INT (the registered invocation wraps this pack in `timeout 600`):
+# an UNtrapped SIGTERM kills bash WITHOUT running the EXIT trap — the
+# leaked-fixture state the 2026-11-19 prior run left behind. Trap them,
+# clean up, then exit; the EXIT trap re-runs cleanup_listeners
+# (idempotent — dead pids are `kill ... || true`).
+# T11 (tidier fold, 2026-11-20): the traps now also remove the listener
+# log (TMP_LISTENER_LOG, a $$-keyed /tmp file previously NEVER removed —
+# the /tmp leak class); `:-`-guarded because the assignment sits below
+# the trap block (an early kill fires the trap pre-assignment).
+trap 'cleanup_listeners; _cleanup_fixtures; rm -f "$LISTENER_PID_FILE" "${TMP_LISTENER_LOG:-}"; exit 143' TERM
+trap 'cleanup_listeners; _cleanup_fixtures; rm -f "$LISTENER_PID_FILE" "${TMP_LISTENER_LOG:-}"; exit 130' INT
 
 # ── fixture helpers ────────────────────────────────────────────────────────
 
@@ -187,6 +226,10 @@ start_listener() {
         --port "$port" --mode "$mode" --version "$version" \
         --log "$TMP_LISTENER_LOG" >/dev/null 2>&1 &
     LISTENER_PIDS="$LISTENER_PIDS $!"
+    # The registry append crosses the $( ) boundary where the variable
+    # update above cannot (see LISTENER_PID_FILE) — this line is what
+    # makes a command-substitution start_listener killable at cleanup.
+    printf '%s\n' "$!" >>"$LISTENER_PID_FILE" 2>/dev/null || true
     TMP_LISTENER_LOG="/tmp/ens-serving-probe-$$.jsonl"
     : > "$TMP_LISTENER_LOG"
     local waited=0
@@ -1288,6 +1331,124 @@ case "$M7_QUAR" in
         ;;
 esac
 rm -rf "$M7_FIX"; cleanup_listeners
+
+# ===========================================================================
+section "P-38 — the halt row carries the verifier-path reason (AC-D6-6, attribution arm)"
+
+# The companion of the D6 leg in promote_handback_halt_gate_legs_test.sh:
+# that leg pins the VERSION arm (the observed /livez version); THIS leg
+# pins the ATTRIBUTION arm (the GATE_ATTRIBUTION_DETAIL string).
+#
+# WHY IT MATTERS (C-9): the launchd HB_ERR / HANDBACK_LAST_ERROR channel is
+# written ONLY by the launchd resolver (lib.sh:5651 / :5737) — the systemd
+# hand-back touches it NOWHERE. So on Linux the halt row's "hand-back
+# error: none captured" was an UNWRITTEN channel, not a missing capture:
+# its presence positively indicated a VERIFIER-PATH failure (attribution /
+# version / hard-red) and told the operator NOTHING. The fix bypasses the
+# launchd channel: the verifier-path reason rides its own channel and the
+# halt row renders it ⇒ "none captured" can never recur on the systemd
+# path.
+#
+# The halt row is composed by promote.sh's OWN template — this leg
+# EXTRACTS that template from the shipped script and EXECUTES it against
+# the channel the REAL hand-back left behind (no grep, no
+# re-implementation: dropping the substitution turns the leg RED).
+#
+# The fixture: the real unit hand-back with stubbed systemctl/lsof/curl.
+# The lsof stub reports a FOREIGN holder (not in the supervision-owned pid
+# set) ⇒ the attribution conjunct REFUSES (the incident-2026-11-14 §3.1
+# shape: the port is answered by someone else).
+P38_FIX="$(mktemp -d -t p38.XXXXXX)"; _register_fixture "$P38_FIX"
+P38_STUB="$(mktemp -d -t p38stub.XXXXXX)"; _register_fixture "$P38_STUB"
+mkdir -p "$P38_FIX/releases"
+printf '#!/bin/bash\nexit 0\n' > "$P38_FIX/launcher.sh"
+chmod +x "$P38_FIX/launcher.sh"
+cat > "$P38_FIX/releases/state.json" <<'P38J'
+{"current":null,"previous":null,"in_flight":null,"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}
+P38J
+
+cat > "$P38_STUB/systemctl" <<'P38S'
+#!/bin/bash
+sub="$1"; shift
+case "$sub" in
+    is-active) echo "${SC_IS_ACTIVE:-inactive}"; exit "${SC_IS_ACTIVE_RC:-0}" ;;
+    show)
+        prop=""; props=""
+        while [ $# -gt 0 ]; do
+            case "$1" in -p) prop="$2"; props="${props} $2"; shift 2 ;; --value) shift ;; *) shift ;; esac
+        done
+        # D6 (self-service-promote Wave 2): the verify's bounded 3-field
+        # state probe answers in the ASSIGNMENT form.
+        case "$props" in
+            *" ActiveState "*)
+                echo "ActiveState=${SC_ACTIVESTATE:-active}"
+                echo "SubState=${SC_SUBSTATE:-running}"
+                echo "MainPID=${SC_MAINPID:-0}"
+                exit 0 ;;
+        esac
+        case "$prop" in MainPID) echo "${SC_MAINPID:-0}" ;; *) echo "" ;; esac
+        exit 0 ;;
+    start) exit 0 ;;
+    *) exit 0 ;;
+esac
+P38S
+chmod +x "$P38_STUB/systemctl"
+cat > "$P38_STUB/lsof" <<'P38L'
+#!/bin/bash
+# The FOREIGN holder — the port is answered by a process that is NOT in
+# the supervision-owned pid set (the attribution-refusal cell).
+printf '%s\n' "${P38_HOLDER:-999999}"
+exit 0
+P38L
+chmod +x "$P38_STUB/lsof"
+cat > "$P38_STUB/curl" <<'P38C'
+#!/bin/bash
+out=""
+while [ $# -gt 0 ]; do
+    case "$1" in -o) out="$2"; shift 2 ;; -w) shift ;; --max-time) shift ;; -sS|-s|-S) shift ;; *) shift ;; esac
+done
+[ -n "$out" ] && printf '{"status":"alive","version":"%s"}\n' "${P38_VERSION:-0.28.5}" > "$out"
+printf '200'
+P38C
+chmod +x "$P38_STUB/curl"
+
+# The REAL promote.sh halt template (the FIRST `if ! restart_via_launcher`
+# block — promote.sh has a second one in its rollback section).
+P38_HALT_BODY="$(awk '
+    /^if ! restart_via_launcher; then$/ && !seen { inblock=1; seen=1; next }
+    inblock && /^fi$/ { exit }
+    inblock { print }
+' "$REPO_ROOT/scripts/upgrade/promote.sh")"
+if [ -n "$P38_HALT_BODY" ]; then
+    _pass "P38-0 the promote.sh halt template is extractable"
+else
+    _fail "P38-0 the promote.sh halt template is extractable" "non-empty" "empty"
+fi
+
+P38_OUT="$(PATH="$P38_STUB:$PATH" INSTALL_DIR="$P38_FIX" \
+    SYSTEMCTL_BIN="$P38_STUB/systemctl" SC_LOG="$P38_FIX/sc.log" \
+    PORT=19991 PROMOTE_EXPECTED_VERSION=0.28.5 HANDBACK_VERIFY_BUDGET_S=4 \
+    SC_MAINPID=9999 \
+    bash -c '
+        unset ENSEMBLE_SUPERVISION ENSEMBLE_RESTART_UNIT 2>/dev/null || true
+        . "'"$REPO_ROOT"'/scripts/upgrade/lib.sh" >/dev/null 2>&1
+        _supervision_owned_pids() { printf "%s\n" 424242; }
+        SUPERVISION_MODE=unit; SUPERVISION_STATE=UNIT_MANAGED
+        SUPERVISION_UNIT=ensemble-p38.service; SUPERVISION_PRESTOP_MAINPID=777
+        VERSION=v9.9.9-p38
+        restart_via_launcher >/dev/null; echo "rvl-rc=$?"
+        '"$P38_HALT_BODY"'
+    ' 2>&1)"
+P38_JOURNAL="$(cat "$P38_FIX/releases/state.json")"
+
+assert_contains "P38-1 the hand-back FAILED (the attribution refusal)" "rvl-rc=1" "$P38_OUT"
+assert_contains "P38-2 the halt row carries the ATTRIBUTION DETAIL" \
+    "NOT in the supervision-owned pid set" "$P38_JOURNAL"
+assert_contains "P38-3 the halt row names the refusing holder" "999999" "$P38_JOURNAL"
+assert_not_contains "P38-4 the halt row NEVER reads 'none captured' on the systemd path" \
+    "none captured" "$P38_JOURNAL"
+assert_contains "P38-5 the halt row is still a halt-for-human (the vocabulary is unchanged)" \
+    "halt-for-human, txn left open" "$P38_JOURNAL"
 
 # ===========================================================================
 section "summary"

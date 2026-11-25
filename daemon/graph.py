@@ -988,10 +988,11 @@ class ContextSlot:
         try:
             inst = self._instance_repository.get(instance_id)
         except Exception as exc:  # pragma: no cover - defensive
-            logger.debug(
-                f"[ContextSlot] instance_repository.get({instance_id[:8]}...) "
-                f"failed during project_injected check: {exc}"
-            )
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    f"[ContextSlot] instance_repository.get({instance_id[:8]}...) "
+                    f"failed during project_injected check: {exc}"
+                )
             return False
         if inst is None:
             return False
@@ -1024,10 +1025,11 @@ class ContextSlot:
         try:
             inst = self._instance_repository.get(instance_id)
         except Exception as exc:  # pragma: no cover - defensive
-            logger.debug(
-                f"[ContextSlot] instance_repository.get({instance_id[:8]}...) "
-                f"failed during project_id resolution: {exc}"
-            )
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    f"[ContextSlot] instance_repository.get({instance_id[:8]}...) "
+                    f"failed during project_id resolution: {exc}"
+                )
             return None
         if inst is None:
             return None
@@ -3720,12 +3722,14 @@ class ThinkingChatOpenAI(ChatOpenAI):
                 # streaming path that may have already populated it).
                 if gen_message.additional_kwargs.get("reasoning_content") is None:
                     gen_message.additional_kwargs["reasoning_content"] = reasoning
-                    logger.debug(
-                        f"[LLM] Extracted reasoning_content from raw response: "
-                        f"{str(reasoning)[:100]}..."
-                    )
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug(
+                            f"[LLM] Extracted reasoning_content from raw response: "
+                            f"{str(reasoning)[:100]}..."
+                        )
         except Exception as e:
-            logger.debug(f"[LLM] Could not extract reasoning_content in _create_chat_result: {e}")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"[LLM] Could not extract reasoning_content in _create_chat_result: {e}")
 
         return result
 
@@ -3763,10 +3767,12 @@ class ThinkingChatOpenAI(ChatOpenAI):
                     if reasoning is not None and hasattr(gen_message, 'additional_kwargs') \
                             and gen_message.additional_kwargs.get('reasoning_content') is None:
                         gen_message.additional_kwargs['reasoning_content'] = reasoning
-                        logger.debug(f"[LLM] Extracted reasoning from metadata: {str(reasoning)[:100]}...")
+                        if logger.isEnabledFor(logging.DEBUG):
+                            logger.debug(f"[LLM] Extracted reasoning from metadata: {str(reasoning)[:100]}...")
 
         except Exception as e:
-            logger.debug(f"[LLM] Could not extract reasoning_content: {e}")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"[LLM] Could not extract reasoning_content: {e}")
 
         return result
 
@@ -3812,7 +3818,8 @@ class ThinkingChatOpenAI(ChatOpenAI):
         try:
             original_messages = self._convert_input(input_).to_messages()
         except Exception as e:
-            logger.debug(f"[LLM] Could not get original messages for reasoning_content injection: {e}")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"[LLM] Could not get original messages for reasoning_content injection: {e}")
             return super()._get_request_payload(input_, stop=stop, **kwargs)
 
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
@@ -3834,7 +3841,8 @@ class ThinkingChatOpenAI(ChatOpenAI):
                     reasoning = original.additional_kwargs.get('reasoning_content')
                     if reasoning is not None:
                         msg["reasoning_content"] = reasoning
-                        logger.debug(f"[LLM] Injected reasoning_content for assistant message {assistant_idx}")
+                        if logger.isEnabledFor(logging.DEBUG):
+                            logger.debug(f"[LLM] Injected reasoning_content for assistant message {assistant_idx}")
                     assistant_idx += 1
 
         return payload
@@ -3859,7 +3867,8 @@ class ThinkingChatOpenAI(ChatOpenAI):
         # If we found reasoning_content and the result is an AIMessageChunk, store it
         if reasoning_content is not None and isinstance(result, AIMessageChunk):
             result.additional_kwargs["reasoning_content"] = reasoning_content
-            logger.debug(f"[LLM] Stream extracted reasoning_content: {str(reasoning_content)[:50]}...")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"[LLM] Stream extracted reasoning_content: {str(reasoning_content)[:50]}...")
 
         return result
 
@@ -4287,6 +4296,22 @@ class SessionState(MessagesState):
     attestation_fresh_episode_consumed_id: str = ""
 
 
+def _fresh_compact_context_continuation(messages) -> bool:
+    """Fresh-swap router (compact-fresh-swap)."""
+    if not messages:
+        return False
+    i = len(messages) - 1
+    while i >= 0 and isinstance(messages[i], HumanMessage):
+        i -= 1
+    trailing = messages[i + 1:]
+    return any(
+        isinstance(m, HumanMessage)
+        and (getattr(m, "additional_kwargs", {}) or {}).get("context_kind")
+        == "compacted_context"
+        for m in trailing
+    )
+
+
 def should_continue(state: MessagesState) -> str:
     """Determine if we should continue or end.
 
@@ -4302,6 +4327,10 @@ def should_continue(state: MessagesState) -> str:
     # Normal case: LLM made tool calls
     if getattr(last_message, 'tool_calls', None):
         return "tools"
+
+    # Fresh-swap continuation: one extra agent pass after a fresh swap.
+    if _fresh_compact_context_continuation(messages):
+        return "agent"
 
     # ── S5 degenerate re-invoke cap (empty-response-guard Phase 1) ──────
     # Rows 2-3 (reasoning-only / <think>-tag-only) re-invoked UNBOUNDED
@@ -4359,7 +4388,8 @@ def should_continue(state: MessagesState) -> str:
         content = getattr(last_message, 'content', '') or ''
         has_tool_calls = bool(getattr(last_message, 'tool_calls', None))
         if reasoning and not content and not has_tool_calls and trailing_degenerate < EMPTY_DEGENERATE_REINVOKE_CAP:
-            logger.debug(f"[Graph] Thinking-only response, continuing...")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"[Graph] Thinking-only response, continuing...")
             return "agent"
 
     # Check for <think>-only content (models that embed reasoning in content string).
@@ -6126,6 +6156,9 @@ def create_attestation_gate_node(
         safe_reset,
         safe_set_escalated_and_reset,
     )
+    # Phase 5 event registry — class-4 bridge (T5.6): observation-only
+    # import; the ledger's own fail-open posture is labeled, not changed.
+    from .services.event_registry import record as _event_registry_record
     # FIX-3 (2026-09-16, incident 6a0d60c9) — stable nudge id mint.
     from .services.context_messages import _stable_id_for
 
@@ -7107,6 +7140,13 @@ def create_attestation_gate_node(
                     # the nudge kwargs remain checkpoint-serializable.
                     if isinstance(increment_result, int):
                         counted_denied_count = increment_result
+                    # Phase 5 event registry — class-4 bridge (T5.6): the
+                    # committed deny epoch, observed AFTER the guard.
+                    _event_registry_record("attestation_epoch",
+                        instance_id=effective_instance_id,
+                        epoch_action="deny_increment",
+                        path="leader_completion_gate",
+                        denied_count=increment_result if isinstance(increment_result, int) else None)
                 elif decision.decision is Decision.TERMINAL_AFTER_BOUND:
                     terminal_result = safe_set_escalated_and_reset(
                         ledger,
@@ -7118,6 +7158,12 @@ def create_attestation_gate_node(
                     )
                     if terminal_result is False or terminal_result is None:
                         return {"attestation_route": None}
+                    # Phase 5 event registry — class-4 bridge (T5.6): the
+                    # committed escalation epoch.
+                    _event_registry_record("attestation_epoch",
+                        instance_id=effective_instance_id,
+                        epoch_action="escalated_and_reset",
+                        path="leader_completion_gate")
                 elif decision.decision is Decision.ALLOWED:
                     # Attested allow only — R2 un-attested allow arrives
                     # as ALLOWED_LEGITIMATE_PENDING_WAKEUP, which is its
@@ -7126,7 +7172,7 @@ def create_attestation_gate_node(
                     # is True ONLY for the attested path (the deny path
                     # sets it False via scanner diagnostics).
                     if decision.attestation_present:
-                        safe_reset(
+                        reset_result = safe_reset(
                             ledger,
                             effective_instance_id,
                             log_context={
@@ -7134,6 +7180,16 @@ def create_attestation_gate_node(
                                 "decision": decision.decision.value,
                             },
                         )
+                        # Phase 5 event registry — class-4 bridge (T5.6):
+                        # the attested-allow reset epoch — commit-guarded
+                        # like its siblings (observe only when the ledger
+                        # write actually landed; False = row missing,
+                        # None = DB error/fail-open ⇒ no epoch moved).
+                        if reset_result is True:
+                            _event_registry_record("attestation_epoch",
+                                instance_id=effective_instance_id,
+                                epoch_action="reset",
+                                path="leader_completion_gate")
                 # else: ALLOWED_LEGITIMATE_PENDING_WAKEUP, DRY_LOG,
                 # ALLOWED (meta-condition bypass) — NO ledger write.
             except Exception:  # noqa: BLE001 — defense-in-depth
@@ -7764,7 +7820,7 @@ def create_attestation_gate_node(
 # Agent group chat P4 — room completion gate (the (a2) completion nudge)
 # ============================================================================
 #
-# The Emperor's rhythm-aware delivery, arm (a2): before the instance
+# The user's rhythm-aware delivery, arm (a2): before the instance
 # declares its turn done, a last-chance "check unread team messages"
 # nudge — IN-GRAPH at the END decision (the post-graph finalization was
 # evaluated and rejected; nudges fire IN-GRAPH).
@@ -9062,11 +9118,12 @@ def create_agent_node(
                     + ephemeral_context_msgs
                     + list(messages)
                 )
-                logger.debug(
-                    f"[ContextSlot] Injected {len(ephemeral_context_msgs)} "
-                    f"ephemeral context message(s) for {instance_short} "
-                    f"before LLM call"
-                )
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        f"[ContextSlot] Injected {len(ephemeral_context_msgs)} "
+                        f"ephemeral context message(s) for {instance_short} "
+                        f"before LLM call"
+                    )
 
         # ── Phase 3 / C2: pull + clear ALL pending user-injections ─────────
         # Pull happens BEFORE the LLM call so the injected HumanMessages are
@@ -9536,7 +9593,8 @@ def create_agent_node(
         model_name = model_vision if use_vision_model else llm_config.get("model", "unknown") if llm_config else "unknown"
         vision_log = f", vision={model_vision}" if model_vision and has_images else ""
         call_type = "VISION" if use_vision_model else "STANDARD"
-        logger.debug(f'[LLM][{instance_short}] Invoking LLM ({call_type}) with {len(full_messages)} messages (model={model_name}, transient_attempts={transient}, timeout_attempts={timeout}{vision_log})')
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f'[LLM][{instance_short}] Invoking LLM ({call_type}) with {len(full_messages)} messages (model={model_name}, transient_attempts={transient}, timeout_attempts={timeout}{vision_log})')
         _llm_heartbeat(sums={"invocations": 1}, sets={"model": model_name})
 
         # ── get_instance_info throttling ─────────────────────────────────
@@ -9693,11 +9751,12 @@ def create_agent_node(
             full_messages = _reassemble_with_context(
                 full_messages, ephemeral_context_msgs, system_prompt
             )
-            logger.debug(
-                f"[ContextSlot] B1 re-append: {len(ephemeral_context_msgs)} "
-                f"ephemeral context message(s) re-injected after "
-                f"loop-breaker repair for {instance_short}"
-            )
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    f"[ContextSlot] B1 re-append: {len(ephemeral_context_msgs)} "
+                    f"ephemeral context message(s) re-injected after "
+                    f"loop-breaker repair for {instance_short}"
+                )
 
         try:
             # ── Ladder phase 1 / D-1: loud terminal short-circuit ──
@@ -9908,7 +9967,8 @@ def create_agent_node(
                 logger.warning('[LLM] Context length exceeded (no compactor available)')
                 raise
 
-            logger.debug(f'[LLM] Context length exceeded, attempting reactive compaction for {len(messages)} messages')
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f'[LLM] Context length exceeded, attempting reactive compaction for {len(messages)} messages')
 
             graph = graph_ref[0]
             # Namespace trap fix: resolve the REAL root-namespace
@@ -10120,7 +10180,8 @@ def create_agent_node(
                     mission_id=resolve_turn_mission_id(full_messages),
                 )
 
-            logger.debug(f'[LLM] Reactive compaction complete: {result.messages_before} -> {result.messages_after} messages, {result.tokens_saved} tokens saved ({result.compaction_type})')
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f'[LLM] Reactive compaction complete: {result.messages_before} -> {result.messages_after} messages, {result.tokens_saved} tokens saved ({result.compaction_type})')
 
             updated_state = await graph.aget_state(thread_config)
             compact_messages = [SystemMessage(content=system_prompt)] + updated_state.values.get('messages', [])
@@ -10154,11 +10215,12 @@ def create_agent_node(
             if injected_msgs:
                 for inj in injected_msgs:
                     compact_messages.append(inj)
-                logger.debug(
-                    f'[LLM] Reactive compaction: re-appended '
-                    f'{len(injected_msgs)} injected message(s) for '
-                    f'{instance_short}'
-                )
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        f'[LLM] Reactive compaction: re-appended '
+                        f'{len(injected_msgs)} injected message(s) for '
+                        f'{instance_short}'
+                    )
             # C3 for report-injection messages: same reason as the
             # user-injection re-append above — they live only in the
             # local closure and ``graph.aget_state`` reads from
@@ -10195,11 +10257,12 @@ def create_agent_node(
                 compact_messages = _reassemble_with_context(
                     compact_messages, ephemeral_context_msgs, system_prompt
                 )
-                logger.debug(
-                    f'[LLM] Reactive compaction: re-appended '
-                    f'{len(ephemeral_context_msgs)} ephemeral context '
-                    f'message(s) for {instance_short}'
-                )
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        f'[LLM] Reactive compaction: re-appended '
+                        f'{len(ephemeral_context_msgs)} ephemeral context '
+                        f'message(s) for {instance_short}'
+                    )
 
             # Use run_in_executor to avoid blocking the event loop after compaction
             # Continue with the same LLM that was being used (may be vision or standard)
@@ -10534,10 +10597,12 @@ def create_agent_node(
             first_tc = response.tool_calls[0]
             tc_args = first_tc.get('args', getattr(first_tc, 'args', {}))
             tc_args_str = str(tc_args)[:80] if tc_args else ''
-            logger.debug(f'[LLM] Tool call: {tool_names[0]} — {tc_args_str}..., tools: {tool_names}')
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f'[LLM] Tool call: {tool_names[0]} — {tc_args_str}..., tools: {tool_names}')
             _llm_heartbeat(sums={"tool_calls": 1})
         elif response.content:
-            logger.debug(f'[LLM] Response: {response.content[:80]}...')
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f'[LLM] Response: {response.content[:80]}...')
         else:
             logger.debug('[LLM] Response: empty')
 
@@ -11009,6 +11074,36 @@ def build_instance_llms(
     llm_with_tools = None
     llm_vision_chat = None
 
+    # S2 (ROW2-DEEP-DIVE §3.3, fix 2): compute the OpenAI tool payloads ONCE
+    # and hand the SAME dicts to every binding below.  Before this change the
+    # tool list was bound at THREE SOURCE sites (the vision branch + the two
+    # standard binds), and each ``bind_tools`` call re-derived the payload per
+    # tool — langchain's ``BaseTool.tool_call_schema`` is a plain
+    # ``@property`` that rebuilds a pydantic subset model on EVERY access,
+    # and ``convert_to_openai_tool`` touches it four times.
+    #
+    # RUNTIME MULTIPLIER: at most TWO of the three source sites execute per
+    # assembly.  The vision bind and the "standard-with-tools" bind are
+    # MUTUALLY EXCLUSIVE — the latter sits inside ``if llm_with_tools is
+    # None``, which the vision branch has already satisfied — so the pre-fix
+    # derivation count was 2 x N_tools per assembly (NOT 3 x N_tools),
+    # whether or not a vision model is configured.
+    #
+    # ``openai_tool_payloads`` memoises the payload per tool identity, so the
+    # payload is derived ONCE per tool and the SAME dicts are handed to every
+    # binding that runs, and the SECOND assembly of the same surface derives
+    # NOTHING.  The payload the provider receives is byte-identical: the same
+    # ``convert_to_openai_tool`` output, in the same key order, for the same
+    # name / description / parameters.
+    #
+    # Lazy import: a module-level ``from daemon.tools...`` would close the
+    # ``daemon.tools`` → ``daemon.services.instance_lifecycle`` →
+    # ``daemon.graph`` import cycle (the same reason the neighbouring
+    # ``.services.language_utils`` import is lazy).
+    from daemon.tools._schema_registry import openai_tool_payloads
+
+    formatted_tools = openai_tool_payloads(tools)
+
     if model_vision:
         # log-noise-hygiene: once per DISTINCT vision-model value (the
         # line re-fires on every instance graph build; see the latch
@@ -11028,7 +11123,7 @@ def build_instance_llms(
         # failover controller can mutate its underlying openai client
         # (W3: vision gets its OWN controller, see retry wiring below).
         llm_vision_chat = ThinkingChatOpenAI(**vision_config)
-        llm_with_tools = llm_vision_chat.bind_tools(tools)
+        llm_with_tools = llm_vision_chat.bind_tools(formatted_tools)
     else:
         # log-noise-hygiene: same once-per-process latch as the vision
         # line above (this is the COMMON branch — it re-fired on every
@@ -11046,8 +11141,8 @@ def build_instance_llms(
 
     # Always bind tools to llm_standard, regardless of vision configuration
     if llm_with_tools is None:
-        llm_with_tools = llm_standard_chat.bind_tools(tools)
-    llm_standard = llm_standard_chat.bind_tools(tools)
+        llm_with_tools = llm_standard_chat.bind_tools(formatted_tools)
+    llm_standard = llm_standard_chat.bind_tools(formatted_tools)
 
     # CRITICAL — classify errors BEFORE any retry/cooldown layer so
     # the agent_node W2 catch (the primary ``except ToolPairingInvalidError``
@@ -11146,10 +11241,11 @@ def build_instance_llms(
                     f"backup gets full {transient_attempts}/{timeout_attempts})"
                 ),
             )
-        logger.debug(
-            f"LLM configured with {transient_attempts} transient retries, "
-            f"{timeout_attempts} timeout retries"
-        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                f"LLM configured with {transient_attempts} transient retries, "
+                f"{timeout_attempts} timeout retries"
+            )
 
     return llm_with_tools, llm_standard
 
@@ -12979,10 +13075,11 @@ def create_watchover_check_node(
                 if callable(set_md):
                     set_md(instance_id, "watchover_context_turn", context_turn)
         except Exception as turn_err:
-            logger.debug(
-                f"[watchover_check] turn counter write failed for "
-                f"{instance_id[:8]}...: {type(turn_err).__name__}: {turn_err}"
-            )
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    f"[watchover_check] turn counter write failed for "
+                    f"{instance_id[:8]}...: {type(turn_err).__name__}: {turn_err}"
+                )
 
         # Patch the instance_id on the evaluator (it was built before
         # we knew the instance). Safe because the evaluator is closed
@@ -13583,52 +13680,73 @@ def create_compact_note_tools_node(
             # ``len(state_msgs)`` announced #1–#51 while the swap compacted
             # #1–#50. Strip FIRST, then size the span from the stripped set.
             kept_msgs, _exchange = _compact_note_strip_exchange(state_msgs)
-            from daemon.compaction import identify_boundary_groups, select_compactable_groups
-            from daemon.loader import estimate_messages_tokens
 
-            groups = identify_boundary_groups(kept_msgs)
+            # FRESH-SWAP SPLIT: idx = index of the LAST exchange member in
+            # state_msgs (by id()); arrivals = messages strictly newer than
+            # the arm; pre_arm = pre-exchange messages minus exchange
+            # members. Defensive: exchange not found → arrivals=[], pre_arm=kept.
+            _exchange_ids = {id(m) for m in _exchange}
+            _idx = -1
+            for _i, _m in enumerate(state_msgs):
+                if id(_m) in _exchange_ids:
+                    _idx = _i
+            if _idx == -1:
+                arrivals = []
+                pre_arm = list(kept_msgs)
+            else:
+                arrivals = list(state_msgs[_idx + 1 :])
+                pre_arm = [
+                    _m for _m in state_msgs[: _idx + 1] if id(_m) not in _exchange_ids
+                ]
+
             cfg_obj = getattr(compactor, "config", None) if compactor is not None else None
-            recent_window = getattr(cfg_obj, "recent_message_window", _COMPACT_NOTE_DEFAULT_RECENT_WINDOW) if cfg_obj is not None else _COMPACT_NOTE_DEFAULT_RECENT_WINDOW
-            min_window = getattr(cfg_obj, "min_recent_window", _COMPACT_NOTE_DEFAULT_MIN_WINDOW) if cfg_obj is not None else _COMPACT_NOTE_DEFAULT_MIN_WINDOW
-            threshold = getattr(cfg_obj, "threshold", _COMPACT_NOTE_DEFAULT_THRESHOLD) if cfg_obj is not None else _COMPACT_NOTE_DEFAULT_THRESHOLD
-            system_prompt_tokens = _COMPACT_NOTE_SYSTEM_PROMPT_TOKENS
             agent_model_name = _compact_note_effective_model(
                 state_msgs, llm_config, llm_standard
             )
+
             context_window = 0
             try:
                 from daemon.compaction import get_model_context_limit
                 context_window = get_model_context_limit(agent_model_name, cfg_obj)
-            except Exception as exc:
-                logger.warning(
-                    "[CompactNote] context-window read failed instance=%s "
-                    "error_class=%s — falling back to the unconfigured "
-                    "window",
-                    str(instance_id)[:8],
-                    type(exc).__name__,
-                )
+            except Exception:
                 context_window = 0
             if not context_window or context_window <= 0:
-                from daemon.compaction import get_model_context_limit
-                context_window = get_model_context_limit(agent_model_name, None)
+                try:
+                    from daemon.compaction import get_model_context_limit
+                    context_window = get_model_context_limit(agent_model_name, None)
+                except Exception:
+                    context_window = 0
             if context_window <= 0:
                 context_window = _COMPACT_NOTE_FALLBACK_CONTEXT_WINDOW
 
-            compactable, _preserved, _window = select_compactable_groups(
-                groups,
-                recent_window=recent_window,
-                min_window=min_window,
-                context_window=context_window,
-                system_prompt_tokens=system_prompt_tokens,
-                estimate_fn=estimate_messages_tokens,
-                config_threshold=threshold,
-            )
-            if compactable:
-                span_start = compactable[0].start_idx + 1
-                span_end = compactable[-1].end_idx + 1
-            else:
-                span_start = 1
-                span_end = len(kept_msgs) if kept_msgs else 1
+            # GATE: if pre_arm empty → settle DEFERRED, do NOT append request.
+            if not pre_arm:
+                from daemon.services.prompt_refresh import (
+                    APPEND_OUTCOME_DEFERRED,
+                    read_compact_note_state,
+                    settle_compact_note_arm,
+                )
+                _arm = read_compact_note_state(repo, instance_id) if instance_id else None
+                if _arm is not None and getattr(_arm, "armed", False):
+                    _log_compact_note_settle(
+                        instance_id,
+                        APPEND_OUTCOME_DEFERRED,
+                        settle_compact_note_arm(
+                            repo,
+                            instance_id,
+                            note_sha12=getattr(_arm, "sha256_12", "") or "",
+                            outcome=APPEND_OUTCOME_DEFERRED,
+                            persisted=False,
+                            agent_model=agent_model_name,
+                            note_chars=len(getattr(_arm, "note", "") or ""),
+                            agent_id=getattr(_arm, "agent_id", "") or "",
+                            arrivals_preserved=len(arrivals),
+                        ),
+                    )
+                return result
+
+            span_start = 1
+            span_end = max(1, len(pre_arm))
 
             from daemon.compaction import GLOBAL_OVERVIEW_TOKEN_CAP, build_compact_note_request
             request_text = build_compact_note_request(
@@ -13887,15 +14005,28 @@ def create_compact_note_agent_node(
             # yet — it is kept for the consumed-count audit log and for
             # the tests that pin the strip's behaviour.
             kept_msgs, exchange_msgs = _compact_note_strip_exchange(pre_request_msgs)
-            from daemon.compaction import identify_boundary_groups, select_compactable_groups
-            from daemon.loader import estimate_messages_tokens
 
-            groups = identify_boundary_groups(kept_msgs)
+            # FRESH-SWAP SPLIT (SWAP half): idx = index of the LAST exchange
+            # member in pre_request_msgs (by id()); arrivals = messages
+            # strictly newer than the arm; pre_arm = pre-exchange messages
+            # minus exchange members. Defensive: exchange not found ->
+            # arrivals=[], pre_arm=kept.
+            _exchange_ids = {id(m) for m in exchange_msgs}
+            _idx = -1
+            for _i, _m in enumerate(pre_request_msgs):
+                if id(_m) in _exchange_ids:
+                    _idx = _i
+            if _idx == -1:
+                arrivals = []
+                pre_arm = list(kept_msgs)
+            else:
+                arrivals = list(pre_request_msgs[_idx + 1 :])
+                pre_arm = [
+                    _m for _m in pre_request_msgs[: _idx + 1]
+                    if id(_m) not in _exchange_ids
+                ]
+
             cfg_obj = getattr(compactor, "config", None) if compactor is not None else None
-            # Read the override-configured value up front so every settle
-            # call site (including the persist-failure path, which returns
-            # early) can report it. A FAILED read is "unknown", never
-            # "not configured".
             override_configured = ""
             try:
                 override_configured = str(
@@ -13909,63 +14040,25 @@ def create_compact_note_agent_node(
                     type(exc).__name__,
                 )
                 override_configured = "unknown"
-            recent_window = getattr(cfg_obj, "recent_message_window", _COMPACT_NOTE_DEFAULT_RECENT_WINDOW) if cfg_obj is not None else _COMPACT_NOTE_DEFAULT_RECENT_WINDOW
-            min_window = getattr(cfg_obj, "min_recent_window", _COMPACT_NOTE_DEFAULT_MIN_WINDOW) if cfg_obj is not None else _COMPACT_NOTE_DEFAULT_MIN_WINDOW
-            threshold = getattr(cfg_obj, "threshold", _COMPACT_NOTE_DEFAULT_THRESHOLD) if cfg_obj is not None else _COMPACT_NOTE_DEFAULT_THRESHOLD
-            system_prompt_tokens = _COMPACT_NOTE_SYSTEM_PROMPT_TOKENS
-            # ITEM-8 (leader-ratified): the window MUST come from the
-            # SAME effective model the swap side uses (the vision switch
-            # included) — the announced span is read by the model in the
-            # very turn it answers, so a window sized for another model
-            # is the same receipt-truth class as the in-context lie.
             agent_model_name = _compact_note_effective_model(state_msgs, llm_config, llm_standard, reply_msg)
+
             context_window = 0
             try:
                 from daemon.compaction import get_model_context_limit
                 context_window = get_model_context_limit(agent_model_name, cfg_obj)
-            except Exception as exc:
-                # NEVER swallow silently: a failed window read would
-                # silently re-size the announced span (the fallback below
-                # is a different window), so it is surfaced.
-                logger.warning(
-                    "[CompactNote] context-window read failed instance=%s "
-                    "error_class=%s — falling back to the unconfigured "
-                    "window",
-                    str(instance_id)[:8],
-                    type(exc).__name__,
-                )
+            except Exception:
                 context_window = 0
             if not context_window or context_window <= 0:
-                from daemon.compaction import get_model_context_limit
-                context_window = get_model_context_limit(agent_model_name, None)
+                try:
+                    from daemon.compaction import get_model_context_limit
+                    context_window = get_model_context_limit(agent_model_name, None)
+                except Exception:
+                    context_window = 0
             if context_window <= 0:
                 context_window = _COMPACT_NOTE_FALLBACK_CONTEXT_WINDOW
 
-            compactable, preserved, _window = select_compactable_groups(
-                groups,
-                recent_window=recent_window,
-                min_window=min_window,
-                context_window=context_window,
-                system_prompt_tokens=system_prompt_tokens,
-                estimate_fn=estimate_messages_tokens,
-                config_threshold=threshold,
-            )
-
-            # #4 (BLOCKER): when NOTHING is compactable (every message is
-            # preserved — e.g. a note armed early in a SHORT conversation)
-            # the swap must NOT claim "summarized messages #1–N" while
-            # ALL N are preserved. The arm stays armed and the settle
-            # records a NO-OP outcome (the existing deferred/no-doc
-            # vocabulary).
-            if not compactable:
-                logger.info(
-                    "[CompactNote] no compaction needed instance=%s "
-                    "(len(groups)=%d <= recent_window=%d) — the arm "
-                    "stays armed",
-                    str(instance_id)[:8],
-                    len(groups),
-                    recent_window,
-                )
+            # GATE: if pre_arm empty -> settle DEFERRED, return unchanged.
+            if not pre_arm:
                 _log_compact_note_settle(
                     instance_id,
                     APPEND_OUTCOME_DEFERRED,
@@ -13979,22 +14072,14 @@ def create_compact_note_agent_node(
                         override_configured=override_configured,
                         note_chars=note_chars,
                         agent_id=agent_id,
+                        arrivals_preserved=len(arrivals),
                     ),
                 )
                 return result
 
-            preserved_msgs = []
-            for g in (preserved or []):
-                preserved_msgs.extend(getattr(g, "messages", []) or [])
-
-            # ``compactable`` is GUARANTEED non-empty here — the #4 no-op
-            # settle above returns early on the empty case. (The former
-            # ``else`` fallback was UNREACHABLE: F4.)
-            span_start = compactable[0].start_idx + 1
-            span_end = compactable[-1].end_idx + 1
-
-            from daemon.compaction import _next_compaction_seq, build_compaction_doc, make_remove_all_sentinel
+            from daemon.compaction import _next_compaction_seq, build_compaction_doc, make_remove_all_sentinel, build_compact_note_post_swap_note
             from daemon.compaction import CompactionResult
+            from daemon.loader import estimate_messages_tokens
             seq = _next_compaction_seq(kept_msgs, instance_id or "")
             from datetime import datetime, timezone
             compacted_at = datetime.now(timezone.utc).isoformat()
@@ -14006,9 +14091,9 @@ def create_compact_note_agent_node(
                 global_overview=reply_text,
                 sections=[],
                 total_sections=0,
-                summarized_start=span_start,
-                summarized_end=span_end,
-                preserved_count=len(preserved_msgs),
+                summarized_start=1,
+                summarized_end=len(pre_arm),
+                preserved_count=len(arrivals),
                 dropped_spans=[],
                 msg_timestamps=None,
                 context_window=context_window,
@@ -14016,24 +14101,19 @@ def create_compact_note_agent_node(
                 honest_truncation=True,
             )
             sentinel = make_remove_all_sentinel()
+            note = build_compact_note_post_swap_note()
 
-            # Build the CompactionResult for the seam.
-            kept_ids = {getattr(m, "id", None) for m in preserved_msgs}
+            replacement_keepables = [doc, note, *arrivals]
+
+            # dropped_ids = every state_msgs id not kept.
+            kept_ids = {getattr(m, "id", None) for m in replacement_keepables}
             kept_ids.discard(None)
-            replacement_keepables = [doc, *preserved_msgs]
-            # The dropped ids: every channel message that is NOT in the
-            # preserved tail — the compacted span AND the exchange (the
-            # tool call + its receipt) AND the request itself. They are
-            # removed by the sentinel (the exchange is CONSUMED).
             dropped_ids = set()
             for m in state_msgs:
                 mid = getattr(m, "id", None)
                 if mid is not None and mid not in kept_ids:
                     dropped_ids.add(mid)
 
-            # HONEST token counts (never zeros that read as measurements):
-            # the signed difference — on a tiny fixture the compaction can
-            # GROW the context, and a clamped "0 saved" would misreport it.
             tokens_before = estimate_messages_tokens(state_msgs)
             tokens_after = estimate_messages_tokens(replacement_keepables)
             result_obj = CompactionResult(
@@ -14053,7 +14133,7 @@ def create_compact_note_agent_node(
             )
             result_obj.compacted_ids = frozenset(dropped_ids)
 
-            # Persist via the seam (mid_turn, fail_open) — mirror graph.py:8408.
+            # Persist via the seam.
             graph = None
             if graph_ref is not None:
                 try:
@@ -14077,11 +14157,9 @@ def create_compact_note_agent_node(
                     mid_turn=True,
                     abort_policy="fail_open",
                     graph=graph,
+                    hoist_injected=False,
                 )
             except Exception as exc:
-                # The seam logs at WARNING only for a REFUSED write — an
-                # EXCEPTION here would otherwise vanish (the swap would
-                # look like a plain refusal to persist).
                 logger.warning(
                     "[CompactNote] persistence raised instance=%s "
                     "error_class=%s — the swap did NOT land",
@@ -14090,10 +14168,6 @@ def create_compact_note_agent_node(
                 )
                 persisted = False
 
-            # The compaction-model override: the append path NEVER applies
-            # it (the compaction is produced by the agent's own invoke, so
-            # there is no model call to override — architect v1.5 §2b).
-            # The CONFIGURED value is still reported so an operator can
             if not persisted:
                 _log_compact_note_settle(
                     instance_id,
@@ -14104,29 +14178,20 @@ def create_compact_note_agent_node(
                         outcome=APPEND_OUTCOME_APPEND_FAILED,
                         persisted=False,
                         agent_model=agent_model_name,
-                        # ALWAYS FALSE BY CONSTRUCTION (v1.5 §2b): the
-                        # append path makes no model call of its own.
                         override_applied=False,
                         override_configured=override_configured,
                         note_chars=note_chars,
                         agent_id=agent_id,
+                        arrivals_preserved=len(arrivals),
                     ),
                 )
                 return result
 
-            # Persisted — build the swapped channel and settle.
-            # Mirror the seam's sentinel-first replacement so the node
-            # return (the durable landing) matches what was persisted.
             rebuild_ok = True
             try:
                 from daemon.compaction import build_sentinel_replacement
-                channel = build_sentinel_replacement(result_obj, state_msgs, compacted_ids=result_obj.compacted_ids)
+                channel = build_sentinel_replacement(result_obj, state_msgs, compacted_ids=result_obj.compacted_ids, hoist_injected=False)
             except Exception as exc:
-                # The hand-built fallback does NOT carry the helper's
-                # injected-hoisting semantics — the durable state and the
-                # committed channel can disagree. That is DISCLOSED (a
-                # WARNING) and the settle records a DISTINCT outcome (never
-                # "compacted"), so the arm persists and the work re-runs.
                 rebuild_ok = False
                 logger.warning(
                     "[CompactNote] the compacted channel could not be "
@@ -14136,7 +14201,7 @@ def create_compact_note_agent_node(
                     str(instance_id)[:8],
                     type(exc).__name__,
                 )
-                channel = [sentinel, doc, *preserved_msgs]
+                channel = [sentinel, doc, note, *arrivals]
             settle_result = settle_compact_note_arm(
                 repo, instance_id,
                 note_sha12=note_sha12,
@@ -14147,13 +14212,9 @@ def create_compact_note_agent_node(
                 ),
                 persisted=True,
                 agent_model=agent_model_name,
-                # ALWAYS FALSE BY CONSTRUCTION (architect v1.5 §2b): the
-                # append path makes no model call of its own, so there is
-                # no override to apply — the configured value is reported
-                # above so an operator can see their pin did not apply.
                 override_applied=False,
                 override_configured=override_configured,
-                tail_spliced=len(preserved_msgs),
+                arrivals_preserved=len(arrivals),
                 doc_id=str(getattr(doc, "id", "") or ""),
                 note_chars=note_chars,
                 agent_id=agent_id,
@@ -14174,6 +14235,7 @@ def create_compact_note_agent_node(
                 result["compacted_at"] = compacted_at
                 return result
             return {"messages": channel, "compacted_at": compacted_at}
+
         except Exception as exc:
             # CONTENT-FREE: the class name only — an exception MESSAGE can
             # carry conversation content (the note is live in this scope),
@@ -14211,8 +14273,6 @@ def create_compact_note_agent_node(
                     "[CompactNote] SWAP failure settle failed for instance=%s",
                     str(instance_id)[:8],
                 )
-            return result
-
     return _node
 
 
@@ -14448,6 +14508,12 @@ def build_instance_graph(
         LONG_TOOL_REGISTRY,
         wrapped_tools_node,
     )
+    # tool-usage P1 (D14): the observation wrapper sits BETWEEN compact_note
+    # (outermost) and wrapped_tools_node — it sees the ToolNode result to
+    # set the ok flag, and stays below compact_note's post-processing append.
+    from daemon.services.tool_usage_observation import (  # noqa: E402
+        wrap_tools_node,
+    )
     graph.add_node(
         "tools",
         create_compact_note_tools_node(
@@ -14459,7 +14525,13 @@ def build_instance_graph(
             # clears in ``finally`` (pause-cancel + task-cap included)
             # with the per-completion ``[LongToolNudge] TOOL_COMPLETED``
             # log line and the AD-9 healthy-gated episode close.
-            wrapped_tools_node(tools, registry=LONG_TOOL_REGISTRY),
+            wrap_tools_node(
+                wrapped_tools_node(tools, registry=LONG_TOOL_REGISTRY),
+                # A-1: manager._instance_repository (same handle compact_note
+                # uses at :13606) — NOT a bare instance_repository in scope.
+                instance_repository=getattr(manager, "_instance_repository", None),
+                flusher=getattr(manager, "_tool_usage_flusher", None),
+            ),
             manager=manager,
             compactor=compactor,
             llm_config=llm_config_with_headers,

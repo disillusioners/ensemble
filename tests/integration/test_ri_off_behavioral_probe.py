@@ -196,6 +196,7 @@ def wire_bus_gate():
     bus = MagicMock(name="DependencyBus")
     bus.get_generation = lambda _iid: 0
     bus.count_pending_for_target_sync = lambda _iid: 0
+    bus.count_fulfillable_pending_for_target_sync = lambda _iid, **kw: 0
     parent_lock = asyncio.Lock()
 
     async def _get_parent_lock(_iid: str) -> asyncio.Lock:

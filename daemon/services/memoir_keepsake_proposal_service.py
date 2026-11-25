@@ -61,7 +61,7 @@ WHAT THIS MODULE OWNS
 
 WHAT THIS MODULE NEVER DOES
 
-* It NEVER pins (V2-D 6.3 / R2). Pinning stays the Emperor/Empress
+* It NEVER pins (V2-D 6.3 / R2). Pinning stays the actor-claim
   confirmation path through the v1 ``memoir_pin(id, reason, actor)``
   tool — the actor gate that records WHO confirmed. Proposals are never
   auto-pinned, and this module holds no reference to the pin writer.
@@ -95,6 +95,8 @@ from daemon.config import MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_DEFAULT
 from daemon.repositories.memoir.models import (
     MEMOIR_PROPOSAL_REASON_CHAR_CAP,
     MEMOIR_UNTITLED_TITLE,
+    PIN_ACTORS,
+    PROPOSAL_DECISIONS,
     MemoirEpisode,
     MemoirProposalLedger,
     render_proposal_line,
@@ -130,6 +132,13 @@ MEMOIR_PROPOSAL_MIN_BODY_CHARS = 80
 #: backfill never floods the ledger (and the briefing zone's top-3
 #: selection) in a single tick.
 MEMOIR_PROPOSAL_STAGE_CAP_PER_PASS = 10
+
+#: How many OPEN proposal rows the review resolver may re-read when the
+#: EXACT title does not match (the reviewer's quote is the RENDERED —
+#: collapsed — title, which is not byte-equal to the stored one). The
+#: bound keeps the fallback read bounded: it never grows with the
+#: corpus, and the zone's own strongest-first order decides the winner.
+MEMOIR_PROPOSAL_REVIEW_TITLE_SCAN_CAP = 50
 
 #: The BOUNDED OVER-FETCH multiplier (W-2) — the CONSTITUTIONAL DEFAULT.
 #: The candidate window pages up to this multiple of the window per pass,
@@ -175,6 +184,52 @@ PROPOSAL_STATUSES: frozenset[str] = frozenset(
         PROPOSAL_STATUS_FAILED,
     }
 )
+
+#: THE DECISION AXIS (review state) — orthogonal to the DELIVERY axis
+#: above. ``NULL`` (no decision yet) is expressed by the absence of a
+#: value, never by a token; the closed two-token vocabulary itself lives
+#: in the models module (:data:`PROPOSAL_DECISIONS`) so the model's CHECK
+#: constraint and this service can never disagree.
+#:
+#: WHY A SEPARATE AXIS. ``notification_status`` records DELIVERY; a
+#: reviewer's verdict is a different question with a different lifetime
+#: (a delivered proposal may stay undecided for weeks, and a decided one
+#: has no further delivery question). Adding a fifth delivery token would
+#: conflate them and corrupt the 1/day gate, which counts CONSUMPTION
+#: (``notified_at``), not judgement.
+
+#: The structured refusal codes :class:`MemoirProposalReviewError` carries
+#: in ``.code``. Callers read ``getattr(exc, "code", ...)`` and never have
+#: to match on message text.
+PROPOSAL_REVIEW_NOT_FOUND = "not_found"
+PROPOSAL_REVIEW_INVALID_DECISION = "invalid_decision"
+PROPOSAL_REVIEW_INVALID_ACTOR = "invalid_actor"
+
+
+class MemoirProposalReviewError(ValueError):
+    """A TYPED refusal from :meth:`MemoirKeepsakeProposalService.record_review`.
+
+    Subclasses ``ValueError`` (so a caller that only knows "bad input"
+    still works) and carries a machine-readable ``code`` in
+    ``{"not_found", "invalid_decision", "invalid_actor"}``. The message is
+    for a human; the ``code`` is the contract.
+
+    RELEASE-GATED DEGRADATION: on a database whose schema predates the
+    decision columns (the live daemon runs OLDER code until this binary
+    boots), ``record_review`` / ``count_pending_reviews`` raise a driver
+    error for the missing column. The CALLER's broad handler catches it:
+    the tool path (``memoir_review``) returns the GENERIC
+    ``memoir_internal_error`` refusal envelope ("an unexpected error
+    occurred (logged server-side); nothing was recorded"), and the
+    briefing path swallows it in ``_guarded_read``, degrading only that
+    zone. Fail-soft holds in both cases, but NO decision-specific typed
+    code is minted for that case — the exception propagates as-is and
+    the broad handler maps it to the generic refusal.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def _resolve_fetch_cap_multiplier() -> int:
@@ -603,6 +658,14 @@ class MemoirKeepsakeProposalService:
         W-3 filters so ONE selection serves BOTH paths (the notify
         target narrows the SAME query) and neither can drift from the
         other.
+
+        REVIEWED ROWS ARE EXCLUDED — ``decision_status IS NULL`` ONLY.
+        A proposal somebody already accepted or declined is a CLOSED
+        question: rendering it here would ask the same question again
+        every turn, and announcing it would spend the day's slot on a
+        settled proposal. The exclusion lives inside
+        :meth:`_zone_selection_statement`, so the briefing and the
+        bridge inherit it together (ONE home, no drift).
         """
         statement = self._zone_selection_statement(
             limit=max(0, int(limit)),
@@ -645,12 +708,34 @@ class MemoirKeepsakeProposalService:
         limit: int,
         agent_id: str | None,
         statuses: tuple[str, ...] | None,
+        title: str | None = None,
+        count_only: bool = False,
     ) -> Any:
         """BUILD the zone selection — the statement, not the rows.
 
         Split from the materialization so the bridge's claim
         transaction can run the SAME selection inside its own
         transaction (one query, one truth).
+
+        THE DECIDED-ROW EXCLUSION LIVES HERE, AND ONLY HERE. Both the
+        briefing's zone render (:meth:`select_zone_rows`) and the notify
+        target (:meth:`notify_once`, which narrows the SAME builder to
+        ``statuses=('pending',)``) come through this one call, so a
+        REVIEWED proposal can not be re-rendered as an open question and
+        can not be re-announced — by construction, not by two mirrored
+        predicates that could drift apart.
+
+        ``count_only`` swaps the projection for ``COUNT(*)`` while
+        keeping the SAME join and the SAME predicates, so the
+        pending-review COUNT (:meth:`count_pending_reviews`) is the
+        number of rows this very selection would render (uncapped) — the
+        count can never disagree with the zone it annotates, and it never
+        materializes a row.
+
+        ``title`` is the optional exact-title filter :meth:`record_review`
+        needs; it does NOT change the ordering or the other predicates,
+        so the review resolves the strongest matching open proposal with
+        exactly the ordering the briefing renders.
         """
         owner = agent_id or self._agent_id
         wanted = (
@@ -659,6 +744,38 @@ class MemoirKeepsakeProposalService:
             else tuple(statuses)
         )
         effective = func.coalesce(MemoirEpisode.poignancy, MemoirEpisode.importance)
+        filters = [
+            MemoirProposalLedger.agent_id == owner,
+            MemoirProposalLedger.notification_status.in_(list(wanted)),
+            # THE DECIDED-ROW EXCLUSION (the decision axis). An UNDECIDED
+            # row carries NULL — that is the ONLY value that leaves a
+            # proposal in the open set. A row with ``accepted`` or
+            # ``declined`` has been reviewed and the question is closed:
+            # it is never rendered (the briefing would be asking again)
+            # and never announced (the 1/day slot must not be spent on a
+            # settled question).
+            MemoirProposalLedger.decision_status.is_(None),
+            MemoirEpisode.is_keepsake.is_(False),
+            MemoirEpisode.superseded_by.is_(None),
+            # THE RE-CHECKED THRESHOLD — the episode's EFFECTIVE
+            # poignancy must STILL reach the qualification bar
+            # (the same predicate the candidate scan uses).
+            effective >= MEMOIR_KEEPSAKE_POIGNANCY_THRESHOLD,
+        ]
+        if title is not None:
+            filters.append(MemoirEpisode.title == title)
+        if count_only:
+            # THE CHEAP COUNT — the same join and the same predicates,
+            # one integer back, no row materialized.
+            return (
+                select(func.count())
+                .select_from(MemoirProposalLedger)
+                .join(
+                    MemoirEpisode,
+                    MemoirEpisode.id == MemoirProposalLedger.episode_id,
+                )
+                .where(*filters)
+            )
         return (
             select(
                 MemoirProposalLedger.id,
@@ -675,19 +792,208 @@ class MemoirKeepsakeProposalService:
                 MemoirEpisode,
                 MemoirEpisode.id == MemoirProposalLedger.episode_id,
             )
-            .where(
-                MemoirProposalLedger.agent_id == owner,
-                MemoirProposalLedger.notification_status.in_(list(wanted)),
-                MemoirEpisode.is_keepsake.is_(False),
-                MemoirEpisode.superseded_by.is_(None),
-                # THE RE-CHECKED THRESHOLD — the episode's EFFECTIVE
-                # poignancy must STILL reach the qualification bar
-                # (the same predicate the candidate scan uses).
-                effective >= MEMOIR_KEEPSAKE_POIGNANCY_THRESHOLD,
-            )
+            .where(*filters)
             .order_by(effective.desc(), MemoirProposalLedger.proposed_at.desc())
             .limit(max(0, int(limit)))
         )
+
+    # ── the REVIEW axis (the decision store) ────────────────────────────
+
+    def count_pending_reviews(
+        self,
+        *,
+        agent_id: str | None = None,
+    ) -> int:
+        """The OPEN-REVIEW COUNT — how many proposals await a decision.
+
+        A CHEAP COUNT, NEVER A ROW MATERIALIZATION: the count is computed
+        in the database (``SELECT COUNT(*)``) and only the integer comes
+        back. The caller (a tool surface) wants to know "is there
+        anything for me to look at?", and materializing the rows to
+        answer that would be the expensive shape.
+
+        WHAT COUNTS AS PENDING: the agent's ledger rows that are still
+        UNDECIDED (``decision_status IS NULL``) and still carry an
+        OPEN delivery status (``pending`` / ``enqueued``) — the same two
+        axes the zone render uses, so the number and the rendered zone
+        can never disagree about what "open" means.
+
+        The two axes are SEPARATE on purpose: a row can be DELIVERED
+        (``enqueued``) and still be undecided (nobody has reviewed it
+        yet) — that is exactly the row this count exists to surface. A
+        DECIDED row never counts, whatever its delivery status: the
+        question is closed.
+        """
+        with Session(self._engine) as session:
+            total = session.execute(
+                self._zone_selection_statement(
+                    limit=0,
+                    agent_id=agent_id,
+                    statuses=None,
+                    count_only=True,
+                )
+            ).scalar()
+        return int(total or 0)
+
+    def record_review(
+        self,
+        *,
+        title: str,
+        decision: str,
+        actor: str,
+        now: datetime | None = None,
+    ) -> dict:
+        """Record ONE review decision against an OPEN proposal.
+
+        THE RESOLUTION ORDER IS THE ZONE'S OWN. The candidate is the
+        STRONGEST open proposal whose episode title matches — the SAME
+        strongest-first ordering :meth:`select_zone_rows` renders
+        (``effective poignancy DESC, proposed_at DESC``), resolved
+        through the SAME statement builder, so the proposal a reviewer
+        is told about is the proposal their decision lands on. (A title
+        that matches nothing open raises ``not_found`` — a decision is
+        never silently applied to a different proposal.)
+
+        THE TITLE IS MATCHED THE WAY THE BRIEFING RENDERS IT. The zone
+        renders a proposal title through the shared one-line sanitizer
+        (a newline inside a title is collapsed — the raw title is never
+        what the reviewer sees), so the resolver matches the COLLAPSED
+        title too. The exact title is tried first (the common case, one
+        indexed-style equality), and the collapsed form is the fallback
+        over a BOUNDED window of open rows — the scan never grows with
+        the corpus, and the first match in the zone's own order wins.
+
+        THE WRITE IS A COMPARE-AND-SET. The UPDATE carries
+        ``decision_status IS NULL``; a row that was decided between the
+        selection and the write is NOT overwritten (the loser of that
+        race records nothing — the first decision stands, and a second
+        reviewer is told the proposal is already settled). The three
+        columns are written TOGETHER: the token, the actor-claim and the
+        instant, or none of them.
+
+        THE REFUSALS ARE TYPED, NEVER SILENT:
+          * ``invalid_decision`` — the decision is outside the closed
+            two-token vocabulary;
+          * ``invalid_actor`` — the actor-claim is not a
+            :data:`PIN_ACTORS` member (the vocabulary has ONE home;
+            the tokens are never spelled in this module);
+          * ``not_found`` — no OPEN proposal carries that title.
+
+        THE STAMP IS AN AWARE-UTC INSTANT: ``decided_at`` is coerced
+        through the same ``coerce_to_aware_utc`` the rest of the lane
+        uses, so the recorded instant is one unambiguous moment (a naive
+        local stamp would render in the reviewer's timezone, not in UTC).
+
+        RETURNS A PLAIN DICT — the caller needs no new type and no new
+        import: ``{"ledger_id", "episode_id", "decision", "title",
+        "reason"}``.
+        """
+        if decision not in PROPOSAL_DECISIONS:
+            raise MemoirProposalReviewError(
+                PROPOSAL_REVIEW_INVALID_DECISION,
+                "the review decision must be one of "
+                f"{sorted(PROPOSAL_DECISIONS)}; got {decision!r}",
+            )
+        if actor not in PIN_ACTORS:
+            raise MemoirProposalReviewError(
+                PROPOSAL_REVIEW_INVALID_ACTOR,
+                "the review actor must be one of "
+                f"{sorted(PIN_ACTORS)}; got {actor!r} — the claim is "
+                "never derived",
+            )
+        if not title or not str(title).strip():
+            raise MemoirProposalReviewError(
+                PROPOSAL_REVIEW_NOT_FOUND,
+                "the review needs the proposal title to resolve",
+            )
+        moment = coerce_to_aware_utc(now or self._clock())
+        with Session(self._engine) as session:
+            open_rows = self._resolve_open_proposal_in(session, title=str(title))
+            if not open_rows:
+                raise MemoirProposalReviewError(
+                    PROPOSAL_REVIEW_NOT_FOUND,
+                    "no OPEN proposal carries that title — the proposal was "
+                    "already reviewed, or it is not proposable",
+                )
+            row = open_rows[0]
+            result = session.execute(
+                update(MemoirProposalLedger)
+                .where(
+                    MemoirProposalLedger.id == row.ledger_id,
+                    MemoirProposalLedger.decision_status.is_(None),
+                )
+                .values(
+                    decision_status=decision,
+                    decided_by=actor,
+                    decided_at=moment,
+                )
+            )
+            if int(result.rowcount or 0) != 1:
+                # SOMEONE ELSE DECIDED FIRST — the first decision stands.
+                session.rollback()
+                raise MemoirProposalReviewError(
+                    PROPOSAL_REVIEW_NOT_FOUND,
+                    "the proposal was decided concurrently — the first "
+                    "decision stands",
+                )
+            session.commit()
+        return {
+            "ledger_id": row.ledger_id,
+            "episode_id": row.episode_id,
+            "decision": decision,
+            "title": row.title,
+            "reason": row.reason,
+        }
+
+    def _resolve_open_proposal_in(
+        self,
+        session: Session,
+        *,
+        title: str,
+    ) -> list[ProposalCandidateRow]:
+        """Resolve the OPEN proposal a review refers to — the zone's order.
+
+        THE EXACT TITLE FIRST. The common case is an exact match, and it
+        costs one row: the SAME statement builder (so the exclusion and
+        the ordering are the zone's, not a second copy) with the title
+        filter applied.
+
+        THE COLLAPSED TITLE AS THE FALLBACK. The briefing renders a
+        proposal title through the shared one-line sanitizer, so a title
+        carrying a newline is shown collapsed — the reviewer quotes the
+        RENDERED title, which is not byte-equal to the stored one. The
+        fallback therefore re-reads a BOUNDED window of the open rows
+        (same builder, same order) and compares the RENDERED title. The
+        bound keeps the read bounded: the scan never grows with the
+        corpus, and the first match in the zone's own order wins — so a
+        review can never land on a weaker proposal than the one that was
+        shown.
+        """
+        exact = self._select_zone_rows_in(
+            session,
+            self._zone_selection_statement(
+                limit=1,
+                agent_id=self._agent_id,
+                statuses=None,
+                title=title,
+            ),
+        )
+        if exact:
+            return exact
+        wanted = _proposal_one_line(title) or MEMOIR_UNTITLED_TITLE
+        window = self._select_zone_rows_in(
+            session,
+            self._zone_selection_statement(
+                limit=MEMOIR_PROPOSAL_REVIEW_TITLE_SCAN_CAP,
+                agent_id=self._agent_id,
+                statuses=None,
+            ),
+        )
+        for row in window:
+            rendered = _proposal_one_line(row.title) or MEMOIR_UNTITLED_TITLE
+            if rendered == wanted:
+                return [row]
+        return []
 
     def count_notified_today(
         self,
@@ -784,12 +1090,31 @@ class MemoirKeepsakeProposalService:
         The ROWCOUNT IS THE ASSERTION: ``1`` means this caller moved
         the row, ``0`` means somebody else already holds it (the loser
         of the race must deliver NOTHING). The caller asserts on it.
+
+        BOTH predicates are load-bearing, for DIFFERENT races:
+
+        * ``notification_status == 'pending'`` is the DELIVERY CAS. It
+          is what stops a second producer from moving an already-claimed
+          row — dropping it is DOUBLE DELIVERY, proven by the repo's own
+          mutation probe.
+        * ``decision_status IS NULL`` is the DECISION CAS. A row that was
+          REVIEWED between the selection read and this claim must not be
+          announced: the reviewer settled the question, so spending the
+          day's slot on it would re-nag about a closed proposal and
+          starve an open one. The claim loses (rowcount 0) and the
+          caller delivers nothing.
+
+        The selection already excludes decided rows (ONE home,
+        :meth:`_zone_selection_statement`); this predicate closes the
+        window between the selection and the claim, exactly as the
+        status predicate does for the producer race.
         """
         result = session.execute(
             update(MemoirProposalLedger)
             .where(
                 MemoirProposalLedger.id == ledger_id,
                 MemoirProposalLedger.notification_status == PROPOSAL_STATUS_PENDING,
+                MemoirProposalLedger.decision_status.is_(None),
             )
             .values(
                 notification_status=PROPOSAL_STATUS_ENQUEUED,
@@ -1125,10 +1450,15 @@ __all__ = [
     "MEMOIR_PROPOSAL_AGENT_ID",
     "MEMOIR_PROPOSAL_ENQUEUE_TIMEOUT_S",
     "MEMOIR_PROPOSAL_MIN_BODY_CHARS",
+    "MEMOIR_PROPOSAL_REVIEW_TITLE_SCAN_CAP",
     "MEMOIR_PROPOSAL_SOURCE",
     "MEMOIR_PROPOSAL_STAGE_CAP_PER_PASS",
     "MEMOIR_PROPOSAL_WINDOW_FETCH_MULTIPLE",
     "MemoirKeepsakeProposalService",
+    "MemoirProposalReviewError",
+    "PROPOSAL_REVIEW_INVALID_ACTOR",
+    "PROPOSAL_REVIEW_INVALID_DECISION",
+    "PROPOSAL_REVIEW_NOT_FOUND",
     "PROPOSAL_STATUSES",
     "PROPOSAL_STATUS_ENQUEUED",
     "PROPOSAL_STATUS_FAILED",

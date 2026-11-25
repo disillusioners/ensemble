@@ -1,0 +1,33 @@
+[identity] current_database()=ensemble_prod  transaction_read_only=on  (env-file db name only, no DSN)
+[identity] server says current_database()=ensemble_prod current_user=ensemble
+
+=== R8a: extra PENDING watchers — target_instance_id ===
+  5602e91d target=17efd2ef-9f98-46d4-b41b-60e3e32b2d13 match_parent=True state=PENDING source_task=39564 child=82551f59-4603-4b88-bbce-c9bccfa6fcd5 created=2026-11-17T22:51:59.886304+00:00 fired_at=None enqueued_at=None
+  c83e12a2 target=17efd2ef-9f98-46d4-b41b-60e3e32b2d13 match_parent=True state=PENDING source_task=39564 child=82551f59-4603-4b88-bbce-c9bccfa6fcd5 created=2026-11-17T22:53:05.940442+00:00 fired_at=None enqueued_at=None
+  -> both extras target the parent: True (rows=2)
+
+=== R8b: extra outstanding commissions — commissioner ===
+  06001f88 commissioner=17efd2ef-9f98-46d4-b41b-60e3e32b2d13 match_parent=True worker=82551f59-4603-4b88-bbce-c9bccfa6fcd5 lane=instance_nudge state=outstanding created=2026-11-17T22:51:59.855255+00:00 advisory_backfill=False
+  a1561f19 commissioner=17efd2ef-9f98-46d4-b41b-60e3e32b2d13 match_parent=True worker=82551f59-4603-4b88-bbce-c9bccfa6fcd5 lane=instance_nudge state=outstanding created=2026-11-17T22:53:05.912797+00:00 advisory_backfill=False
+  -> both extras are commissioned BY the parent: True (rows=2)
+
+=== R4a: boot-sweep predicate applied to ALL 4 parent watchers ===
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-wake-path-carrier-fix/.agents/shared/planning/wake-path-carrier-fix/repair/review/r8_census_check.py", line 175, in <module>
+    sys.exit(main())
+             ~~~~^^
+  File "/home/nea/ensemble-src-wt-wake-path-carrier-fix/.agents/shared/planning/wake-path-carrier-fix/repair/review/r8_census_check.py", line 107, in main
+    rows = q(
+        "SELECT w.watch_id, w.source_task_id, w.state, w.created_at, "
+    ...<10 lines>...
+        (PARENT,),
+    )
+  File "/home/nea/ensemble-src-wt-wake-path-carrier-fix/.agents/shared/planning/wake-path-carrier-fix/repair/review/r8_census_check.py", line 61, in q
+    cur2.execute(sql, params)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "/home/nea/ensemble-src-wt-wake-path-carrier-fix/.venv/lib/python3.14/site-packages/psycopg/cursor.py", line 117, in execute
+    raise ex.with_traceback(None)
+psycopg.errors.UndefinedFunction: operator does not exist: integer = character varying
+LINE 1: ...OM dependency_watchers w LEFT JOIN task t ON t.id = w.source...
+                                                             ^
+HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.

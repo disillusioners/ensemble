@@ -1,0 +1,18 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+E   AssertionError: sibling-owned row must stay OPEN
+    assert '2026-11-21T14:29:38.768667+00:00' is None
+     +  where '2026-11-21T14:29:38.768667+00:00' = BashSpawnRecord(pid=2046184, start_time=None, instance_id='child-sib-12345678', boot_id='aab40c8cc5624ff0b3d3844febbd1...tized='sleep 30', daemon_pid=2046184, reaped_at='2026-11-21T14:29:38.768667+00:00', reap_reason='refused:env-mismatch').reaped_at
+------------------------------ Captured log call -------------------------------
+WARNING  daemon.services.bash_spawn_reaper:bash_spawn_reaper.py:588 env verify: marker ENSEMBLE_BASH_TRACKING_ID present at PID 2046184 but value differs (PID likely recycled). Aborting.
+WARNING  daemon.services.bash_spawn_reaper:bash_spawn_reaper.py:1309 bash reaper: refused row 1 (writer daemon_pid=2046184) — refused:env-mismatch (swept by daemon pid 2046144)
+/home/nea/ensemble-src-wt-live-defects-p1/tests/job_queue/test_job_feedback_observer.py:3200: AssertionError: sibling-owned row must stay OPEN
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-live-defects-p1/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/job_queue/test_job_feedback_observer.py::TestDispatchTwoTierBashCleanupDurableRows::test_tier1_sibling_owned_row_skipped
+1 failed, 1 warning in 1.42s

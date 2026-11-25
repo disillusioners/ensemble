@@ -38,8 +38,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from langchain_core.tools import tool
 
+from ._schema_registry import tool
 from ..repositories.project.models import (
     CriticalNotes,
     CriticalNotesCategory,

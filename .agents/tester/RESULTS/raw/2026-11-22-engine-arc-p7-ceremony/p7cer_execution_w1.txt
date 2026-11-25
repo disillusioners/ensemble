@@ -1,0 +1,79 @@
+=== Test Pack: engine_execution_unit_test ===
+
+--- unit legs ---
+============================= test session starts ==============================
+platform linux -- Python 3.14.7, pytest-9.0.2, pluggy-1.6.0 -- /home/nea/ensemble-src-wt-engine-arc-p1/.venv/bin/python
+cachedir: .pytest_cache
+hypothesis profile 'default'
+rootdir: /tmp/p7cer_execution_w1
+configfile: pyproject.toml
+plugins: anyio-4.12.1, hypothesis-6.165.10, asyncio-1.3.0, mock-3.15.1, xdist-3.8.0, langsmith-0.7.7, timeout-2.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+timeout: 280.0s
+timeout method: thread
+timeout func_only: False
+collecting ... collected 40 items
+
+tests/unit/services/test_engine_honest_state.py::test_stamp_terminal_writes_run_row_and_stamps_job PASSED [  2%]
+tests/unit/services/test_engine_honest_state.py::test_skip_path_stamps_and_appends_run PASSED [  5%]
+tests/unit/services/test_engine_honest_state.py::test_every_terminal_outcome_appends_exactly_one_run PASSED [  7%]
+tests/unit/services/test_engine_honest_state.py::test_skip_reasons_closed_vocabulary PASSED [ 10%]
+tests/unit/services/test_engine_honest_state.py::test_effective_interval_backoff_and_reset PASSED [ 12%]
+tests/unit/services/test_engine_honest_state.py::test_hydration_preserves_last_run_at PASSED [ 15%]
+tests/unit/services/test_engine_honest_state.py::test_retry_arithmetic_no_jitter PASSED [ 17%]
+tests/unit/services/test_engine_honest_state.py::test_retry_exhaustion_lands_failed_backoff PASSED [ 20%]
+tests/unit/services/test_engine_honest_state.py::test_allowed_transitions_table PASSED [ 22%]
+tests/unit/services/test_engine_honest_state.py::test_failed_write_logs_dedicated_error PASSED [ 25%]
+tests/unit/services/test_engine_honest_state.py::test_failing_repo_stamp_leaves_loop_alive_w7 PASSED [ 27%]
+tests/unit/services/test_engine_honest_state.py::test_idempotent_skip_reason_normalization PASSED [ 30%]
+tests/unit/services/test_engine_single_flight.py::test_single_flight_overlap_returns_false_without_awaiting PASSED [ 32%]
+tests/unit/services/test_engine_single_flight.py::test_lock_released_in_finally_on_exception PASSED [ 35%]
+tests/unit/services/test_engine_single_flight.py::test_two_concurrent_ticks_produce_one_overlap PASSED [ 37%]
+tests/unit/services/test_engine_single_flight.py::test_timeout_cancel_policy PASSED [ 40%]
+tests/unit/services/test_engine_single_flight.py::test_timeout_extend_policy_records_pending_and_awaits_completion PASSED [ 42%]
+tests/unit/services/test_engine_single_flight.py::test_extend_then_eventual_success_honest_state PASSED [ 45%]
+tests/unit/services/test_engine_single_flight.py::test_extend_held_across_ticks_stamps_tpe_not_overlap PASSED [ 47%]
+tests/unit/services/test_engine_single_flight.py::test_extend_final_state_has_no_self_contradiction PASSED [ 50%]
+tests/unit/services/test_engine_single_flight.py::test_off_loop_thread_discipline_db_offload PASSED [ 52%]
+tests/unit/services/test_engine_single_flight.py::test_db_offload_refuses_coroutine_function PASSED [ 55%]
+tests/unit/services/test_engine_single_flight.py::test_off_loop_thread_discipline_dedicated_executor PASSED [ 57%]
+tests/unit/services/test_engine_single_flight.py::test_main_loop_runs_on_loop_thread PASSED [ 60%]
+tests/unit/services/test_engine_single_flight.py::test_engine_start_stop_idempotent PASSED [ 62%]
+tests/unit/services/test_engine_single_flight.py::test_engine_task_name PASSED [ 65%]
+tests/unit/services/test_engine_single_flight.py::test_engine_stop_bounded PASSED [ 67%]
+tests/unit/services/test_engine_single_flight.py::test_extend_then_raise_records_failed_backoff PASSED [ 70%]
+tests/unit/services/test_engine_single_flight.py::test_extend_wedge_escalates_to_dead PASSED [ 72%]
+tests/unit/services/test_engine_due_skip_backoff.py::test_shadow_zero_execution PASSED [ 75%]
+tests/unit/services/test_engine_due_skip_backoff.py::test_due_boundary PASSED [ 77%]
+tests/unit/services/test_engine_due_skip_backoff.py::test_metrics_snapshot_key_set PASSED [ 80%]
+tests/unit/services/test_engine_due_skip_backoff.py::test_dead_observer_carveout PASSED [ 82%]
+tests/unit/services/test_engine_due_skip_backoff.py::test_dead_observer_stale_evidence_outside_window PASSED [ 85%]
+tests/unit/services/test_engine_due_skip_backoff.py::test_shadow_stamp_records_timestamped_evidence PASSED [ 87%]
+tests/unit/services/test_engine_due_skip_backoff.py::test_project_merged_purity PASSED [ 90%]
+tests/unit/services/test_engine_due_skip_backoff.py::test_hydration_restart_clock PASSED [ 92%]
+tests/unit/services/test_engine_due_skip_backoff.py::test_ingest_event_sets_pending_latch PASSED [ 95%]
+tests/unit/services/test_engine_due_skip_backoff.py::test_loop_does_not_silently_return_on_unexpected_error PASSED [ 97%]
+tests/unit/services/test_engine_due_skip_backoff.py::test_consecutive_skips_survives_hydration PASSED [100%]
+
+=============================== warnings summary ===============================
+../../home/nea/ensemble-src-wt-engine-arc-p1/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-engine-arc-p1/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+tests/unit/services/test_engine_honest_state.py: 2 warnings
+tests/unit/services/test_engine_single_flight.py: 8 warnings
+  /tmp/p7cer_execution_w1/daemon/services/engine/dispatch.py:51: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    if asyncio.iscoroutinefunction(fn):
+
+tests/unit/services/test_engine_single_flight.py::test_off_loop_thread_discipline_dedicated_executor
+  /tmp/p7cer_execution_w1/daemon/services/engine/dispatch.py:66: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    if asyncio.iscoroutinefunction(fn):
+
+tests/unit/services/test_engine_single_flight.py::test_main_loop_runs_on_loop_thread
+  /tmp/p7cer_execution_w1/daemon/services/engine/dispatch.py:33: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    if asyncio.iscoroutinefunction(fn):
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+======================= 40 passed, 13 warnings in 6.85s ========================
+SUMMARY: ======================= 40 passed, 13 warnings in 6.85s ========================
+RESULT: PASS

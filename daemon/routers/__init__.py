@@ -35,6 +35,8 @@ from .wedge_capture import router as wedge_capture_router  # wedge-capture: /api
 from .metrics import router as metrics_router  # /api/metrics (checkpoint read instrumentation surface)
 from .nest_reports import router as nest_reports_router  # /api/nest-reports (nest-anomaly-report lane: the anomaly domain route)
 from .rooms import router as rooms_router  # /api/rooms/* + /api/instances/{id}/rooms (P6 observability modal)
+from .tool_usage import router as tool_usage_router  # /api/tool-usage (tool-usage-metrics-p1: ledger read door)
+from .maintenance_reports import router as maintenance_reports_router  # /api/maintenance-reports (Central Maintenance System: run list)
 
 __all__ = [
     "agents_router",
@@ -72,4 +74,6 @@ __all__ = [
     "metrics_router",
     "nest_reports_router",
     "rooms_router",
+    "tool_usage_router",
+    "maintenance_reports_router",
 ]

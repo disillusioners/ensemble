@@ -16,7 +16,7 @@ renders its VISIBLE members contiguous), AC22 (the audience-filtered
 injection views: devops/ari/leader see operation ∪ both; developer
 and worker see both only; each view within the same 8/2,900 budget).
 
-The §11 payload shape (8 slugs, the Emperor's classifications) is the
+The §11 payload shape (8 slugs, the user's classifications) is the
 fixture — the same set the dogfood will seed.
 """
 
@@ -359,16 +359,49 @@ class TestAc18Ordering:
         assert slugs == [("mixa-02-both", "ranked")]  # no pinned drag
 
     def test_tightened_regex_unordered_slugs_stay_unordered(self) -> None:
-        """Slugs that do NOT match ^([a-z][a-z0-9]*)-(\\d{2})-(.+)$ are
-        singletons — they keep their ranked (here: slug) relative
-        order and never merge into a family block."""
+        """Family membership under the CORRECTED multi-token key.
+
+        PREMISE CORRECTION (fix iteration 1, F4): the old docstring
+        claimed non-matching slugs are singletons under the OLD
+        single-token pattern, and used
+        ``model-catalogs-19-vs-22-not-drift`` as the UNORDERED
+        exemplar. Under the corrected key that slug IS a family member
+        — family ``model-catalogs``, ordinal 19 — so the old assertion
+        was green only because a ONE-member family block is
+        order-stable (a vacuous pass for that row).
+
+        The unordered claim now rides the slugs that genuinely have NO
+        family (no ``-NN-`` ordinal): ``artifact-is-container-image``
+        and ``healthz-in-cluster-only``. The family row's ordering is
+        asserted EXPLICITLY below — never assumed."""
+        from daemon.services.pok_injection import _slug_family
+
+        # the exemplar that LEFT the unordered set …
+        assert _slug_family("model-catalogs-19-vs-22-not-drift") == "model-catalogs"
+        # … and the genuinely family-less pair
+        assert _slug_family("artifact-is-container-image") is None
+        assert _slug_family("healthz-in-cluster-only") is None
+
         rows = [
             _row("model-catalogs-19-vs-22-not-drift", audience="both"),
+            _row("model-catalogs-20-other-fact", audience="both"),
             _row("artifact-is-container-image", audience="both"),
             _row("healthz-in-cluster-only", audience="both"),
         ]
         result = admit_view(rows, agent_id="worker", now=NOW)
         slugs = [v.row.slug for v in result.entries]
+        # the family-less pair keeps its ranked (here: slug) relative
+        # order and never merges into a family block
+        assert [s for s in slugs if not s.startswith("model-catalogs-")] == [
+            "artifact-is-container-image",
+            "healthz-in-cluster-only",
+        ]
+        # the family renders as ONE CONTIGUOUS block, slug-ordered
+        # inside — asserted, not assumed (a ONE-member block would pass
+        # vacuously, hence the second member).
+        fam_idx = [i for i, s in enumerate(slugs) if s.startswith("model-catalogs-")]
+        assert fam_idx == list(range(fam_idx[0], fam_idx[0] + len(fam_idx)))
+        assert [slugs[i] for i in fam_idx] == sorted(slugs[i] for i in fam_idx)
         assert slugs == sorted(slugs)  # slug order = rank order fallback
 
     def test_family_never_splits_under_entry_pressure(self) -> None:
@@ -577,3 +610,87 @@ class TestAsyncSurfaceCensus:
         import daemon.manager as manager_mod
 
         assert not inspect.iscoroutinefunction(manager_mod.InstanceManager.set_injection)
+
+
+# ── CAP INDEPENDENCE: the read-side injection budget is a fixed house
+#    budget (8 entries / 2,900 chars per view), INDEPENDENT of the
+#    storage cap ``POK_ACTIVE_CAP_PER_PROJECT``. Raising or lowering the
+#    storage cap must never silently change what one view renders ──────
+
+
+class TestCapIndependenceReadBudget:
+    """The cap-raise dimension the standing pack does not cover: patch
+    the STORAGE cap (small and large) and prove the READ budget is
+    unchanged. Every count here is SYNTHETIC (in-memory SQLite) — never
+    a live store / live count."""
+
+    N_ROWS = 40  # > 8 in scope for the single viewer (ari)
+
+    def _seeded_service(self) -> POKService:
+        """In-memory store with N_ROWS distinct, ari-visible active rows.
+        Bodies sit at the 240-char escaped ceiling so the render is a
+        near-worst-case budget proof, not a trivial tiny-block one."""
+        from sqlmodel import Session
+
+        engine = create_engine("sqlite://")
+        SQLModel.metadata.create_all(
+            engine,
+            tables=[
+                ProjectOperatingKnowledge.__table__,
+                ProjectOperatingKnowledgeEmbedding.__table__,
+            ],
+        )
+        with Session(engine) as session:
+            for i in range(self.N_ROWS):
+                session.add(
+                    _row(
+                        f"capind-{i:03d}-fact",
+                        audience="operation",  # ari ∈ operation set → visible
+                        body=f"{i:04d}" + "x" * 236,  # 240 chars, distinct
+                    )
+                )
+            session.commit()
+        return POKService(engine)
+
+    def test_constant_pins(self) -> None:
+        """(a) The two house budget constants are pinned by value."""
+        from daemon.services.pok_service import (
+            POK_BLOCK_MAX_CHARS,
+            POK_BLOCK_MAX_ENTRIES,
+        )
+
+        assert POK_BLOCK_MAX_ENTRIES == 8
+        assert POK_BLOCK_MAX_CHARS == 2_900
+
+    @pytest.mark.parametrize("storage_cap", [64, 4096])
+    def test_read_budget_independent_of_storage_cap(
+        self, monkeypatch: pytest.MonkeyPatch, storage_cap: int
+    ) -> None:
+        """(b) With the storage cap patched smaller (64) AND larger
+        (4096), a 40-row synthetic in-scope set still admits EXACTLY 8
+        rows and renders under 2,900 chars in BOTH regimes."""
+        monkeypatch.setattr(
+            "daemon.services.pok_service.POK_ACTIVE_CAP_PER_PROJECT",
+            storage_cap,
+        )
+        service = self._seeded_service()
+        rows = service._repo.list_entries("p1", statuses=("active",))
+        assert len(rows) == self.N_ROWS  # synthetic store fully seeded
+
+        result = admit_view(rows, agent_id="ari", now=NOW)
+        block = render_pok_block(result)
+        full = f"[SYSTEM CONTEXT: {POK_BLOCK_TITLE}]\n\n{block}"
+        entries = len(result.entries)
+        chars = len(full)
+
+        # discriminating leg: >8 in scope → EXACTLY 8 admitted, never more
+        assert entries == 8, (
+            f"storage_cap={storage_cap}: admitted {entries}, expected exactly 8"
+        )
+        assert entries <= 8
+        assert chars <= 2_900, f"storage_cap={storage_cap}: {chars} chars"
+
+        print(
+            f"storage_cap={storage_cap}: {entries} entries / {chars} chars "
+            "(budget 8 / 2,900 UNCHANGED)"
+        )

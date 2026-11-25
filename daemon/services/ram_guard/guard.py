@@ -95,8 +95,8 @@ logger = logging.getLogger(__name__)
 #: can never fire the fairness gate.
 RAM_GUARD_PENDING_MAX = 2
 
-#: The liveness sweep's cadence (in ticks).  ~25 ticks at a 200 ms poll
-#: is ~5 s.
+#: The liveness sweep's cadence (in ticks).  ~25 ticks at a 1000 ms poll
+#: is ~25 s (was ~5 s at the prior 200 ms poll).
 RAM_GUARD_SWEEP_EVERY_TICKS = 25
 
 #: Bounded backoff for transient refusals (§18.5) — runtime transients
@@ -177,7 +177,7 @@ class RamGuard:
         enabled: bool = True,
         ceiling_mib: Optional[int] = None,
         resolved_ceiling: Optional[tuple[int, str]] = None,
-        poll_interval_ms: int = 200,
+        poll_interval_ms: int = 1000,
         grace_ms: int = 250,
         pss_confirm_deadline_ms: int = 250,
         proc_root: Path = PROC_ROOT,

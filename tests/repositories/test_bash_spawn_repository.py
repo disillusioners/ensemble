@@ -307,3 +307,26 @@ class TestManagerImportBeforeCreateAll:
         finally:
             eng.dispose()
         assert hasattr(mod, "BashSpawnRecord")
+
+
+class TestListOpenInstanceIds:
+    """DISTINCT instance_ids over the OPEN subset (census A2 fix,
+    2026-11-21 — feeds the periodic retention sweep's stall leg)."""
+
+    def test_distinct_ids_open_only(self, repo) -> None:
+        repo.insert_open_row(_mkrow(tracking_id="c" * 32, instance_id="inst-a"))
+        repo.insert_open_row(_mkrow(tracking_id="d" * 32, instance_id="inst-a"))
+        repo.insert_open_row(_mkrow(tracking_id="e" * 32, instance_id="inst-b"))
+
+        ids = repo.list_open_instance_ids()
+        assert sorted(ids) == ["inst-a", "inst-b"]
+
+    def test_reaped_rows_excluded(self, repo) -> None:
+        row = repo.insert_open_row(
+            _mkrow(tracking_id="f" * 32, instance_id="inst-done")
+        )
+        repo.mark_reaped(row.id, "terminal-tier@1", "gc")
+        assert repo.list_open_instance_ids() == []
+
+    def test_empty_registry_returns_empty(self, repo) -> None:
+        assert repo.list_open_instance_ids() == []

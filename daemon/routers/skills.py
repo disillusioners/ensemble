@@ -1638,7 +1638,7 @@ async def resolve_ab_test(
         default="",
         description=(
             "REQUIRED in sanctioned mode - auditable provenance for "
-            "the resolution decision (operator/Emperor-visible)."
+            "the resolution decision (operator/user-visible)."
         ),
     ),
     defective_arm_id: str | None = Query(
@@ -1913,7 +1913,7 @@ async def _resolve_ab_test_sanctioned(
             ),
             severity="major",
             suspected_cause=(
-                "operator/Emperor-sanctioned closure of a stalled or "
+                "operator/user-sanctioned closure of a stalled or "
                 "verified-defective A/B pair (E-6 rule)"
             ),
             # W8 (review fix round, 2026-11-17): pass the SERVICE,

@@ -21,7 +21,12 @@
       "wedge-capture",
       "metrics-read",
       "nest-report-read",
-      "pok", "nest-report"
+      "pok",
+      "nest-report",
+      "spawn_instance",
+      "send_message",
+      "subtree_messages",
+      "subtree_status"
     ],
     "deny": ["git_commit", "edit_file", "write_file"]
   },

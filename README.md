@@ -220,7 +220,7 @@ overrides at spawn time (spawn `model=` override, weighted `llm_models` pool,
 such as `model_title` / `model_vision` are unaffected). It accepts a comma-separated
 list or a JSON array, e.g. `gpt-4,gpt-4o,gpt-4o-mini,gpt-4-turbo,gpt-3.5-turbo,o1-mini,o1-preview,vision`.
 
-- **Default (when unset):** `agentic,coding,coding2,vision,img-gen,decision` — matching
+- **Default (when unset):** `agentic,coding,vision,img-gen,decision` — matching
   the shipped `config.yaml` interpolation. When the default applies, the daemon logs a one-shot
   WARNING at startup; set the variable explicitly (even to the default value) to silence it.
 - **Strict-when-set:** an explicit list is respected exactly. A model outside the
@@ -375,4 +375,7 @@ For the one-page quick start and the full deployment guide — install, supervis
 
 ## License
 
-MIT
+Copyright (C) 2026 disillusioners
+
+This project is licensed under the GNU Affero General Public License v3.0 only (AGPL-3.0-only).
+See [LICENSE](LICENSE) for the full license text.

@@ -8,6 +8,7 @@ import os
 import uuid
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from sqlalchemy import (
@@ -42,7 +43,7 @@ from daemon.services.turn_transitions import (
     RetryTurn,
 )
 
-from ..instance.models import Instance, InstanceStatus
+from ..instance.models import Instance, InstanceStatus, InstanceHierarchy
 from ..job_queue.models import (
     ACTIVE_ADMISSION_STATES,
     AdmissionState,
@@ -50,8 +51,105 @@ from ..job_queue.models import (
     active_admission_states_sql,
 )
 from .models import SuspensionReason, Task, TaskStatus, TaskType
+from ..message_queue.models import MessageQueue
+from ..job_queue.watcher_models import JobWatcher
+from ..dependency_bus.models import DependencyWatcher, DependencyWatcherState
+from ..report_injection.models import ReportInjection, ReportInjectionState
 
 logger = logging.getLogger(__name__)
+
+@dataclass
+class StrandedClassification:
+    """Classification of a stranded RUNNING instance.
+
+    ``classification`` is one of:
+      * ``"1a"`` — proven dead, never dispatched (zero task rows,
+        zero message rows, no active JobItem, no non-terminal
+        descendant, idle past the recency bound, no delivered work).
+        RETIRE is correct.
+      * ``"1b"`` — proven dead, work delivered (report_injections
+        with state TASK_DELIVERED). RETIRE is correct.
+      * ``"2"``  — recoverable (active JobItem / active task row /
+        pending watcher / live descendant / recent activity). NEVER
+        retire; surface only.
+      * ``"3"``  — ambiguous (fail-closed): unparseable/absent value,
+        clock skew, unexpected status, or unprovable. Surface only,
+        no mutation.
+    """
+    instance_id: str
+    classification: str
+    evidence: dict = field(default_factory=dict)
+
+
+# Proven-dead recency bound (seconds). An instance whose last activity
+# is younger than this is NEVER proven dead (in-flight-spawn hazard).
+# Named + documented + configurable via env
+# ENSEMBLE_STRANDED_PROVEN_DEAD_MIN_IDLE_SECONDS (default 86400 = 24h).
+# Aligned EXACTLY with the husk detector's DEFAULT_HUSK_MIN_AGE_SECONDS
+# (86400) so the report surface and the mutation surface agree on when
+# an instance is "dead": the boot pass's proven-dead set is the husk
+# set INTERSECT (no active JobItem, no non-terminal descendant, no
+# pending watcher). A 1h bound was REJECTED: measured spawn->task-start
+# latency reaches 20 min on a loaded lane, so any unclaimed spawn older
+# than 1h would be falsely labelled proven-dead in the durable report.
+# Consequence: 68f04ccd (idle 5.5d, 5 deliveries) still classifies 1b
+# and is surfaced retire-armed; 716908e7 (idle ~5.5h, zero evidence)
+# classifies 3 (ambiguous) TODAY and becomes 1a at ~2026-11-24T14:51:31Z
+# — exactly when the husk detector's 24h gate starts naming it. That
+# alignment is the point, not a side effect.
+DEFAULT_STRANDED_PROVEN_DEAD_MIN_IDLE_SECONDS = 86400
+
+#: Recent-activity window (seconds). An instance with activity inside
+#: this window has DEMONSTRABLE liveness -> class 2 (recoverable).
+#: Measured spawn->task-start latency is 5-7 min generally, 20 min on a
+#: loaded lane; 1h is ~3x the worst measured case.
+#: LABEL-ONLY boundary: class 2 and class 3 are BOTH non-mutating
+#: (surface only, never retired), so this constant only decides which
+#: label an operator sees — it is not a safety boundary. The safety
+#: boundary is DEFAULT_STRANDED_PROVEN_DEAD_MIN_IDLE_SECONDS (24h).
+DEFAULT_STRANDED_RECENT_ACTIVITY_SECONDS = 3600
+
+#: Checkpoint-leg evaluation states (visible in the durable payload).
+#: ``evaluated``  — the ``checkpoints`` table was present and probed.
+#: ``degraded_absent`` — the ``checkpoints`` table does not exist (SQLite
+#:     unit-test fixtures); the leg CANNOT be evaluated, so every
+#:     class-1a candidate degrades to class 3 (fail-closed, no mutation).
+#: ``degraded_error`` — the probe raised; same fail-closed degradation.
+CHECKPOINT_LEG_EVALUATED = "evaluated"
+CHECKPOINT_LEG_DEGRADED_ABSENT = "degraded_absent"
+CHECKPOINT_LEG_DEGRADED_ERROR = "degraded_error"
+
+
+def _stranded_min_idle_seconds() -> int:
+    raw = os.environ.get(
+        "ENSEMBLE_STRANDED_PROVEN_DEAD_MIN_IDLE_SECONDS", ""
+    )
+    try:
+        v = int(raw) if raw != "" else DEFAULT_STRANDED_PROVEN_DEAD_MIN_IDLE_SECONDS
+        return v if v > 0 else DEFAULT_STRANDED_PROVEN_DEAD_MIN_IDLE_SECONDS
+    except (ValueError, TypeError):
+        return DEFAULT_STRANDED_PROVEN_DEAD_MIN_IDLE_SECONDS
+
+
+def _naive_utc_from_event_stamp(raw: Any) -> datetime:
+    """Parse an Event.data ``created_at`` stamp into naive-UTC digits.
+
+    Event.data carries ``now_utc_iso()`` (an ISO-8601 string, usually
+    aware with ``+00:00``). The re-minted Task/MessageQueue timestamp
+    columns are naive-UTC (DC-A), so the offset is stripped after UTC
+    normalization. Unparseable / missing stamps fall back to
+    ``now_utc_naive()`` (fail-open — a bad trace stamp must never block
+    a re-mint).
+    """
+    if isinstance(raw, str) and raw:
+        try:
+            value = datetime.fromisoformat(raw)
+            if value.tzinfo is not None:
+                value = value.astimezone(timezone.utc).replace(tzinfo=None)
+            return value
+        except ValueError:
+            pass
+    return now_utc_naive()
 
 
 # Bind-parameter chunk size for the bulk answer-handle lookup
@@ -1103,6 +1201,94 @@ class TaskRepository:
             )
             return db_session.exec(stmt).first()
 
+    def find_pending_redrive_turn(self, instance_id: str) -> Task | None:
+        """F2 (fix/post-outage-recovery b2): find the adjudicated wedge shape.
+
+        The 6105e198 net: a LIVE instance holds a PENDING task anchored to a
+        NON-TERMINAL JobItem, yet nothing claims it (the wake was lost or
+        the slot-denial never re-evaluated) and the operator repair path
+        (``resume_processing_job``) cannot see PENDING —
+        :meth:`find_paused_or_cancellable_turn` selects paused/running only,
+        so the verdict came back ``no_active_job`` while the task sat
+        unclaimed for 11m19s.
+
+        The selector for that shape:
+
+          * ``status = 'pending'`` (the resume selector's blind spot),
+          * ``COALESCE(cancel_requested, FALSE) = FALSE`` (a deliberate
+            stop is never re-driven),
+          * ``task_type IN ('process_message', 'process_report')`` (the
+            same active-graph-turn scope as the pause selector),
+          * the task's ``work_id`` anchors a non-terminal JobItem
+            (``admission_state IN ('active','queued')`` — the FP1
+            admission vocabulary; ``deleted_at IS NULL``) — a pending
+            task with NO live JobItem anchor is the reconciler's /
+            wipe's domain, not a re-drive target,
+          * most recent first (deterministic for the
+            one-running-turn-per-instance invariant).
+
+        Read-only. The CALLER owns the re-drive: make-claimable + pool
+        wake via :meth:`make_pending_task_claimable` — never a direct
+        claim (the claim UPDATE in ``claim_pending_task`` is the single
+        consumer CAS, F4).
+        """
+        with SQLModelSession(self.engine) as db_session:
+            stmt = (
+                select(Task)
+                .where(Task.instance_id == instance_id)
+                .where(Task.status == TaskStatus.PENDING.value)
+                # COALESCE form, matching the docstring above AND the
+                # sibling ``make_pending_task_claimable`` SQL: a NULL
+                # cancel_requested is NOT a deliberate stop, so it must be
+                # included (a bare ``IS FALSE`` would exclude it).
+                .where(text("COALESCE(cancel_requested, FALSE) = FALSE"))
+                .where(
+                    Task.task_type.in_([
+                        TaskType.PROCESS_MESSAGE.value,
+                        TaskType.PROCESS_REPORT.value,
+                    ])
+                )
+                .where(
+                    # Non-terminal JobItem anchor (FP1 admission
+                    # vocabulary — mirrors the wipe's FP1 arm so the
+                    # re-drive selector and the boot-wipe agree on what
+                    # "anchored live work" means).
+                    text(
+                        "EXISTS ("
+                        "SELECT 1 FROM job_queue_items jqi "
+                        "WHERE jqi.job_id = task.work_id "
+                        f"AND jqi.admission_state IN {active_admission_states_sql()} "
+                        "AND jqi.deleted_at IS NULL)"
+                    )
+                )
+                .order_by(col(Task.created_at).desc())
+            )
+            return db_session.exec(stmt).first()
+
+    def make_pending_task_claimable(self, task_id: int) -> bool:
+        """F2: clear claim-blocking backoff on a PENDING task (guarded CAS).
+
+        ``UPDATE task SET next_retry_at = NULL WHERE id = :tid AND
+        status = 'pending' AND COALESCE(cancel_requested, FALSE) = FALSE``
+
+        The ONLY mutation the F2 re-drive performs. It does NOT flip
+        status (the claim UPDATE in ``claim_pending_task`` stays the
+        single pending→running consumer CAS, F4) and it never touches
+        RUNNING/PAUSED/terminal rows. ``rowcount == 1`` ⇒ the row was
+        pending and is now claimable; ``0`` ⇒ another actor moved it.
+        """
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    "UPDATE task SET next_retry_at = NULL "
+                    "WHERE id = :tid "
+                    "AND status = :status_pending "
+                    "AND COALESCE(cancel_requested, FALSE) = FALSE"
+                ),
+                {"tid": task_id, "status_pending": TaskStatus.PENDING.value},
+            )
+            return result.rowcount == 1
+
     # ---------------------------------------------------------------
     # Auto-continue boot pass (feature/auto-continue-running-after-restart)
     # ---------------------------------------------------------------
@@ -1407,6 +1593,630 @@ class TaskRepository:
             # Row objects). Indexing ``row[0]`` would slice the first
             # CHARACTER off the id; iterate directly instead.
             return list(db_session.exec(stmt).all())
+
+    def _probe_checkpoint_rows(self, instance_id: str) -> tuple[int | None, str]:
+        """Count the rows in the ``checkpoints`` table for one thread.
+
+        The ``checkpoints`` table is created by the LangGraph saver, NOT
+        by SQLModel metadata, so it is absent in the SQLite unit-test
+        fixtures (and absent on any engine where the saver never ran).
+
+        Returns ``(row_count, leg_state)``:
+          * ``(N, CHECKPOINT_LEG_EVALUATED)`` -- the table exists and
+            was probed; ``N`` is the row count for the thread.
+          * ``(None, CHECKPOINT_LEG_DEGRADED_ABSENT)`` -- the table does
+            not exist. The leg CANNOT be evaluated -> the caller MUST
+            degrade fail-closed (class 3, no mutation).
+          * ``(None, CHECKPOINT_LEG_DEGRADED_ERROR)`` -- the probe
+            raised. Same fail-closed degradation.
+
+        Detection of absence: SQLAlchemy's ``inspect(engine).has_table``
+        -- engine-agnostic (works on SQLite and PostgreSQL), and it does
+        NOT rely on an exception to signal "table missing" (a genuine
+        query failure is caught separately and also degrades).
+        """
+        try:
+            from sqlalchemy import inspect as _sa_inspect
+
+            if not _sa_inspect(self.engine).has_table("checkpoints"):
+                return None, CHECKPOINT_LEG_DEGRADED_ABSENT
+        except Exception as exc:  # noqa: BLE001 — read-only probe
+            logger.warning(
+                "stranded classifier: checkpoint-leg probe could not "
+                "inspect the schema — DEGRADED: %s", exc,
+            )
+            return None, CHECKPOINT_LEG_DEGRADED_ERROR
+        try:
+            from sqlalchemy import text as _sa_text
+
+            stmt = _sa_text(
+                "SELECT COUNT(*) FROM checkpoints WHERE thread_id = :tid"
+            )
+            with self.engine.connect() as conn:
+                count = conn.execute(stmt, {"tid": instance_id}).scalar()
+        except Exception as exc:  # noqa: BLE001 — read-only probe
+            logger.warning(
+                "stranded classifier: checkpoint-leg read failed for "
+                "instance=%s — DEGRADED: %s",
+                str(instance_id)[:8], exc,
+            )
+            return None, CHECKPOINT_LEG_DEGRADED_ERROR
+        return int(count or 0), CHECKPOINT_LEG_EVALUATED
+
+    def classify_stranded_running_instances(
+        self, *, boot_epoch: datetime
+    ) -> list["StrandedClassification"]:
+        """Classify RUNNING instances into proven-dead / recoverable /
+        ambiguous (surface-first doctrine).
+
+        See :class:`StrandedClassification` and the design requirements
+        in the commission. Returns one entry per RUNNING instance,
+        classified. Instances that are structurally class 2/3 are
+        included (surfaced) but never retired by the pass.
+        """
+        if boot_epoch is None:
+            return []
+        terminal_statuses = {
+            InstanceStatus.COMPLETED.value,
+            InstanceStatus.TERMINATED.value,
+            InstanceStatus.ERROR.value,
+            InstanceStatus.FAILED.value,
+            InstanceStatus.CANCELLED.value if hasattr(InstanceStatus, "CANCELLED") else "cancelled",
+        }
+        min_idle = _stranded_min_idle_seconds()
+        recent_window = DEFAULT_STRANDED_RECENT_ACTIVITY_SECONDS
+
+        out: list[StrandedClassification] = []
+        with SQLModelSession(self.engine) as db_session:
+            instances = list(
+                db_session.exec(
+                    select(Instance).where(
+                        Instance.status == InstanceStatus.RUNNING.value
+                    )
+                ).all()
+            )
+            for inst in instances:
+                iid = inst.instance_id
+                evidence: dict = {}
+                # Fail-closed inputs
+                try:
+                    # recency from last_activity_at or created_at
+                    activity_raw = getattr(inst, "last_activity_at", None)
+                    if activity_raw is None:
+                        activity_raw = getattr(inst, "created_at", None)
+                    if activity_raw is None:
+                        raise ValueError("no activity timestamp")
+                    if isinstance(activity_raw, datetime):
+                        activity_ts = activity_raw
+                    else:
+                        activity_ts = datetime.fromisoformat(
+                            str(activity_raw).replace("Z", "+00:00")
+                        )
+                    if activity_ts.tzinfo is not None:
+                        activity_ts = activity_ts.replace(tzinfo=None)
+                    # clock skew: activity after boot_epoch => ambiguous
+                    if activity_ts > boot_epoch:
+                        raise ValueError("clock skew: activity after boot_epoch")
+                    age_seconds = (boot_epoch - activity_ts).total_seconds()
+                except (ValueError, TypeError):
+                    out.append(StrandedClassification(
+                        instance_id=iid, classification="3",
+                        evidence={"reason": "unparseable/absent/skew timestamp"},
+                    ))
+                    continue
+
+                evidence["age_seconds"] = age_seconds
+                evidence["recency_bound_seconds"] = min_idle
+
+                # Task rows (ANY state)
+                task_count = db_session.exec(
+                    select(func.count()).select_from(Task).where(
+                        Task.instance_id == iid
+                    )
+                ).one()
+                evidence["task_count"] = int(task_count or 0)
+
+                # Message queue rows (ANY state)
+                try:
+                    mq_count = db_session.exec(
+                        select(func.count()).select_from(MessageQueue).where(
+                            MessageQueue.instance_id == iid
+                        )
+                    ).one()
+                except Exception:
+                    mq_count = 0
+                evidence["message_queue_count"] = int(mq_count or 0)
+
+                # Active JobItem
+                active_job = db_session.exec(
+                    select(func.count()).select_from(JobItem).where(
+                        col(JobItem.instance_id) == iid
+                    ).where(
+                        col(JobItem.admission_state).in_(
+                            list(ACTIVE_ADMISSION_STATES)
+                        )
+                    ).where(col(JobItem.deleted_at).is_(None))
+                ).one()
+                evidence["active_jobitem"] = bool(active_job)
+
+                # Non-terminal descendants
+                desc_rows = list(db_session.exec(
+                    select(InstanceHierarchy).where(
+                        InstanceHierarchy.parent_id == iid
+                    )
+                ).all())
+                nonterm_desc = 0
+                for hr in desc_rows:
+                    child = db_session.get(Instance, hr.child_id)
+                    if child is not None and child.status not in terminal_statuses:
+                        nonterm_desc += 1
+                evidence["nonterminal_descendants"] = nonterm_desc
+
+                # Pending watcher (job lifecycle watcher)
+                watcher_count = db_session.exec(
+                    select(func.count()).select_from(JobWatcher).where(
+                        JobWatcher.instance_id == iid
+                    )
+                ).one()
+                evidence["pending_watchers"] = int(watcher_count or 0)
+
+                # Pending DEPENDENCY watcher (dependency bus). A parent
+                # that is still awaited by the bus is LIVE work in
+                # flight -> class 2 (never retired).
+                try:
+                    dep_watcher_count = db_session.exec(
+                        select(func.count()).select_from(DependencyWatcher).where(
+                            DependencyWatcher.target_instance_id == iid
+                        ).where(
+                            DependencyWatcher.state
+                            == DependencyWatcherState.PENDING.value
+                        )
+                    ).one()
+                except Exception:
+                    dep_watcher_count = 0
+                evidence["pending_dependency_watchers"] = int(dep_watcher_count or 0)
+
+                # Delivered work
+                try:
+                    delivered = db_session.exec(
+                        select(func.count()).select_from(ReportInjection).where(
+                            ReportInjection.parent_instance_id == iid
+                        ).where(
+                            ReportInjection.state == ReportInjectionState.TASK_DELIVERED.value
+                        )
+                    ).one()
+                except Exception:
+                    delivered = 0
+                evidence["delivered_reports"] = int(delivered or 0)
+
+                # Class 2 (RECOVERABLE) — a LIVE signal exists: work
+                # evidence (task rows / message rows in ANY state), an
+                # active JobItem, a pending watcher, or a non-terminal
+                # descendant. NEVER retired.
+                recoverable = (
+                    int(task_count or 0) > 0
+                    or int(mq_count or 0) > 0
+                    or bool(active_job)
+                    or nonterm_desc > 0
+                    or int(watcher_count or 0) > 0
+                    or int(dep_watcher_count or 0) > 0
+                )
+                if recoverable:
+                    out.append(StrandedClassification(
+                        instance_id=iid, classification="2", evidence=evidence,
+                    ))
+                    continue
+
+                # No live signal at all (no rows, no job, no watcher, no
+                # live descendant). The recency legs now decide:
+                #   age < recent_window -> class 2 (recent activity =
+                #                    demonstrable liveness)
+                #   recent_window <= age < bound -> class 3 (AMBIGUOUS):
+                #                    the selectors CANNOT PROVE the
+                #                    instance is dead (e.g. a spawned-but-
+                #                    not-yet-claimed instance whose first
+                #                    turn has not created rows yet).
+                #                    Surface only, no mutation.
+                #   age >= bound -> class 1a / 1b (PROVEN DEAD).
+                if age_seconds < recent_window:
+                    out.append(StrandedClassification(
+                        instance_id=iid, classification="2", evidence=evidence,
+                    ))
+                    continue
+                if age_seconds < min_idle:
+                    out.append(StrandedClassification(
+                        instance_id=iid, classification="3", evidence=evidence,
+                    ))
+                    continue
+
+                # Delivered work -> class 1b. THE ZERO-CHECKPOINT LEG
+                # DOES NOT APPLY TO 1b (ASYMMETRY — DO NOT "HARMONISE"
+                # IT AWAY): exemplar 68f04ccd is class 1b and carries 3
+                # checkpoint rows + 1 blob. 1b's proof is the DELIVERED
+                # WORK itself, not the absence of execution evidence.
+                if int(delivered or 0) > 0:
+                    out.append(StrandedClassification(
+                        instance_id=iid, classification="1b", evidence=evidence,
+                    ))
+                    continue
+
+                # Class 1a (never dispatched) conjunct — ALL of:
+                #   * the proven-dead legs above (no task rows in ANY
+                #     state, no message_queue rows in ANY state, no
+                #     active JobItem, no pending watcher, no pending
+                #     dependency watcher, no non-terminal descendant)
+                #   * idle past the 24 h bound (husk-aligned)
+                #   * ZERO rows in the ``checkpoints`` table for the
+                #     thread (the instance NEVER executed a turn).
+                #
+                # CHECKPOINT-BLOBS: NOT required, deliberately. Reason:
+                #   (a) MEASURED (2026-11-23, ensemble_prod): 1 442
+                #       threads carry checkpoint_blobs rows and ALL 1 442
+                #       also carry a ``checkpoints`` row -- 0 threads
+                #       carry blobs WITHOUT a checkpoints row, so the
+                #       blobs are a strict subset of the checkpoints
+                #       threads and the checkpoints probe already
+                #       excludes every blob-carrying thread that still
+                #       holds its checkpoint row.
+                #   (b) SCHEMA / WRITE PATH: ``checkpoint_blobs`` exists
+                #       only for the PostgreSQL saver (the SQLite saver
+                #       has no blobs table), so a blobs leg would be
+                #       PERMANENTLY unevaluable on SQLite -- it would
+                #       force a permanent fail-closed degradation and
+                #       make class 1a unreachable on SQLite installs.
+                #   (c) RESIDUAL (documented, not acted upon): a thread
+                #       whose checkpoints rows were swept by the 168 h
+                #       retention while its blobs linger is exactly the
+                #       E7 admissible band the sibling lane is
+                #       cross-checking. The retire arm is HELD OFF, so
+                #       this residual is never acted upon.
+                ckpt_rows, ckpt_leg_state = self._probe_checkpoint_rows(iid)
+                evidence["checkpoint_leg"] = ckpt_leg_state
+                evidence["checkpoint_rows"] = ckpt_rows
+                if ckpt_leg_state != CHECKPOINT_LEG_EVALUATED:
+                    # FAIL CLOSED: the leg cannot be evaluated -> the
+                    # class-1a conjunct cannot be PROVEN -> class 3
+                    # (ambiguous, surface only, NO MUTATION). The
+                    # degradation is VISIBLE in the payload (evidence).
+                    out.append(StrandedClassification(
+                        instance_id=iid, classification="3",
+                        evidence=evidence,
+                    ))
+                    continue
+                if int(ckpt_rows or 0) > 0:
+                    # Executed-but-evidence-free (the E7 admissible band):
+                    # a turn RAN (checkpoint row), so the instance is NOT
+                    # proven dead and NOT never-dispatched -> class 3
+                    # (ambiguous, surface only, NO MUTATION).
+                    out.append(StrandedClassification(
+                        instance_id=iid, classification="3",
+                        evidence=evidence,
+                    ))
+                    continue
+
+                out.append(StrandedClassification(
+                    instance_id=iid, classification="1a", evidence=evidence,
+                ))
+
+        return out
+
+    # ------------------------------------------------------------------
+    # Boot-consistency reconciler (fix/post-outage-recovery SCOPE b)
+    # ------------------------------------------------------------------
+
+    def find_boot_consistency_candidates(
+        self, boot_epoch: datetime
+    ) -> list[dict[str, Any]]:
+        """Return 100% DB-derived boot-consistency reconciliation candidates.
+
+        Feature: fix/post-outage-recovery SCOPE (b). The post-outage RCA:
+        the boot-window queue recovery/GC leg deletes durable mq/task rows
+        that RUNNING instance rows depend on, while no instance-side boot
+        seam reconciles the row state — leaving ``status='running'`` with
+        nothing to consume and no durable trace of the turn.
+
+        This selector is the SOLE candidate source for the lane — there is
+        deliberately NO in-memory candidate source (no ``_graph_tasks`` /
+        ``_pending_injections`` / ``_live_children``). Three disjoint
+        families (UNION ALL), all gated on ``status='running'`` (which
+        excludes terminal / PAUSED / WAITING_CHILDREN by construction) and
+        on the per-epoch CAS predicate
+        ``(boot_re_drive_at IS NULL OR boot_re_drive_at < :boot_epoch)``:
+
+          1. ``deleted_trace`` — the message_queue row AND the task row are
+             both gone (the post-commit-deletion signature). The LATEST
+             ``message_received`` Event is LEFT-JOINed (may be absent):
+             its ``data`` JSON is the durable trace the lane re-mints from
+             (Tier 1, content present) or retires from (Tier 2, Event
+             absent / content empty — the no-event ghost). One row per
+             instance. The ghost variant (no checkpoint) is detected in
+             the LANE via ``manager._has_checkpoint`` — NOT in this query,
+             because the LangGraph ``checkpoints`` table is not part of
+             SQLModel metadata on SQLite.
+          2. ``blocked_claim`` — a PENDING, non-cancelled task is blocked
+             by a stale RUNNING task on the same instance (the exact
+             per-instance claim guard at ``claim_pending_task`` ~:2960 —
+             ``instance_id NOT IN (SELECT instance_id FROM task WHERE
+             status='running')``). ``work_id`` carries the blocking
+             RUNNING task's handle for a continue-in-place re-drive.
+          3. ``completed_task`` — the instance's LATEST task is terminal
+             COMPLETED with a ``completed_at`` stamp. The lane defers
+             ROOTS (``parent_id IS NULL``) to ``mission_strand_healer``
+             and finalizes non-roots to COMPLETED (the finalize-gap
+             non-root disposition).
+
+        ``cancel_requested`` is excluded on the task-based families
+        (a deliberate stop is never re-driven). Read-only — no row
+        mutation. Ordering: ``instance_id`` then family (deterministic).
+
+        Args:
+            boot_epoch: Naive-UTC process boot epoch. ``None`` returns
+                empty (the lane short-circuits before calling this).
+
+        Returns:
+            List of mapping rows with keys: ``instance_id``, ``family``,
+            ``parent_id``, ``agent_id``, ``agent_tag``, ``created_at``,
+            ``metadata``, ``version``, ``event_data``, ``message_id``,
+            ``work_id``.
+        """
+        if boot_epoch is None:
+            return []
+        statement = text(
+            """
+            SELECT
+                i.instance_id AS instance_id,
+                'deleted_trace' AS family,
+                i.parent_id AS parent_id,
+                i.agent_id AS agent_id,
+                i.agent_tag AS agent_tag,
+                i.created_at AS created_at,
+                i.metadata AS metadata,
+                i.version AS version,
+                e.data AS event_data,
+                e.message_id AS message_id,
+                CAST(NULL AS TEXT) AS work_id
+            FROM instances i
+            LEFT JOIN event e
+              ON e.id = (
+                  SELECT e2.id FROM event e2
+                  WHERE e2.instance_id = i.instance_id
+                    AND e2.kind = 'message_received'
+                  ORDER BY e2.created_at DESC, e2.id DESC LIMIT 1
+              )
+            WHERE i.status = 'running'
+              AND (i.boot_re_drive_at IS NULL
+                   OR i.boot_re_drive_at < :boot_epoch)
+              AND NOT EXISTS (
+                  SELECT 1 FROM message_queue mq
+                  WHERE mq.instance_id = i.instance_id
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM task t
+                  WHERE t.instance_id = i.instance_id
+              )
+
+            UNION ALL
+
+            SELECT
+                i.instance_id, 'blocked_claim', i.parent_id, i.agent_id,
+                i.agent_tag, i.created_at, i.metadata, i.version,
+                CAST(NULL AS TEXT), CAST(NULL AS TEXT),
+                (SELECT tr.work_id FROM task tr
+                 WHERE tr.instance_id = i.instance_id
+                   AND tr.status = 'running' AND COALESCE(tr.cancel_requested, FALSE) = FALSE
+                 ORDER BY tr.created_at ASC, tr.id ASC LIMIT 1) AS work_id
+            FROM instances i
+            WHERE i.status = 'running'
+              AND (i.boot_re_drive_at IS NULL
+                   OR i.boot_re_drive_at < :boot_epoch)
+              AND EXISTS (
+                  SELECT 1 FROM task tp
+                  WHERE tp.instance_id = i.instance_id
+                    AND tp.status = 'pending' AND COALESCE(tp.cancel_requested, FALSE) = FALSE
+              )
+              AND EXISTS (
+                  SELECT 1 FROM task tr
+                  WHERE tr.instance_id = i.instance_id
+                    AND tr.status = 'running' AND COALESCE(tr.cancel_requested, FALSE) = FALSE
+              )
+
+            UNION ALL
+
+            SELECT
+                i.instance_id, 'completed_task', i.parent_id, i.agent_id,
+                i.agent_tag, i.created_at, i.metadata, i.version,
+                CAST(NULL AS TEXT), CAST(NULL AS TEXT), t.work_id
+            FROM instances i
+            JOIN task t
+              ON t.id = (
+                  SELECT t2.id FROM task t2
+                  WHERE t2.instance_id = i.instance_id
+                  ORDER BY t2.created_at DESC, t2.id DESC LIMIT 1
+              )
+            WHERE i.status = 'running'
+              AND (i.boot_re_drive_at IS NULL
+                   OR i.boot_re_drive_at < :boot_epoch)
+              AND t.status = 'completed'
+              AND t.completed_at IS NOT NULL
+              -- N8 (review): a deliberate stop is never dispositioned —
+              -- the completed_task family excludes cancel_requested just
+              -- like the blocked_claim family does.
+              AND COALESCE(t.cancel_requested, FALSE) = FALSE
+
+            ORDER BY instance_id ASC, family ASC
+            """
+        ).bindparams(bindparam("boot_epoch", type_=DateTime))
+        with self.engine.connect() as conn:
+            rows = conn.execute(statement, {"boot_epoch": boot_epoch}).mappings().all()
+        return [dict(row) for row in rows]
+
+    def stamp_boot_re_drive(
+        self, instance_id: str, boot_epoch: datetime,
+        require_running: bool = True,
+    ) -> bool:
+        """CAS-stamp ``instances.boot_re_drive_at`` (mirrors mark_task_auto_continued).
+
+        Single-statement atomic CAS:
+
+            UPDATE instances SET boot_re_drive_at = :boot_epoch
+            WHERE instance_id = :iid
+              [AND status = 'running']
+              AND (boot_re_drive_at IS NULL
+                   OR boot_re_drive_at < :boot_epoch)
+
+        ``require_running=True`` (default) is the resume/retire path guard
+        (mirrors ``mark_task_auto_continued``'s status guard — avoids
+        racing a concurrent worker-pool completion). Callers that have
+        ALREADY flipped the row off 'running' (finalize, and the Tier-2
+        retire whose terminate_instance ran first) pass
+        ``require_running=False``.
+
+        N3 (review) — CORRECTED rationale: exactly-once for the finalize
+        disposition comes from the GUARDED TERMINALIZER STATUS FLIP
+        (``finalize_boot_consistency_instance``), NOT from this epoch
+        CAS. This CAS is the RE-SELECTION guard only: it keeps a
+        dispositioned instance out of the next boot's candidate set
+        (``boot_re_drive_at IS NULL OR < boot_epoch``). The retire path
+        ALSO stamps ``require_running=False`` (N1): its
+        ``terminate_instance`` has already flipped the row off 'running'
+        by stamp time — the default True guard would decline a stamp
+        whose disposition already happened (retire-done-but-never-stamped
+        ⇒ re-selected every boot and counted refused).
+
+        Returns ``True`` iff ``rowcount == 1``. Called ONLY AFTER the
+        disposition succeeds (no marked-but-never-re-driven window).
+        ``False`` is a benign idempotency outcome.
+        """
+        if boot_epoch is None:
+            return False
+        sql = (
+            "UPDATE instances SET boot_re_drive_at = :boot_epoch "
+            "WHERE instance_id = :iid "
+        )
+        if require_running:
+            sql += "AND status = 'running' "
+        sql += (
+            "AND (boot_re_drive_at IS NULL "
+            "     OR boot_re_drive_at < :boot_epoch)"
+        )
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                text(sql).bindparams(bindparam("boot_epoch", type_=DateTime)),
+                {"iid": instance_id, "boot_epoch": boot_epoch},
+            )
+            return result.rowcount == 1
+
+    def remint_boot_consistency_work(
+        self,
+        instance_id: str,
+        payload: dict[str, Any],
+        work_id: str | None = None,
+    ) -> str:
+        """Re-mint Task + MessageQueue rows from a durable Event (Tier 1).
+
+        ``payload`` is the parsed ``Event.data`` JSON (``content``,
+        ``message_id``, ``role``, ``source``, ``created_at``). A surviving
+        ``mission_commissions.work_id`` is reused when present; otherwise
+        a fresh UUID4 work_id is minted. Returns the work_id used, for the
+        lane's ``_schedule_explicit_handle_resume`` call.
+
+        Both inserts ride ONE transaction (same shape as the normal
+        enqueue at ``instance_messaging.py:2515`` / ``:2647``). Naive-UTC
+        digits for the timestamp columns (DC-A).
+        """
+        from daemon.repositories.message_queue.models import (
+            MessageQueue,
+            MessageStatus,
+            MessageType,
+        )
+
+        content = payload.get("content") or ""
+        message_id = payload.get("message_id") or str(uuid.uuid4())
+        source = payload.get("source")
+        role = payload.get("role") or "user"
+        msg_type = (
+            MessageType.SYSTEM.value
+            if role == "system"
+            else MessageType.HUMAN.value
+        )
+        enqueued_at = _naive_utc_from_event_stamp(payload.get("created_at"))
+
+        # Reuse a surviving commission's work_id when one exists. Fail-open
+        # (the mission_commissions table is absent on some SQLite harnesses).
+        if work_id is None:
+            try:
+                from daemon.repositories.mission_record.models import (
+                    MissionCommission,
+                )
+
+                with SQLModelSession(self.engine) as s:
+                    row = s.exec(
+                        select(MissionCommission.work_id)
+                        .where(
+                            MissionCommission.worker_instance_id
+                            == instance_id
+                        )
+                        .where(MissionCommission.work_id.isnot(None))
+                        .order_by(MissionCommission.created_at.desc())
+                        .limit(1)
+                    ).first()
+                    if row:
+                        work_id = str(row)
+            except Exception:  # noqa: BLE001 — fail-open to a fresh work_id
+                work_id = None
+        if work_id is None:
+            work_id = str(uuid.uuid4())
+
+        with SQLModelSession(self.engine) as s:
+            s.add(
+                MessageQueue(
+                    message_id=message_id,
+                    instance_id=instance_id,
+                    content=content,
+                    source=source,
+                    type=msg_type,
+                    status=MessageStatus.READY.value,
+                    enqueued_at=enqueued_at,
+                )
+            )
+            s.add(
+                Task(
+                    task_type=TaskType.PROCESS_MESSAGE.value,
+                    instance_id=instance_id,
+                    message_id=message_id,
+                    status=TaskStatus.PENDING.value,
+                    created_at=enqueued_at,
+                    work_id=work_id,
+                )
+            )
+            s.commit()
+        return work_id
+
+    def finalize_boot_consistency_instance(
+        self, instance_id: str, expected_version: int | None
+    ) -> bool:
+        """Finalize-gap non-root: flip a RUNNING instance to COMPLETED.
+
+        Guarded CAS on ``status='running'`` (+ ``version`` when supplied)
+        so a concurrent terminalizer wins cleanly. Terminal-status writer
+        used by the strand-healer precedent. Returns ``True`` iff one row
+        flipped.
+        """
+        sql = (
+            "UPDATE instances SET status = 'completed', "
+            "updated_at = :updated_at, version = version + 1 "
+            "WHERE instance_id = :iid AND status = 'running'"
+        )
+        params: dict[str, Any] = {
+            "iid": instance_id,
+            "updated_at": now_utc_naive().isoformat(),
+        }
+        if expected_version is not None:
+            sql += " AND version = :expected_version"
+            params["expected_version"] = expected_version
+        with self.engine.begin() as conn:
+            result = conn.execute(text(sql), params)
+            return result.rowcount == 1
 
     def mark_task_auto_continued(
         self, task_id: int, boot_epoch: datetime
@@ -4999,6 +5809,22 @@ class TaskRepository:
                         "WHERE jqi.job_id = task.work_id "
                         f"AND jqi.admission_state IN {active_admission_states_sql()} "
                         "AND jqi.deleted_at IS NULL)"
+                        # F3 (fix/post-outage-recovery b2) — the Event
+                        # receipt arm's AUDIT MIRROR: a PENDING task whose
+                        # message has a surviving ``message_received``
+                        # Event is NOT doomed (the Event is the
+                        # receipt-of-truth — the enqueue committed). The
+                        # mirror keeps the doomed-id audit list honest
+                        # (the audit and the DELETE must agree, F-1
+                        # contract).
+                        " AND NOT ("
+                        "task.status = 'pending' "
+                        "AND EXISTS ("
+                        "SELECT 1 FROM event e "
+                        "WHERE e.message_id = task.message_id "
+                        "AND e.kind = 'message_received'"
+                        ")"
+                        ")"
                         # Render the arm-3 suffix only when present —
                         # with the kill-switch OFF the suffix is ""
                         # and the unconditional f-string rendered a
@@ -5051,6 +5877,31 @@ class TaskRepository:
                         "WHERE jqi.job_id = task.work_id "
                         f"AND jqi.admission_state IN {active_admission_states_sql()} "
                         "AND jqi.deleted_at IS NULL"
+                        ")"
+                    )
+                ).where(
+                    # F3 (fix/post-outage-recovery b2) — the Event RECEIPT
+                    # arm. Shape A of the adjudicated post-outage wedge
+                    # pair: the plain-revive enqueue (``enqueue_message``,
+                    # NOT job-driven) creates Task PENDING + a
+                    # ``message_received`` Event but NO JobItem, so the
+                    # FP1 arm above was inapplicable and the boot-wipe
+                    # DELETED a committed, unconsumed enqueue whose
+                    # durable receipt survived. The wipe's contract is
+                    # "discard doomed orphans" — a committed enqueue with
+                    # a surviving receipt is NOT doomed. Scoped to
+                    # PENDING only: terminal backlog (completed/failed/
+                    # cancelled) stays doomed so the backlog-clear keeps
+                    # its pruner role (the live host's volume discipline
+                    # depends on it).
+                    text(
+                        "NOT ("
+                        "task.status = 'pending' "
+                        "AND EXISTS ("
+                        "SELECT 1 FROM event e "
+                        "WHERE e.message_id = task.message_id "
+                        "AND e.kind = 'message_received'"
+                        ")"
                         ")"
                     )
                 )

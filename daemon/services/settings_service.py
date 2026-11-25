@@ -1,6 +1,9 @@
 """DB-backed daemon runtime settings — managed-key registry, the ONE
 shared tier resolver, override CRUD, and the boot apply hook.
 
+Module-size rationale (band 1000–3000): single owner of the settings
+registry + resolution ladder + boot apply; cohesive, not split.
+
 (db-backed-settings commission, Phase 1; plan set:
 ``.agents/shared/planning/db-backed-settings/`` — BINDING.)
 
@@ -142,7 +145,6 @@ class ManagedKeySpec:
     """
 
     key: str
-    config_path: str
     env_var: str
     value_type: str  # "int" | "float" | "bool" | "str"
     default: Any
@@ -185,6 +187,10 @@ class ManagedKeySpec:
     # never a boot/wire failure — the settings service must never break
     # because the decision module changed).
     raw_yaml_section: Callable[[], Any] | None = None
+    # config_path is None => DB/ENV-ONLY key (no backing Config field):
+    # skips the yaml tier + boot-time Config mutation. Opt-out is
+    # EXPLICIT via None - never implicit by accident.
+    config_path: str | None = None
 
     def constraint_desc(self) -> str:
         """Human-readable constraint for log lines / 422 details
@@ -217,7 +223,7 @@ class ManagedKeySpec:
 #: ``limits.manager_pool_size`` (devops incident fix item #7), the
 #: SEVEN metrics-collection knobs (metrics-collection P0, 2026-10-29)
 #: and the THREE decision-module switches (decision-module P1,
-#: 2026-11-09) — the registry now carries EIGHTEEN entries (rogue-containment rider (d) retired limits.metrics_listener_port). Adding keys
+#: 2026-11-09) — the registry now carries NINETEEN entries (rogue-containment rider (d) retired limits.metrics_listener_port; the wedge-notice emission kill-switch (wake-path S4) is the 19th and is DB/ENV-ONLY — config_path is None, no backing Config field). Adding keys
 #: later is a registry entry + nothing else (the ladder, CRUD, API and
 #: FE render generically off the registry); ``len(MANAGED_KEYS)`` is
 #: the authoritative census.
@@ -527,6 +533,57 @@ MANAGED_KEYS: dict[str, ManagedKeySpec] = {
             "Takes effect WITHOUT a restart."
         ),
     ),
+    # ── tool-usage P1 (D17 + review fix U3): THREE managed keys ──────────
+    # All three land in THIS phase's edit so phases 2 and 3 keep their
+    # zero-edit stance on this file. (1) collection kill-switch — dotted
+    # config_path backed by LimitsConfig.tool_usage_collection_enabled
+    # (A-7 option (a)). (2) F24 family key — config_path=None (DB/ENV-only).
+    # (3) D-5 seeder opt-out — config_path=None (DB/ENV-only).
+    "limits.tool_usage_collection_enabled": ManagedKeySpec(
+        key="limits.tool_usage_collection_enabled",
+        config_path="limits.tool_usage_collection_enabled",  # backed by LimitsConfig field (A-7)
+        env_var="LIMITS_TOOL_USAGE_COLLECTION_ENABLED",
+        value_type="bool",
+        default=True,  # this phase IS the measurement slice
+        requires_restart=False,
+        sensitive=False,
+        description=(
+            "Tool-usage collection kill-switch (opt-OUT; default ON). "
+            "Absent ⇒ code default ON (never crash — v0.31.8 absent-config "
+            "class); present-but-unparseable ⇒ FAIL-CLOSED OFF. DB override "
+            "> env LIMITS_TOOL_USAGE_COLLECTION_ENABLED > config.yaml > "
+            "default. Takes effect WITHOUT a restart."
+        ),
+    ),
+    "limits.metrics_tool_usage_enabled": ManagedKeySpec(
+        key="limits.metrics_tool_usage_enabled",
+        config_path=None,  # DB/ENV-ONLY (wedge_notice shape)
+        env_var="ENSEMBLE_METRICS_TOOL_USAGE_ENABLED",
+        value_type="bool",
+        default=True,
+        requires_restart=False,
+        sensitive=False,
+        description=(
+            "Tool-usage metrics family kill-switch (Phase 2 stacks under "
+            "the global metrics gates; mirrors the authoritative "
+            "per-request env var ENSEMBLE_METRICS_TOOL_USAGE_ENABLED "
+            "— fail-closed off-switch; this managed key is the "
+            "operator-writable tier). DB/ENV-only."
+        ),
+    ),
+    "limits.tool_usage_digest_seeding_enabled": ManagedKeySpec(
+        key="limits.tool_usage_digest_seeding_enabled",
+        config_path=None,  # DB/ENV-ONLY (D-5 opt-out; survives re-seed)
+        env_var="LIMITS_TOOL_USAGE_DIGEST_SEEDING_ENABLED",
+        value_type="bool",
+        default=True,  # seeder enabled by default; OFF ⇒ no-op
+        requires_restart=False,
+        sensitive=False,
+        description=(
+            "Tool-usage digest seeder opt-out (Phase 3 consumes; no-op "
+            "when OFF — survives GC + re-seed). DB/ENV-only."
+        ),
+    ),
     # (limits.metrics_listener_port retired by rogue-containment rider (d):
     #  metrics port is now derived = resolved main port + 1, with
     #  LIMITS_METRICS_LISTENER_PORT as the env escape hatch. The DB
@@ -683,6 +740,116 @@ MANAGED_KEYS: dict[str, ManagedKeySpec] = {
             "on the next consult without restart. Effective precedence: "
             "DB override > env DECISION_SEAM_SNAPSHOT_L3_SELECTION_STAGE > "
             "config.yaml decision.seams.snapshot_l3_selection_stage > shadow."
+        ),
+    ),
+    # ── wedge-notice emission kill-switch (S4 — wake-path-carrier-fix) ──
+    # The SEVENTH requires_restart=False key.
+    #
+    # SCOPE: EMISSION ONLY. The switch gates the wedge-NOTICE ENQUEUE
+    # and NOTHING else — never the watchdog's detection, never the
+    # reason-code classification, never the S1 fire, the S2 arm, the
+    # S3 park predicate, the mission-strand healer, or the report
+    # lane. A switch wired into any of those would SILENCE THE FIX
+    # (and the live defect) instead of the notice.
+    #
+    # DEFAULT: NOTICES ON. The absence of the key means ON (the
+    # watchdog's per-tick read treats "no override row" as "on"), so
+    # an operator must EXPLICITLY turn it off.
+    #
+    # PER-TICK READ: the registry key alone is VOID — the watchdog's
+    # own ``_enabled`` flag is a BOOT-time read, so the switch is read
+    # from the settings service on EVERY tick (the value is memoised
+    # per tick: ONE DB read per tick). A mid-run flip therefore takes
+    # effect with NO restart.
+    # ── POK write gate (pok-write-gate Wave 2 Phase 8, T8.11) ──────────
+    #
+    # TWO SIBLING enforcement switches, both default OFF at build:
+    # ``pok_gate.semantic_enforcement`` (the SEMANTIC judge gates
+    # writes) and ``pok_gate.softmax_tightening`` (the librarian's
+    # near-soft-max tightening changes admission outcomes — it rides
+    # the same switch family). A THIRD key of the same family,
+    # ``pok_gate.merge_policy``, carries the F2 merge dial (the
+    # architecture places it "on the same switch family as
+    # enforcement" so the P1 ceremony moves the dial instead of a
+    # rebuild).
+    #
+    # DB-ONLY: ``env_var=""`` means the env tier is INERT for these
+    # keys (an env flip is a live config change at deploy + restart —
+    # design-amendments-v2 §13.3 item 5). The value is read per write
+    # through ``SettingsService.get_overrides()``; a missing row reads
+    # as the registry default (OFF).
+    "pok_gate.semantic_enforcement": ManagedKeySpec(
+        key="pok_gate.semantic_enforcement",
+        config_path=None,  # DB-ONLY — no backing Config field
+        env_var="",  # NO env tier (the env tier is skipped for an empty env_var)
+        value_type="bool",
+        default=False,
+        requires_restart=False,
+        sensitive=False,
+        description=(
+            "POK write-gate SEMANTIC enforcement switch (pok-write-gate "
+            "Phase 8). OFF (the build default) = SHADOW: the judge "
+            "logs its verdict to the ledger and refuses NO write. ON = "
+            "the semantic verdict gates the write (ACCEPT writes, "
+            "REJECT refuses, ASK asks, MERGE executes or asks). "
+            "DB-backed only — there is no env tier (an env flip is a "
+            "live config change at deploy + restart). Read per write; "
+            "takes effect without a daemon restart."
+        ),
+    ),
+    "pok_gate.softmax_tightening": ManagedKeySpec(
+        key="pok_gate.softmax_tightening",
+        config_path=None,  # DB-ONLY — no backing Config field
+        env_var="",  # NO env tier
+        value_type="bool",
+        default=False,
+        requires_restart=False,
+        sensitive=False,
+        description=(
+            "POK librarian SOFT-MAX TIGHTENING switch (pok-write-gate "
+            "Phase 8/10). OFF (the build default) = the librarian never "
+            "tightens admission. ON = near the soft max the librarian "
+            "asks more rounds and prefers MERGE over new rows. "
+            "DB-backed only (no env tier). Read by the librarian pass; "
+            "takes effect without a daemon restart."
+        ),
+    ),
+    "pok_gate.merge_policy": ManagedKeySpec(
+        key="pok_gate.merge_policy",
+        config_path=None,  # DB-ONLY — no backing Config field
+        env_var="",  # NO env tier
+        value_type="str",
+        default="ASK_WITH_PROPOSAL",
+        allowed_values=("ASK_WITH_PROPOSAL", "AUTO", "ASK_NO_PROPOSAL"),
+        requires_restart=False,
+        sensitive=False,
+        description=(
+            "POK write-gate MERGE policy (F2 — the same switch family as "
+            "the enforcement switches, so the P1 ceremony moves the dial "
+            "instead of a rebuild). ASK_WITH_PROPOSAL (the default) = a "
+            "delta merge is a caller-confirmed round-trip carrying the "
+            "judge's merged-body proposal; AUTO = the tool executes the "
+            "judge's proposal as a count-preserving supersede; "
+            "ASK_NO_PROPOSAL = the round-trip carries no proposal. "
+            "DB-backed only (no env tier)."
+        ),
+    ),
+    "wedge_notice_emission_enabled": ManagedKeySpec(
+        key="wedge_notice_emission_enabled",
+        config_path=None,  # DB/ENV-ONLY — no backing Config field (consumed per-tick via get_overrides())
+        env_var="WEDGE_NOTICE_EMISSION_ENABLED",
+        value_type="bool",
+        default=True,
+        requires_restart=False,
+        sensitive=False,
+        description=(
+            "Wedge-notice EMISSION kill-switch (S4). OFF suppresses the "
+            "wedge-notice ENQUEUE only — detection, classification, the "
+            "S1 fire, the S2 arm, the S3 park predicate, the healer and "
+            "the report lane are untouched. DEFAULT ON: the absence of "
+            "the key means notices are emitted. Takes effect on the next "
+            "watchdog tick WITHOUT a restart (the watchdog reads it per "
+            "tick — the registry key alone is void)."
         ),
     ),
 }
@@ -850,8 +1017,11 @@ def set_last_applied_resolution(
     tests may reset it to ``None`` to simulate a pre-boot process.
     """
     global _last_applied_resolution
+    # Robust to a None VALUE (a failed per-key resolve publishes an empty
+    # record; a defensive ``dict(v or {})`` keeps this tail call from ever
+    # raising — the boot-apply must not abort on bookkeeping).
     _last_applied_resolution = (
-        {k: dict(v) for k, v in resolution.items()} if resolution else None
+        {k: dict(v or {}) for k, v in resolution.items()} if resolution else None
     )
 
 
@@ -924,7 +1094,10 @@ def resolve(
             )
 
     # Tier 2 — os.environ, read DIRECTLY (never pydantic's env tier).
-    raw_env = os.environ.get(spec.env_var)
+    # An EMPTY ``env_var`` means the key has NO env tier at all (the
+    # DB-ONLY pok_gate.* switches: an env flip is a live config change
+    # at deploy + restart — design-amendments-v2 §13.3 item 5).
+    raw_env = os.environ.get(spec.env_var) if spec.env_var else None
     if raw_env is not None:
         ok, value, failure_class, detail = parse_and_validate(spec, raw_env)
         if ok:
@@ -1219,6 +1392,8 @@ def _raw_yaml_leaf(raw_yaml_limits: Any, spec: ManagedKeySpec) -> Any:
     log carries the failure CLASS only.
     """
     try:
+        if not spec.config_path:
+            return None
         if spec.raw_yaml_section is not None:
             node: Any = spec.raw_yaml_section()
         else:
@@ -1240,14 +1415,18 @@ def _raw_yaml_leaf(raw_yaml_limits: Any, spec: ManagedKeySpec) -> Any:
         return None
 
 
-def _get_config_value(config: Any, config_path: str) -> Any:
+def _get_config_value(config: Any, config_path: str | None) -> Any:
+    if not config_path:
+        return None
     obj = config
     for part in config_path.split("."):
         obj = getattr(obj, part)
     return obj
 
 
-def _set_config_value(config: Any, config_path: str, value: Any) -> None:
+def _set_config_value(config: Any, config_path: str | None, value: Any) -> None:
+    if not config_path:
+        return
     parts = config_path.split(".")
     obj = config
     for part in parts[:-1]:
@@ -1297,7 +1476,13 @@ def apply_db_settings_overrides(
     FAIL-OPEN EVERYWHERE (Ruling 3): any read error (dead DB, corrupt
     row, parse/range failure) logs ERROR with the failure class and
     continues boot on the lower tiers — worst case is "the feature is
-    inert", never "the daemon does not start".
+    inert", never "the daemon does not start". The Step-3/4 PER-KEY
+    apply (missing Config attribute, wrong type, non-scalar section root,
+    conversion failure) logs a WARNING (not ERROR) and leaves the key
+    UNAPPLIED (lower tier / existing Config intact) - never aborts boot.
+    The resolution record carries applied=False for an unapplied key so
+    downstream restart-audit consumers never render a failed apply as
+    'applied'.
 
     Returns ``(config, snapshot)`` — the same Config object, mutated
     in place, plus the completed snapshot.
@@ -1338,30 +1523,113 @@ def apply_db_settings_overrides(
                 )
 
     # Step 3+4 — resolve, mutate in place, capture applied_value.
+    # PER-KEY FAIL-SOFT: one bad/unknown/missing-path/wrong-type key or
+    # row logs a clear WARNING and continues (lower tier / existing
+    # Config intact, never marked applied) — NEVER aborts boot. The
+    # targeted catches cover the known failure classes (missing attr,
+    # type mismatch, missing dict key, non-scalar section root); the
+    # broad safety catch is the last resort so a single misbehaving key
+    # can never take down lifespan.
     applied_count = 0
     resolutions: dict[str, dict[str, Any]] = {}
     for key, spec in MANAGED_KEYS.items():
-        resolution = resolve(key, snapshot, db_overrides=db_overrides)
-        resolutions[key] = resolution
-        if resolution["source"] == "db":
-            applied_count += 1
-        current = _get_config_value(config, spec.config_path)
-        if resolution["value"] != current:
-            # Sensitive-key tripwire: BOTH %r args redacted (same
-            # posture as the router PUT audit line) — a future
-            # secret-bearing key must never leak through this line.
-            logged_current = "<redacted>" if spec.sensitive else current
-            logged_value = "<redacted>" if spec.sensitive else resolution["value"]
-            logger.info(
-                "[Settings] %s: %s tier wins — config field %r -> %r "
-                "(applies on this boot; restart-required semantics)",
+        resolution = None
+        db_won = False
+        try:
+            resolution = resolve(key, snapshot, db_overrides=db_overrides)
+            resolutions[key] = resolution
+            db_won = resolution["source"] == "db"
+
+            if spec.config_path:
+                current = _get_config_value(config, spec.config_path)
+                # A config_path that resolves to a non-scalar (a section
+                # root / BaseModel / dict) is a misconfigured entry, NOT
+                # a leaf — refuse to mutate it and fail-soft.
+                if not isinstance(
+                    current, (int, float, bool, str, type(None))
+                ):
+                    raise ValueError(
+                        f"config_path {spec.config_path!r} resolves to a "
+                        f"non-scalar section root ({type(current).__name__}), "
+                        f"not a managed leaf"
+                    )
+                if resolution["value"] != current:
+                    # Sensitive-key tripwire: BOTH %r args redacted (same
+                    # posture as the router PUT audit line) — a future
+                    # secret-bearing key must never leak through this line.
+                    logged_current = "<redacted>" if spec.sensitive else current
+                    logged_value = "<redacted>" if spec.sensitive else resolution["value"]
+                    logger.info(
+                        "[Settings] %s: %s tier wins — config field %r -> %r "
+                        "(applies on this boot; restart-required semantics)",
+                        key,
+                        resolution["source"],
+                        logged_current,
+                        logged_value,
+                    )
+                    _set_config_value(config, spec.config_path, resolution["value"])
+                applied_value = _get_config_value(config, spec.config_path)
+                # G1: post-apply confirmation (DB-tier wins only).
+                if resolution["source"] == "db":
+                    logger.info(
+                        "[Settings] %s: applied to config - field now %r (post-apply)",
+                        key,
+                        applied_value,
+                    )
+            else:
+                # DB/ENV-ONLY key (config_path is None): no Config field to
+                # mutate — the resolved winner is the applied value. The
+                # consumer reads it via get_overrides() / env, not Config.
+                # G2: this path was previously silent - emit an INFO so the
+                # exact knob this fix repairs is auditable at runtime.
+                logger.info(
+                    "[Settings] %s: %s tier wins - DB/env-only key (no Config "
+                    "field) - resolved value %r (applies on this boot; "
+                    "restart-required semantics: %s)",
+                    key,
+                    resolution["source"],
+                    resolution["value"],
+                    "restart-required" if spec.requires_restart else "takes effect per tick",
+                )
+                applied_value = resolution["value"]
+            # F10: publish an explicit applied flag so the restart-audit
+            # sweep cannot render a failed apply as 'applied'.
+            if isinstance(resolution, dict):
+                resolution["applied"] = True
+            if db_won:
+                applied_count += 1
+        except (AttributeError, TypeError, KeyError, ValueError) as exc:
+            # NEVER store None here: the tail call set_last_applied_resolution
+            # does ``dict(v)`` per entry — a None value would raise
+            # TypeError and ABORT boot (the very crash class this boundary
+            # exists to prevent). A failed resolve publishes an empty record.
+            _rec = resolution if isinstance(resolution, dict) else {}
+            _rec["applied"] = False
+            resolutions[key] = _rec
+            logger.warning(
+                "[Settings] %s: boot apply skipped — %s: %s — lower tiers "
+                "stay active; key not marked applied (config_path=%r)",
                 key,
-                resolution["source"],
-                logged_current,
-                logged_value,
+                type(exc).__name__,
+                exc,
+                spec.config_path,
             )
-            _set_config_value(config, spec.config_path, resolution["value"])
-        snapshot[key]["applied_value"] = _get_config_value(config, spec.config_path)
+            applied_value = None
+        except Exception as exc:  # noqa: BLE001 — per-key fail-soft (last resort)
+            # Same rule as the targeted arm above — never a None value.
+            _rec = resolution if isinstance(resolution, dict) else {}
+            _rec["applied"] = False
+            resolutions[key] = _rec
+            logger.warning(
+                "[Settings] %s: boot apply skipped — %s: %s — lower tiers "
+                "stay active; key not marked applied (config_path=%r)",
+                key,
+                type(exc).__name__,
+                exc,
+                spec.config_path,
+            )
+            applied_value = None
+        snapshot[key]["applied_value"] = applied_value
 
     # ONE summary INFO per invocation on ALL exit paths (council
     # follow-up) — every apply_db_settings_overrides exit is uniformly

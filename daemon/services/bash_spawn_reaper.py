@@ -58,6 +58,12 @@ runtime key):
   exists for). Default 21600 s (6 h), clamped to [60, 86400]. The
   pgid-only attribution path keeps the 10 s
   ``..._START_TOLERANCE_SECONDS`` gate everywhere.
+* ``ENSEMBLE_BASH_REAPER_RETENTION_INTERVAL_SECONDS`` — cadence of the
+  periodic retention lane (``BashSpawnRetentionSweepService``: reaped-row
+  prune + terminal-instance stall sweep). Default 900 s (15 min), clamped
+  to [60, 86400]; absent or unparseable (including ``inf`` / overflow
+  values) ⇒ default. A CADENCE, not a latency bound — see the service
+  docstring for the worst-case tick wall-clock.
 
 Restart-lane exclusion is STRUCTURAL (plan D1): the bash seam is the
 ONLY writer of ``bash_spawn_registry``; ``spawn_executor`` deliberately
@@ -92,6 +98,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
+from daemon.constants import TERMINAL_INSTANCE_STATUSES
 from daemon.services.timestamps import now_utc_iso
 
 if TYPE_CHECKING:
@@ -111,6 +118,7 @@ ENV_BOOT_SWEEP = "ENSEMBLE_BASH_ORPHAN_REAPER_BOOT_SWEEP"
 ENV_TERM_GRACE = "ENSEMBLE_BASH_REAPER_TERM_GRACE_SECONDS"
 ENV_START_TOLERANCE = "ENSEMBLE_BASH_REAPER_START_TOLERANCE_SECONDS"
 ENV_STAMP_TOLERANCE = "ENSEMBLE_BASH_REAPER_STAMP_TOLERANCE_SECONDS"
+ENV_RETENTION_INTERVAL = "ENSEMBLE_BASH_REAPER_RETENTION_INTERVAL_SECONDS"
 
 # The secondary discriminator injected into the spawned child's env.
 BASH_TRACKING_ENV_VAR: str = "ENSEMBLE_BASH_TRACKING_ID"
@@ -133,6 +141,14 @@ LANE_SWEEP_DEADLINE_SECONDS = 60.0
 
 # minor-4 — closed-row retention window (boot-reconcile housekeeping).
 BASH_SPAWN_RETENTION_DAYS = 30
+
+# Retention sweep (census A2 fix, 2026-11-21) — periodic cadence for the
+# lane that runs the closed-row prune + the terminal-instance stall
+# sweep MORE THAN ONCE PER BOOT (the boot reconcile prune alone left
+# inter-boot growth unbounded; live v0.31.22: 194k rows / 70MB).
+DEFAULT_RETENTION_INTERVAL_SECONDS = 900
+MIN_RETENTION_INTERVAL_SECONDS = 60
+MAX_RETENTION_INTERVAL_SECONDS = 86400
 
 
 # ── Kill-switch parse (F6: lane default FLIPPED to ON) ───────────────────────
@@ -208,6 +224,56 @@ def stamp_tolerance_seconds_from_env(environ: dict | None = None) -> float:
     return max(
         MIN_STAMP_TOLERANCE_SECONDS, min(MAX_STAMP_TOLERANCE_SECONDS, value)
     )
+
+
+def retention_interval_seconds_from_env(environ: dict | None = None) -> int:
+    """Retention sweep knob: periodic cadence in seconds (census A2 fix).
+
+    Default 900s (15 min); clamped to [MIN, MAX]; unparseable ⇒
+    default (the module's env-parse convention). Absent ⇒ default.
+    """
+    env = os.environ if environ is None else environ
+    raw = (env.get(ENV_RETENTION_INTERVAL) or "").strip()
+    if not raw:
+        return DEFAULT_RETENTION_INTERVAL_SECONDS
+    try:
+        value = int(float(raw))
+    except (ValueError, OverflowError):
+        # D-1 (review hardening, 2026-11-21): OverflowError joins the
+        # catch — ``int(float("inf"))`` / ``int(float("1e400"))``
+        # raises OverflowError (``nan`` is already a ValueError). Pre-fix
+        # it escaped every non-fatal try/except at the wiring site, so
+        # the retention lane silently NEVER STARTED — recreating the
+        # unbounded-registry growth this lane exists to prevent. Same
+        # adjudication as ``daemon/services/upgrade_journal_sweep.py``
+        # (M2: a poisoned env value must never raise past this parse).
+        return DEFAULT_RETENTION_INTERVAL_SECONDS
+    return max(
+        MIN_RETENTION_INTERVAL_SECONDS,
+        min(MAX_RETENTION_INTERVAL_SECONDS, value),
+    )
+
+
+# ── Silent no-op visibility (census A2 fix, 2026-11-21) ─────────────────────
+# The lanes' no-op exits used to be SILENT (kill switch OFF / writer unset
+# ⇒ zero repository access, zero log) — a stopped reaper left no trace.
+# Best-effort process-local counters + a rate-limited WARNING make every
+# no-op class visible: first occurrence logs, then every 50th.
+_NOOP_SKIP_COUNTS: dict[str, int] = {}
+_NOOP_LOG_EVERY = 50
+
+
+def _log_noop_skip(surface: str, detail: str) -> None:
+    """Count + rate-limited-log one silent no-op skip (visibility fix)."""
+    count = _NOOP_SKIP_COUNTS.get(surface, 0) + 1
+    _NOOP_SKIP_COUNTS[surface] = count
+    if count == 1 or count % _NOOP_LOG_EVERY == 0:
+        logger.warning(
+            "bash reaper: %s is a NO-OP (%s) — skipped %d time(s) since "
+            "boot; the durable registry is NOT being maintained on this "
+            "surface",
+            surface, detail, count,
+        )
 
 
 # ── Linux jiffies reader (ported from daemon/tools/bash.py) ──────────────────
@@ -1357,10 +1423,24 @@ async def sweep_instance(
     tiers / terminate / chart inherit the reach with zero call-site
     changes) and ``cleanup_all`` (the shutdown lane passes
     ``reaped_by='shutdown'``).
+
+    Census A2 visibility fix (2026-11-21): the OFF / writer-unset
+    exits used to be SILENT — a flipped or malformed master switch
+    stopped every terminalization sweep with zero durable trace. Both
+    no-op classes are now counted + rate-limited-logged (first
+    occurrence, then every 50th).
     """
     if not kill_switch_from_env():
+        _log_noop_skip(
+            "terminal-tier durable sweep",
+            f"master switch {ENV_KILL_SWITCH} resolves OFF",
+        )
         return 0
     if repo is None:
+        _log_noop_skip(
+            "terminal-tier durable sweep",
+            "durable writer (BashSpawnRepository) unset",
+        )
         return 0
     rows = await asyncio.to_thread(repo.list_open_by_instance, instance_id)
     if not rows:
@@ -1403,12 +1483,17 @@ async def sweep_open_rows_for_shutdown(
     Returns the number of rows closed.
     """
     if not kill_switch_from_env():
-        logger.info(
-            "bash reaper: master switch OFF — shutdown durable sweep "
-            "is a no-op (no repository access)"
+        _log_noop_skip(
+            "shutdown durable sweep",
+            f"master switch {ENV_KILL_SWITCH} resolves OFF "
+            "(no repository access)",
         )
         return 0
     if repo is None:
+        _log_noop_skip(
+            "shutdown durable sweep",
+            "durable writer (BashSpawnRepository) unset",
+        )
         return 0
     rows = await asyncio.to_thread(repo.list_open_all)
     if not rows:
@@ -1981,3 +2066,359 @@ async def _enumerated_sweep(
                 "%s: %s", rid, type(exc).__name__, exc,
             )
     return closed
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Retention sweep service (census A2 fix, 2026-11-21).
+#
+# The reaper's five lanes are EVENT-PIGGYBACKED (no standalone loop): closed-
+# row retention was pruned ONLY inside the one-shot boot reconcile, and open
+# rows closed only when their owning instance terminalized — spawns from
+# long-lived instances and any missed/no-op'd terminalization close left the
+# registry growing unbounded between boots (live v0.31.22: 194k rows / 70MB;
+# last reap ≈1h after boot, then 0 reaps of 3,604 spawns).
+#
+# This service is the periodic companion lane — the SAME pattern family as
+# OrphanWatcherSweepService (bounded-interval asyncio loop, first tick
+# immediate, interruptible stop). Per tick it:
+#   1. prunes REAPED rows older than the retention window (the boot
+#      reconcile's prune, now periodic);
+#   2. sweeps OPEN rows whose OWNING INSTANCE IS TERMINAL (the stall mode:
+#      reaping cadence used to equal instance-terminalization cadence; a
+#      terminal owner's bash groups should be dead, so its leftover open
+#      rows are swept through the EXISTING ``sweep_instance`` machinery —
+#      every D8/D9 guard and the audit trail inherited unchanged).
+#
+# The master switch (``ENSEMBLE_BASH_ORPHAN_REAPER``) is honored BEFORE any
+# repository touch, exactly like every other lane — OFF ⇒ the lane is a
+# counted, rate-limited-logged no-op, never a silent one.
+# ════════════════════════════════════════════════════════════════════════════
+
+# Per-tick bounds — keep a tick cheap even on a pathological registry.
+_RETENTION_MAX_INSTANCE_LOOKUPS = 200
+_RETENTION_MAX_INSTANCE_SWEEPS = 25
+
+
+class BashSpawnRetentionSweepService:
+    """Periodic bash-spawn registry retention + terminal-instance sweep.
+
+    Args:
+        repo: the durable registry repository (the lifespan's
+            ``BashSpawnRepository``). ``None`` ⇒ the lane is a counted,
+            rate-limited-logged no-op (same adjudication as the other
+            lanes' writer-unset case).
+        instance_repo: instance repository exposing ``get(instance_id)``
+            (the lifespan's ``SQLModelInstanceRepository``). ``None``
+            disables the terminal-instance stall leg (prune still runs)
+            — an internal test seam / degraded-wiring adjudication, made
+            visible by a rate-limited WARNING.
+        interval_seconds: tick cadence. ``None`` (production) resolves
+            ``ENSEMBLE_BASH_REAPER_RETENTION_INTERVAL_SECONDS`` via
+            :func:`retention_interval_seconds_from_env` (default 900s,
+            clamped to [60, 86400]) — the module's env-knob convention.
+        enabled: ALWAYS True in production (hardcoded at the wiring
+            site); ``False`` is an internal test seam only — it skips
+            the sweep body and ticks idle. Never a production toggle.
+
+    NOTE (D-4, review hardening 2026-11-21): ``interval_seconds`` is a
+    CADENCE, not a latency guarantee. The worst-case tick wall-clock is
+    ``_RETENTION_MAX_INSTANCE_SWEEPS`` (25) × ``LANE_SWEEP_DEADLINE_SECONDS``
+    (60s) = 1500s, which EXCEEDS the nominal 900s default interval — a
+    pathological registry can therefore make consecutive ticks overlap
+    in wall-clock terms (the loop still runs them strictly serially, so
+    the effective cadence simply stretches).
+
+    Lifecycle: ``start()`` spawns the asyncio task (idempotent);
+    ``stop()`` cancels + awaits it (safe when never started).
+    """
+
+    def __init__(
+        self,
+        repo: "BashSpawnRepository | None",
+        *,
+        instance_repo: Any | None = None,
+        interval_seconds: int | None = None,
+        enabled: bool = True,
+    ) -> None:
+        self._repo = repo
+        self._instance_repo = instance_repo
+        self._interval_seconds = (
+            retention_interval_seconds_from_env()
+            if interval_seconds is None
+            else max(1, int(interval_seconds))
+        )
+        self._enabled = enabled
+
+        self._task: asyncio.Task | None = None
+        self._stop_event = asyncio.Event()
+        # Counters — surface via ``counters()`` for tests / observability.
+        self._ticks_total: int = 0
+        self._pruned_total: int = 0
+        self._closed_total: int = 0
+        self._terminal_scanned_total: int = 0
+        self._terminal_swept_total: int = 0
+        self._errors_total: int = 0
+
+    # --------------------------------------------------------
+    # Public API
+    # --------------------------------------------------------
+
+    def start(self) -> None:
+        """Spawn the periodic loop as an asyncio task. Idempotent."""
+        if self._task is not None and not self._task.done():
+            logger.debug(
+                "BashSpawnRetentionSweepService: start() called while "
+                "the sweep task is already alive — silent no-op"
+            )
+            return
+        self._stop_event.clear()
+        self._task = asyncio.create_task(
+            self._run_loop(),
+            name="bash-spawn-retention-sweep",
+        )
+        logger.info(
+            f"BashSpawnRetentionSweepService started: "
+            f"interval={self._interval_seconds}s"
+        )
+
+    async def stop(self, timeout: float = 5.0) -> None:
+        """Cancel + await the loop task. Safe when never started."""
+        self._stop_event.set()
+        if self._task is None:
+            return
+        try:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+        finally:
+            self._task = None
+        logger.info("BashSpawnRetentionSweepService stopped")
+
+    def counters(self) -> dict[str, int]:
+        """Read-only view of the sweep counters (tests / observability)."""
+        return {
+            "ticks": self._ticks_total,
+            "pruned_total": self._pruned_total,
+            "closed_total": self._closed_total,
+            "terminal_scanned_total": self._terminal_scanned_total,
+            "terminal_swept_total": self._terminal_swept_total,
+            "errors_total": self._errors_total,
+        }
+
+    async def sweep_once(self) -> dict[str, int]:
+        """One tick: retention prune + terminal-instance stall sweep.
+
+        Never raises — per-leg failures are counted + logged and the
+        next tick retries (the sweep must never break its host loop;
+        same adjudication as the piggyback lanes).
+        """
+        self._ticks_total += 1
+        pruned = 0
+        closed = 0
+        terminal_scanned = 0
+        terminal_swept = 0
+        if not self._enabled:
+            return self._tick_result(pruned, closed, terminal_scanned,
+                                     terminal_swept)
+
+        # Master switch — checked BEFORE any repository touch (the same
+        # contract as every other lane), no-op made VISIBLE.
+        if not kill_switch_from_env():
+            _log_noop_skip(
+                "retention sweep",
+                f"master switch {ENV_KILL_SWITCH} resolves OFF",
+            )
+            return self._tick_result(pruned, closed, terminal_scanned,
+                                     terminal_swept)
+        if self._repo is None:
+            _log_noop_skip(
+                "retention sweep",
+                "durable writer (BashSpawnRepository) unset",
+            )
+            return self._tick_result(pruned, closed, terminal_scanned,
+                                     terminal_swept)
+
+        # ── Leg 1: periodic closed-row retention prune ──────────────
+        try:
+            pruned = await asyncio.to_thread(
+                self._repo.prune_reaped_older_than
+            )
+            self._pruned_total += pruned
+            if pruned:
+                logger.info(
+                    "bash reaper: retention sweep pruned %d reaped "
+                    "row(s) older than %d day(s)",
+                    pruned, BASH_SPAWN_RETENTION_DAYS,
+                )
+        except Exception as exc:  # noqa: BLE001 — per-leg isolation
+            self._errors_total += 1
+            logger.warning(
+                "bash reaper: retention sweep prune failed "
+                "(non-fatal, retries next tick): %s: %s",
+                type(exc).__name__, exc,
+            )
+
+        # ── Leg 2: terminal-instance stall sweep ────────────────────
+        # Open rows whose owning instance is TERMINAL are leftovers (the
+        # terminalization piggyback missed or no-op'd them). Reap them
+        # through the EXISTING sweep_instance machinery — all D8/D9
+        # guards and the audit trail inherited unchanged. Rows owned by
+        # non-terminal instances are NEVER touched here (their children
+        # may legitimately be alive; PAUSED is deliberately excluded via
+        # TERMINAL_INSTANCE_STATUSES).
+        if self._instance_repo is None:
+            _log_noop_skip(
+                "retention sweep stall leg",
+                "instance repository unset (terminal-instance "
+                "resolution unavailable)",
+            )
+        else:
+            try:
+                closed, terminal_scanned, terminal_swept = (
+                    await self._sweep_terminal_instances()
+                )
+                self._closed_total += closed
+                self._terminal_scanned_total += terminal_scanned
+                self._terminal_swept_total += terminal_swept
+            except Exception as exc:  # noqa: BLE001 — per-leg isolation
+                self._errors_total += 1
+                logger.warning(
+                    "bash reaper: retention sweep stall leg failed "
+                    "(non-fatal, retries next tick): %s: %s",
+                    type(exc).__name__, exc,
+                )
+
+        if pruned or closed:
+            logger.info(
+                "bash reaper: retention sweep tick %d census — "
+                "pruned=%d closed=%d (terminal scanned=%d swept=%d)",
+                self._ticks_total, pruned, closed,
+                terminal_scanned, terminal_swept,
+            )
+        else:
+            logger.debug(
+                "bash reaper: retention sweep tick %d — nothing to do",
+                self._ticks_total,
+            )
+        return self._tick_result(pruned, closed, terminal_scanned,
+                                 terminal_swept)
+
+    # --------------------------------------------------------
+    # Internal
+    # --------------------------------------------------------
+
+    def _tick_result(
+        self,
+        pruned: int,
+        closed: int,
+        terminal_scanned: int,
+        terminal_swept: int,
+    ) -> dict[str, int]:
+        return {
+            "ticks": self._ticks_total,
+            "pruned": pruned,
+            "closed": closed,
+            "terminal_scanned": terminal_scanned,
+            "terminal_swept": terminal_swept,
+            "pruned_total": self._pruned_total,
+            "closed_total": self._closed_total,
+            "terminal_scanned_total": self._terminal_scanned_total,
+            "terminal_swept_total": self._terminal_swept_total,
+            "errors_total": self._errors_total,
+        }
+
+    async def _sweep_terminal_instances(
+        self,
+    ) -> tuple[int, int, int]:
+        """Sweep open rows of TERMINAL owners via ``sweep_instance``.
+
+        Returns ``(closed, terminal_scanned, terminal_swept)``. Bounded:
+        at most ``_RETENTION_MAX_INSTANCE_LOOKUPS`` status lookups and
+        ``_RETENTION_MAX_INSTANCE_SWEEPS`` instance sweeps per tick —
+        the rest wait for the next tick.
+        """
+        instance_ids = await asyncio.to_thread(
+            self._repo.list_open_instance_ids
+        )
+        if not instance_ids:
+            return 0, 0, 0
+
+        terminal_ids: list[str] = []
+        for iid in instance_ids[:_RETENTION_MAX_INSTANCE_LOOKUPS]:
+            try:
+                instance = await asyncio.to_thread(
+                    self._instance_repo.get, iid
+                )
+            except Exception as exc:  # noqa: BLE001 — per-row isolation
+                logger.warning(
+                    "bash reaper: retention sweep instance lookup "
+                    "failed for %.8s...: %s: %s",
+                    str(iid), type(exc).__name__, exc,
+                )
+                continue
+            if instance is None:
+                continue
+            status = getattr(instance, "status", None)
+            if status in TERMINAL_INSTANCE_STATUSES:
+                terminal_ids.append(iid)
+
+        closed = 0
+        swept = 0
+        grace = term_grace_seconds_from_env()
+        for iid in terminal_ids[:_RETENTION_MAX_INSTANCE_SWEEPS]:
+            try:
+                closed += await asyncio.wait_for(
+                    sweep_instance(
+                        self._repo,
+                        iid,
+                        reaped_by="retention-sweep",
+                        term_grace_seconds=grace,
+                    ),
+                    timeout=LANE_SWEEP_DEADLINE_SECONDS,
+                )
+                swept += 1
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "bash reaper: retention sweep of instance %.8s... "
+                    "exceeded its %.0fs deadline — remaining rows left "
+                    "OPEN (the next tick retries)",
+                    str(iid), LANE_SWEEP_DEADLINE_SECONDS,
+                )
+            except Exception as exc:  # noqa: BLE001 — per-row isolation
+                logger.warning(
+                    "bash reaper: retention sweep of instance %.8s... "
+                    "failed (non-fatal): %s: %s",
+                    str(iid), type(exc).__name__, exc,
+                )
+        return closed, len(terminal_ids), swept
+
+    async def _run_loop(self) -> None:
+        """Bounded-interval asyncio loop — first tick immediate,
+        cancel-safe, interruptible sleep (same shape as
+        OrphanWatcherSweepService._run_loop)."""
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    await self.sweep_once()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as tick_err:  # noqa: BLE001
+                    # ``sweep_once`` swallows its own per-leg errors;
+                    # defense-in-depth so the loop never dies.
+                    logger.error(
+                        "BashSpawnRetentionSweepService: unexpected "
+                        f"loop error: {tick_err}",
+                        exc_info=True,
+                    )
+                try:
+                    await asyncio.wait_for(
+                        self._stop_event.wait(),
+                        timeout=self._interval_seconds,
+                    )
+                    return  # stop event set — polite exit
+                except asyncio.TimeoutError:
+                    continue  # interval elapsed — next tick
+        except asyncio.CancelledError:
+            return  # hard cancel — exit silently

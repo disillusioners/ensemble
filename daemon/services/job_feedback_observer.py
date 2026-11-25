@@ -69,6 +69,7 @@ from daemon.repositories.project.repository import SQLModelProjectRepository
 from daemon.repositories.task.models import TaskStatus, TaskType
 from daemon.repositories.dependency_bus.models import DependencyWatcher, DependencyWatcherState
 from daemon.services.dependency_bus import get_dependency_bus
+from daemon.services.event_registry import record as _event_registry_record
 from daemon.services.job_queue_service import DemandState, JobQueueService
 from daemon.services.job_state_machine import InvalidTransitionError
 from daemon.services.messaging_types import _assert_linkage_contract
@@ -402,6 +403,16 @@ class JobFeedbackObserver:
         # :meth:`stop` (B2 fix) so deferred checks do not fire
         # against a torn-down observer.
         self._deferred_finalize_tasks: set[asyncio.Task] = set()
+
+        # Addendum A (b3): the delivery-completed callback. Injected from
+        # api.py with the source repo; fires on a terminal JobItem write to
+        # close the matching execution receipt (dispatched -> executed).
+        # None until wired (legacy harnesses / tests) — a no-op then.
+        self._execution_receipt_callback: Any = None
+
+    def set_execution_receipt_callback(self, callback: Any) -> None:
+        """Inject the bounded, fail-soft delivery-completed callback."""
+        self._execution_receipt_callback = callback
 
     def _bus_count_pending_for_target_sync(
         self, target_instance_id: str
@@ -1835,6 +1846,29 @@ class JobFeedbackObserver:
                     getattr(ctx, "already_finalized_job_id", None),
                 )
 
+            # Addendum A (b3): the delivery-completed callback. Fires AFTER
+            # the terminal JobItem write commits (both bus and no-bus
+            # branches converge here). Bounded + fail-soft by construction —
+            # the callback factory catches everything, so a receipt failure
+            # can NEVER wedge the completing job. Only a real terminal
+            # transition (not skip / gate_deferred) closes a receipt.
+            if (
+                getattr(self, "_execution_receipt_callback", None) is not None
+                and ctx.job_id
+                and not db_result.skip
+                and not db_result.gate_deferred
+            ):
+                try:
+                    await getattr(self, "_execution_receipt_callback")(
+                        ctx.job_id, terminal_status
+                    )
+                except Exception as exc:  # noqa: BLE001 — belt-and-braces
+                    logger.warning(
+                        "Observer: execution receipt callback failed for "
+                        "job=%s: %s: %s",
+                        str(ctx.job_id)[:8], type(exc).__name__, exc,
+                    )
+
             # ─── Post-commit re-arm (orphan-race fix, 2026-06-20) ───
             # After the lock is released, check if a register_message_send
             # bumped the generation counter during finalization. If yes,
@@ -2406,6 +2440,10 @@ class JobFeedbackObserver:
                                 "result_summary": result_summary,
                             },
                         )
+                        # Phase 5 event registry — class-2 bridge (T5.4).
+                        _event_registry_record("event_bus:job_completed",
+                                               instance_id=instance_id,
+                                               source="job_feedback_observer")
                         logger.debug(
                             f"Observer: published JOB_COMPLETED event "
                             f"for job {ctx.job_id[:8]}... (instance "

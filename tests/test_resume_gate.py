@@ -175,7 +175,9 @@ def _make_manager():
         # children so the resume path proceeds to job completion.
         bus_mock = MagicMock()
         bus_mock.count_pending_for_target = AsyncMock(return_value=0)
+        bus_mock.count_fulfillable_pending_for_target = AsyncMock(return_value=0)
         bus_mock.count_pending_for_target_sync = lambda iid: 0
+        bus_mock.count_fulfillable_pending_for_target_sync = lambda iid, **kw: 0
         bus_patcher = patch(
             "daemon.manager.get_dependency_bus",
             return_value=bus_mock,

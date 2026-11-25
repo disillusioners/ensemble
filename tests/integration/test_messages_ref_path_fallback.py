@@ -163,7 +163,6 @@ class TestRefPathFallbackRowPersistence:
             ),
             persistence=PersistenceConfig(
                 db_path=str(engine.url.database or ""),
-                checkpoint_interval=1,
                 checkpoint_ttl_hours=168,
                 checkpoint_cleanup_interval=24,
                 max_instance_history=300,

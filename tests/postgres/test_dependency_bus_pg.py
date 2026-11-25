@@ -25,6 +25,7 @@ collect even on machines without a running PG.
 from __future__ import annotations
 
 import asyncio
+import uuid
 
 import pytest
 from sqlmodel import Session, select
@@ -59,11 +60,22 @@ def make_fu(
     message: str = "m",
     metadata: dict | None = None,
 ) -> FollowUp:
-    """Build a FollowUp with sensible defaults."""
+    """Build a FollowUp with sensible defaults.
+
+    S1 (wake-path-carrier-fix, task 1b): the bus REFUSES an arm whose
+    payload carries no ``metadata.child_id`` (the target-agnostic
+    child-keyed fire cannot match a row without it), so the default
+    stamps a unique child id — unique per arm so the per-parent error
+    bookkeeping still sees DISTINCT children.
+    """
     return FollowUp(
         target_instance_id=target_id,
         message=message,
-        metadata=metadata if metadata is not None else {},
+        metadata=(
+            metadata
+            if metadata is not None
+            else {"child_id": f"pg-test-child-{uuid.uuid4().hex[:8]}"}
+        ),
     )
 
 

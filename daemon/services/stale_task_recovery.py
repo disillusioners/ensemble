@@ -11,6 +11,7 @@ from typing import Callable, TYPE_CHECKING
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.task.models import TaskStatus
 from daemon.services.boot_epoch import get_boot_epoch
+from daemon.services.event_registry import record as _event_registry_record
 from daemon.services.job_state_machine import InvalidTransitionError
 from daemon.services.usage_limit_schedule import (
     DEFAULT_USAGE_LIMIT_RETRY_DELAYS_SECONDS,
@@ -953,6 +954,12 @@ class StaleTaskRecovery:
                     "retry_task_id": retry_task_id,
                 }
             )
+            # Phase 5 event registry — class-2 bridge (T5.4): observe the
+            # repo-direct durable write AFTER it returns (variant rides
+            # the action dim; kind = the non-enum recovery family).
+            _event_registry_record("event_bus:task_recovery",
+                                   instance_id=task.instance_id,
+                                   action=action)
         except Exception as e:
             logger.debug(f"Failed to log recovery event: {e}")
     

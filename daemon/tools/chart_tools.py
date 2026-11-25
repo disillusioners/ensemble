@@ -11,8 +11,8 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING
 
-from langchain_core.tools import tool
 
+from ._schema_registry import tool
 from ._tool_registry import register_tool_category
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.utils import invoke_agent_and_wait

@@ -15,7 +15,7 @@ What this suite pins:
 * the CHECK constraints are bound to the MODELS (W2) — the PG tables are
   built by ``create_all`` FROM THE MODELS, so a constraint that lived
   only in the ``.sql`` would not exist on PG;
-* ``StarsListType`` round-trips ``["Emperor", "the Emperor"]``, ``None``
+* ``StarsListType`` round-trips ``["the user", "The user"]``, ``None``
   and ``[]`` and carries NO mutable default (D1.8);
 * the migration census: the lane's DELTA is exactly ONE new file, the
   prefix is unique, and the distinct-prefix count equals the file count
@@ -365,7 +365,7 @@ def test_the_git_derived_lane_delta_is_exactly_one_migration_file():
 
 
 def test_stars_list_type_round_trips_the_three_shapes(sqlite_engine):
-    """``["Emperor", "the Emperor"]``, ``None`` and ``[]`` survive a round-trip."""
+    """``["the user", "The user"]``, ``None`` and ``[]`` survive a round-trip."""
     with Session(sqlite_engine) as session:
         session.add(
             MemoirEpisode(
@@ -374,7 +374,7 @@ def test_stars_list_type_round_trips_the_three_shapes(sqlite_engine):
                 body="list",
                 created_at=_now(),
                 event_at=_now(),
-                stars=["Emperor", "the Emperor"],
+                stars=["the user", "The user"],
             )
         )
         session.add(
@@ -401,7 +401,7 @@ def test_stars_list_type_round_trips_the_three_shapes(sqlite_engine):
 
     with Session(sqlite_engine) as session:
         by_id = {row.id: row for row in session.exec(select(MemoirEpisode)).all()}
-        assert by_id["e-list"].stars == ["Emperor", "the Emperor"]
+        assert by_id["e-list"].stars == ["the user", "The user"]
         assert by_id["e-none"].stars is None
         assert by_id["e-empty"].stars == []
 
