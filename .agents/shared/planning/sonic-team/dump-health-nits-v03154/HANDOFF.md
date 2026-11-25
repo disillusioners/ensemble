@@ -44,7 +44,7 @@ HANDOFF is the next commit on top).
 - `.agents/shared/metrics/tool-categories.json` — `66832459500763ba3eb9b268cb828b9d28390d5144bd5694deab6076ffba0365`
 - `agents/.prompt-artifacts.sha256` — `3c089361c9862b08861c17763037beae7a746840eac0190a59ed8f79d2aaa443`
   (house generator `scripts/protection/generate_prompt_artifact_baseline.py --check` → `PROMPT-BASELINE: OK — 217 versioned artifact(s) match`, rc=0, on the merged tree)
-- Every `agents/*/meta.json` (no grant change) · every `daemon/**` file (no daemon code) ·
+- Every `agents/*/meta.json` (no grant change) · no daemon BEHAVIOR touched; daemon/__init__.py carries the version bump ·
   every `daemon/migrations/versions/*.sql` (NO schema change — the heartbeat table is not created here)
 
 ---
@@ -53,8 +53,8 @@ HANDOFF is the next commit on top).
 
 **R1 — the runbook named a checkout that cannot run the probe. CHOICE: (a).**
 `docs/runbooks/dump-lane-health-probe.md` §1 and §4 both said `cd /home/nea/ensemble-src` — a
-detached HEAD (`bf4bfde6e`) that predates `scripts/audit/`, drifts by design and is never a
-commit target; the v0.31.53 payload ships `scripts/upgrade/` only, never `scripts/audit/`.
+detached HEAD (`bf4bfde6e`) that carries `scripts/audit/` but not `scripts/audit/dump_lane_staleness.py`,
+drifts by design and is never a commit target; the v0.31.53 payload ships `scripts/upgrade/` only, never `scripts/audit/`.
 Both sections now state the PRECONDITION — a checkout whose tree CONTAINS
 `scripts/audit/dump_lane_staleness.py` (tag v0.31.53 or later) — say in one line WHY NOT the
 detached checkout, and carry one-line existence guards that refuse in the exit-78 family
@@ -80,7 +80,7 @@ from the live install env file (mode 600) into `PGPASSWORD` (env only — never 
 - file provider, missing path: **exit 75**, `reason=marker_file_missing`.
 - file provider, 30-day-old marker: **exit 76**, `reason=older_than_threshold`.
 - Credential hygiene: **0** occurrences of the secret in any captured output; the RESULT line
-  carries no DSN. The exact command and both result sets are recorded verbatim in the design
+  carries no DSN. The exact command and the result set are recorded verbatim in the design
   doc §4.0 (`dump-lane-health-design.md`).
 
 **R2 — the "12-week" outage figure was uncited in-repo.** `CHANGELOG.md:14` and the v0.31.53
