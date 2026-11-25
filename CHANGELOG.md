@@ -5,6 +5,12 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.31.58] — 2026-11-25
+
+### Fixed — promote hand-back recovery (board wi-aa89581b)
+
+- promote hand-back false-halt cure (ladder + deferral + rc taxonomy + reason handling) + C-1 severed-continuation fix; staged only.
+
 ## [v0.31.56] — 2026-11-25
 
 ### Fixed — POK gate judge cycle ceiling + mutation legs (commission pok-gate-timeout-prompt follow-up)
