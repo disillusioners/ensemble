@@ -2200,3 +2200,350 @@ class TestScheduleListingTruthRest:
         assert item["next_run_at"].startswith(
             source.config["run_at"][:13]
         )
+
+
+# ==================== Phase-1 fix-round REST pins (M-C / M-D / M-A) ====================
+
+
+class TestSchedulePhase1GuardsRest:
+    """REST-level pins for the Phase-1 fix-round (branch
+    feature/schedule-listing-truth-phase1, round commits 38cb02c2c /
+    a70b3980d / b6157743a).
+
+    * **M-C** — a REST PUT RENAME enforces the live-label namespace
+      EXCLUDING the row being renamed; a live/live collision is refused
+      with HTTP 409 code ``SCHEDULE_LABEL_CONFLICT``.  Sub-cases:
+      rename onto a CANCELLED row's label is ALLOWED; rename to the
+      row's OWN name is a no-op (never a self-conflict); rename onto
+      another LIVE row's label is 409.  A broken namespace scan is 503
+      ``SCHEDULE_LABEL_CHECK_UNAVAILABLE`` (M-E's REST mapping).
+    * **M-D/M-A REST legs** — the REST list renders the SAME instant as
+      the shared service helper for the SAME row (ONE next-fire value);
+      a disarmed (paused/cancelled) row renders ``next_run_at`` null
+      with ``enabled``/``armed`` visible; REST GET likewise; a PUT on a
+      disarmed row renders the same gate.
+
+    The unit-side pins live in
+    ``tests/unit/services/test_schedule_phase1_guards.py``; the seed
+    (M-B) pins live in ``tests/unit/test_maintenance_seed_selfheal.py``.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_svc_deps(self):
+        """Reset the shared scheduling-service deps after each test so a
+        configured service never leaks into a neighbour."""
+        yield
+        from daemon.services import scheduling_service as _svc
+
+        _svc._deps.source_repo = None
+        _svc._deps.source_registry = None
+        _svc._deps.project_repository = None
+        _svc._source_locks.clear()
+
+    # -- row builders -------------------------------------------------------
+
+    def _rest_source(
+        self,
+        source_id="sched-1",
+        name="my-schedule",
+        config=None,
+        status="running",
+        enabled=True,
+    ):
+        """A scheduler source Mock with EXPLICIT status/enabled (the
+        file-level ``create_scheduler_source`` helper hardcodes
+        status='stopped' — these pins need armed rows too)."""
+        source = Mock()
+        source.source_id = source_id
+        source.source_type = "scheduler"
+        source.name = name
+        source.config = config or {
+            "agent": "./agents/maintenancer",
+            "message": "weekly run",
+            "timezone": "Asia/Ho_Chi_Minh",
+            "recurrence": "weekly",
+            "local_time": "03:30",
+            "schedule": "30 3 * * 0",
+            "instance_mode": "new_instance",
+            "project_id": "agents-ensemble",
+        }
+        source.credentials = None
+        source.enabled = enabled
+        source.status = status
+        source.error_message = None
+        source.created_at = "2026-11-01T00:00:00+00:00"
+        source.updated_at = "2026-11-01T00:00:00+00:00"
+        return source
+
+    def _fake_repo(self):
+        """A minimal PAGE-AWARE repo double for the TOOL surface (the
+        identity pin derives the tool value through the REAL service)."""
+        class _Repo:
+            def __init__(self):
+                self.rows = {}
+
+            def add(self, row):
+                self.rows[row.source_id] = row
+                return row
+
+            def get_source_config(self, source_id):
+                return self.rows.get(source_id)
+
+            def get_source_config_by_name(self, name):
+                for row in self.rows.values():
+                    if row.name == name:
+                        return row
+                return None
+
+            def list_source_configs(self, enabled=None, status=None, limit=100, offset=0):
+                rows = list(self.rows.values())
+                if status is not None:
+                    rows = [r for r in rows if r.status == status]
+                if enabled is not None:
+                    rows = [r for r in rows if r.enabled == enabled]
+                return rows[offset : offset + limit]
+
+            def get_latest_execution(self, schedule_id):
+                return None
+
+        return _Repo()
+
+    # -- M-C: the REST PUT rename conflict gate ------------------------------
+
+    @pytest.mark.asyncio
+    async def test_put_rename_onto_another_live_row_label_is_409(
+        self, client, mock_manager
+    ):
+        """M-C — renaming onto another LIVE row's label is refused with
+        409 SCHEDULE_LABEL_CONFLICT."""
+        existing = self._rest_source("sched-1", "my-schedule")
+        live_other = self._rest_source("sched-2", "taken-label", status="running")
+        mock_manager._source_repository.get_source_config = Mock(return_value=existing)
+        mock_manager._source_repository.list_source_configs = Mock(
+            return_value=[live_other]
+        )
+
+        response = await client.put("/schedules/sched-1", json={"name": "taken-label"})
+        assert response.status_code == 409, response.text
+        assert response.json()["detail"]["code"] == "SCHEDULE_LABEL_CONFLICT"
+        # The rename never reached the repository.
+        mock_manager._source_repository.update_source_config.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_put_rename_onto_a_cancelled_row_label_succeeds(
+        self, client, mock_manager
+    ):
+        """M-C sub-case — a CANCELLED row keeps its name for history but
+        no longer OWNS it: renaming onto its label is ALLOWED."""
+        existing = self._rest_source("sched-1", "my-schedule")
+        cancelled = self._rest_source("sched-3", "old-cancelled", status="cancelled")
+        mock_manager._source_repository.get_source_config = Mock(return_value=existing)
+        mock_manager._source_repository.list_source_configs = Mock(
+            return_value=[cancelled]
+        )
+        updated = self._rest_source("sched-1", "old-cancelled")
+        mock_manager._source_repository.update_source_config = Mock(return_value=updated)
+        mock_manager._source_repository.get_latest_execution = Mock(return_value=None)
+
+        response = await client.put("/schedules/sched-1", json={"name": "old-cancelled"})
+        assert response.status_code == 200, response.text
+        assert response.json()["name"] == "old-cancelled"
+
+    @pytest.mark.asyncio
+    async def test_put_rename_to_the_own_name_is_a_noop_never_a_self_conflict(
+        self, client, mock_manager
+    ):
+        """M-C sub-case — renaming to the row's OWN name is a no-op: the
+        conflict gate is skipped entirely (the exclusion guard keeps the
+        row from ever conflicting with itself).  The scan sees the row
+        ITSELF — so a broken exclusion (exclude-every-row mutation shape)
+        turns this pin RED with a 409."""
+        existing = self._rest_source("sched-1", "my-schedule")
+        mock_manager._source_repository.get_source_config = Mock(return_value=existing)
+        # The scan WILL see the row itself.
+        mock_manager._source_repository.list_source_configs = Mock(
+            return_value=[existing]
+        )
+        updated = self._rest_source("sched-1", "my-schedule")
+        mock_manager._source_repository.update_source_config = Mock(return_value=updated)
+        mock_manager._source_repository.get_latest_execution = Mock(return_value=None)
+
+        response = await client.put("/schedules/sched-1", json={"name": "my-schedule"})
+        assert response.status_code == 200, response.text
+        assert response.json()["name"] == "my-schedule"
+
+    @pytest.mark.asyncio
+    async def test_put_rename_with_an_unavailable_scan_is_503(
+        self, client, mock_manager
+    ):
+        """M-E REST mapping — a broken namespace scan on a rename is
+        503 SCHEDULE_LABEL_CHECK_UNAVAILABLE (never 'no conflict')."""
+        existing = self._rest_source("sched-1", "my-schedule")
+        mock_manager._source_repository.get_source_config = Mock(return_value=existing)
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("repository unavailable")
+
+        mock_manager._source_repository.list_source_configs = _boom
+
+        response = await client.put("/schedules/sched-1", json={"name": "other-label"})
+        assert response.status_code == 503, response.text
+        assert (
+            response.json()["detail"]["code"] == "SCHEDULE_LABEL_CHECK_UNAVAILABLE"
+        )
+
+    # -- M-D/M-A REST legs ---------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_rest_list_next_run_is_the_same_instant_as_the_service_value(
+        self, client, mock_manager
+    ):
+        """M-D — ONE next-fire value: the REST list renders the SAME
+        instant as the shared service helper for the SAME row.  The row's
+        stored config yields NO next-fire (a past-due one-shot) and a
+        live adapter CLAIMS 1999 — the adapter's value must never reach
+        either surface (the historical two-source divergence class)."""
+        from datetime import datetime, timedelta, timezone as _tz
+        from types import SimpleNamespace as _NS
+
+        from daemon.services import scheduling_service as svc
+
+        run_at_past = datetime.now(_tz.utc) - timedelta(days=1)
+        row = _NS(
+            source_id="past-1",
+            source_type="scheduler",
+            name="past-once",
+            config={
+                "agent": "ari",
+                "message": "hi",
+                "timezone": "UTC",
+                "recurrence": "once",
+                "local_time": run_at_past.strftime("%H:%M"),
+                "run_at": run_at_past.isoformat(),
+                "instance_mode": "new_instance",
+                "project_id": "agents-ensemble",
+            },
+            credentials=None,
+            enabled=True,
+            autostart=True,
+            status="running",
+            error_message=None,
+            created_at="2026-11-01T00:00:00+00:00",
+            updated_at="2026-11-01T00:00:00+00:00",
+        )
+        fake = self._fake_repo()
+        fake.add(row)
+        adapter = Mock()
+        adapter._get_next_trigger_time = Mock(
+            return_value=datetime(1999, 1, 1, 0, 0, tzinfo=_tz.utc)
+        )
+        registry = Mock()
+        registry.get = Mock(return_value=adapter)
+        # The TOOL surface derives through the real service.
+        svc.configure(source_repo=fake, source_registry=registry)
+        # The REST surface sees the SAME row; the registry is visible to
+        # it too (so a reintroduced adapter path WOULD be exercised).
+        mock_manager._source_repository.list_source_configs = Mock(return_value=[row])
+        mock_manager._source_repository.get_latest_execution = Mock(return_value=None)
+        mock_manager.source_registry = registry
+
+        response = await client.get("/schedules")
+        assert response.status_code == 200
+        items = response.json()["schedules"]
+        assert len(items) == 1
+        rest_next = items[0]["next_run_at"]
+        tool_items = {i.source_id: i for i in await svc.list_schedules()}
+        tool_next = tool_items["past-1"].next_run_at_utc
+        # Same row, same instant — the stored-config helper's value
+        # (null here), NEVER the adapter's 1999.
+        assert tool_next is None
+        assert rest_next is None, (
+            "the REST list must render the shared helper's value "
+            f"({tool_next!r}), not an adapter-derived one ({rest_next!r})"
+        )
+        assert not str(rest_next or "").startswith("1999")
+
+    @pytest.mark.asyncio
+    async def test_rest_list_disarmed_rows_render_null_next_run_with_enabled_armed_visible(
+        self, client, mock_manager
+    ):
+        """M-A — a paused (enabled=False + stopped) row and a cancelled
+        row render ``next_run_at`` null with ``enabled``/``armed``
+        visible on the REST list."""
+        paused = self._rest_source("paused-1", "paused-cron", status="stopped", enabled=False)
+        cancelled = self._rest_source(
+            "gone-1", "gone-row", status="cancelled", enabled=False
+        )
+        armed = self._rest_source("armed-1", "armed-cron", status="running", enabled=True)
+        mock_manager._source_repository.list_source_configs = Mock(
+            return_value=[paused, cancelled, armed]
+        )
+        mock_manager._source_repository.get_latest_execution = Mock(return_value=None)
+
+        response = await client.get("/schedules", params={"include_cancelled": "true"})
+        assert response.status_code == 200
+        items = {s["id"]: s for s in response.json()["schedules"]}
+        # PAUSED: no next-fire, disarmed, visible.
+        assert items["paused-1"]["next_run_at"] is None
+        assert items["paused-1"]["enabled"] is False
+        assert items["paused-1"]["armed"] is False
+        # CANCELLED: same gate.
+        assert items["gone-1"]["next_run_at"] is None
+        assert items["gone-1"]["armed"] is False
+        # The ARMED neighbour keeps its next-fire (asymmetry control).
+        assert items["armed-1"]["next_run_at"] is not None
+        assert items["armed-1"]["enabled"] is True
+        assert items["armed-1"]["armed"] is True
+
+    @pytest.mark.asyncio
+    async def test_rest_get_disarmed_row_renders_null_next_run(
+        self, client, mock_manager
+    ):
+        """M-A — REST GET renders the same gate for a paused row, with
+        ``enabled``/``armed`` visible."""
+        from unittest.mock import AsyncMock
+
+        from daemon.services import scheduling_service as svc
+
+        repo = self._fake_repo()
+        repo.add(
+            self._rest_source("paused-2", "paused-weekly", status="stopped", enabled=False)
+        )
+        svc.configure(
+            source_repo=repo, source_registry=Mock()
+        )
+        detail = await svc.get_schedule("paused-2")
+        assert detail is not None
+        mock_manager.scheduling_service.get_schedule = AsyncMock(return_value=detail)
+
+        response = await client.get("/schedules/paused-2")
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["next_run_at_local"] is None
+        assert body["next_run_at_utc"] is None
+        assert body["enabled"] is False
+        assert body["armed"] is False
+
+    @pytest.mark.asyncio
+    async def test_rest_put_on_a_disarmed_row_renders_null_next_run(
+        self, client, mock_manager
+    ):
+        """M-A — a PUT on a paused row renders NO next-fire in the
+        response echo, with ``enabled``/``armed`` visible."""
+        existing = self._rest_source("paused-3", "paused-daily", status="stopped", enabled=False)
+        updated = self._rest_source(
+            "paused-3", "paused-daily", status="stopped", enabled=False
+        )
+        mock_manager._source_repository.get_source_config = Mock(return_value=existing)
+        mock_manager._source_repository.list_source_configs = Mock(return_value=[])
+        mock_manager._source_repository.update_source_config = Mock(return_value=updated)
+        mock_manager._source_repository.get_latest_execution = Mock(return_value=None)
+
+        response = await client.put(
+            "/schedules/paused-3", json={"config": {"priority": 3}}
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["next_run_at"] is None
+        assert body["enabled"] is False
+        assert body["armed"] is False
