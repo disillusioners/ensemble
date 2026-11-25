@@ -243,6 +243,12 @@ class ScheduleDetail(BaseModel):
     #: from the stored ``chain`` block.  ``None`` for every row that has
     #: no window (the common case).
     window: ScheduleWindow | None = None
+    #: Raw ``enabled`` column — the operator's pause flag.  ``False``
+    #: means the row is paused (enabled=False + status='stopped').
+    enabled: bool = True
+    #: Derived armed flag: ``enabled`` is True AND ``status`` not in
+    #: {cancelled, stopped}.  A disarmed row renders NO next-fire.
+    armed: bool = True
 
 
 class ScheduleListItem(ScheduleDetail):
@@ -645,7 +651,41 @@ def _scheduler_row_or_none(config: Any) -> Any:
     return config
 
 
-def _rows_named(repo: Any, label: str) -> list[Any]:
+class LabelNamespaceUnavailable(Exception):
+    """Raised when the label-namespace scan cannot be completed.
+
+    The scan is FAIL-CLOSED: an unavailable repository (or any error
+    during the paged scan) must NOT be answered as "no conflict".  This
+    exception propagates from ``_rows_named`` through ``live_label_conflict``
+    and ``resolve_label_row``; callers refuse the operation (REST → 503
+    ``SCHEDULE_LABEL_CHECK_UNAVAILABLE``; the tool surface surfaces its
+    usual ``ERROR: ...`` string).
+    """
+
+
+def is_armed(enabled: Any, status: Any) -> bool:
+    """ARMED = ``enabled`` is True AND ``status`` not in {cancelled, stopped}."""
+    return bool(enabled) and str(status) not in {"cancelled", "stopped"}
+
+
+def row_next_run(
+    config: Any, *, enabled: bool, status: str | None
+) -> tuple[str | None, str | None, str]:
+    """ONE next-fire value for EVERY surface.
+
+    Computes from the STORED config via ``_compute_next_run`` and applies
+    the M-A armed gate: a disarmed row renders NO next-fire (None, None).
+    Returns ``(local_iso, utc_iso, tz_warning)``.
+    """
+    if not is_armed(enabled, status):
+        return None, None, ""
+    return _compute_next_run(config if isinstance(config, dict) else {})
+
+
+
+def _rows_named(repo: Any, label: str, *, exclude_source_id: Any = None) -> list[Any]:
+
+
     """Every source row whose name matches ``label`` (paged scan).
 
     ``get_source_config_by_name`` returns only the FIRST match.  With
@@ -666,15 +706,21 @@ def _rows_named(repo: Any, label: str) -> list[Any]:
             page = list(
                 repo.list_source_configs(None, None, SOURCE_CONFIG_PAGE_SIZE, offset) or []
             )
-        except Exception as exc:  # noqa: BLE001 — the scan is best-effort
+        except Exception as exc:  # noqa: BLE001 — FAIL CLOSED
             logger.warning(
                 "scheduling_service: label scan for %r failed (%s) — "
-                "falling back to the first-match lookup",
+                "raising LabelNamespaceUnavailable (fail-closed)",
                 label,
                 exc,
             )
-            return rows
-        rows.extend(r for r in page if getattr(r, "name", None) == label)
+            raise LabelNamespaceUnavailable(
+                f"label-namespace scan unavailable for {label!r}: {exc}"
+            ) from exc
+        rows.extend(
+            r for r in page
+            if getattr(r, "name", None) == label
+            and (exclude_source_id is None or getattr(r, "source_id", None) != exclude_source_id)
+        )
         # A short page ends the scan; an over-sized page (a repository
         # that ignores the limit) ends it too — the scan never loops on
         # a repository that does not honour the page contract.
@@ -689,7 +735,7 @@ def _live_rows(rows: list[Any]) -> list[Any]:
     return [r for r in rows if getattr(r, "status", None) != _STATUS_CANCELLED]
 
 
-def live_label_conflict(repo: Any, label: str) -> bool:
+def live_label_conflict(repo: Any, label: str, *, exclude_source_id: Any = None) -> bool:
     """True when a LIVE row already owns ``label``.
 
     Create-time uniqueness is scoped to LIVE rows: a CANCELLED row keeps
@@ -697,10 +743,10 @@ def live_label_conflict(repo: Any, label: str) -> bool:
     reusing it.  The check spans every source type (the historical
     behaviour was "any row with that name blocks the label").
     """
-    return bool(_live_rows(_rows_named(repo, label)))
+    return bool(_live_rows(_rows_named(repo, label, exclude_source_id=exclude_source_id)))
 
 
-def resolve_label_row(repo: Any, label: str) -> Any:
+def resolve_label_row(repo: Any, label: str, *, exclude_source_id: Any = None) -> Any:
     """Resolve a human LABEL to its row — the LIVE row wins.
 
     With dead labels reusable, a plain first-match lookup can resolve a
@@ -718,7 +764,7 @@ def resolve_label_row(repo: Any, label: str) -> Any:
     """
     live = [
         r
-        for r in _live_rows(_rows_named(repo, label))
+        for r in _live_rows(_rows_named(repo, label, exclude_source_id=exclude_source_id))
         if getattr(r, "source_type", None) == SCHEDULER_SOURCE_TYPE
     ]
     if len(live) > 1:
@@ -900,7 +946,9 @@ def _row_to_detail(
     ``last_execution_status`` is NOT evidence that a turn ran.
     """
     config = row.config or {}
-    next_local, next_utc, next_warning = _compute_next_run(config)
+    next_local, next_utc, next_warning = row_next_run(
+        config, enabled=getattr(row, "enabled", True), status=getattr(row, "status", None)
+    )
     warning = tz_warning or next_warning
     cancelled_at = None
     if row.status == "cancelled":
@@ -930,6 +978,8 @@ def _row_to_detail(
         deferred_count=deferred_count,
         last_execution_status=last_execution_status,
         window=ScheduleWindow(**view["window"]) if view["window"] else None,
+        enabled=bool(getattr(row, "enabled", True)),
+        armed=is_armed(getattr(row, "enabled", True), getattr(row, "status", None)),
     )
 
 
@@ -1345,7 +1395,9 @@ async def update_schedule(
                 # Same namespace rule as create-time: only a LIVE row
                 # blocks the label (a cancelled row keeps its name for
                 # history but does not own it).
-                if await asyncio.to_thread(live_label_conflict, repo, new_label):
+                if await asyncio.to_thread(
+                    live_label_conflict, repo, new_label, exclude_source_id=row.source_id
+                ):
                     raise ValueError(f"label already exists: {new_label}")
 
         was_enabled = bool(row.enabled)

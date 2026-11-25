@@ -30,8 +30,12 @@ from daemon.models import (
 from daemon.services.scheduling_service import (
     REST_CALLER_ID,
     ScheduleCreatePayload,
+    LabelNamespaceUnavailable,
     compute_next_run,
+    is_armed,
+    live_label_conflict,
     listing_view,
+    row_next_run,
 )
 from daemon.utils import parse_utc_datetime, validate_instance_mode
 from daemon.routers.sources import WEBHOOK_SECRET_MASK, _mask_source_config
@@ -140,19 +144,12 @@ async def list_schedules(request: Request, include_cancelled: bool = False):
             # is now the authority; the adapter survives ONLY as an
             # explicit fallback for a row whose stored config yields no
             # next-fire at all.
-            next_local, next_utc, _tz_warning = compute_next_run(src.config or {})
+            next_local, next_utc, _tz_warning = row_next_run(
+                src.config or {},
+                enabled=getattr(src, "enabled", True),
+                status=getattr(src, "status", None),
+            )
             next_run_at = parse_utc_datetime(next_utc) if next_utc else None
-            if next_run_at is None:
-                adapter = (
-                    manager.source_registry.get(src.source_id)
-                    if manager.source_registry
-                    else None
-                )
-                if adapter and hasattr(adapter, '_get_next_trigger_time'):
-                    try:
-                        next_run_at = adapter._get_next_trigger_time()
-                    except Exception as e:
-                        logger.debug(f"Failed to get next_run_at: {e}")
 
             # Get last_run_at from latest execution record
             #
@@ -195,6 +192,8 @@ async def list_schedules(request: Request, include_cancelled: bool = False):
                 window=view["window"],
                 project_id=view["project_id"],
                 last_execution_status=last_execution_status,
+                enabled=bool(getattr(src, "enabled", True)),
+                armed=is_armed(getattr(src, "enabled", True), getattr(src, "status", None)),
             ))
     return ScheduleListResponse(schedules=schedules)
 
@@ -243,6 +242,14 @@ async def create_schedule(req: ScheduleCreate, request: Request):
             caller_instance_id=REST_CALLER_ID,
             caller_agent_id="",
         )
+    except LabelNamespaceUnavailable as e:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "SCHEDULE_LABEL_CHECK_UNAVAILABLE",
+                "message": str(e),
+            },
+        )
     except ValueError as e:
         if "label" in str(e).lower() and "exists" in str(e).lower():
             raise HTTPException(
@@ -290,6 +297,14 @@ async def get_schedule_by_id(schedule_id: str, request: Request):
     # Landed service call: get_schedule is ASYNC (awaited directly — correction (b)).
     try:
         detail = await manager.scheduling_service.get_schedule(schedule_id)
+    except LabelNamespaceUnavailable as e:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "SCHEDULE_LABEL_CHECK_UNAVAILABLE",
+                "message": str(e),
+            },
+        )
     except ValueError as e:
         # An ambiguous LABEL (two live schedules share it — dead labels are
         # reusable, so the resolver refuses the guess) is a conflict, not a
@@ -337,6 +352,8 @@ async def get_schedule_by_id(schedule_id: str, request: Request):
         tz_warning=detail.tz_warning,
         window=detail.window.model_dump() if detail.window is not None else None,
         last_execution_status=detail.last_execution_status,
+        enabled=detail.enabled,
+        armed=detail.armed,
     )
 
 
@@ -361,6 +378,14 @@ async def cancel_schedule(schedule_id: str, request: Request):
     # already-cancelled → 409 (cancel is terminal).
     try:
         cancelled = await manager.scheduling_service.cancel_schedule(schedule_id)
+    except LabelNamespaceUnavailable as e:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "SCHEDULE_LABEL_CHECK_UNAVAILABLE",
+                "message": str(e),
+            },
+        )
     except ValueError as e:
         if "already cancelled" in str(e).lower():
             raise HTTPException(
@@ -496,6 +521,32 @@ async def update_schedule(schedule_id: str, schedule_update: ScheduleUpdate, req
             logger.info(f"Adjusting max_concurrent from {current_max} to 1 for reuse_instance mode")
             updated_config["max_concurrent"] = 1
     
+    # M-C: on a RENAME, enforce the live-label namespace (excluding the
+    # row being renamed so it never conflicts with itself).  Refuse a
+    # live/live collision with 409 SCHEDULE_LABEL_CONFLICT.
+    if updated_name != existing.name:
+        try:
+            conflict = await asyncio.to_thread(
+                live_label_conflict, manager._source_repository, updated_name,
+                exclude_source_id=schedule_id,
+            )
+        except LabelNamespaceUnavailable:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "SCHEDULE_LABEL_CHECK_UNAVAILABLE",
+                    "message": "label-namespace check unavailable",
+                },
+            )
+        if conflict:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "SCHEDULE_LABEL_CONFLICT",
+                    "message": f"label already exists: {updated_name}",
+                },
+            )
+
     # Update source config using repository
     updated = await asyncio.to_thread(
         manager._source_repository.update_source_config,
@@ -508,16 +559,13 @@ async def update_schedule(schedule_id: str, schedule_update: ScheduleUpdate, req
     )
     
     # Calculate next_run_at from the STORED config (the one authoritative
-    # source — the adapter's in-memory value is only a fallback).
-    next_local, next_utc, _tz_warning = compute_next_run(updated.config or {})
+    # source on EVERY surface — no adapter fallback).
+    next_local, next_utc, _tz_warning = row_next_run(
+        updated.config or {},
+        enabled=getattr(updated, "enabled", None) if getattr(updated, "enabled", None) is not None else existing.enabled,
+        status=getattr(updated, "status", None) or existing.status,
+    )
     next_run_at = parse_utc_datetime(next_utc) if next_utc else None
-    if next_run_at is None:
-        adapter = manager.source_registry.get(updated.source_id)
-        if adapter and hasattr(adapter, '_get_next_trigger_time'):
-            try:
-                next_run_at = adapter._get_next_trigger_time()
-            except Exception as e:
-                logger.debug(f"Failed to get next_run_at: {e}")
 
     # Get last_run_at from latest execution record
     #
@@ -556,6 +604,8 @@ async def update_schedule(schedule_id: str, schedule_update: ScheduleUpdate, req
         window=view["window"],
         project_id=view["project_id"],
         last_execution_status=last_execution_status,
+        enabled=bool(getattr(updated, "enabled", None) if getattr(updated, "enabled", None) is not None else existing.enabled),
+        armed=is_armed(getattr(updated, "enabled", None) if getattr(updated, "enabled", None) is not None else existing.enabled, getattr(updated, "status", None) or existing.status),
     )
 
 

@@ -121,6 +121,10 @@ class ScheduleInfo(BaseModel):
             "(not evidence that a turn ran)"
         ),
     )
+    #: Raw ``enabled`` column — the operator's pause flag.
+    enabled: bool = Field(default=True, description="Raw enabled flag (pause)")
+    #: Derived armed flag: enabled is True AND status not in {cancelled, stopped}.
+    armed: bool = Field(default=True, description="Derived armed flag")
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -314,6 +318,10 @@ class ScheduleDetailRestResponse(BaseModel):
     #: NOT evidence that a turn ran — the execution-receipt lane owns the
     #: outcome truth (job d271db9d).
     last_execution_status: str | None = None
+    #: Raw ``enabled`` column — the operator's pause flag.
+    enabled: bool = True
+    #: Derived armed flag: enabled is True AND status not in {cancelled, stopped}.
+    armed: bool = True
 
 
 class ScheduleCancelRestResponse(BaseModel):
