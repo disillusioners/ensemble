@@ -75,11 +75,12 @@ class TestApiService {
     order?: string,
     includeDescendants: boolean = true,
     source?: string,
+    anchor?: string,
   ): Observable<any> {
     // Mirrors the real ApiService.listInstances param construction
     // (HttpParams set-order serialization: limit, offset, exclude_kb,
     // include_descendants, then optional project_id, search, order,
-    // source).
+    // source, anchor).
     const params: string[] = [
       `limit=${limit}`,
       `offset=${offset}`,
@@ -97,6 +98,9 @@ class TestApiService {
     }
     if (source && source.trim().length > 0) {
       params.push(`source=${source.trim()}`);
+    }
+    if (anchor) {
+      params.push(`anchor=${anchor}`);
     }
     return this.http.get(`${this.API_BASE}/instances?${params.join('&')}`);
   }
@@ -479,6 +483,50 @@ describe('ApiService', () => {
       expect(request.url).toContain('search=refactor');
       expect(request.url).toContain('order=activity');
       expect(request.url).toContain('source=chat');
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Anchor param — the 9th positional arg of listInstances. The BE appends
+  // the selected instance + subtree. Omitted => URL byte-identical to the
+  // pre-anchor contract (back-compat pin).
+  // ─────────────────────────────────────────────────────────────────────
+  describe('listInstances with anchor param', () => {
+    it('should append anchor=<id> to the URL when passed (SPEC PIN)', () => {
+      service.listInstances(10, 0, undefined, true, undefined, undefined, true, undefined, 'inst-anchor-123');
+
+      const request = httpMock.getRequests()[0];
+      expect(request.method).toBe('GET');
+      expect(request.url).toBe('/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=true&anchor=inst-anchor-123');
+      expect(request.url).toContain('anchor=inst-anchor-123');
+    });
+
+    it('should omit the anchor param entirely when not passed (byte-compat)', () => {
+      service.listInstances(100, 0);
+
+      const request = httpMock.getRequests()[0];
+      expect(request.url).toBe('/api/instances?limit=100&offset=0&exclude_kb=true&include_descendants=true');
+      expect(request.url).not.toContain('anchor=');
+    });
+
+    it('should omit the anchor param when passed an empty string', () => {
+      service.listInstances(100, 0, undefined, true, undefined, undefined, true, undefined, '');
+
+      const request = httpMock.getRequests()[0];
+      expect(request.url).not.toContain('anchor=');
+    });
+
+    it('should compose anchor alongside source, order, project_id and search', () => {
+      service.listInstances(
+        10, 0, 'proj-1', true, 'refactor', 'activity', true, 'chat', 'inst-anchor-123'
+      );
+
+      const request = httpMock.getRequests()[0];
+      expect(request.url).toContain('project_id=proj-1');
+      expect(request.url).toContain('search=refactor');
+      expect(request.url).toContain('order=activity');
+      expect(request.url).toContain('source=chat');
+      expect(request.url).toContain('anchor=inst-anchor-123');
     });
   });
 });

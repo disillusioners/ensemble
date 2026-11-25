@@ -31,6 +31,8 @@ import pytest
 from sqlalchemy import create_engine
 from sqlmodel import Session, SQLModel
 
+from tests.helpers.checkpoints_fixture import create_checkpoints_table
+
 from daemon.repositories.instance.models import Instance
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
 from daemon.repositories.job_queue.models import JobItem
@@ -773,10 +775,19 @@ def fleet_db():
     """A scratch SQLite engine with the instance + evidence tables.
 
     tempfile-based — never a HOME-derived or live-shaped path.
+
+    Also creates the LangGraph ``checkpoints`` table (the E7 evidence
+    leg's probe target). That table is NOT part of SQLModel metadata
+    (it belongs to the LangGraph checkpointer), so without it the E7
+    leg degrades to "unavailable" and the detector correctly refuses to
+    flag anything — production always has the table, so the fixture
+    provides it to exercise the full flagging path. ENABLING the code
+    under test, not weakening an assertion.
     """
     tmpdir = tempfile.mkdtemp(prefix="shakedown-fleet-")
     engine = create_engine(f"sqlite:///{tmpdir}/fleet.db")
     SQLModel.metadata.create_all(engine)
+    create_checkpoints_table(engine)
     yield engine
     engine.dispose()
 

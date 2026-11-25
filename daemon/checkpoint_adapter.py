@@ -1479,7 +1479,13 @@ class SqliteCheckpointerAdapter(CheckpointerAdapter):
     async def find_excess_checkpoint_groups(
         self, max_per_thread: int
     ) -> list[tuple[str, str, int]]:
-        """Find (thread_id, checkpoint_ns, count) groups exceeding max_per_thread."""
+        """Find (thread_id, checkpoint_ns, count) groups exceeding max_per_thread.
+
+        ORDERING (SCOPE (c), 2026-11-24): worst-first (``COUNT(*) DESC``)
+        with a stable ``thread_id`` tiebreaker — the SET is unchanged
+        (a pure ordering change), but the bounded consumer (the
+        backstop job) gets a deterministic, worst-first selection.
+        """
         async with self._saver.lock:
             cursor = await self._saver.conn.execute(
                 """
@@ -1487,6 +1493,7 @@ class SqliteCheckpointerAdapter(CheckpointerAdapter):
                 FROM checkpoints
                 GROUP BY thread_id, checkpoint_ns
                 HAVING cnt > ?
+                ORDER BY cnt DESC, thread_id ASC
                 """,
                 (max_per_thread,),
             )
@@ -1886,7 +1893,18 @@ class PostgresCheckpointerAdapter(CheckpointerAdapter):
     async def find_excess_checkpoint_groups(
         self, max_per_thread: int
     ) -> list[tuple[str, str, int]]:
-        """Find (thread_id, checkpoint_ns, count) groups exceeding max_per_thread."""
+        """Find (thread_id, checkpoint_ns, count) groups exceeding max_per_thread.
+
+        ORDERING (SCOPE (c), 2026-11-24): the result is ordered
+        WORST-FIRST (``COUNT(*) DESC``) with a stable ``thread_id``
+        tiebreaker. The SET is unchanged — this is a pure ordering
+        change — but it makes the consumer's bounded selection
+        DETERMINISTIC: the backstop job (which may only prune a
+        bounded number of pairs per run) now always attacks the
+        biggest offenders first instead of an arbitrary
+        hash-aggregate order. The daily cycle prunes every excess
+        pair, so its behaviour is unaffected.
+        """
         # W1: no sentinel exclusion needed — the readiness-probe sentinel
         # writes checkpoint_writes only and never creates a checkpoints row.
         async with self._pool.acquire() as conn:
@@ -1896,6 +1914,7 @@ class PostgresCheckpointerAdapter(CheckpointerAdapter):
                 FROM checkpoints
                 GROUP BY thread_id, checkpoint_ns
                 HAVING COUNT(*) > $1
+                ORDER BY cnt DESC, thread_id ASC
                 """,
                 max_per_thread,
             )

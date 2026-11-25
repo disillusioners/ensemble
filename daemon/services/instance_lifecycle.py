@@ -92,6 +92,16 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Cap for the anchor-family expansion on the instances list route
+# (instances-list-anchor commission). Anchor + descendants total <= cap.
+INSTANCE_LIST_ANCHOR_BFS_CAP = 500
+
+# Rate-limit window for the anchor-cap WARN (seconds). Mirrors the
+# descendant-cap WARN discipline in the repository layer.
+_INSTANCE_LIST_ANCHOR_CAP_WARN_WINDOW_SECONDS = 600
+_anchor_cap_warn_last_emit: dict[str, float] = {}
+
+
 # ─────────────────────────────────────────────────────────────────
 # Boot-Sequence Ownership Contract (F-1, durability-f1-f2 / phase1)
 #
@@ -5223,6 +5233,108 @@ class InstanceLifecycleService:
             info["children"] = children_by_parent.get(inst.instance_id, [])
             result.append(info)
         return result, total, truncated
+
+    def get_instance_anchor_family(self, anchor_id: str) -> list[dict]:
+        """Return the anchor instance plus ALL its descendants (BFS) as
+        shaped instance dicts (``to_dict()`` + ``children``), mirroring
+        the shaping in :meth:`list_instances`.
+
+        Anchor + descendants total is bounded by
+        :data:`INSTANCE_LIST_ANCHOR_BFS_CAP`. On cap hit the first ``cap``
+        family rows in BFS order are returned and ONE rate-limited WARN is
+        logged (the response ``truncated`` flag is NOT touched — it belongs
+        to the normal page's BFS).
+
+        Returns an empty list when the anchor is unknown / empty /
+        malformed so callers can degrade honestly.
+        """
+        instance_repository = self._manager._instance_repository
+
+        if not anchor_id:
+            logger.warning(
+                "Instance anchor missing/empty; returning unchanged list"
+            )
+            return []
+
+        anchor = instance_repository.get(anchor_id)
+        if anchor is None:
+            logger.warning("Instance anchor not found: %s", anchor_id)
+            return []
+
+        cap = INSTANCE_LIST_ANCHOR_BFS_CAP
+        ordered_ids: list[str] = [anchor.instance_id]
+        seen: set[str] = {anchor.instance_id}
+        current_level: list[str] = [anchor.instance_id]
+        cap_hit = False
+
+        while current_level and len(ordered_ids) < cap:
+            children_map = instance_repository.list_child_ids_for_parents(
+                current_level
+            )
+            next_candidates: list[str] = []
+            for pid in current_level:
+                for cid in children_map.get(pid, []):
+                    if cid in seen:
+                        continue
+                    seen.add(cid)
+                    next_candidates.append(cid)
+
+            if not next_candidates:
+                break
+
+            remaining = cap - len(ordered_ids)
+            if len(next_candidates) > remaining:
+                cap_hit = True
+                to_add = next_candidates[:remaining]
+            else:
+                to_add = next_candidates
+
+            for cid in to_add:
+                ordered_ids.append(cid)
+
+            if cap_hit:
+                break
+            current_level = to_add
+
+        if cap_hit:
+            now = time.monotonic()
+            last = _anchor_cap_warn_last_emit.get(anchor_id)
+            if last is None or (now - last) >= _INSTANCE_LIST_ANCHOR_CAP_WARN_WINDOW_SECONDS:
+                logger.warning(
+                    "Anchor family descendant limit (%d) reached for anchor %s; "
+                    "truncating tree load",
+                    cap,
+                    anchor_id,
+                )
+                if len(_anchor_cap_warn_last_emit) > 256:
+                    _anchor_cap_warn_last_emit.clear()
+                _anchor_cap_warn_last_emit[anchor_id] = now
+            else:
+                logger.debug(
+                    "Anchor family descendant limit (%d) reached for anchor %s; "
+                    "truncating tree load (rate-limited; last WARN %.0fs ago)",
+                    cap,
+                    anchor_id,
+                    now - last,
+                )
+
+        # Fetch rows in one batched SELECT per level already done for ids;
+        # here a single batched read for the whole family.
+        instances = instance_repository.list_by_ids(ordered_ids)
+        by_id = {inst.instance_id: inst for inst in instances}
+        children_by_parent = instance_repository.list_child_ids_for_parents(
+            ordered_ids
+        )
+
+        result: list[dict] = []
+        for iid in ordered_ids:
+            inst = by_id.get(iid)
+            if inst is None:
+                continue
+            info = inst.to_dict()
+            info["children"] = children_by_parent.get(iid, [])
+            result.append(info)
+        return result
 
     def get_instance_info(self, instance_id: str) -> dict:
         """Get information about a specific instance.

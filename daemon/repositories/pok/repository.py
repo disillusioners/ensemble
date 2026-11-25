@@ -15,6 +15,12 @@ What lives here (mechanics only, no policy):
   audience_agents / source_tier — the tier flip is Phase 2, trust-tier
   addendum T-3) with the forward-only archived guard;
 * access/verify counters (query-path bookkeeping);
+* the WRITE-GATE LEDGER surface (append-only + read-only-cheap
+  queries — the decision substrate for the POK write gate, pok-write-gate
+  Phase 1 T1.3/T1.7; there is deliberately no update/delete method);
+* the STANDING-DEFECT RESIDUAL rows (pok-write-gate Phase 5 T5.6) — the
+  ledger rows that record the disposition of the subsystem's two
+  standing defects (the same append-only surface, one row per defect);
 * the embeddings-companion CRUD (upsert / map / delete).
 
 Policy (fence, budgets, caps, audience admission, refusal taxonomy)
@@ -26,22 +32,130 @@ txn maintains the lineage wire.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
+import re
 from datetime import datetime, timezone
 from typing import Any, Iterable, Sequence
 
 from sqlmodel import Session, select
 
 from daemon.repositories.pok.models import (
+    POKWriteGateLedger,
     ProjectOperatingKnowledge,
     ProjectOperatingKnowledgeEmbedding,
+    pok_family_key,
 )
 
-__all__ = ["POKRepository", "UNSET"]
+logger = logging.getLogger(__name__)
+
+__all__ = [
+    "POKLedgerDuplicateError",
+    "POKRepository",
+    "POK_STANDING_DEFECTS",
+    "POK_STANDING_DEFECT_GATE_PREFIX",
+    "UNSET",
+    "redact_credential_shapes",
+]
 
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Credential-shape scan (pok-write-gate Phase 8, T8.18)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# The scan is a PERSIST-TIME guard: a bounded ``reason`` /
+# ``proposed_body`` / ``answer_excerpt`` / ``judge_explanation`` must
+# NEVER carry credential-shaped content. A hit is redacted AND
+# flagged DETERMINISTICALLY — the stored row carries the NAME + the
+# sha256 PREFIX of the value, never the value itself.
+#
+# House precedent: capture a redacted block — name + sha256-prefix
+# only, never the raw value (the 2026-11-05 F7 harness rule; the
+# attestation judge's excerpt redaction at
+# ``daemon/services/attestation_report_judge.py``).
+
+#: ``(name, pattern)`` pairs. A pattern with a capture group redacts
+#: ONLY the group (the value); a pattern without one redacts the whole
+#: match (a key BLOCK).
+CREDENTIAL_SHAPE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "bearer_token",
+        re.compile(r"\bbearer\s+([A-Za-z0-9._\-]{8,})", re.IGNORECASE),
+    ),
+    (
+        "api_key",
+        re.compile(r"\bapi[_-]?key\W*[=:]\W*([A-Za-z0-9._\-]{8,})", re.IGNORECASE),
+    ),
+    (
+        "token",
+        re.compile(r"\btoken\W*[=:]\W*([A-Za-z0-9._\-]{8,})", re.IGNORECASE),
+    ),
+    (
+        "secret",
+        re.compile(r"\bsecret\W*[=:]\W*([A-Za-z0-9._\-]{8,})", re.IGNORECASE),
+    ),
+    (
+        "password",
+        re.compile(r"\bpassw(?:or)?d\W*[=:]\W*([A-Za-z0-9._\-]{8,})", re.IGNORECASE),
+    ),
+    (
+        "private_key",
+        re.compile(
+            r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"
+        ),
+    ),
+    (
+        "aws_access_key",
+        re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
+    ),
+)
+
+#: The sha256 prefix length kept for a redacted value (8 hex chars).
+_CREDENTIAL_SHA_PREFIX_LEN = 8
+
+
+def redact_credential_shapes(text: str | None) -> tuple[str, list[str]]:
+    """Redact credential-shaped content in ``text``.
+
+    Returns ``(redacted_text, flags)`` where ``flags`` is the list of
+    ``"<name>:sha256:<prefix>"`` markers for every hit. The RAW value
+    never survives: the redaction replaces it with
+    ``[REDACTED <name> sha256:<prefix>]``.
+
+    Deterministic: the same input always yields the same output and
+    the same flags.
+    """
+    if not text:
+        return ("", [])
+    redacted = str(text)
+    flags: list[str] = []
+    for name, pattern in CREDENTIAL_SHAPE_PATTERNS:
+        if not pattern.search(redacted):
+            continue
+
+        def _replace(match: "re.Match[str]") -> str:
+            material = match.group(1) if match.re.groups else match.group(0)
+            digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
+            prefix = digest[:_CREDENTIAL_SHA_PREFIX_LEN]
+            marker = f"[REDACTED {name} sha256:{prefix}]"
+            flag = f"{name}:sha256:{prefix}"
+            if flag not in flags:
+                flags.append(flag)
+            if match.re.groups:
+                whole = match.group(0)
+                group_start, group_end = match.span(1)
+                rel_start = group_start - match.start()
+                rel_end = group_end - match.start()
+                return whole[:rel_start] + marker + whole[rel_end:]
+            return marker
+
+        redacted = pattern.sub(_replace, redacted)
+    return (redacted, flags)
 
 
 class _Unset:
@@ -52,6 +166,58 @@ class _Unset:
 
 
 UNSET = _Unset()
+
+
+#: The STANDING DEFECTS of the POK write-gate subsystem and their
+#: DISPOSITIONS (pok-write-gate Phase 5, T5.6).
+#:
+#: Each member is ``(defect, disposition, disclosure)``:
+#:
+#: * ``record_verification`` — ``wired-via-gate-path``. The metric has
+#:   NO writer today (zero callers ⇒ ``verify_count`` structurally 0
+#:   on every row). Addendum-3 item 7 REVERSED the earlier
+#:   retire-with-disclosure ruling: the gate path (Wave 2 Phase 7/8)
+#:   becomes the FIRST REAL WRITER — its verdicts, merges, refusals and
+#:   admissions stamp the metric. NOT retired.
+#: * ``vector-leg`` — ``retired-with-disclosure``. The embeddings
+#:   companion is dead: the embeddings table holds 0 rows (2026-11-23
+#:   census), the mint hook ``ensure_embedding`` has zero callers, and
+#:   the query seam never passes a ``query_embedding``. Documented, not
+#:   wired (the operator-decided follow-up P2 may still revive it).
+#:
+#: The vocabulary lives HERE (not in ``models.py``) because these are
+#: DISPOSITIONS of the subsystem, not a store-wide column vocabulary —
+#: the ledger's own vocabularies (``POK_LEDGER_PHASES`` /
+#: ``POK_LEDGER_VERDICTS`` / ``POK_ARCHIVE_BASES``) stay single-sourced
+#: in ``models.py`` and are NOT forked.
+POK_STANDING_DEFECTS: tuple[tuple[str, str, str], ...] = (
+    (
+        "record_verification",
+        "wired-via-gate-path",
+        "verify_count IS wired: the gate path stamps it — the tool's "
+        "no-delta MERGE verdict calls _stamp_target_verification → "
+        "POKRepository.record_verification(row.id) (daemon/tools/pok.py), "
+        "so a re-verified row carries the stamp the librarian's next "
+        "pass reads. A row the gate has never judged still reads 0 — "
+        "absence of a stamp is NOT evidence. Not retired (addendum-3 "
+        "item 7 reversed the retire-with-disclosure ruling).",
+    ),
+    (
+        "vector-leg",
+        "retired-with-disclosure",
+        "The embeddings companion is dead: 0 embedding rows (2026-11-23 "
+        "census), the mint hook ensure_embedding has zero callers, and the "
+        "query seam never passes a query_embedding. Documented, not wired "
+        "(follow-up P2 may still identify a caller).",
+    ),
+)
+
+#: The ``gate_id`` prefix of a standing-defect residual row. The
+#: residual rows are NOT gate events, but they live in the same
+#: APPEND-ONLY ledger — the audit substrate — and the prefix is what
+#: tells a reader (and :meth:`POKRepository.standing_defect_rows`) that
+#: a row is a subsystem DISPOSITION rather than an admission decision.
+POK_STANDING_DEFECT_GATE_PREFIX = "standing-defect:"
 
 #: Slug→row resolution precedence (mechanics, not policy): the row that
 #: OWNS a slug. The ACTIVE row owns it; an ARCHIVED row owns it when no
@@ -72,6 +238,33 @@ _SLUG_OWNER_STATUS_RANK: dict[str, int] = {
     "archived": 1,
     "superseded": 2,
 }
+
+
+class POKLedgerDuplicateError(Exception):
+    """A duplicate gate-chain row was refused at the DB level (T8.16).
+
+    The ledger's gate-chain rows are keyed by ``(project_id, gate_id,
+    phase)`` under a PARTIAL UNIQUE index. Two concurrent callers can
+    therefore NOT write the same chain step twice — the second INSERT
+    raises an integrity violation, which surfaces here as this typed
+    error.
+
+    The appender used to be app-level read-then-append only, which is
+    a race: the DB uniqueness is the backstop (the single-writer
+    discipline is documentation, not enforcement).
+    """
+
+    code = "pok_ledger_duplicate"
+
+    def __init__(self, project_id: str, gate_id: str | None, phase: str) -> None:
+        self.project_id = project_id
+        self.gate_id = gate_id
+        self.phase = phase
+        super().__init__(
+            "a ledger row for (project_id=%s, gate_id=%s, phase=%s) already "
+            "exists — the gate-chain append is idempotent per chain step"
+            % (project_id, gate_id, phase)
+        )
 
 
 class POKRepository:
@@ -219,38 +412,27 @@ class POKRepository:
             return len(list(session.exec(stmt).all()))
 
     def count_active_in_family(self, project_id: str, family: str) -> int:
-        """Active rows whose slug starts ``<family>-`` (§4.5 family key).
+        """Active rows whose FAMILY KEY EQUALS ``family`` (§4.5).
 
-        DELIBERATE SUPERSET (documented, not a bug): the ``startswith``
-        prefix count deliberately includes (i) unnumbered active rows that
-        merely share the ``<family>-`` prefix and (ii) rows that belong to
-        a LONGER family whose name begins with ``family`` (e.g. an
-        ``skill-e6-01-x`` row counts toward both ``skill-e6`` and
-        ``skill``). Quantified in the Phase-1 census artifact
-        ``.agents/shared/planning/pok-sweep/dual-key-census-2026-11-18.md``
-        §3d (9 cross-family rows, 72 unnumbered). The refusal gate
-        (``pok_family_full``) is therefore conservative: a family can
-        trip its bound on prefix-shared rows it does not "own".
+        STRICT MEMBERSHIP (was a PREFIX SUPERSET — the doctrine is OVERTURNED by
+        commission pok-family-count-strict, 2026-11-24): every active row's
+        canonical family key is derived with ``pok_family_key`` and compared
+        for EQUALITY.
 
-        MULTI-TOKEN REACH (fix iteration 2): the family key is now the
-        maximal run of letter-led tokens before the leftmost ``-NN-``
-        ordinal, so the superset reaches shapes the single-token key
-        could not express. An admission of ``skill-01-z`` (family
-        ``skill``) prefix-counts the ``skill-e6-*`` rows (family
-        ``skill-e6``) — a LONGER family inflates the count of a SHORTER
-        prefix. The inverse does NOT hold: ``skill-e6`` never counts
-        ``skill-*`` rows (its prefix is hyphen-terminated). The leak is
-        ONE-DIRECTIONAL (long → short); the count stays
-        pattern-independent (a ``startswith`` query, never a
-        family-membership test).
+        Consequences (MEASURED on the 2026-11-23 census, 499 active rows): a
+        LONGER family never inflates a SHORTER one (``skill-e6-*`` no longer
+        counts toward ``skill``); an UNNUMBERED slug (``verify-something-
+        unnumbered``) has NO family and never counts; a family's count is the
+        number of rows it actually OWNS. The bound (POK_FAMILY_MAX) is
+        unchanged — only the COUNT's meaning is corrected.
         """
         stmt = select(ProjectOperatingKnowledge).where(
             ProjectOperatingKnowledge.project_id == project_id,
             ProjectOperatingKnowledge.status == "active",
-            ProjectOperatingKnowledge.slug.startswith(f"{family}-"),
         )
         with Session(self._engine) as session:
-            return len(list(session.exec(stmt).all()))
+            rows = list(session.exec(stmt).all())
+        return sum(1 for r in rows if pok_family_key(r.slug) == family)
 
     def lineage(self, entry_id: str) -> list[ProjectOperatingKnowledge]:
         """The supersede chain for one slug lineage, oldest first.
@@ -276,17 +458,59 @@ class POKRepository:
 
     # ── writes ───────────────────────────────────────────────────────────
 
-    def insert(self, entry: ProjectOperatingKnowledge) -> ProjectOperatingKnowledge:
+    def insert(
+        self,
+        entry: ProjectOperatingKnowledge,
+        *,
+        ledger_row: POKWriteGateLedger | None = None,
+    ) -> ProjectOperatingKnowledge:
+        """INSERT one knowledge row — optionally with its EXECUTION
+        ledger row in the SAME TRANSACTION.
+
+        The ledger row rides this transaction because it ATTESTS this
+        write (design-amendments-v2 §13.10: "EXECUTION rows are written
+        SAME-TRANSACTION as the write they record" — a ledger that can
+        claim an execution the store did not commit breaks the
+        ledger-alone answerability). ``None`` → no ledger row (the
+        unjudged write path).
+        """
         with Session(self._engine) as session:
             session.add(entry)
+            if ledger_row is not None:
+                self._scrub_ledger_row(ledger_row)
+                session.add(ledger_row)
             session.commit()
             session.refresh(entry)
             return entry
+
+    @staticmethod
+    def _read_for_update(
+        session: Session, entry_id: str
+    ) -> ProjectOperatingKnowledge | None:
+        """Read one row under a row lock (PostgreSQL) / plainly (SQLite).
+
+        ``SELECT ... FOR UPDATE`` is the PostgreSQL path; the SQLite
+        dialect does not render the clause (SQLite serializes writers
+        at the transaction level), so the same statement is used on
+        both drivers and only the lock differs.
+        """
+        stmt = select(ProjectOperatingKnowledge).where(
+            ProjectOperatingKnowledge.id == entry_id
+        )
+        try:
+            dialect = session.get_bind().dialect.name
+        except Exception:  # noqa: BLE001 — defensive (a mock session)
+            dialect = ""
+        if dialect == "postgresql":
+            stmt = stmt.with_for_update()
+        return session.exec(stmt).first()
 
     def supersede_and_insert(
         self,
         prior: ProjectOperatingKnowledge,
         successor: ProjectOperatingKnowledge,
+        *,
+        ledger_row: POKWriteGateLedger | None = None,
     ) -> "tuple[ProjectOperatingKnowledge, str]":
         """THE supersede transaction (§4.2): flip prior → superseded
         (with ``superseded_by_id`` = successor id) and insert the
@@ -297,15 +521,81 @@ class POKRepository:
         ``uq_pok_active_slug`` fires. One commit = no window.
         ``pinned`` does NOT carry over (the successor is unpinned;
         re-pinning is an explicit curator act via pok_curate).
+
+        COUNTER CARRY-OVER (pok-write-gate Phase 2, T2.7 — design-
+        amendments-v2 §13.4 defect #2): the successor INHERITS the
+        prior row's counters (``verify_count`` + ``access_count``) and
+        the prior ``last_verified`` / ``last_accessed_at`` stamps
+        instead of defaulting to 0. Rationale: every merge is a
+        supersede, and a supersede that silently resets the counters
+        breaks the J trusted-metric chain (gate-stamped verify_count
+        IS the trusted metric) — the chain would restart at every
+        merge, making the metric self-defending against exactly the
+        rows the librarian most needs to judge.
+
+        The counters ADD to whatever the successor already carries
+        (``prior + successor``) rather than overwriting it: the
+        successor is normally a fresh row with 0, so the sum is the
+        inherited value; a caller that pre-set a counter keeps it.
+        ``verify_count`` is the metric the librarian trusts
+        (design-amendments-v2 §13.2 fork J); ``access_count`` rides
+        along as LEGACY corroboration only.
         """
         prior_id = prior.id
-        prior.status = "superseded"
-        prior.superseded_by_id = successor.id
-        prior.pinned = False
-        prior.updated_at = _utc_now_iso()
         with Session(self._engine) as session:
-            session.add(prior)
+            # The PERSISTED prior row is the authority for the
+            # carry-over and for the status flip. Reading it here (not
+            # trusting the caller's in-memory snapshot) matters twice
+            # over: a snapshot taken before a ``record_verification``
+            # bump would carry STALE counters, and merging that stale
+            # snapshot back over the row would ZERO the lineage this
+            # method exists to preserve.
+            #
+            # LOCKED READ (W1-CR advisory 8 — routed to Wave 2): the
+            # read is a ``SELECT ... FOR UPDATE`` on the PostgreSQL
+            # path, so two concurrent supersedes of the SAME prior row
+            # cannot interleave (the second waits for the first to
+            # commit, then re-reads the FLIPPED row). SQLite has no
+            # row locks — the dialect ignores the clause and the write
+            # transaction's own serialization is the fence there.
+            db_prior = self._read_for_update(session, prior_id)
+            if db_prior is not None:
+                # Counter carry-over — the successor inherits the
+                # lineage's counters (T2.7). `last_verified` is carried
+                # with them: the verify stamp IS the provenance of the
+                # count.
+                successor.verify_count = (db_prior.verify_count or 0) + (
+                    successor.verify_count or 0
+                )
+                successor.access_count = (db_prior.access_count or 0) + (
+                    successor.access_count or 0
+                )
+                if successor.last_verified is None:
+                    successor.last_verified = db_prior.last_verified
+                if successor.last_accessed_at is None:
+                    successor.last_accessed_at = db_prior.last_accessed_at
+                db_prior.status = "superseded"
+                db_prior.superseded_by_id = successor.id
+                db_prior.pinned = False
+                db_prior.updated_at = _utc_now_iso()
+                session.add(db_prior)
+            else:
+                # The prior was never persisted — fall back to the
+                # caller's snapshot (the historical behaviour).
+                session.add(prior)
+            # Keep the caller's object observably consistent with the
+            # row (the historical contract of this method).
+            prior.status = "superseded"
+            prior.superseded_by_id = successor.id
+            prior.pinned = False
+            prior.updated_at = _utc_now_iso()
             session.add(successor)
+            if ledger_row is not None:
+                # The EXECUTION row rides THIS transaction (design-
+                # amendments-v2 §13.10): it attests the supersede, so
+                # it must vanish with it.
+                self._scrub_ledger_row(ledger_row)
+                session.add(ledger_row)
             session.commit()
             session.refresh(successor)
         return successor, prior_id
@@ -381,9 +671,354 @@ class POKRepository:
             session.commit()
             return len(rows)
 
+    # ── write-gate ledger (pok-write-gate Phase 1, T1.3 + T1.7) ────────
+    #
+    # APPEND-ONLY. There is deliberately NO update and NO delete
+    # method on this surface — the ledger is the audit substrate and a
+    # mutable audit is not an audit. The only mutator is
+    # :meth:`append_ledger`; everything else is a read.
+
+    def append_ledger(
+        self, entry: POKWriteGateLedger
+    ) -> POKWriteGateLedger:
+        """APPEND one ledger row (the only mutator on this surface).
+
+        Read-only-cheap by construction: one INSERT, one commit, no
+        read-modify-write cycle and no counter bump on any other row.
+        The caller owns the CONTENT of the row (the gate owns the
+        verdict row; the tool owns the execution row — the authority
+        split, design-amendments-v2 §8).
+
+        TWO guards ride this method:
+
+        * **DB-LEVEL IDEMPOTENCY (T8.16)** — the partial UNIQUE index
+          ``uq_pok_ledger_gate_chain`` on ``(project_id, gate_id,
+          phase) WHERE gate_id IS NOT NULL`` makes a duplicate
+          gate-chain step impossible. The appender used to be
+          app-level read-then-append only, which is a race: the DB
+          uniqueness is the backstop. A duplicate raises
+          :class:`POKLedgerDuplicateError`.
+        * **CREDENTIAL-SHAPE SCAN (T8.18)** — every bounded body /
+          excerpt (``reason``, ``judge_explanation``, ``answer_excerpt``,
+          ``proposed_body``) is scanned BEFORE the persist; a
+          credential-shaped hit is redacted-and-flagged (name +
+          sha256-prefix only, NEVER the raw value).
+        """
+        self._scrub_ledger_row(entry)
+        with Session(self._engine) as session:
+            session.add(entry)
+            try:
+                session.commit()
+            except Exception as exc:  # noqa: BLE001 — typed discrimination
+                if self._is_gate_chain_duplicate(exc):
+                    session.rollback()
+                    raise POKLedgerDuplicateError(
+                        entry.project_id, entry.gate_id, entry.phase
+                    ) from exc
+                raise
+            session.refresh(entry)
+            return entry
+
+    @staticmethod
+    def _is_gate_chain_duplicate(exc: BaseException) -> bool:
+        """Is this integrity violation the gate-chain unique index?
+
+        ONLY a unique violation naming the gate-chain index (or, on
+        SQLite, the ``(project_id, gate_id, phase)`` tuple) counts —
+        every other integrity error is re-raised untouched so it is
+        never mislabeled (the ``_is_slug_unique_violation`` precedent).
+        """
+        msg = str(exc).upper()
+        orig = getattr(exc, "orig", None)
+        pgcode = getattr(orig, "pgcode", None)
+        if pgcode == "23505":
+            return "UQ_POK_LEDGER_GATE_CHAIN" in msg
+        if "UQ_POK_LEDGER_GATE_CHAIN" in msg:
+            return True
+        # SQLite names the COLUMNS of the violated index, not the index
+        # itself: "UNIQUE constraint failed:
+        # pok_write_gate_ledger.project_id, ...gate_id, ...phase". The
+        # three column names together are the discriminator (the
+        # house ``_is_slug_unique_violation`` precedent).
+        if "UNIQUE" in msg and "GATE_ID" in msg and "PHASE" in msg:
+            return True
+        return False
+
+    @staticmethod
+    def _scrub_ledger_row(entry: POKWriteGateLedger) -> None:
+        """Scan + redact a ledger row's bodies/excerpts before persist.
+
+        The scan is DETERMINISTIC and lossy-on-purpose: a
+        credential-shaped hit is replaced by
+        ``[REDACTED <name> sha256:<prefix>]`` and the flag is logged —
+        the RAW value never reaches the store (T8.18).
+        """
+        for column in ("reason", "judge_explanation", "answer_excerpt", "proposed_body"):
+            value = getattr(entry, column, None)
+            if not value:
+                continue
+            redacted, flags = redact_credential_shapes(value)
+            if flags:
+                logger.warning(
+                    "[pok] ledger %s redacted a credential-shaped value "
+                    "(%s) — the raw value was NOT stored",
+                    column,
+                    ", ".join(flags),
+                )
+                setattr(entry, column, redacted)
+
+    def query_ledger(
+        self,
+        project_id: str,
+        *,
+        gate_id: str | None = None,
+        phase: str | None = None,
+        entry_id: str | None = None,
+        source: str | None = None,
+        limit: int | None = 100,
+    ) -> list[POKWriteGateLedger]:
+        """The ledger READ surface (T1.7) — read-only-cheap queries.
+
+        Ordered oldest-first by ``(created_at, id)`` so a gate chain
+        reads in the order it happened (the ASK chain's three rows are
+        separated in time by the answer round-trip, so the ordering is
+        total in practice; ``id`` breaks any residual tie).
+
+        Every filter is OPTIONAL and composable — the common shapes are
+        "the whole chain for one gate", "every retrieval for one row",
+        "every retrieval from one source" and "every phase for one
+        project".
+        """
+        stmt = select(POKWriteGateLedger).where(
+            POKWriteGateLedger.project_id == project_id
+        )
+        if gate_id is not None:
+            stmt = stmt.where(POKWriteGateLedger.gate_id == gate_id)
+        if phase is not None:
+            stmt = stmt.where(POKWriteGateLedger.phase == phase)
+        if entry_id is not None:
+            stmt = stmt.where(POKWriteGateLedger.entry_id == entry_id)
+        if source is not None:
+            stmt = stmt.where(POKWriteGateLedger.source == source)
+        stmt = stmt.order_by(POKWriteGateLedger.created_at, POKWriteGateLedger.id)
+        if limit is not None and limit >= 0:
+            stmt = stmt.limit(limit)
+        with Session(self._engine) as session:
+            return list(session.exec(stmt).all())
+
+    def ledger_gate_chain(
+        self, project_id: str, gate_id: str
+    ) -> list[POKWriteGateLedger]:
+        """The FULL chain for one gate id, oldest-first.
+
+        This is the shape the authority split produces (design-
+        amendments-v2 §13.2 fork G): TWO rows for a plain
+        ACCEPT/MERGE/REJECT chain (the gate's verdict row then the
+        tool's execution row), THREE for an ASK chain
+        (``ASK_MINTED`` → ``ASK_ANSWERED`` → ``ASK_EXECUTED``).
+        """
+        return self.query_ledger(project_id, gate_id=gate_id, limit=None)
+
+    def count_ledger_phase(
+        self, project_id: str, phase: str
+    ) -> int:
+        """How many ledger rows of ONE phase a project has.
+
+        Counts a phase IN AGGREGATE: this method filters on
+        ``project_id`` + ``phase`` only and takes NO ``source``
+        argument, so it cannot tell query-driven retrievals from
+        injection-driven ones. To disambiguate, use
+        :meth:`query_ledger` with ``source=...`` (the ``source``
+        column is what tells them apart).
+
+        The librarian's metric read (Phase 10): the RETRIEVAL counts
+        here SUPERSEDE ``access_count`` — they disambiguate
+        query-vs-injection, which ``access_count`` alone cannot
+        (design-amendments-v2 §13.2 fork J, amendment 1).
+
+        ── RETRIEVAL EVENTS: BOTH sides are WIRED ──────────────────
+        Both live ``admit_view`` call sites record their admitted
+        rows as ledger RETRIEVAL rows with ``source="injection"``
+        (pok-write-gate Phase 10, T10.13 — the W-1 close). The READ
+        side is wired too (pok-write-gate Phase 12):
+        ``POKService.query`` appends one ``source="query"`` RETRIEVAL
+        row per returned row — the ``source`` column is the
+        query-vs-injection disambiguator this method's callers
+        filter on.
+
+        NOTE for Phase 10: an ADMISSION-phase count INCLUDES the
+        standing-defect residual rows (they are ADMISSION-phase rows
+        with a NULL verdict). Filter them out with
+        :meth:`standing_defect_rows`, or read the verdict-bearing rows
+        only — a residual disposition is not an admission decision.
+        """
+        stmt = select(POKWriteGateLedger).where(
+            POKWriteGateLedger.project_id == project_id,
+            POKWriteGateLedger.phase == phase,
+        )
+        with Session(self._engine) as session:
+            return len(list(session.exec(stmt).all()))
+
+    # ── standing-defect residual rows (pok-write-gate Phase 5, T5.6) ────
+
+    def standing_defect_rows(
+        self, project_id: str
+    ) -> list[POKWriteGateLedger]:
+        """The standing-defect RESIDUAL rows for one project (read).
+
+        A residual row records the DISPOSITION of a standing defect of
+        the write-gate subsystem (see :data:`POK_STANDING_DEFECTS`) —
+        not an admission decision about a knowledge row. They are
+        ordinary APPEND-ONLY ledger rows, so the ledger alone can
+        answer "what was decided about the two standing defects?"
+        without a cross-store join.
+        """
+        return [
+            row
+            for row in self.query_ledger(project_id, limit=None)
+            if (row.gate_id or "").startswith(POK_STANDING_DEFECT_GATE_PREFIX)
+        ]
+
+    def record_standing_defects(
+        self, project_id: str
+    ) -> list[POKWriteGateLedger]:
+        """APPEND the standing-defect RESIDUAL rows for one project.
+
+        The minimal way to record the two standing-defect dispositions
+        (pok-write-gate Phase 5, T5.6): ``record_verification`` is
+        reserved for the gate path (Wave 2 Phase 7/8 wires the caller)
+        and the vector leg is retired with disclosure.
+
+        ENCODING (the landed ledger shape — NO schema fork):
+          * ``phase = "ADMISSION"`` — the closed phase vocabulary's
+            decision-record step. The residual rows are dispositions,
+            not retrievals and not executions.
+          * ``verdict = NULL`` — a disposition is NOT a gate outcome;
+            the four verdicts (ACCEPT / MERGE / ASK / REJECT) are
+            reserved for the gate's admission decisions.
+          * ``gate_id = "standing-defect:<defect>"`` — the chain key
+            that marks the row as a disposition.
+          * ``reason`` — the disposition claim; ``judge_explanation``
+            — the disclosure (why, with the citation).
+          * ``basis = NULL`` — nothing was ARCHIVED (a disposition
+            archives nothing); ``executed = False`` — no knowledge row
+            was written.
+
+        IDEMPOTENT PER DEFECT: a defect that already has a residual row
+        for this project is skipped (the ledger is append-only, so a
+        blind re-call would duplicate the audit trail). The rows that
+        were appended (the NEW ones) are returned.
+        """
+        existing = {
+            (row.gate_id or "").removeprefix(POK_STANDING_DEFECT_GATE_PREFIX)
+            for row in self.standing_defect_rows(project_id)
+        }
+        appended: list[POKWriteGateLedger] = []
+        for defect, disposition, disclosure in POK_STANDING_DEFECTS:
+            if defect in existing:
+                continue
+            appended.append(
+                self.append_ledger(
+                    POKWriteGateLedger(
+                        project_id=project_id,
+                        gate_id=f"{POK_STANDING_DEFECT_GATE_PREFIX}{defect}",
+                        phase="ADMISSION",
+                        verdict=None,
+                        reason=disposition,
+                        judge_explanation=disclosure,
+                        basis=None,
+                        executed=False,
+                    )
+                )
+            )
+        return appended
+
     def record_verification(self, entry_id: str, *, now: str | None = None) -> bool:
         """verify_count += 1 + last_verified stamp (pok_verify phase-2
-        path; the 30-day decay reads ``last_verified``)."""
+        path; the 30-day decay reads ``last_verified``).
+
+        ── THE GATE-PATH CALLER IS WIRED ─────────────────────────────
+        (pok-write-gate Phase 5 T5.1 designed the seam; Wave 2 Phase 7/8
+        wired the caller).
+
+        THE CALLER: the TOOL layer's no-delta MERGE path — a merge whose
+        fact is fully carried by the target writes NO row and STAMPS the
+        target instead (``daemon/tools/pok.py``::
+
+            _handle_merge_verdict → merge_kind == "no_delta"
+              → _stamp_target_verification(engine, project_id, target_slug)
+                → POKRepository(engine).record_verification(row.id)
+
+        So ``verify_count`` is no longer a dead counter: the gate's own
+        activity stamps the metric the librarian's next pass reads — the
+        loop is CLOSED (design-amendments-v2 §6, §9 "close the loop").
+
+        A row that was never stamped still carries ``verify_count == 0``:
+        the gate has judged only a fraction of the store's writes so
+        far. That ZERO IS NOT EVIDENCE — it is the absence of a stamp,
+        never a quality signal (see the IGNORED list below).
+
+        THE SEAL IS SETTLED: the seam, the stamp set, and what a stamp
+        may and may not be used for are fixed, so the librarian's metric
+        contract does not move under it.
+
+        ── THE TRUSTED METRIC SET (design-amendments-v2 §9 / §13.2 J) ──
+
+        TRUST:
+          * ``verify_count`` — but ONLY once it is GATE-STAMPED. The
+            pre-stamp value (structurally 0) is IGNORED.
+          * the CURATOR TIERS (``pinned`` / ``disputed`` /
+            ``source_tier`` / ``audience``) — cold signals, read only.
+          * the FAMILY (post the strict per-key count fix) — a family
+            at the cap is a STRUCTURAL signal, never a per-row one.
+          * VERDICT-DERIVED COUNTS — the librarian's own ledger output
+            (ACCEPT / MERGE / ASK / REJECT counts per project).
+          * TIMESTAMPS (``created_at`` / ``updated_at`` /
+            ``last_verified``) — as PROVENANCE. They corroborate a
+            finding; they NEVER trigger one (a NOW-FALSE row usually
+            co-occurs with an ancient ``last_verified``, but staleness
+            alone never fires).
+
+        IGNORE:
+          * ``access_count`` ALONE — retrieval-driven, not use-driven.
+            The ledger's RETRIEVAL counts SUPERSEDE it once they
+            exist, because they disambiguate query-vs-injection via
+            the ``source`` column; ``access_count`` survives as legacy
+            corroboration only.
+          * AGE — never a consolidation basis, never a worthlessness
+            signal.
+          * the VECTOR / EMBEDDINGS leg — dead, retired with
+            disclosure (below).
+          * ``verify_count`` BEFORE gate stamping — structurally 0.
+          * tier=0 as a signal — every tier is inert today.
+
+        PER-ROW vs PER-STORE: per-ROW metrics (a verify stamp on one
+        row, one row's curator tier) drive ROW decisions; per-STORE
+        aggregates (refusal rate, verdict mix) are PASS TELEMETRY and
+        never decide a row.
+
+        ── THE VECTOR LEG — RETIRED WITH DISCLOSURE (Phase 5, T5.2) ──
+
+        The ranking companion (``upsert_embedding`` / ``embeddings_map``
+        / ``ensure_embedding``) is NOT wired and is NOT a metric:
+
+          * the embeddings table is EMPTY (measured at the
+            2026-11-23 census — the store has 0 embedding rows);
+          * the mint hook ``ensure_embedding`` has ZERO callers
+            (WIRED-BUT-DORMANT — the dormancy is marked at its
+            definition in ``pok_service.py``);
+          * the query seam NEVER passes a ``query_embedding`` — the
+            only caller is the ``pok_query`` tool, which does not
+            supply one; and the injection path never populates
+            ``embeddings_map`` from the repository.
+
+        So the selector degrades to BM25-only by design (AC14). This is
+        DISCLOSED, not silently dropped: a caller may still identify
+        one (the operator-decided follow-up P2). Until then the vector
+        leg contributes NO signal — and, per the IGNORED list above, a
+        future one may not be read as a freshness or a worth measure
+        either.
+        """
         stamp = now or _utc_now_iso()
         with Session(self._engine) as session:
             row = session.get(ProjectOperatingKnowledge, entry_id)

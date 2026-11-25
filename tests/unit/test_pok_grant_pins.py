@@ -5,9 +5,14 @@ Mirrors ``tests/unit/test_anomaly_report_grant_pins.py`` for the
 
 (a) **the grant completeness walk** — every ``agents/*/meta.json``
     with a NON-EMPTY ``tools.allow`` carries ``"pok"``
-    (45 explicit / 46 meta, mechanically re-derived 2026-11-07;
+    (52 explicit / 55 meta, mechanically re-derived 2026-11-25;
     ``watcher`` excluded — empty allow inherits-all, never
-    appended);
+    appended; ``kb-writer`` (Emperor ruling of 2026-11-23) and
+    ``experiencer`` (Emperor pre-approval of 2026-11-25) excluded —
+    the capture duty moved to the OPERATIONAL agents
+    (ari / project-manager / leader / devops) and the grant was
+    taken away from the knowledge writers, which keep RAG-side
+    routing only);
 (b) **the ordering discipline** — ``"pok"`` sits IMMEDIATELY BEFORE
     ``"nest-report"`` in every allow that carries both (the
     insert-before rule, never a reorder); ``canary`` (no
@@ -30,6 +35,14 @@ Mutation legs (the pack's own mutation-verification duty):
   the ordering pin REDs.
 * **M-POK-3** — revert the artifact count to 64 → the artifact pin
   REDs.
+* **M-POK-4** — RE-ADD ``"pok"`` to ``agents/kb-writer/meta.json`` →
+  the kb-writer ABSENCE pin REDs (the Emperor ruling of 2026-11-23:
+  the capture duty lives with the operational agents, not the
+  knowledge writer).
+* **M-POK-5** — RE-ADD ``"pok"`` to ``agents/experiencer/meta.json``
+  immediately before ``"nest-report"`` → the experiencer ABSENCE pin
+  REDs and the census pin REDs (53 vs 52); the ORDERING pin stays
+  GREEN (the grant is re-inserted at its insert-before slot).
 """
 
 from __future__ import annotations
@@ -60,12 +73,26 @@ ANCHOR_CATEGORY = "nest-report"
 #: video-editor / video-verifier), each with a non-empty allow granted
 #: mechanically by the SAME insert-before rule → 54 explicit grants /
 #: 55 meta-bearing agent dirs.
-EXPECTED_EXPLICIT = 54
+#: RE-DERIVED 2026-11-25 (feeder-grants module A — the Emperor
+#: pre-approval): ``experiencer`` LOSES the ``pok`` grant (the capture
+#: duty lives with the operational agents; ``kb-writer`` lost its
+#: grant 2026-11-24) → 52 explicit grants / 55 meta-bearing agent dirs.
+EXPECTED_EXPLICIT = 52
 EXPECTED_TOTAL_META = 55
 #: The ONE agent that inherits (empty allow = the default universe
 #: grants every NON-privileged category — an explicit entry would
 #: STRIP every other tool watcher inherits).
 INHERITANCE_EXCEPTIONS: frozenset[str] = frozenset({"watcher"})
+#: The agents whose NON-EMPTY allow deliberately does NOT carry the
+#: grant (the completeness-walk exception). The Emperor ruling of
+#: 2026-11-23 / pre-approval of 2026-11-25 moved the POK capture
+#: duty to the operational agents (ari / project-manager / leader /
+#: devops); ``kb-writer`` and ``experiencer`` are KNOWLEDGE writers
+#: and keep RAG-side routing only. The absences are pinned positively
+#: (see :class:`TestTheKbWriterGrantAbsence` and
+#: :class:`TestTheExperiencerGrantAbsence`) — the exceptions are not
+#: holes in the walk.
+GRANT_ABSENT_EXCEPTIONS: frozenset[str] = frozenset({"kb-writer", "experiencer"})
 #: Non-empty allow WITHOUT a nest-report entry (arrived post-sweep):
 #: its grant is APPENDED AT END (the sweep's append-end exception).
 APPEND_END_EXCEPTIONS: frozenset[str] = frozenset({"canary"})
@@ -97,7 +124,7 @@ class TestThePokGrantCompletenessWalk:
             "registered as an inheritance exception) in this pack"
         )
 
-    def test_exactly_45_carry_the_grant_explicitly(self) -> None:
+    def test_exactly_52_carry_the_grant_explicitly(self) -> None:
         explicit = [d for d in _agent_dirs() if CATEGORY in _allow(d)]
         assert len(explicit) == EXPECTED_EXPLICIT, (
             f"{len(explicit)} agents carry {CATEGORY!r} explicitly, "
@@ -109,6 +136,8 @@ class TestThePokGrantCompletenessWalk:
         for agent_dir in _agent_dirs():
             allow = _allow(agent_dir)
             if not allow:
+                continue
+            if agent_dir.name in GRANT_ABSENT_EXCEPTIONS:
                 continue
             if CATEGORY not in allow:
                 missing.append(agent_dir.name)
@@ -192,6 +221,95 @@ class TestThePokGrantOrdering:
             f"ari's memoir/prompt-reload/prompt-assent/guidelines/instance_read/"
             f"instance_ops/room tail must survive the insert UNREORDERED — tail is {tail}"
         )
+
+
+class TestTheKbWriterGrantAbsence:
+    """T4.4 — the kb-writer ABSENCE pin.
+
+    The Emperor ruling of 2026-11-23 (pok-write-gate Phase 4): the
+    ``pok`` grant moves OFF the knowledge writer and ONTO the
+    operational agents. This pin asserts the ABSENCE positively — the
+    completeness walk's exception is a declared decision, not a hole.
+    """
+
+    def test_kb_writer_does_not_hold_the_grant(self) -> None:
+        allow = _allow(AGENTS_DIR / "kb-writer")
+        assert CATEGORY not in allow, (
+            f"kb-writer must NOT hold the {CATEGORY!r} grant — the "
+            "capture duty lives with the operational agents (ari / "
+            "project-manager / leader / devops); the allow is "
+            f"{allow}"
+        )
+
+    def test_the_absence_is_a_declared_exception(self) -> None:
+        assert "kb-writer" in GRANT_ABSENT_EXCEPTIONS, (
+            "the completeness walk must carry kb-writer as a DECLARED "
+            f"exception — the set is {sorted(GRANT_ABSENT_EXCEPTIONS)}"
+        )
+
+    def test_kb_writer_keeps_its_rag_side_routing(self) -> None:
+        """The removal is the POK grant ONLY — the RAG write tool
+        stays (kb-writer's job is unchanged: it writes knowledge)."""
+        allow = _allow(AGENTS_DIR / "kb-writer")
+        assert "rag_insert_text" in allow, (
+            "kb-writer must keep its RAG-side routing tool — the "
+            f"allow is {allow}"
+        )
+
+    def test_the_four_operational_agents_hold_the_grant(self) -> None:
+        """The compensating capture duty must be executable — the
+        four agents that carry the routing contract hold the grant."""
+        for name in ("ari", "project-manager", "leader", "devops"):
+            allow = _allow(AGENTS_DIR / name)
+            assert CATEGORY in allow, (
+                f"{name} carries the POK capture duty but does not "
+                f"hold the {CATEGORY!r} grant — the allow is {allow}"
+            )
+
+
+class TestTheExperiencerGrantAbsence:
+    """feeder-grants module A — the experiencer ABSENCE pin.
+
+    The Emperor pre-approval (2026-11-25): the ``pok`` grant moves OFF
+    the knowledge extractor and stays ON the operational agents. This
+    pin asserts the ABSENCE positively — the completeness walk's
+    second exception is a declared decision, not a hole. Mirrors
+    :class:`TestTheKbWriterGrantAbsence` exactly.
+    """
+
+    def test_experiencer_does_not_hold_the_grant(self) -> None:
+        allow = _allow(AGENTS_DIR / "experiencer")
+        assert CATEGORY not in allow, (
+            f"experiencer must NOT hold the {CATEGORY!r} grant — the "
+            "capture duty lives with the operational agents (ari / "
+            "project-manager / leader / devops); the allow is "
+            f"{allow}"
+        )
+
+    def test_the_absence_is_a_declared_exception(self) -> None:
+        assert "experiencer" in GRANT_ABSENT_EXCEPTIONS, (
+            "the completeness walk must carry experiencer as a DECLARED "
+            f"exception — the set is {sorted(GRANT_ABSENT_EXCEPTIONS)}"
+        )
+
+    def test_experiencer_keeps_its_rag_side_routing(self) -> None:
+        """The removal is the POK grant ONLY — the RAG tool stays
+        (experiencer's job is unchanged: it writes knowledge)."""
+        allow = _allow(AGENTS_DIR / "experiencer")
+        assert "rag" in allow, (
+            "experiencer must keep its RAG-side routing tool — the "
+            f"allow is {allow}"
+        )
+
+    def test_the_four_operational_agents_hold_the_grant(self) -> None:
+        """The compensating capture duty must be executable — the
+        four agents that carry the routing contract hold the grant."""
+        for name in ("ari", "project-manager", "leader", "devops"):
+            allow = _allow(AGENTS_DIR / name)
+            assert CATEGORY in allow, (
+                f"{name} carries the POK capture duty but does not "
+                f"hold the {CATEGORY!r} grant — the allow is {allow}"
+            )
 
 
 class TestTheVocabularyArtifactPair:

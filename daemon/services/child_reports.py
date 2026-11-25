@@ -1357,11 +1357,53 @@ Provide a concise summary:"""
             logger.info(f"Instance {instance_id[:8]}... has no parent_id, skipping completion report")
             return False, "no_parent_id"
             
-        # Use message_id in source so each completion generates a unique report
+        # Idempotency: one obligation per CHILD (the per-child PREFIX
+        # invariant), NOT one per anchor.
+        #
+        # NIT-MEDIUM (fix/post-outage-recovery SCOPE (c) rider): the
+        # guard used to be ANCHOR-EXACT
+        # (``source == internal_report:{child}:{message_id}``) while the
+        # INVARIANT the rest of the subsystem enforces is PER-CHILD
+        # PREFIX (``source LIKE 'internal_report:' || child || ':%'`` —
+        # see ``daemon/repositories/report_injection/repository.py``
+        # ``find_completed_children_without_delivery``). A b4
+        # stale-running candidate whose PRIOR report is still pending
+        # under a DIFFERENT anchor therefore slipped past the mint
+        # guard: a SECOND report row was minted AND a SECOND delivery
+        # obligation was created for the same child (the probe: 2
+        # obligations for 1 child, the parent receives 2 reports).
+        #
+        # The fix is at the MINT SITE (not a hold in the sweep): the
+        # guard now matches the child's report PREFIX, so ANY pending
+        # report for the child suppresses a second mint.
+        #
+        # TWO properties preserved deliberately:
+        #
+        # * The COLON terminator keeps the EXACT BOUNDARY — a sibling
+        #   child whose id EXTENDS this child's id (``...:{child}2:``)
+        #   does NOT match (``internal_report:{child}:`` is not a prefix
+        #   of ``internal_report:{child}2:``). The boundary pin lives in
+        #   ``tests/repositories/test_report_injection_prefix_boundary.py``.
+        # * ``autoescape=True`` escapes ``%`` / ``_`` inside the child
+        #   id so a wildcard in an id can never widen the match
+        #   (instance ids are uuids today, but the guard must not
+        #   depend on that).
+        #
+        # The RECIPIENT predicate is DROPPED (child-keyed, like the
+        # delivery-side D1 correction): the obligation belongs to the
+        # CHILD, so a report already minted for it — including one
+        # addressed to the commissioner rather than the structural
+        # parent — discharges the obligation. Keeping the recipient
+        # predicate is what let the backstop read a
+        # commissioner-addressed report as UNDELIVERED and mint a second
+        # obligation for the structural parent (the D1 defect).
         existing_report = session.exec(
             select(MessageQueue)
-            .where(MessageQueue.instance_id == instance.parent_id)
-            .where(MessageQueue.source == f"internal_report:{instance_id}:{completed_message_id}")
+            .where(
+                MessageQueue.source.startswith(
+                    f"internal_report:{instance_id}:", autoescape=True
+                )
+            )
             .where(MessageQueue.status.in_([
                 MessageStatus.READY.value,
                 MessageStatus.PROCESSING.value,
@@ -1372,7 +1414,7 @@ Provide a concise summary:"""
         if existing_report is not None:
             logger.debug(
                 f"Completion report already queued for child {instance_id[:8]}... "
-                f"message {completed_message_id[:8]}..., skipping duplicate"
+                f"(per-child prefix), skipping duplicate"
             )
             return False, "idempotency_skip"
         
@@ -4609,13 +4651,37 @@ Provide a concise summary:"""
                         should_send = False
                         skip_reason = "no_parent_id"
                     else:
+                        # NIT-MEDIUM (fix/post-outage-recovery SCOPE (c)
+                        # rider) — the MINT-SITE guard is PER-CHILD
+                        # PREFIX, not anchor-exact. The invariant the
+                        # whole subsystem enforces is "one obligation
+                        # per child" (``source LIKE 'internal_report:'
+                        # || child || ':%'`` — the delivery-side D1
+                        # correction in
+                        # ``daemon/repositories/report_injection/
+                        # repository.py``). The anchor-exact form let a
+                        # b4 stale-running candidate whose prior report
+                        # was still PENDING under a different anchor
+                        # mint a SECOND report + a SECOND obligation.
+                        #
+                        # Same three deliberate properties as the
+                        # sibling guard in ``_should_send_completion_
+                        # report``: the COLON terminator keeps the exact
+                        # boundary (a sibling whose id EXTENDS this
+                        # child's id does not match), ``autoescape=True``
+                        # neutralises ``%`` / ``_`` inside the id, and
+                        # the RECIPIENT predicate is dropped because the
+                        # obligation belongs to the CHILD (a report
+                        # already minted for it — addressed to the
+                        # commissioner or to the parent — discharges it).
                         existing_report = session.exec(
                             select(MessageQueue)
                             .where(
-                                MessageQueue.instance_id
-                                == (report_recipient_id or inst_check.parent_id)
+                                MessageQueue.source.startswith(
+                                    f"internal_report:{instance_id}:",
+                                    autoescape=True,
+                                )
                             )
-                            .where(MessageQueue.source == f"internal_report:{instance_id}:{completed_message_id}")
                             .where(MessageQueue.status.in_([
                                 MessageStatus.READY.value,
                                 MessageStatus.PROCESSING.value,

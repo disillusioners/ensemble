@@ -553,6 +553,17 @@ async def list_instances(
             "of their own ``source_type`` (lineage is by parent_id)."
         ),
     ),
+    anchor: str | None = Query(
+        None,
+        description=(
+            "Optional instance id used as a presence anchor. When present "
+            "and resolvable, the response's ``instances`` array additionally "
+            "contains the anchor row and ALL its descendants (BFS), appended "
+            "after the normal page rows and deduplicated by instance_id. "
+            "Unknown / malformed / unresolvable anchors degrade to an "
+            "unchanged list (HTTP 200)."
+        ),
+    ),
 ) -> InstanceListResponse:
     """List instances with pagination.
 
@@ -621,6 +632,32 @@ async def list_instances(
     # whole loop for the duration of the SELECT. SECOND offload call
     # on purpose: folding the read into ``manager.list_instances``
     # would widen the change into ``daemon/manager.py`` for no gain.
+    # instances-list-anchor: optional presence guarantee for the selected
+    # instance + its subtree. Fetched via a SECOND offloaded call (event-loop
+    # discipline) and merged into ``instances_data`` BEFORE the prefs fetch so
+    # the UI-prefs merge covers the appended rows too. Unknown / malformed /
+    # unresolvable anchors degrade to an unchanged list (HTTP 200, WARN).
+    if anchor is not None:
+        try:
+            anchor_rows = await _offload(
+                manager.get_instance_anchor_family, anchor
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "Anchor family fetch failed for %r: %s", anchor, exc
+            )
+            anchor_rows = []
+        if anchor_rows:
+            existing_ids = {
+                inst["instance_id"] for inst in instances_data
+            }
+            for row in anchor_rows:
+                rid = row.get("instance_id")
+                if rid is None or rid in existing_ids:
+                    continue
+                instances_data.append(row)
+                existing_ids.add(rid)
+
     instance_ids = [inst["instance_id"] for inst in instances_data]
     prefs_map = await _offload(
         manager._instance_ui_prefs_repo.get_all, instance_ids

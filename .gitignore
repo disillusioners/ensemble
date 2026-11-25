@@ -94,3 +94,10 @@ e2e-shots/
 # Tool-usage digest output (dev default location; council C5 dev corollary).
 # Tight leaf only — do NOT broaden to .agents/ (would hide planning artifacts).
 .agents/shared/planning/tool-usage-metrics-p1/digests/
+
+# Engine-arc boot-SLO gate transcripts (the `engine_boot_slo_gate.sh` pack
+# writes its fenced-boot evidence here, in the repo root). Generated
+# evidence, not source: ignored at the repo ROOT only (a tight leaf — the
+# path is the sanctioned pack's own output directory, and the pack remains
+# runnable in place). Fix turn 2026-11-23, review #1.
+/.f2gate-transcripts/

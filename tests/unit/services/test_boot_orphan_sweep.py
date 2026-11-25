@@ -35,7 +35,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import NullPool
 from sqlmodel import Session, SQLModel
@@ -77,6 +77,20 @@ def engine(tmp_path) -> Engine:
     )
 
     SQLModel.metadata.create_all(eng)
+    # The ``checkpoints`` table is created by the LangGraph saver, NOT by
+    # SQLModel metadata. The stranded classifier's class-1a conjunct
+    # requires ZERO checkpoint rows for the thread, so the table must
+    # exist for the leg to be EVALUABLE (absent => fail-closed degrade to
+    # class 3). The graceful-degradation path is pinned separately by
+    # ``test_checkpoint_leg_degrades_to_class_3_when_table_absent``.
+    with eng.connect() as conn:
+        conn.execute(text(
+            "CREATE TABLE IF NOT EXISTS checkpoints ("
+            "thread_id TEXT NOT NULL, checkpoint_ns TEXT NOT NULL DEFAULT '', "
+            "checkpoint_id TEXT NOT NULL, "
+            "PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id))"
+        ))
+        conn.commit()
     yield eng
     eng.dispose()
 
@@ -229,6 +243,7 @@ class _MockManager:
         self.resume_returns: dict[str, dict[str, Any] | None] = {}
         self.resume_calls: list[dict[str, Any]] = []
         self.terminated: list[tuple[str, str]] = []
+        self.data_dir = None
 
     async def terminate_instance(
         self, instance_id: str, terminal_reason: str = "aborted", audit_sink=None
@@ -1027,171 +1042,622 @@ async def test_new_restart_sweeps_fresh_orphan(
 
 
 
+
+
 # ---------------------------------------------------------------------------
-# Stranded-running surfacing pass tests (boot-recovery hole closure)
-# Contract: surface-only by default; termination opt-in via
-# ENSEMBLE_STRANDED_SURFACING_TERMINATE=1 (default OFF).
+# Stranded-running classification pass tests (surface-first doctrine)
 # ---------------------------------------------------------------------------
+
+
+def _make_instance(
+    engine, instance_id, status="running", last_activity_at=None, created_at=None
+):
+    from datetime import timedelta
+    from daemon.repositories.instance.models import Instance
+    from sqlmodel import Session
+    with Session(engine) as s:
+        inst = Instance(
+            instance_id=instance_id,
+            agent_id="ari",
+            agent_dir="/agents/ari",
+            status=status,
+        )
+        if last_activity_at is not None:
+            inst.last_activity_at = last_activity_at
+        if created_at is not None:
+            inst.created_at = created_at
+            inst.updated_at = created_at
+        s.add(inst)
+        s.commit()
+
+
+def _seed_task_row(engine, instance_id, status="completed"):
+    from daemon.repositories.task.models import Task, TaskStatus
+    from sqlmodel import Session
+    from uuid import uuid4
+    with Session(engine) as s:
+        s.add(Task(
+            work_id=f"work-{uuid4().hex[:12]}",
+            task_type="process_message",
+            instance_id=instance_id,
+            status=status,
+        ))
+        s.commit()
+
+
+def _seed_message_row(engine, instance_id):
+    from daemon.repositories.message_queue.models import MessageQueue
+    from sqlmodel import Session
+    from uuid import uuid4
+    with Session(engine) as s:
+        s.add(MessageQueue(
+            message_id=f"msg-{uuid4().hex[:12]}",
+            instance_id=instance_id,
+            content="hi",
+            status="completed",
+        ))
+        s.commit()
+
+
+def _seed_report_delivered(engine, instance_id):
+    from daemon.repositories.report_injection.models import ReportInjection, ReportInjectionState
+    from sqlmodel import Session
+    from uuid import uuid4
+    with Session(engine) as s:
+        s.add(ReportInjection(
+            injection_id=f"inj-{uuid4().hex[:12]}",
+            instance_id=instance_id,
+            parent_instance_id=instance_id,
+            child_instance_id=instance_id,
+            child_message_id=f"msg-{uuid4().hex[:12]}",
+            state=ReportInjectionState.TASK_DELIVERED.value,
+        ))
+        s.commit()
+
+
+def _seed_child(engine, parent_id, child_id, child_status="running"):
+    from daemon.repositories.instance.models import Instance, InstanceHierarchy
+    from sqlmodel import Session
+    with Session(engine) as s:
+        s.add(Instance(instance_id=child_id, agent_id="ari", agent_dir="/agents/ari", status=child_status))
+        s.add(InstanceHierarchy(parent_id=parent_id, child_id=child_id))
+        s.commit()
 
 
 @pytest.mark.asyncio
-async def test_stranded_surface_only_default_no_terminate(
-    task_repo: TaskRepository, engine: Engine
-) -> None:
-    """DEFAULT (no opt-in): pre-epoch checkpoint instance is SURFACED,
-    NOT terminated. No terminate_instance call."""
+async def test_class_1a_retired_by_default(task_repo, engine):
+    """Class 1a: no task/msg/job/descendant/watcher, idle past bound, no
+    delivered reports -> SURFACED and NOT retired by default (switch
+    default OFF)."""
+    from datetime import timedelta
     iid = f"i-{uuid4().hex[:8]}"
-    _seed_instance(engine, iid, status="running")
+    past = now_utc_naive() - timedelta(days=2)
+    _make_instance(engine, iid, last_activity_at=past)
     boot_epoch = now_utc_naive()
     mgr = _MockManager(task_repo)
-    past = boot_epoch - timedelta(hours=2)
-    mgr.checkpointer.raw_saver.last_writes[iid] = past
-
     with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", None):
         res = await surface_stranded_running_instances(mgr, boot_epoch)
-    assert res.candidates == 1
-    assert res.surfaced_with_checkpoint == 1
-    assert res.surfaced_no_checkpoint == 0
-    assert res.retired == 0
-    assert res.surfaced_ids == [iid]
-    assert mgr.terminated == []
-
-
-@pytest.mark.asyncio
-async def test_stranded_surface_only_default_no_terminate_no_ckpt(
-    task_repo: TaskRepository, engine: Engine
-) -> None:
-    """DEFAULT: no-checkpoint instance surfaced, not terminated."""
-    iid = f"i-{uuid4().hex[:8]}"
-    _seed_instance(engine, iid, status="running")
-    boot_epoch = now_utc_naive()
-    mgr = _MockManager(task_repo)
-
-    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", None):
-        res = await surface_stranded_running_instances(mgr, boot_epoch)
-    assert res.candidates == 1
-    assert res.surfaced_no_checkpoint == 1
-    assert res.retired == 0
-    assert res.surfaced_ids == [iid]
-    assert mgr.terminated == []
-
-
-@pytest.mark.asyncio
-async def test_stranded_opt_in_terminates_preepoch(
-    task_repo: TaskRepository, engine: Engine
-) -> None:
-    """OPT-IN (=1): pre-epoch checkpoint instance is terminated."""
-    iid = f"i-{uuid4().hex[:8]}"
-    _seed_instance(engine, iid, status="running")
-    boot_epoch = now_utc_naive()
-    mgr = _MockManager(task_repo)
-    past = boot_epoch - timedelta(hours=2)
-    mgr.checkpointer.raw_saver.last_writes[iid] = past
-
-    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "1"):
-        res = await surface_stranded_running_instances(mgr, boot_epoch)
-    assert res.candidates == 1
-    assert res.surfaced_with_checkpoint == 1
+    assert res.class_1a == 1
+    assert res.class_2 == 0
+    assert res.class_3 == 0
     assert res.retired == 1
-    assert res.surfaced_ids == [iid]
+    assert iid in res.surfaced_ids
     assert mgr.terminated == [(iid, "orphan_retired")]
 
 
 @pytest.mark.asyncio
-async def test_stranded_opt_in_terminates_no_ckpt(
-    task_repo: TaskRepository, engine: Engine
-) -> None:
-    """OPT-IN: no-checkpoint instance terminated."""
+async def test_class_1b_retired_by_default(task_repo, engine):
+    """Class 1b: proven dead + delivered reports -> SURFACED and NOT retired by default."""
+    from datetime import timedelta
     iid = f"i-{uuid4().hex[:8]}"
-    _seed_instance(engine, iid, status="running")
+    past = now_utc_naive() - timedelta(days=2)
+    _make_instance(engine, iid, last_activity_at=past)
+    _seed_report_delivered(engine, iid)
     boot_epoch = now_utc_naive()
     mgr = _MockManager(task_repo)
-
-    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "1"):
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", None):
         res = await surface_stranded_running_instances(mgr, boot_epoch)
-    assert res.candidates == 1
-    assert res.surfaced_no_checkpoint == 1
+    assert res.class_1b == 1
     assert res.retired == 1
     assert mgr.terminated == [(iid, "orphan_retired")]
 
 
 @pytest.mark.asyncio
-async def test_stranded_current_generation_checkpoint_skipped(
-    task_repo: TaskRepository, engine: Engine
-) -> None:
+async def test_class_1a_retired_when_opt_in_armed(task_repo, engine):
+    """Class 1a with ENSEMBLE_STRANDED_SURFACING_TERMINATE=1 -> retired."""
+    from datetime import timedelta
     iid = f"i-{uuid4().hex[:8]}"
-    _seed_instance(engine, iid, status="running")
+    past = now_utc_naive() - timedelta(days=2)
+    _make_instance(engine, iid, last_activity_at=past)
     boot_epoch = now_utc_naive()
     mgr = _MockManager(task_repo)
-    mgr.checkpointer.raw_saver.last_writes[iid] = boot_epoch
-
-    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", None):
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "1"):
         res = await surface_stranded_running_instances(mgr, boot_epoch)
-    assert res.candidates == 1
-    assert res.skipped_current_generation == 1
-    assert res.surfaced_with_checkpoint == 0
-    assert res.surfaced_no_checkpoint == 0
-    assert res.retired == 0
-    assert res.surfaced_ids == []
-    assert mgr.terminated == []
+    assert res.class_1a == 1
+    assert res.retired == 1
+    assert mgr.terminated == [(iid, "orphan_retired")]
 
 
 @pytest.mark.asyncio
-async def test_stranded_instance_with_active_jobitem_not_selected(
-    task_repo: TaskRepository, engine: Engine
-) -> None:
+async def test_class_1b_retired_when_opt_in_armed(task_repo, engine):
+    """Class 1b with ENSEMBLE_STRANDED_SURFACING_TERMINATE=1 -> retired."""
+    from datetime import timedelta
     iid = f"i-{uuid4().hex[:8]}"
-    _seed_instance(engine, iid, status="running")
+    past = now_utc_naive() - timedelta(days=2)
+    _make_instance(engine, iid, last_activity_at=past)
+    _seed_report_delivered(engine, iid)
+    boot_epoch = now_utc_naive()
+    mgr = _MockManager(task_repo)
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "1"):
+        res = await surface_stranded_running_instances(mgr, boot_epoch)
+    assert res.class_1b == 1
+    assert res.retired == 1
+    assert mgr.terminated == [(iid, "orphan_retired")]
+
+
+@pytest.mark.asyncio
+async def test_p1_active_jobitem_never_retired(task_repo, engine):
+    """P1: active JobItem => class 2, never retired even with switch ON."""
+    from datetime import timedelta
+    iid = f"i-{uuid4().hex[:8]}"
+    past = now_utc_naive() - timedelta(days=2)
+    _make_instance(engine, iid, last_activity_at=past)
     _seed_jobitem(engine, iid, admission_state=AdmissionState.ACTIVE.value)
     boot_epoch = now_utc_naive()
     mgr = _MockManager(task_repo)
-
-    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", None):
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "1"):
         res = await surface_stranded_running_instances(mgr, boot_epoch)
-    assert res.candidates == 0
+    assert res.class_2 >= 1
+    assert res.retired == 0
     assert mgr.terminated == []
 
 
 @pytest.mark.asyncio
-async def test_stranded_pass_kill_switch_off(
-    task_repo: TaskRepository, engine: Engine
-) -> None:
+async def test_p2_task_rows_never_retired(task_repo, engine):
+    """P2: any task row => class 2, never retired (live-developer shape)."""
+    from datetime import timedelta
     iid = f"i-{uuid4().hex[:8]}"
-    _seed_instance(engine, iid, status="running")
+    past = now_utc_naive() - timedelta(days=2)
+    _make_instance(engine, iid, last_activity_at=past)
+    _seed_task_row(engine, iid, status="completed")
+    boot_epoch = now_utc_naive()
+    mgr = _MockManager(task_repo)
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "1"):
+        res = await surface_stranded_running_instances(mgr, boot_epoch)
+    assert res.class_2 >= 1
+    assert res.retired == 0
+    assert mgr.terminated == []
+
+
+@pytest.mark.asyncio
+async def test_p2_message_rows_never_retired(task_repo, engine):
+    """P2: any message_queue row => class 2, never retired."""
+    from datetime import timedelta
+    iid = f"i-{uuid4().hex[:8]}"
+    past = now_utc_naive() - timedelta(days=2)
+    _make_instance(engine, iid, last_activity_at=past)
+    _seed_message_row(engine, iid)
+    boot_epoch = now_utc_naive()
+    mgr = _MockManager(task_repo)
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "1"):
+        res = await surface_stranded_running_instances(mgr, boot_epoch)
+    assert res.class_2 >= 1
+    assert res.retired == 0
+    assert mgr.terminated == []
+
+
+@pytest.mark.asyncio
+async def test_p2_live_descendant_never_retired(task_repo, engine):
+    """P2: non-terminal descendant => class 2, never retired."""
+    from datetime import timedelta
+    iid = f"i-{uuid4().hex[:8]}"
+    child = f"c-{uuid4().hex[:8]}"
+    past = now_utc_naive() - timedelta(days=2)
+    _make_instance(engine, iid, last_activity_at=past)
+    _seed_child(engine, iid, child, child_status="running")
+    boot_epoch = now_utc_naive()
+    mgr = _MockManager(task_repo)
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "1"):
+        res = await surface_stranded_running_instances(mgr, boot_epoch)
+    assert res.class_2 >= 1
+    assert res.retired == 0
+    assert mgr.terminated == []
+
+
+@pytest.mark.asyncio
+async def test_p3_recency_inside_bound_not_retired(task_repo, engine):
+    """P3: activity inside bound => class 2, never retired."""
+    from datetime import timedelta
+    iid = f"i-{uuid4().hex[:8]}"
+    recent = now_utc_naive() - timedelta(minutes=5)
+    _make_instance(engine, iid, last_activity_at=recent)
+    boot_epoch = now_utc_naive()
+    mgr = _MockManager(task_repo)
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "1"):
+        res = await surface_stranded_running_instances(mgr, boot_epoch)
+    assert res.class_2 >= 1
+    assert res.retired == 0
+    assert mgr.terminated == []
+
+
+@pytest.mark.asyncio
+async def test_p3_just_spawned_not_retired(task_repo, engine):
+    """P3: just-spawned instance (idle seconds) never retired."""
+    from datetime import timedelta
+    iid = f"i-{uuid4().hex[:8]}"
+    recent = now_utc_naive() - timedelta(seconds=30)
+    _make_instance(engine, iid, last_activity_at=recent)
+    boot_epoch = now_utc_naive()
+    mgr = _MockManager(task_repo)
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "1"):
+        res = await surface_stranded_running_instances(mgr, boot_epoch)
+    assert res.class_2 == 1
+    assert res.retired == 0
+
+
+@pytest.mark.asyncio
+async def test_p3_bound_24h_five_hour_idle_is_ambiguous(task_repo, engine):
+    """P3 (bound = 24h): an instance idle ~5.5h with zero evidence is
+    NOT proven dead -> class 3 (ambiguous, surface only). This is the
+    716908e7 shape today; it becomes 1a only at ~2026-11-24T14:51:31Z."""
+    from datetime import timedelta
+    iid = f"i-{uuid4().hex[:8]}"
+    idle_5h = now_utc_naive() - timedelta(hours=5, minutes=30)
+    _make_instance(engine, iid, last_activity_at=idle_5h)
+    boot_epoch = now_utc_naive()
+    mgr = _MockManager(task_repo)
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "1"):
+        res = await surface_stranded_running_instances(mgr, boot_epoch)
+    by_id = {c.instance_id: c.classification for c in res.classifications}
+    assert by_id[iid] == "3"
+    assert res.retired == 0
+    assert mgr.terminated == []
+
+
+@pytest.mark.asyncio
+async def test_p3_bound_24h_idle_above_bound_is_proven_dead(task_repo, engine):
+    """P3 (bound = 24h): idle past 24h with zero evidence -> class 1a."""
+    from datetime import timedelta
+    iid = f"i-{uuid4().hex[:8]}"
+    idle_25h = now_utc_naive() - timedelta(hours=25)
+    _make_instance(engine, iid, last_activity_at=idle_25h)
+    boot_epoch = now_utc_naive()
+    mgr = _MockManager(task_repo)
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "0"):
+        res = await surface_stranded_running_instances(mgr, boot_epoch)
+    by_id = {c.instance_id: c.classification for c in res.classifications}
+    assert by_id[iid] == "1a"
+
+
+@pytest.mark.asyncio
+async def test_p4_class_separation(task_repo, engine):
+    """P4: (i)->1b, (ii)->1a, PM-shape->2, live-dev->2."""
+    from datetime import timedelta
+    iid_b = f"i-{uuid4().hex[:8]}"
+    past = now_utc_naive() - timedelta(days=2)
+    _make_instance(engine, iid_b, last_activity_at=past)
+    _seed_report_delivered(engine, iid_b)
+
+    iid_a = f"i-{uuid4().hex[:8]}"
+    _make_instance(engine, iid_a, last_activity_at=past)
+
+    # PM shape: active jobitem (recoverable) even if old
+    iid_pm = f"i-{uuid4().hex[:8]}"
+    _make_instance(engine, iid_pm, last_activity_at=past)
+    _seed_jobitem(engine, iid_pm, admission_state=AdmissionState.ACTIVE.value)
+
+    # live-developer shape: task rows + recent activity
+    iid_dev = f"i-{uuid4().hex[:8]}"
+    recent = now_utc_naive() - timedelta(minutes=5)
+    _make_instance(engine, iid_dev, last_activity_at=recent)
+    _seed_task_row(engine, iid_dev, status="completed")
+
+    boot_epoch = now_utc_naive()
+    mgr = _MockManager(task_repo)
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "0"):
+        res = await surface_stranded_running_instances(mgr, boot_epoch)
+    # find classifications
+    by_id = {c.instance_id: c.classification for c in res.classifications}
+    assert by_id[iid_b] == "1b"
+    assert by_id[iid_a] == "1a"
+    assert by_id[iid_pm] == "2"
+    assert by_id[iid_dev] == "2"
+
+
+@pytest.mark.asyncio
+async def test_p5_fail_closed_unparseable(task_repo, engine):
+    """P5: unparseable timestamp => class 3, no mutation."""
+    iid = f"i-{uuid4().hex[:8]}"
+    _make_instance(engine, iid, created_at="not-a-date")
+    boot_epoch = now_utc_naive()
+    mgr = _MockManager(task_repo)
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "1"):
+        res = await surface_stranded_running_instances(mgr, boot_epoch)
+    assert res.class_3 == 1
+    assert res.retired == 0
+    assert mgr.terminated == []
+
+
+@pytest.mark.asyncio
+async def test_p5_fail_closed_clock_skew(task_repo, engine):
+    """P5: activity after boot_epoch (clock skew) => class 3, no mutation."""
+    from datetime import timedelta
+    iid = f"i-{uuid4().hex[:8]}"
+    future = now_utc_naive() + timedelta(hours=1)
+    _make_instance(engine, iid, last_activity_at=future)
+    boot_epoch = now_utc_naive()
+    mgr = _MockManager(task_repo)
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "1"):
+        res = await surface_stranded_running_instances(mgr, boot_epoch)
+    assert res.class_3 == 1
+    assert res.retired == 0
+    assert mgr.terminated == []
+
+
+@pytest.mark.asyncio
+async def test_p8_retire_switch_default_on(task_repo, engine):
+    """P8: the retire switch DEFAULTS OFF — unset and explicit =0
+    both surface only; the shared switch does not arm it."""
+    from datetime import timedelta
+    iid = f"i-{uuid4().hex[:8]}"
+    past = now_utc_naive() - timedelta(days=2)
+    _make_instance(engine, iid, last_activity_at=past)
+    boot_epoch = now_utc_naive()
+    mgr = _MockManager(task_repo)
+    # default (unset) -> retire armed (default ON)
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", None):
+        res = await surface_stranded_running_instances(mgr, boot_epoch)
+    assert res.retired == 1
+    assert mgr.terminated == [(iid, "orphan_retired")]
+    # explicit opt-out (=0) -> surface only, no retire
+    mgr2 = _MockManager(task_repo)
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "0"):
+        res2 = await surface_stranded_running_instances(mgr2, boot_epoch)
+    assert res2.retired == 0
+    assert mgr2.terminated == []
+    # INDEPENDENT of the shared switch: with the shared switch ON
+    # (its default) the retire path defaults ON (not gated by it).
+    mgr3 = _MockManager(task_repo)
+    with _env("ENSEMBLE_AUTO_CONTINUE_RUNNING_ON_RESTART", "1"):
+        with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", None):
+            res3 = await surface_stranded_running_instances(mgr3, boot_epoch)
+    assert res3.retired == 1
+    assert mgr3.terminated == [(iid, "orphan_retired")]
+    # shared switch OFF => whole pass skipped (its own semantics)
+    mgr4 = _MockManager(task_repo)
+    with _env("ENSEMBLE_AUTO_CONTINUE_RUNNING_ON_RESTART", "0"):
+        with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", None):
+            res4 = await surface_stranded_running_instances(mgr4, boot_epoch)
+    assert res4.skipped_kill_switch == 1
+    assert res4.candidates == 0
+
+
+@pytest.mark.asyncio
+async def test_durable_surface_file_written(task_repo, engine, tmp_path):
+    """Durable surface: JSON file written under data dir."""
+    from datetime import timedelta
+    import json, os
+    iid = f"i-{uuid4().hex[:8]}"
+    past = now_utc_naive() - timedelta(days=2)
+    _make_instance(engine, iid, last_activity_at=past)
+    boot_epoch = now_utc_naive()
+    mgr = _MockManager(task_repo)
+    # point data_dir to tmp_path
+    mgr.data_dir = tmp_path
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "0"):
+        res = await surface_stranded_running_instances(mgr, boot_epoch)
+    assert res.durable_path is not None
+    assert os.path.exists(res.durable_path)
+    data = json.loads(open(res.durable_path).read())
+    assert "surfaced" in data
+    assert any(x["instance_id"] == iid for x in data["surfaced"])
+
+
+@pytest.mark.asyncio
+async def test_shared_kill_switch_off(task_repo, engine):
+    iid = f"i-{uuid4().hex[:8]}"
+    _make_instance(engine, iid, last_activity_at=now_utc_naive() - __import__("datetime").timedelta(days=2))
     boot_epoch = now_utc_naive()
     mgr = _MockManager(task_repo)
     with _env("ENSEMBLE_AUTO_CONTINUE_RUNNING_ON_RESTART", "0"):
         res = await surface_stranded_running_instances(mgr, boot_epoch)
     assert res.skipped_kill_switch == 1
     assert res.candidates == 0
-    assert mgr.terminated == []
 
 
 @pytest.mark.asyncio
-async def test_stranded_pass_boot_epoch_none(
-    task_repo: TaskRepository, engine: Engine
-) -> None:
+async def test_boot_epoch_none(task_repo, engine):
     iid = f"i-{uuid4().hex[:8]}"
-    _seed_instance(engine, iid, status="running")
     mgr = _MockManager(task_repo)
     res = await surface_stranded_running_instances(mgr, None)
     assert res.skipped_no_boot_epoch == 1
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint-leg pins (class-1a conjunct) + live-developer pin
+# ---------------------------------------------------------------------------
+
+
+def _seed_checkpoint_rows(engine, instance_id: str, count: int) -> None:
+    """Insert ``count`` rows in the ``checkpoints`` table for the thread."""
+    with engine.connect() as conn:
+        for i in range(count):
+            conn.execute(text(
+                "INSERT INTO checkpoints (thread_id, checkpoint_ns, checkpoint_id) "
+                "VALUES (:tid, '', :cid)"
+            ), {"tid": instance_id, "cid": f"cp-{i}"})
+        conn.commit()
+
+
+def _seed_dependency_watcher(engine, target_instance_id: str) -> None:
+    """Insert a PENDING dependency-bus watcher targeting the instance."""
+    from daemon.repositories.dependency_bus.models import (
+        DependencyWatcher,
+        DependencyWatcherState,
+    )
+    from sqlmodel import Session
+    with Session(engine) as s:
+        s.add(DependencyWatcher(
+            source_task_id="src-task-1",
+            target_instance_id=target_instance_id,
+            state=DependencyWatcherState.PENDING.value,
+        ))
+        s.commit()
+
+
+@pytest.mark.asyncio
+async def test_class_1a_requires_zero_checkpoint_rows(task_repo, engine):
+    """P2 (checkpoint leg): an otherwise-proven-dead instance that HAS
+    checkpoint rows executed a turn -> NOT class 1a -> class 3 (surface
+    only, never retired)."""
+    from datetime import timedelta
+    iid = f"i-{uuid4().hex[:8]}"
+    past = now_utc_naive() - timedelta(days=2)
+    _make_instance(engine, iid, last_activity_at=past)
+    _seed_checkpoint_rows(engine, iid, 3)
+    boot_epoch = now_utc_naive()
+    mgr = _MockManager(task_repo)
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "1"):
+        res = await surface_stranded_running_instances(mgr, boot_epoch)
+    by_id = {c.instance_id: c.classification for c in res.classifications}
+    assert by_id[iid] == "3"
+    assert res.retired == 0
     assert mgr.terminated == []
 
 
 @pytest.mark.asyncio
-async def test_stranded_durable_surface_accessor(
-    task_repo: TaskRepository, engine: Engine
-) -> None:
-    """The surfaced set is queryable after the boot via the accessor."""
-    from daemon.services.auto_continue_boot_pass import get_last_stranded_surfacing
+async def test_class_1b_does_not_require_zero_checkpoints(task_repo, engine):
+    """ASYMMETRY PIN: class 1b (delivered work) does NOT require zero
+    checkpoint rows -- the 68f04ccd exemplar carries 3 checkpoints + 1
+    blob and must stay 1b. DO NOT 'harmonise' the legs together."""
+    from datetime import timedelta
     iid = f"i-{uuid4().hex[:8]}"
-    _seed_instance(engine, iid, status="running")
+    past = now_utc_naive() - timedelta(days=5)
+    _make_instance(engine, iid, last_activity_at=past)
+    _seed_checkpoint_rows(engine, iid, 3)
+    _seed_report_delivered(engine, iid)
     boot_epoch = now_utc_naive()
     mgr = _MockManager(task_repo)
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "1"):
+        res = await surface_stranded_running_instances(mgr, boot_epoch)
+    by_id = {c.instance_id: c.classification for c in res.classifications}
+    assert by_id[iid] == "1b"
+    assert res.retired == 1
+    assert mgr.terminated == [(iid, "orphan_retired")]
 
-    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", None):
-        await surface_stranded_running_instances(mgr, boot_epoch)
-    last = get_last_stranded_surfacing()
-    assert last is not None
-    assert iid in last.surfaced_ids
+
+@pytest.mark.asyncio
+async def test_checkpoint_leg_degrades_to_class_3_when_table_absent(tmp_path):
+    """Graceful degradation: with the ``checkpoints`` table ABSENT the
+    leg cannot be evaluated -> FAIL CLOSED -> class 3, no mutation, and
+    the degradation is VISIBLE in the payload (evidence)."""
+    from datetime import timedelta
+    from sqlmodel import SQLModel as _SM
+    from sqlalchemy import create_engine as _ce
+    eng = _ce(
+        f"sqlite:///{tmp_path}/no_ckpt.db",
+        connect_args={"check_same_thread": False},
+        poolclass=NullPool,
+    )
+    _SM.metadata.create_all(eng)
+    # NOTE: no `checkpoints` table created here.
+    repo = TaskRepository(eng)
+    iid = f"i-{uuid4().hex[:8]}"
+    past = now_utc_naive() - timedelta(days=2)
+    _make_instance(eng, iid, last_activity_at=past)
+    boot_epoch = now_utc_naive()
+    mgr = _MockManager(repo)
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "1"):
+        res = await surface_stranded_running_instances(mgr, boot_epoch)
+    by_id = {c.instance_id: c.classification for c in res.classifications}
+    assert by_id[iid] == "3"
+    assert res.retired == 0
+    assert mgr.terminated == []
+    # VISIBLE: the degradation is carried in the evidence payload.
+    ev = {c.instance_id: c.evidence for c in res.classifications}[iid]
+    assert ev["checkpoint_leg"] == "degraded_absent"
+    assert res.degraded_checkpoint_leg == 1
+    eng.dispose()
+
+
+@pytest.mark.asyncio
+async def test_pending_dependency_watcher_is_class_2(task_repo, engine):
+    """P (a): a PENDING dependency-bus watcher is a class-2 leg -- the
+    instance is awaited, so it is NEVER retired."""
+    from datetime import timedelta
+    iid = f"i-{uuid4().hex[:8]}"
+    past = now_utc_naive() - timedelta(days=2)
+    _make_instance(engine, iid, last_activity_at=past)
+    _seed_dependency_watcher(engine, iid)
+    boot_epoch = now_utc_naive()
+    mgr = _MockManager(task_repo)
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "1"):
+        res = await surface_stranded_running_instances(mgr, boot_epoch)
+    by_id = {c.instance_id: c.classification for c in res.classifications}
+    assert by_id[iid] == "2"
+    assert res.retired == 0
+    assert mgr.terminated == []
+
+
+@pytest.mark.asyncio
+async def test_just_spawned_no_rows_never_retired(task_repo, engine):
+    """P (b) just-spawned floor: an instance spawned SECONDS ago with NO
+    task/message/checkpoint/JobItem rows at all is NEVER retired (it is
+    inside the 24 h bound)."""
+    from datetime import timedelta
+    iid = f"i-{uuid4().hex[:8]}"
+    now = now_utc_naive()
+    _make_instance(engine, iid, last_activity_at=now - timedelta(seconds=5))
+    boot_epoch = now_utc_naive()
+    mgr = _MockManager(task_repo)
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "1"):
+        res = await surface_stranded_running_instances(mgr, boot_epoch)
+    by_id = {c.instance_id: c.classification for c in res.classifications}
+    assert by_id[iid] in ("2", "3")
+    assert by_id[iid] not in ("1a", "1b")
+    assert res.retired == 0
+    assert mgr.terminated == []
+
+
+@pytest.mark.asyncio
+async def test_e08fc02c_live_developer_never_retired(task_repo, engine):
+    """P (e08fc02c) THE LIVE-DEVELOPER PIN -- NEVER retirable.
+
+    Measured shape of instance ``e08fc02c-22e2-4de8-9ed2-70787c3bd898``
+    (live DB ensemble_prod, 2026-11-23T19:40-19:56Z): 12 completed task
+    rows, 12 message_queue rows, 136 checkpoints (newest ts
+    2026-11-23T19:42:40Z), 6 children of which TWO were spawned within
+    the last 10 minutes and were LIVE, 8 report_injections (all
+    TASK_DELIVERED), ZERO job_queue_items rows, last activity MINUTES
+    before measurement. It satisfies every other leg of the retired
+    selector -- the epoch/JobItem walls do NOT save it (it has no
+    JobItem rows at all) -- so the task-row / message-row / live-descendant
+    legs are what keep it safe. It MUST land in a NON-MUTATING class.
+    """
+    from datetime import timedelta
+    iid = "e08fc02c-22e2-4de8-9ed2-70787c3bd898"
+    now = now_utc_naive()
+    _make_instance(engine, iid, last_activity_at=now - timedelta(minutes=8))
+    for _ in range(12):
+        _seed_task_row(engine, iid, status="completed")
+    for _ in range(12):
+        _seed_message_row(engine, iid)
+    for _ in range(8):
+        _seed_report_delivered(engine, iid)
+    _seed_checkpoint_rows(engine, iid, 136)
+    # 6 children; two of them live (spawned minutes ago), four terminal.
+    for i in range(4):
+        _seed_child(engine, iid, f"c-{i}-{uuid4().hex[:6]}", child_status="terminated")
+    _seed_child(engine, iid, "cbdf1880-live-1", child_status="running")
+    _seed_child(engine, iid, "5f354205-live-2", child_status="running")
+    # ZERO job_queue_items rows (the shape has none).
+
+    boot_epoch = now_utc_naive()
+    mgr = _MockManager(task_repo)
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "1"):
+        res = await surface_stranded_running_instances(mgr, boot_epoch)
+    by_id = {c.instance_id: c.classification for c in res.classifications}
+    assert by_id[iid] in ("2", "3")
+    assert by_id[iid] not in ("1a", "1b")
+    assert res.retired == 0
+    assert mgr.terminated == []

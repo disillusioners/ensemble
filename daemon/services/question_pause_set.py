@@ -197,7 +197,17 @@ _RELEASED_OUTCOMES = frozenset(
 #: Everything else (``silent_resume`` = the internal-child no-op,
 #: ``wake_failed`` = the loud WC refusal, ``None`` = no handle) is a
 #: REFUSAL and must be surfaced, never counted as a wake.
-_WAKE_STATUSES = frozenset({"resuming", "wake_enqueued", "resumed", "queued"})
+#:
+#: ``pending_redrive`` (F2) is INCLUDED deliberately: it means an anchored
+#: PENDING task was made claimable AND the job pipeline + worker pools were
+#: woken — a REAL wake of durable work, not a refusal. Classifying it as
+#: OUTCOME_WAKE_REFUSED would falsely report a strand and leave the
+#: question-pause marker uncleared even though the instance is being
+#: re-driven. The decision is documented here (R6/nit-8) so the
+#: classification is explicit rather than an accident of the set literal.
+_WAKE_STATUSES = frozenset(
+    {"resuming", "wake_enqueued", "resumed", "queued", "pending_redrive"}
+)
 
 
 # ---------------------------------------------------------------------------

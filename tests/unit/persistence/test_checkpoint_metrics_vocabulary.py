@@ -9,7 +9,7 @@ Frozen sets (all in ``daemon/checkpoint_metrics.py``):
 
 * instance status (10) — ``daemon/repositories/instance/models.py``
   → ``InstanceStatus``;
-* sweep lane (13) — the seven RDRS lanes (named by the
+* sweep lane (15) — the eight RDRS lanes (named by the
   ``report_delivery_recovery_lane_*`` kill-switchs of
   ``daemon/config.py``) PLUS the six standalone sweep services (each
   owns a ``DEFAULT_*_INTERVAL_SECONDS`` constant);
@@ -67,10 +67,10 @@ class TestInstanceStatusVocabulary:
 
 
 class TestSweepLaneVocabulary:
-    """13 lanes = 7 RDRS lanes + 6 standalone sweep services."""
+    """15 lanes = 8 RDRS lanes + 7 standalone sweep services."""
 
     def test_has_thirteen_values(self) -> None:
-        assert len(SWEEP_LANE_VOCABULARY) == 13
+        assert len(SWEEP_LANE_VOCABULARY) == 15
 
     def test_rdrs_lanes_come_from_the_config_kill_switchs(self) -> None:
         import daemon.config as config
@@ -80,7 +80,7 @@ class TestSweepLaneVocabulary:
             for name in config.ServicesConfig.model_fields
             if name.startswith("report_delivery_recovery_lane_")
         ]
-        assert len(lane_fields) == 7, f"RDRS lane count drifted: {sorted(lane_fields)}"
+        assert len(lane_fields) == 8, f"RDRS lane count drifted: {sorted(lane_fields)}"
         derived = {
             "rdrs_" + name[len("report_delivery_recovery_lane_") :] for name in lane_fields
         }
@@ -91,7 +91,7 @@ class TestSweepLaneVocabulary:
         standalone = {
             name for name in SWEEP_LANE_VOCABULARY if not name.startswith("rdrs_")
         }
-        assert len(standalone) == 6
+        assert len(standalone) == 7
 
     def test_standalone_lanes_match_the_sweep_services(self) -> None:
         import daemon.services as services_pkg

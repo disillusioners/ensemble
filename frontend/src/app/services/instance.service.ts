@@ -3,6 +3,7 @@ import { firstValueFrom } from 'rxjs';
 import { Observable } from 'rxjs';
 import { ApiService } from './api.service';
 import { SseService } from './sse.service';
+import { InstancesViewStateService } from './instances-view-state.service';
 import type { InstanceInfo, InstanceListResponse, InstanceStatus } from '../models';
 
 const PAGE_SIZE = 10;
@@ -33,6 +34,7 @@ export function sortByCreatedAtDesc(instances: InstanceInfo[]): InstanceInfo[] {
 export class InstanceService {
   private readonly api = inject(ApiService);
   private readonly sseService = inject(SseService);
+  private readonly viewState = inject(InstancesViewStateService);
 
   // Polling interval: 60 seconds
   private readonly POLLING_INTERVAL = 60_000;
@@ -357,6 +359,15 @@ export class InstanceService {
     // currently active tab's source filter.
     const effectiveSource = source ?? this._currentSource;
 
+    // Anchor: the route-selected instance (detail overlay) + its subtree must
+    // always be present in the list. Read INSIDE loadInstances() at fetch time
+    // — the same precedent as searchQuery() — so the initial load, pagination
+    // (loadMore) and the 60 s poll tick all inherit it automatically. No new
+    // param on startPolling; no anchor on the 8 s badge poll / tree fetches.
+    const anchor = this.viewState.detailVisible()
+      ? (this.viewState.activeInstanceId() ?? null)
+      : null;
+
     if (append) {
       this.isLoadingMore.set(true);
     } else {
@@ -375,6 +386,7 @@ export class InstanceService {
           undefined,           // order: BE default (pinned)
           true,                // include_descendants: default true (back-compat)
           effectiveSource,     // source: tab's active source-type filter (sticky via _currentSource)
+          anchor ?? undefined, // anchor: selected instance + subtree (only while detail is visible)
         )
       );
 
