@@ -9,11 +9,15 @@
 #
 # Strategy: source launcher.sh (the source-guard in main must hold — sourcing
 # must NOT run anything), then unit-test the pure decision functions
-# (classify_exit / next_backoff / budget_tick), the .env parser, the
-# state-file round-trip + corrupt tolerance, and the ADR-012 journal sweep
-# (P2.1 T7: decision table against fixture state.json + release dirs — pure
-# filesystem sandboxes, no daemon, no network). NO binaries are ever spawned;
-# the run-loop itself is not executed here.
+# (classify_exit / next_backoff / budget_tick / healthy_run_reset), the .env
+# parser, the state-file round-trip + corrupt tolerance, and the ADR-012
+# journal sweep (P2.1 T7: decision table against fixture state.json +
+# release dirs — pure filesystem sandboxes, no daemon, no network).
+#
+# EXCEPTION (2026-11-26, §15): the crash-budget-reset cells DO execute the
+# run loop — against a FAKE child binary, a deterministic clock and a
+# sandboxed install dir (mktemp -d). No real daemon, no service, no live
+# .env and no live .launcher-state is ever read or written.
 # ============================================================================
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -94,6 +98,9 @@ if declare -F classify_exit >/dev/null 2>&1 \
     && declare -F write_state >/dev/null 2>&1 \
     && declare -F _journal_sweep >/dev/null 2>&1 \
     && declare -F _notify_once >/dev/null 2>&1 \
+    && declare -F healthy_run_reset >/dev/null 2>&1 \
+    && declare -F reset_crash_budget >/dev/null 2>&1 \
+    && declare -F _apply_budget_reset >/dev/null 2>&1 \
     && declare -F resolve_binary >/dev/null 2>&1; then
     _pass
 else
@@ -2985,12 +2992,290 @@ else
     _pass
 fi
 
+# ─── 15. Crash-budget reset on a proven-healthy run (2026-11-26) ───────────
+# Incident: the 2026-11-23 host-reboot storm froze crash_count=5 on disk
+# for three days. The burst counters were only ever ADVANCED (budget_tick on
+# the crash path) and never CLEARED, so the file kept describing a dead
+# storm while the unit was healthy (NRestarts=0, Result=success) — every
+# operator who read it concluded the daemon was crash-looping.
+#
+# The reset rule: a completed run whose uptime reached BUDGET_UPTIME_RESET_S
+# (600s) ends the burst. The uptime gate — NOT "the child exited 0" — is
+# load-bearing; see healthy_run_reset's own comment for why (the supervisor's
+# own stop path never yields exit 0).
+#
+# These cells are hermetic: a fake child binary, a deterministic clock and a
+# sandboxed install dir. No live daemon, no service, no live .env, and no
+# live .launcher-state is read or written.
+section "crash-budget reset on a proven-healthy run"
+
+# ── helpers ────────────────────────────────────────────────────────────────
+
+# _cbr_sandbox <dir> — build a hermetic install sandbox: a fake supervised
+# child (and a stop-path variant). Nothing outside <dir> is ever touched.
+_cbr_sandbox() {
+    local dir="$1"
+    mkdir -p "$dir"
+    cat > "$dir/fake-child.sh" <<'CBRCHILD'
+#!/usr/bin/env bash
+# Fake supervised child. Behaviour comes from the environment:
+#   CBR_EXIT   exit code to return (default 3)
+#   CBR_SLEEP  seconds to sleep before exiting (default 0.05)
+#   CBR_TRACE  file to append the on-disk crash_count to before exiting
+if [ -n "${CBR_TRACE:-}" ] && [ -f "${CBR_STATE:-}" ]; then
+    grep '^crash_count=' "$CBR_STATE" 2>/dev/null | cut -d= -f2 >> "$CBR_TRACE"
+fi
+sleep "${CBR_SLEEP:-0.05}"
+exit "${CBR_EXIT:-3}"
+CBRCHILD
+    chmod +x "$dir/fake-child.sh"
+    # The stop-path child must SURVIVE until it is signalled: exec sleep
+    # replaces the shell, so the SIGTERM lands on sleep itself and the
+    # child dies with 143 (the shape of a daemon asked to stop).
+    cat > "$dir/fake-child-stop.sh" <<'CBRSTOP'
+#!/usr/bin/env bash
+exec sleep 30
+CBRSTOP
+    chmod +x "$dir/fake-child-stop.sh"
+}
+
+# _cbr_prelude <dir> <clock_step_s> [backoff_base_s] — (call INSIDE a subshell)
+# point the launcher at the sandbox, install a deterministic clock and shrink
+# ONLY the backoff ladder so a scenario runs in seconds.
+# BUDGET_UPTIME_RESET_S is deliberately NOT touched: every proof below runs
+# against the REAL 600s threshold.
+# The backoff base defaults to 0 (no pacing — the escalation ladder itself
+# is pinned by the next_backoff cells above); a scenario that needs a window
+# in which the launcher is SLEEPING between crashes passes 1.
+_cbr_prelude() {
+    INSTALL_DIR="$1"
+    STATE_FILE="$1/.launcher-state"
+    CBR_CLOCK_BASE=1000000
+    CBR_CLOCK_STEP="$2"
+    CBR_CLOCK_FILE="$1/.clock"
+    echo 0 > "$CBR_CLOCK_FILE"
+    # A deterministic clock: every _now call advances the counter by
+    # CBR_CLOCK_STEP seconds, so a run's measured uptime is exactly the
+    # step. The counter lives in a FILE because _now is invoked inside a
+    # command substitution (a subshell), where a shell-variable increment
+    # would be lost.
+    _now() {
+        local n
+        n=$(cat "$CBR_CLOCK_FILE" 2>/dev/null || echo 0)
+        printf '%s\n' "$(( CBR_CLOCK_BASE + CBR_CLOCK_STEP * n ))"
+        echo $(( n + 1 )) > "$CBR_CLOCK_FILE"
+    }
+    # Shrink only the backoff ladder (the storm's escalation is asserted
+    # purely by the next_backoff cells above). The cap is what matters: the
+    # seeded last_backoff seeds next_backoff, so a non-zero cap would pace
+    # the storm in real seconds.
+    CRASH_BACKOFF_BASE_S=0
+    CRASH_BACKOFF_FACTOR=2
+    CRASH_BACKOFF_CAP_S="${3:-0}"
+    CHILD_STOP_WAIT_S=5
+}
+
+# _cbr_field <file> <key> — read one key out of a state file.
+_cbr_field() {
+    sed -n "s/^$2=//p" "$1" 2>/dev/null | head -1
+}
+
+# The LIVE install's state file exactly as observed on 2026-11-26
+# (mtime 2026-11-23 16:44:36Z — untouched by both of today's promotes).
+CBR_LIVE_STATE='last_exit=3
+crash_count=5
+window_start=1795452068
+last_backoff=160
+notified_75=0
+last_uptime=15'
+
+# The DEMO install's state file — same format, same storm, last_uptime=8.
+CBR_DEMO_STATE='last_exit=3
+crash_count=5
+window_start=1795452068
+last_backoff=160
+notified_75=0
+last_uptime=8'
+
+# ── 15a. the decision seam ─────────────────────────────────────────────────
+section "crash-budget reset — decision seam (healthy_run_reset)"
+assert_eq "healthy_run_reset: uptime 600s → reset (at the threshold)" \
+    "reset" "$(healthy_run_reset 600 0)"
+assert_eq "healthy_run_reset: uptime 599s → keep (one second short)" \
+    "keep" "$(healthy_run_reset 599 0)"
+assert_eq "healthy_run_reset: 15s storm uptime → keep (Nov-23 shape stays visible)" \
+    "keep" "$(healthy_run_reset 15 3)"
+assert_eq "healthy_run_reset: long run + crash code 137 → reset" \
+    "reset" "$(healthy_run_reset 900 137)"
+assert_eq "healthy_run_reset: long run + supervisor-stop code 143 → reset" \
+    "reset" "$(healthy_run_reset 900 143)"
+assert_eq "healthy_run_reset: exit 75 → keep (ADR-011 #1 — tempfail never touches the budget)" \
+    "keep" "$(healthy_run_reset 900 75)"
+assert_eq "the proof-of-health threshold is the launcher's own 600s constant" \
+    "600" "$BUDGET_UPTIME_RESET_S"
+
+# ── 15b. PROOF A — the crash storm is STILL visible after the fix ──────────
+section "crash-budget reset — PROOF A: the storm shape still climbs"
+CBR_A_DIR="$(mktemp -d "${TMPDIR:-/tmp}/launcher-cbr-storm.XXXXXX")"
+_cbr_sandbox "$CBR_A_DIR"
+# A burst already in progress: count=3 inside one 10-minute window — the
+# Nov-23 shape (repeated ~15s uptimes, the counter climbing 3→4→5→6).
+printf '%s\n' "last_exit=3" "crash_count=3" "window_start=1000000" \
+    "last_backoff=80" "notified_75=0" "last_uptime=15" > "$CBR_A_DIR/.launcher-state"
+(
+    _cbr_prelude "$CBR_A_DIR" 15
+    export CBR_EXIT=3 CBR_SLEEP=0.05
+    export CBR_TRACE="$CBR_A_DIR/trace" CBR_STATE="$CBR_A_DIR/.launcher-state"
+    run_loop "$CBR_A_DIR/fake-child.sh" 2>"$CBR_A_DIR/launcher.log"
+)
+CBR_A_RC=$?
+assert_eq "PROOF A: the storm still trips the burst-abort hold (launcher exit 1)" \
+    "1" "$CBR_A_RC"
+assert_eq "PROOF A: the counter CLIMBED to 6 — the storm is still visible" \
+    "6" "$(_cbr_field "$CBR_A_DIR/.launcher-state" crash_count)"
+assert_eq "PROOF A: the climb is visible on disk across the storm (3→4→5)" \
+    "3 4 5" "$(tr '\n' ' ' < "$CBR_A_DIR/trace" | sed 's/ $//')"
+assert_eq "PROOF A: the storm's short uptimes never armed the reset" \
+    "15" "$(_cbr_field "$CBR_A_DIR/.launcher-state" last_uptime)"
+assert_eq "PROOF A: the reset did NOT fire during the storm" \
+    "0" "$(grep -c 'crash budget reset' "$CBR_A_DIR/launcher.log" || true)"
+
+# ── 15c. PROOF B — a proven-healthy run CLEARS the stale storm ─────────────
+section "crash-budget reset — PROOF B: a healthy run clears the counter"
+CBR_B_DIR="$(mktemp -d "${TMPDIR:-/tmp}/launcher-cbr-clean.XXXXXX")"
+_cbr_sandbox "$CBR_B_DIR"
+printf '%s\n' "$CBR_LIVE_STATE" > "$CBR_B_DIR/.launcher-state"
+(
+    _cbr_prelude "$CBR_B_DIR" 700      # the run lived 700s ≥ 600s
+    export CBR_EXIT=0 CBR_SLEEP=0.05
+    run_loop "$CBR_B_DIR/fake-child.sh" 2>"$CBR_B_DIR/launcher.log"
+)
+CBR_B_RC=$?
+assert_eq "PROOF B: the healthy run exited clean (launcher exit 0)" "0" "$CBR_B_RC"
+assert_eq "PROOF B: crash_count cleared" "0" "$(_cbr_field "$CBR_B_DIR/.launcher-state" crash_count)"
+assert_eq "PROOF B: window_start cleared" "0" "$(_cbr_field "$CBR_B_DIR/.launcher-state" window_start)"
+assert_eq "PROOF B: last_backoff cleared" "0" "$(_cbr_field "$CBR_B_DIR/.launcher-state" last_backoff)"
+assert_eq "PROOF B: notified_75 cleared" "0" "$(_cbr_field "$CBR_B_DIR/.launcher-state" notified_75)"
+assert_eq "PROOF B: last_exit records the real exit (0)" "0" "$(_cbr_field "$CBR_B_DIR/.launcher-state" last_exit)"
+assert_eq "PROOF B: last_uptime records the real uptime (700s)" "700" "$(_cbr_field "$CBR_B_DIR/.launcher-state" last_uptime)"
+assert_eq "PROOF B: the reset fired exactly once" \
+    "1" "$(grep -c 'crash budget reset' "$CBR_B_DIR/launcher.log" || true)"
+
+# ── 15d. PROOF C — the supervisor-stop path (systemd's SIGTERM) ────────────
+# This is the path the LIVE host actually takes: systemd stops the unit
+# with SIGTERM; the launcher forwards it and exits with the CHILD's code
+# (143 here — the child dies on the forwarded TERM). Before the fix that
+# path wrote NO state at all, which is exactly why the live counters stayed
+# frozen for three days. The exit code is UNCHANGED by the fix.
+section "crash-budget reset — PROOF C: the supervisor-stop path clears it"
+CBR_C_DIR="$(mktemp -d "${TMPDIR:-/tmp}/launcher-cbr-stop.XXXXXX")"
+_cbr_sandbox "$CBR_C_DIR"
+printf '%s\n' "$CBR_LIVE_STATE" > "$CBR_C_DIR/.launcher-state"
+(
+    _cbr_prelude "$CBR_C_DIR" 700
+    run_loop "$CBR_C_DIR/fake-child-stop.sh" 2>"$CBR_C_DIR/launcher.log"
+) &
+CBR_C_PID=$!
+sleep 0.4
+kill -TERM "$CBR_C_PID" 2>/dev/null
+wait "$CBR_C_PID"
+CBR_C_RC=$?
+assert_eq "PROOF C: the launcher still exits with the CHILD's code (143 — contract unchanged)" \
+    "143" "$CBR_C_RC"
+assert_eq "PROOF C: crash_count cleared on the stop path" "0" "$(_cbr_field "$CBR_C_DIR/.launcher-state" crash_count)"
+assert_eq "PROOF C: window_start cleared on the stop path" "0" "$(_cbr_field "$CBR_C_DIR/.launcher-state" window_start)"
+assert_eq "PROOF C: last_backoff cleared on the stop path" "0" "$(_cbr_field "$CBR_C_DIR/.launcher-state" last_backoff)"
+assert_eq "PROOF C: last_exit records the child's 143" "143" "$(_cbr_field "$CBR_C_DIR/.launcher-state" last_exit)"
+assert_eq "PROOF C: last_uptime records the real uptime (700s)" "700" "$(_cbr_field "$CBR_C_DIR/.launcher-state" last_uptime)"
+
+# ── 15e. a SHORT successful run must NOT look clean ────────────────────────
+# "a run that succeeds for a second and then crashes" must stay visible: a
+# short run is a crash-loop member whatever it exits, so it must NOT erase
+# the repetition evidence.
+section "crash-budget reset — a short successful run does NOT clear"
+CBR_D_DIR="$(mktemp -d "${TMPDIR:-/tmp}/launcher-cbr-short.XXXXXX")"
+_cbr_sandbox "$CBR_D_DIR"
+printf '%s\n' "$CBR_LIVE_STATE" > "$CBR_D_DIR/.launcher-state"
+(
+    _cbr_prelude "$CBR_D_DIR" 15      # the run lasted 15s — a crash-loop shape
+    export CBR_EXIT=0 CBR_SLEEP=0.05
+    run_loop "$CBR_D_DIR/fake-child.sh" 2>"$CBR_D_DIR/launcher.log"
+)
+CBR_D_RC=$?
+assert_eq "short run: the launcher exits clean (0)" "0" "$CBR_D_RC"
+assert_eq "short run: crash_count SURVIVES (the storm evidence is not erased)" \
+    "5" "$(_cbr_field "$CBR_D_DIR/.launcher-state" crash_count)"
+assert_eq "short run: window_start SURVIVES" \
+    "1795452068" "$(_cbr_field "$CBR_D_DIR/.launcher-state" window_start)"
+assert_eq "short run: last_backoff SURVIVES" \
+    "160" "$(_cbr_field "$CBR_D_DIR/.launcher-state" last_backoff)"
+assert_eq "short run: the reset did NOT fire" \
+    "0" "$(grep -c 'crash budget reset' "$CBR_D_DIR/launcher.log" || true)"
+
+# ── 15f. the state-file FORMAT is unchanged (demo/dev installs share it) ───
+# The reset changes VALUES only. The key set and the key ORDER are what the
+# readers parse (upgrade_tools._launcher_state_values, watchdog-watcher.sh)
+# and what the sibling installs' files carry.
+section "crash-budget reset — state-file format unchanged"
+assert_eq "format: the writer still emits the canonical six-key format" \
+    'last_exit=%s\ncrash_count=%s\nwindow_start=%s\nlast_backoff=%s\nnotified_75=%s\nlast_uptime=%s\n' \
+    "$(grep -o "printf 'last_exit=%s[^']*'" "$LAUNCHER" | head -1 | sed "s/^printf '//; s/'$//")"
+assert_eq "format: the written key order is the canonical order" \
+    "last_exit crash_count window_start last_backoff notified_75 last_uptime" \
+    "$(cut -d= -f1 "$CBR_B_DIR/.launcher-state" | tr '\n' ' ' | sed 's/ $//')"
+assert_eq "format: the written key order matches the live/demo file's order" \
+    "last_exit crash_count window_start last_backoff notified_75 last_uptime" \
+    "$(cut -d= -f1 <(printf '%s\n' "$CBR_DEMO_STATE") | tr '\n' ' ' | sed 's/ $//')"
+# The demo-shaped file must still parse with the same semantics.
+CBR_E_DIR="$(mktemp -d "${TMPDIR:-/tmp}/launcher-cbr-demo.XXXXXX")"
+printf '%s\n' "$CBR_DEMO_STATE" > "$CBR_E_DIR/.launcher-state"
+(
+    STATE_FILE="$CBR_E_DIR/.launcher-state"
+    read_state
+    [ "${STATE_LAST_EXIT:-}" = "3" ]              || exit 80
+    [ "${STATE_CRASH_COUNT:-}" = "5" ]             || exit 81
+    [ "${STATE_WINDOW_START:-}" = "1795452068" ]   || exit 82
+    [ "${STATE_LAST_BACKOFF:-}" = "160" ]         || exit 83
+    [ "${STATE_LAST_UPTIME:-}" = "8" ]             || exit 84
+    [ "${STATE_NOTIFIED_75:-}" = "0" ]             || exit 85
+    exit 0
+)
+assert_eq "format: the demo-shaped state file parses exactly as before" "0" "$?"
+
+# ── 15g. stopping the launcher DURING a storm must NOT erase the evidence ──
+# The opposite of the healthy-run reset: if the operator stops the launcher
+# while a crash burst is still in progress (the SIGTERM lands during the
+# backoff sleep, before the next child starts), the burst must survive —
+# otherwise a stop would launder the evidence of a live crash loop.
+section "crash-budget reset — a stop DURING a storm does NOT clear"
+CBR_F_DIR="$(mktemp -d "${TMPDIR:-/tmp}/launcher-cbr-midstorm.XXXXXX")"
+_cbr_sandbox "$CBR_F_DIR"
+printf '%s\n' "last_exit=3" "crash_count=3" "window_start=1000000" \
+    "last_backoff=80" "notified_75=0" "last_uptime=15" > "$CBR_F_DIR/.launcher-state"
+(
+    _cbr_prelude "$CBR_F_DIR" 15 1   # cap 1 → a 1s backoff window to stop inside
+    export CBR_EXIT=3 CBR_SLEEP=0.05
+    export CBR_TRACE="$CBR_F_DIR/trace" CBR_STATE="$CBR_F_DIR/.launcher-state"
+    run_loop "$CBR_F_DIR/fake-child.sh" 2>"$CBR_F_DIR/launcher.log"
+) &
+CBR_F_PID=$!
+sleep 0.4        # the child has crashed and the launcher is in its backoff
+kill -TERM "$CBR_F_PID" 2>/dev/null
+wait "$CBR_F_PID"
+CBR_F_RC=$?
+assert_eq "mid-storm stop: the counter is NOT cleared (the storm evidence survives)" \
+    "4" "$(_cbr_field "$CBR_F_DIR/.launcher-state" crash_count)"
+assert_eq "mid-storm stop: the reset did NOT fire" \
+    "0" "$(grep -c 'crash budget reset' "$CBR_F_DIR/launcher.log" || true)"
+
 # ─── cleanup ────────────────────────────────────────────────────────────────
 rm -rf "$ENV_TEST_DIR" "$STATE_TEST_DIR" "$JS_TEST_DIR" \
        "$RB_TEST_DIR" "$RB_TEST_DIR2" "$RB_TEST_DIR3" "$RB_TEST_DIR4" \
        "$RB_TEST_DIR5" "$LP_TEST_DIR" "$JSF_TEST_DIR" "$JSF_PERF_DIR" \
        "$JSF_NOAWK_DIR" "$JSF_FAKE_DIR" "$JSF_WEDGE_DIR" \
-       "$JSF_DECIDE_WEDGE_DIR" 2>/dev/null
+       "$JSF_DECIDE_WEDGE_DIR" \
+       "$CBR_A_DIR" "$CBR_B_DIR" "$CBR_C_DIR" "$CBR_D_DIR" "$CBR_E_DIR" \
+       "$CBR_F_DIR" 2>/dev/null
 
 # ─── summary ────────────────────────────────────────────────────────────────
 printf '\n========================================\n'

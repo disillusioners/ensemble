@@ -4333,6 +4333,84 @@ budget_tick() {
     fi
 }
 
+# healthy_run_reset <uptime_s> <code> → echoes: reset | keep
+#
+# Does the run that just ended PROVE the daemon was healthy — and therefore
+# END the crash burst that the persisted counters are still describing?
+#
+# THE RULE: a completed run whose uptime reached BUDGET_UPTIME_RESET_S
+# (600s) ends the burst. The caller then clears crash_count /
+# window_start / last_backoff / notified_75.
+#
+# WHY THE UPTIME GATE AND NOT "the child exited 0":
+#   * The supervisor's own stop path NEVER produces exit 0. systemd stops
+#     the unit with SIGTERM; the launcher forwards it, bounds the child's
+#     teardown at CHILD_STOP_WAIT_S (70s) and exits with the CHILD's code —
+#     measured status=137 (SIGKILL after that bound) on the live host and
+#     143 elsewhere. An "exit == 0" gate would never fire where it matters.
+#   * A SHORT run is a crash-loop member whatever it exits: clearing on a
+#     one-second success would erase the repetition evidence and the NEXT
+#     crash would be counted as #1 — the "succeeds for a second and then
+#     crashes" shape must stay visible.
+#   * BUDGET_UPTIME_RESET_S is ALREADY this file's proof-of-health
+#     threshold — budget_tick() re-seeds the burst when a run that lasted
+#     ≥600s crashes. This fix makes that ONE rule apply on the exit paths
+#     that never reach budget_tick (clean stop, supervisor stop, refusal).
+#     No new threshold, no second notion of "healthy".
+#   * exit 75 stays exempt (ADR-011 #1: the tempfail track never touches
+#     the crash budget — not even to clear it).
+healthy_run_reset() {
+    local uptime_s="$1" code="$2"
+    if [ "$code" -eq 75 ]; then
+        echo "keep"
+        return 0
+    fi
+    if [ "$uptime_s" -ge "$BUDGET_UPTIME_RESET_S" ]; then
+        echo "reset"
+        return 0
+    fi
+    echo "keep"
+}
+
+# reset_crash_budget — clear the crash-burst counters (THE RESET ONLY).
+#
+# These counters are what an operator reads to answer "is the daemon
+# crash-looping?" — so they must describe the CURRENT burst, not a storm
+# that has already ended. Pre-fix they were only ever ADVANCED by
+# budget_tick() on the crash path and never cleared, so a host-reboot storm
+# froze crash_count=5 on disk for days while the unit was healthy
+# (NRestarts=0, Result=success) and every operator read the file as an
+# active crash loop.
+#
+# The crash-DETECTION semantics are untouched here: budget_tick,
+# classify_exit, next_backoff, BUDGET_MAX_CRASHES and the abort threshold
+# keep exactly their pre-fix behaviour.
+reset_crash_budget() {
+    STATE_CRASH_COUNT=0
+    STATE_WINDOW_START=0
+    STATE_LAST_BACKOFF=0
+    STATE_NOTIFIED_75=0
+}
+
+# _apply_budget_reset <uptime_s> <code> — apply + persist the crash-budget
+# reset when the run that just ended proves health (healthy_run_reset).
+# No-op otherwise: the burst evidence survives untouched.
+#
+# The state file's FORMAT is unchanged (write_state writes the same six
+# keys in the same order) — only the VALUES change. Readers that parse it
+# (upgrade_tools._launcher_state_values, watchdog-watcher.sh) and sibling
+# installs that share the format (demo/dev) are unaffected.
+_apply_budget_reset() {
+    local uptime_s="$1" code="$2"
+    [ "$(healthy_run_reset "$uptime_s" "$code")" = "reset" ] || return 0
+    reset_crash_budget
+    STATE_LAST_EXIT="$code"
+    STATE_LAST_UPTIME="$uptime_s"
+    write_state
+    _log "healthy run (uptime ${uptime_s}s) — crash budget reset (crash_count=0, window_start=0, last_backoff=0)"
+    return 0
+}
+
 # ── Binary resolution (Phase-1 form) ────────────────────────────────────────
 # Prefer INSTALL_DIR/current/ensemble-prod (Phase 2 introduces the releases/
 # layout behind the `current` symlink); fall back to today's flat
@@ -4449,6 +4527,12 @@ run_loop() {
                 child_exit="$REAPED_EXIT"
             fi
             CHILD_PID=0
+            # A run that lived ≥BUDGET_UPTIME_RESET_S ends the burst it is
+            # not part of: this was a planned stop of a healthy daemon, not
+            # a crash. Persist the cleared counters so the file stops
+            # describing a past storm. The exit code below is UNCHANGED —
+            # still the child's, as the supervisor contract requires.
+            _apply_budget_reset "$uptime" "$child_exit"
             _log "shutdown complete — exiting $child_exit (child's exit code)"
             exit "$child_exit"
         fi
@@ -4496,10 +4580,16 @@ run_loop() {
 
         case "$verdict" in
             clean)
+                # The daemon stopped on its own after a PROVEN-healthy run:
+                # the burst it was never part of is over — clear it.
+                _apply_budget_reset "$uptime" "$child_exit"
                 _log "child exited 0 (clean stop) — launcher exiting 0, not looping"
                 exit 0
                 ;;
             refuse)
+                # A refusal is a fatal-config exit, not a crash — a run that
+                # lasted ≥BUDGET_UPTIME_RESET_S still ends the old burst.
+                _apply_budget_reset "$uptime" "$child_exit"
                 _log "child exited 78 (refuse: fatal config/schema) — launcher exiting 78, NOT restarting (ADR-010)"
                 exit 78
                 ;;
