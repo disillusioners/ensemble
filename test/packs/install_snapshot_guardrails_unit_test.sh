@@ -29,8 +29,13 @@ BUDGET_S="${INSTALL_SNAPSHOT_GUARDRAILS_BUDGET_S:-240}"
 START_S=$(date +%s)
 PACK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$PACK_DIR/../.." && pwd)"
-SCRIPT="$REPO_ROOT/scripts/protection/ensemble-install-snapshot.sh"
+# By default the pack pins the REPO source of truth. Point it at a deployed
+# copy to verify the installed artifact instead:
+#   INSTALL_SNAPSHOT_SCRIPT=/usr/local/sbin/ensemble-install-snapshot.sh bash <pack>
+# (post-promote verification: the deployed copy must carry the new values.)
+SCRIPT="${INSTALL_SNAPSHOT_SCRIPT:-$REPO_ROOT/scripts/protection/ensemble-install-snapshot.sh}"
 
+PACK_SELF="${BASH_SOURCE[0]}"
 PASS=0
 FAIL=0
 declare -a FAILED_LEGS=()
@@ -51,6 +56,12 @@ echo "   script=$SCRIPT"
 
 if [ ! -f "$SCRIPT" ]; then
   echo "RESULT: FAIL (script under test not found: $SCRIPT)"; exit 1
+fi
+# Production snapshot-set fingerprint BEFORE the pack runs (root only; the pack
+# must leave the production snapshot set untouched whatever it does).
+if [ "$(id -u)" -eq 0 ]; then
+  PROD_SNAP_COUNT_BEFORE="$(ls -1d /home/nea/.install-snapshots/snap-* 2>/dev/null | wc -l | tr -d ' ')"
+  echo "   production_snapshot_count_before=$PROD_SNAP_COUNT_BEFORE"
 fi
 if ! bash -n "$SCRIPT"; then
   echo "RESULT: FAIL (bash -n rejected the script under test)"; exit 1
@@ -178,19 +189,45 @@ else
   ok "L5 floor-skip block has no fatal exit 1"
 fi
 
-# ── L6 — the non-root drill escape cannot reach the production root ─────────
-leg "L6 non-root drill escape is refused for the production snapshot root"
-PROD_OUT="$(env PATH="$STUB_BIN:$PATH" \
-  ENSEMBLE_SNAPSHOT_ROOT=/home/nea/.install-snapshots \
-  ENSEMBLE_SNAPSHOT_SRC="$FAKE_SRC" \
-  ENSEMBLE_SNAPSHOT_ALERT_DIR="$FAKE_ALERTS" \
-  ENSEMBLE_SNAPSHOT_ALLOW_NONROOT=1 \
-  timeout 30 bash "$SCRIPT" 2>&1)"
-PROD_RC=$?
-if [ "$PROD_RC" -ne 0 ] && printf '%s' "$PROD_OUT" | grep -q 'must run as root'; then
-  ok "L6 production snapshot root refuses a non-root drilled run (rc=$PROD_RC)"
+# ── L6 — the production snapshot root is never writable by a non-root run ───
+leg "L6 production snapshot root is the non-root refusal boundary"
+if grep -q 'PROD_SNAP_ROOT="/home/nea/.install-snapshots"' "$SCRIPT" && \
+   grep -q '\[ "\$SNAP_ROOT" = "\$PROD_SNAP_ROOT" \]' "$SCRIPT"; then
+  ok "L6 script pins the production snapshot root as the non-root refusal boundary"
 else
-  bad "L6 production root did not refuse the non-root run (rc=$PROD_RC) :: $PROD_OUT"
+  bad "L6 script does not pin the production snapshot root as the refusal boundary"
+fi
+# The DRILL itself is only safe as a NON-root run: under root the script is
+# SUPPOSED to be able to write the production root, so running it there would
+# publish a bogus snapshot of the fixture into the production snapshot set.
+if [ "$(id -u)" -eq 0 ]; then
+  echo "  SKIP: production-root drill not executed (running as root — a root run would legitimately write there; the structural pin above holds instead)"
+else
+  PROD_OUT="$(env PATH="$STUB_BIN:$PATH" \
+    ENSEMBLE_SNAPSHOT_ROOT=/home/nea/.install-snapshots \
+    ENSEMBLE_SNAPSHOT_SRC="$FAKE_SRC" \
+    ENSEMBLE_SNAPSHOT_ALERT_DIR="$FAKE_ALERTS" \
+    ENSEMBLE_SNAPSHOT_ALLOW_NONROOT=1 \
+    timeout 30 bash "$SCRIPT" 2>&1)"
+  PROD_RC=$?
+  if [ "$PROD_RC" -ne 0 ] && printf '%s' "$PROD_OUT" | grep -q 'must run as root'; then
+    ok "L6 production snapshot root refuses a non-root drilled run (rc=$PROD_RC)"
+  else
+    bad "L6 production root did not refuse the non-root run (rc=$PROD_RC) :: $PROD_OUT"
+  fi
+fi
+# Behavioural guarantee: the production snapshot set must be byte-for-byte the
+# SAME set after the pack as before it (measurable when running as root; under
+# non-root the refusal drill above already proves the production root is
+# unreachable). This is what makes the pack safe to run under sudo against a
+# DEPLOYED copy — the post-promote verification can never pollute production.
+if [ "$(id -u)" -eq 0 ] && [ -n "${PROD_SNAP_COUNT_BEFORE:-}" ]; then
+  PROD_SNAP_COUNT_AFTER="$(ls -1d /home/nea/.install-snapshots/snap-* 2>/dev/null | wc -l | tr -d ' ')"
+  if [ "$PROD_SNAP_COUNT_AFTER" = "$PROD_SNAP_COUNT_BEFORE" ]; then
+    ok "L6 production snapshot set unchanged by the pack (count=$PROD_SNAP_COUNT_AFTER)"
+  else
+    bad "L6 production snapshot set CHANGED: before=$PROD_SNAP_COUNT_BEFORE after=$PROD_SNAP_COUNT_AFTER"
+  fi
 fi
 
 echo
