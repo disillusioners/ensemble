@@ -1,570 +1,1620 @@
 {
   "agents": {
-    "_baby_template": [
-      "context",
-      "knowledge",
-      "mcp",
-      "nest-report",
-      "pok",
-      "shared_meta_kv"
+    "_baby_template": {
+      "allow": [
+        "context",
+        "knowledge",
+        "mcp",
+        "nest-report",
+        "pok",
+        "shared_meta_kv"
+      ],
+      "deny": [],
+      "innate": [
+        "todo"
+      ]
+    },
+    "_mother": {
+      "allow": [
+        "context",
+        "help",
+        "instance",
+        "knowledge",
+        "mcp",
+        "mother",
+        "nest-report",
+        "pok",
+        "self",
+        "shared_meta_kv"
+      ],
+      "deny": [],
+      "innate": [
+        "todo"
+      ]
+    },
+    "aegis": {
+      "allow": [
+        "bash",
+        "context",
+        "dynamic-skill",
+        "filesystem",
+        "help",
+        "instance",
+        "knowledge",
+        "mcp",
+        "midflight",
+        "nest-report",
+        "pok",
+        "proc",
+        "question",
+        "self",
+        "shared_meta_kv",
+        "time",
+        "todo"
+      ],
+      "deny": [
+        "edit_file",
+        "pause_instance",
+        "resume_instance",
+        "set_instance_tunable",
+        "terminate_instance",
+        "write_file"
+      ],
+      "innate": [
+        "dynamic-skill",
+        "todo"
+      ]
+    },
+    "approver": {
+      "allow": [
+        "bash",
+        "context",
+        "filesystem",
+        "help",
+        "image",
+        "instance",
+        "knowledge",
+        "mcp",
+        "nest-report",
+        "pok",
+        "proc",
+        "project_future",
+        "self",
+        "service",
+        "shared_meta_kv",
+        "time"
+      ],
+      "deny": [
+        "db",
+        "edit_file",
+        "write_file"
+      ],
+      "innate": [
+        "chart",
+        "dynamic-skill",
+        "todo"
+      ]
+    },
+    "approver[v2]": {
+      "allow": [
+        "bash",
+        "context",
+        "filesystem",
+        "help",
+        "image",
+        "instance",
+        "knowledge",
+        "mcp",
+        "nest-report",
+        "pok",
+        "proc",
+        "project_future",
+        "self",
+        "service",
+        "shared_meta_kv",
+        "time"
+      ],
+      "deny": [
+        "db",
+        "edit_file",
+        "write_file"
+      ],
+      "innate": [
+        "chart",
+        "dynamic-skill",
+        "todo"
+      ]
+    },
+    "architect": {
+      "allow": [
+        "bash",
+        "context",
+        "council",
+        "filesystem",
+        "help",
+        "image",
+        "instance",
+        "knowledge",
+        "mcp",
+        "nest-report",
+        "pok",
+        "proc",
+        "project_future",
+        "self",
+        "service",
+        "shared_meta_kv",
+        "time"
+      ],
+      "deny": [
+        "db_conn_add",
+        "db_conn_delete",
+        "edit_file"
+      ],
+      "innate": [
+        "chart",
+        "dynamic-skill",
+        "todo"
+      ]
+    },
+    "ari": {
+      "allow": [
+        "bash",
+        "board",
+        "board-link",
+        "context",
+        "filesystem",
+        "guidelines",
+        "help",
+        "image",
+        "image-gen",
+        "instance_ops",
+        "instance_read",
+        "job",
+        "job_inject",
+        "job_messages",
+        "job_progress",
+        "job_tree",
+        "mcp_rpc",
+        "memoir",
+        "mission",
+        "nest-report",
+        "notify-user",
+        "pause_instance",
+        "pok",
+        "project",
+        "prompt-assent",
+        "prompt-reload",
+        "question",
+        "resume_instance",
+        "room",
+        "scheduling",
+        "secrets",
+        "self",
+        "self-alarm",
+        "service",
+        "settings",
+        "shared_meta_kv",
+        "system_restart",
+        "system_upgrade",
+        "time",
+        "view-views",
+        "view-write",
+        "wedge-capture"
+      ],
+      "deny": [
+        "edit_file",
+        "watch_job",
+        "watch_jobs",
+        "write_file"
+      ],
+      "innate": [
+        "chart",
+        "job-orchestration",
+        "question",
+        "todo"
+      ]
+    },
+    "blueprinter": {
+      "allow": [
+        "blueprint",
+        "commit_docs_validated",
+        "filesystem",
+        "help",
+        "instance",
+        "nest-report",
+        "pok",
+        "self",
+        "time"
+      ],
+      "deny": [],
+      "innate": []
+    },
+    "canary": {
+      "allow": [
+        "bash",
+        "filesystem",
+        "help",
+        "pok",
+        "time"
+      ],
+      "deny": [
+        "edit_file",
+        "write_file"
+      ],
+      "innate": []
+    },
+    "charter": {
+      "allow": [
+        "bash",
+        "context",
+        "filesystem",
+        "image",
+        "nest-report",
+        "pok",
+        "proc",
+        "service",
+        "shared_meta_kv"
+      ],
+      "deny": [],
+      "innate": []
+    },
+    "coder": {
+      "allow": [
+        "bash",
+        "context",
+        "filesystem",
+        "help",
+        "instance",
+        "knowledge",
+        "midflight",
+        "nest-report",
+        "pok",
+        "proc",
+        "self",
+        "service",
+        "shared_meta_kv",
+        "snapshot_create",
+        "snapshot_search",
+        "time"
+      ],
+      "deny": [],
+      "innate": [
+        "chart",
+        "dynamic-skill",
+        "todo"
+      ]
+    },
+    "cracker": {
+      "allow": [
+        "bash",
+        "filesystem",
+        "help",
+        "nest-report",
+        "pok",
+        "proc",
+        "self",
+        "time"
+      ],
+      "deny": [
+        "edit_file",
+        "write_file"
+      ],
+      "innate": []
+    },
+    "critic": {
+      "allow": [
+        "design",
+        "image",
+        "nest-report",
+        "pok",
+        "read_file"
+      ],
+      "deny": [
+        "bash",
+        "image_save",
+        "infra",
+        "instance",
+        "mcp",
+        "midflight",
+        "proc",
+        "service",
+        "shared_meta_kv"
+      ],
+      "innate": [
+        "dynamic-skill",
+        "todo"
+      ]
+    },
+    "designer": {
+      "allow": [
+        "bash",
+        "context",
+        "design",
+        "dynamic-skill",
+        "filesystem",
+        "help",
+        "image",
+        "instance",
+        "knowledge",
+        "mcp",
+        "midflight",
+        "nest-report",
+        "pok",
+        "proc",
+        "self",
+        "service",
+        "shared_meta_kv",
+        "time",
+        "view-views"
+      ],
+      "deny": [],
+      "innate": [
+        "dynamic-skill",
+        "todo"
+      ]
+    },
+    "developer": {
+      "allow": [
+        "bash",
+        "context",
+        "filesystem",
+        "help",
+        "image",
+        "instance",
+        "knowledge",
+        "mcp",
+        "nest-report",
+        "pok",
+        "proc",
+        "project_future",
+        "self",
+        "service",
+        "shared_meta_kv",
+        "time"
+      ],
+      "deny": [
+        "edit_file",
+        "write_file"
+      ],
+      "innate": [
+        "chart",
+        "dynamic-skill",
+        "todo"
+      ]
+    },
+    "developer[v2]": {
+      "allow": [
+        "bash",
+        "context",
+        "filesystem",
+        "help",
+        "image",
+        "image-gen",
+        "instance",
+        "knowledge",
+        "mcp",
+        "nest-report",
+        "pok",
+        "proc",
+        "project_future",
+        "self",
+        "service",
+        "shared_meta_kv",
+        "time"
+      ],
+      "deny": [
+        "edit_file",
+        "write_file"
+      ],
+      "innate": [
+        "chart",
+        "dynamic-skill",
+        "todo"
+      ]
+    },
+    "devops": {
+      "allow": [
+        "bash",
+        "context",
+        "db",
+        "dynamic-skill",
+        "filesystem",
+        "guidelines",
+        "help",
+        "image",
+        "infra",
+        "knowledge",
+        "mcp",
+        "metrics-read",
+        "midflight",
+        "nest-report",
+        "nest-report-read",
+        "pok",
+        "proc",
+        "project",
+        "project_future",
+        "question",
+        "self",
+        "service",
+        "shared_meta_kv",
+        "time"
+      ],
+      "deny": [],
+      "innate": [
+        "chart",
+        "dynamic-skill",
+        "todo"
+      ]
+    },
+    "doc-maintainer": {
+      "allow": [
+        "comment_edit",
+        "doc_write",
+        "glob_files",
+        "grep_files",
+        "help",
+        "list_directory",
+        "nest-report",
+        "pok",
+        "read_file",
+        "shared_meta_kv",
+        "skill_search",
+        "time"
+      ],
+      "deny": [],
+      "innate": []
+    },
+    "doc-writer": {
+      "allow": [
+        "bash",
+        "context",
+        "filesystem",
+        "help",
+        "nest-report",
+        "pok",
+        "proc",
+        "service",
+        "shared_meta_kv",
+        "time"
+      ],
+      "deny": [],
+      "innate": [
+        "chart"
+      ]
+    },
+    "experiencer": {
+      "allow": [
+        "context",
+        "help",
+        "mcp",
+        "nest-report",
+        "rag",
+        "shared_meta_kv",
+        "time"
+      ],
+      "deny": [],
+      "innate": []
+    },
+    "explorer": {
+      "allow": [
+        "blueprint",
+        "context",
+        "filesystem",
+        "help",
+        "mcp",
+        "nest-report",
+        "pok",
+        "rag",
+        "shared_meta_kv",
+        "time"
+      ],
+      "deny": [
+        "experience",
+        "explore",
+        "rag_insert_text",
+        "rag_insert_texts",
+        "rag_query"
+      ],
+      "innate": []
+    },
+    "gaia": {
+      "allow": [
+        "bash",
+        "filesystem",
+        "help",
+        "nest-report",
+        "pok",
+        "proc",
+        "system"
+      ],
+      "deny": [],
+      "innate": [
+        "todo"
+      ]
+    },
+    "giter": {
+      "allow": [
+        "bash",
+        "context",
+        "filesystem",
+        "help",
+        "image",
+        "knowledge",
+        "mcp",
+        "nest-report",
+        "pok",
+        "proc",
+        "self",
+        "service",
+        "shared_meta_kv",
+        "time"
+      ],
+      "deny": [],
+      "innate": [
+        "todo"
+      ]
+    },
+    "governor": {
+      "allow": [
+        "council",
+        "help",
+        "instance",
+        "knowledge",
+        "nest-report",
+        "pok",
+        "project",
+        "self",
+        "shared_meta_kv",
+        "time"
+      ],
+      "deny": [],
+      "innate": [
+        "chart",
+        "todo"
+      ]
+    },
+    "hacker": {
+      "allow": [
+        "bash",
+        "filesystem",
+        "help",
+        "nest-report",
+        "pok",
+        "proc",
+        "self",
+        "time"
+      ],
+      "deny": [
+        "edit_file",
+        "write_file"
+      ],
+      "innate": []
+    },
+    "image-comparator": {
+      "allow": [
+        "bash",
+        "context",
+        "filesystem",
+        "nest-report",
+        "pok",
+        "proc",
+        "service",
+        "shared_meta_kv"
+      ],
+      "deny": [],
+      "innate": []
+    },
+    "image-reader": {
+      "allow": [
+        "context",
+        "help",
+        "knowledge",
+        "mcp",
+        "nest-report",
+        "pok",
+        "self",
+        "time"
+      ],
+      "deny": [],
+      "innate": []
+    },
+    "jober": {
+      "allow": [
+        "context",
+        "help",
+        "job",
+        "knowledge",
+        "mcp",
+        "mission",
+        "nest-report",
+        "pok",
+        "project",
+        "scheduling",
+        "self",
+        "shared_meta_kv",
+        "time"
+      ],
+      "deny": [
+        "watch_job",
+        "watch_jobs"
+      ],
+      "innate": [
+        "job-orchestration",
+        "todo"
+      ]
+    },
+    "kb-importer": {
+      "allow": [
+        "context",
+        "help",
+        "mcp",
+        "nest-report",
+        "pok",
+        "rag",
+        "shared_meta_kv",
+        "time"
+      ],
+      "deny": [
+        "rag_track_status"
+      ],
+      "innate": [
+        "todo"
+      ]
+    },
+    "kb-writer": {
+      "allow": [
+        "nest-report",
+        "rag_insert_text",
+        "time",
+        "tool_help"
+      ],
+      "deny": [],
+      "innate": []
+    },
+    "leader": {
+      "allow": [
+        "attestation",
+        "critical_notes",
+        "guidelines",
+        "help",
+        "image",
+        "image-gen",
+        "instance",
+        "job_pause",
+        "job_resume",
+        "knowledge",
+        "mcp",
+        "mcp_rpc",
+        "midflight",
+        "nest-report",
+        "pok",
+        "project",
+        "project_future",
+        "project_history",
+        "question",
+        "room",
+        "scheduling",
+        "secrets",
+        "self",
+        "settings",
+        "shared_meta_kv",
+        "subtree_messages",
+        "subtree_status",
+        "view-views",
+        "wedge-capture"
+      ],
+      "deny": [],
+      "innate": [
+        "chart",
+        "coordination",
+        "todo"
+      ]
+    },
+    "maintenancer": {
+      "allow": [
+        "db",
+        "ens-db",
+        "instance_ops",
+        "instance_read",
+        "knowledge",
+        "metrics-read",
+        "nest-report",
+        "nest-report-read",
+        "pok",
+        "send_message",
+        "spawn_instance",
+        "subtree_messages",
+        "subtree_status",
+        "system-log",
+        "system_restart",
+        "system_upgrade",
+        "wedge-capture"
+      ],
+      "deny": [
+        "edit_file",
+        "git_commit",
+        "write_file"
+      ],
+      "innate": [
+        "chart",
+        "dynamic-skill",
+        "todo"
+      ]
+    },
+    "planner": {
+      "allow": [
+        "bash",
+        "context",
+        "filesystem",
+        "help",
+        "image",
+        "instance",
+        "knowledge",
+        "mcp",
+        "nest-report",
+        "pok",
+        "proc",
+        "project_future",
+        "self",
+        "service",
+        "shared_meta_kv",
+        "time"
+      ],
+      "deny": [],
+      "innate": [
+        "chart",
+        "dynamic-skill",
+        "todo"
+      ]
+    },
+    "planner[v2]": {
+      "allow": [
+        "bash",
+        "context",
+        "filesystem",
+        "help",
+        "image",
+        "instance",
+        "knowledge",
+        "mcp",
+        "nest-report",
+        "pok",
+        "proc",
+        "project_future",
+        "self",
+        "service",
+        "shared_meta_kv",
+        "time"
+      ],
+      "deny": [],
+      "innate": [
+        "chart",
+        "dynamic-skill",
+        "todo"
+      ]
+    },
+    "project-manager": {
+      "allow": [
+        "chart",
+        "explore",
+        "filesystem",
+        "image",
+        "instance",
+        "nest-report",
+        "plane_complete_cycle",
+        "plane_count_work_items",
+        "plane_create_cycle",
+        "plane_create_work_item",
+        "plane_create_work_item_comment",
+        "plane_delete_cycle",
+        "plane_delete_work_item",
+        "plane_delete_work_item_comment",
+        "plane_list_cycle_work_items",
+        "plane_list_cycles",
+        "plane_list_projects",
+        "plane_list_states",
+        "plane_list_work_item_comments",
+        "plane_list_work_item_types",
+        "plane_list_work_items",
+        "plane_manage_cycle_archive",
+        "plane_manage_cycle_work_items",
+        "plane_manage_work_item_assignee",
+        "plane_resolve_work_item_type",
+        "plane_retrieve_cycle",
+        "plane_retrieve_work_item",
+        "plane_retrieve_work_item_by_identifier",
+        "plane_retrieve_work_item_comment",
+        "plane_search_work_items",
+        "plane_transfer_cycle_work_items",
+        "plane_update_cycle",
+        "plane_update_work_item",
+        "plane_update_work_item_comment",
+        "pok",
+        "project_add_directory",
+        "project_add_shortname",
+        "project_add_tag",
+        "project_cn_add",
+        "project_cn_list",
+        "project_cn_remove",
+        "project_create",
+        "project_delete_metadata",
+        "project_get",
+        "project_get_by_directory",
+        "project_get_by_instance",
+        "project_history_add",
+        "project_history_list",
+        "project_history_search",
+        "project_link",
+        "project_list",
+        "project_remove_directory",
+        "project_remove_shortname",
+        "project_remove_tag",
+        "project_search",
+        "project_set_metadata",
+        "project_set_shortnames",
+        "project_set_status",
+        "project_set_tags",
+        "project_unlink",
+        "project_update",
+        "shared_meta_kv",
+        "todo_view"
+      ],
+      "deny": [
+        "bash",
+        "council",
+        "edit_file",
+        "experience",
+        "mcp",
+        "project_delete",
+        "project_history_delete",
+        "question",
+        "self",
+        "terminate_instance",
+        "write_file"
+      ],
+      "innate": []
+    },
+    "reviewer": {
+      "allow": [
+        "bash",
+        "context",
+        "council",
+        "filesystem",
+        "help",
+        "image",
+        "image-gen",
+        "instance",
+        "knowledge",
+        "mcp",
+        "nest-report",
+        "pok",
+        "proc",
+        "project_future",
+        "self",
+        "service",
+        "shared_meta_kv",
+        "time"
+      ],
+      "deny": [],
+      "innate": [
+        "chart",
+        "dynamic-skill",
+        "todo"
+      ]
+    },
+    "reviewer[v2]": {
+      "allow": [
+        "bash",
+        "context",
+        "council",
+        "filesystem",
+        "help",
+        "image",
+        "instance",
+        "knowledge",
+        "mcp",
+        "nest-report",
+        "pok",
+        "proc",
+        "project_future",
+        "self",
+        "service",
+        "shared_meta_kv",
+        "time"
+      ],
+      "deny": [],
+      "innate": [
+        "chart",
+        "dynamic-skill",
+        "todo"
+      ]
+    },
+    "sketcher": {
+      "allow": [
+        "dynamic-skill",
+        "image",
+        "nest-report",
+        "od.compose_brief",
+        "od.generate",
+        "od.lint",
+        "od.save",
+        "pok"
+      ],
+      "deny": [],
+      "innate": [
+        "dynamic-skill"
+      ]
+    },
+    "skill-keeper": {
+      "allow": [
+        "dynamic-skill",
+        "glob_files",
+        "grep_files",
+        "help",
+        "knowledge",
+        "list_directory",
+        "nest-report",
+        "pok",
+        "read_file",
+        "self",
+        "shared_meta_kv",
+        "skill-evolution"
+      ],
+      "deny": [
+        "bash",
+        "edit_file",
+        "inner_soul",
+        "proc",
+        "service",
+        "write_file"
+      ],
+      "innate": [
+        "dynamic-skill",
+        "todo"
+      ]
+    },
+    "sonic-coder": {
+      "allow": [
+        "bash",
+        "context",
+        "filesystem",
+        "help",
+        "image",
+        "nest-report",
+        "pok",
+        "proc",
+        "self",
+        "shared_meta_kv",
+        "time"
+      ],
+      "deny": [
+        "image_save"
+      ],
+      "innate": [
+        "todo"
+      ]
+    },
+    "sonic-developer": {
+      "allow": [
+        "bash",
+        "context",
+        "filesystem",
+        "help",
+        "image",
+        "instance",
+        "knowledge",
+        "nest-report",
+        "pok",
+        "proc",
+        "self",
+        "shared_meta_kv",
+        "time",
+        "todo"
+      ],
+      "deny": [
+        "edit_file",
+        "image_save",
+        "write_file"
+      ],
+      "innate": [
+        "todo"
+      ]
+    },
+    "sonic-leader": {
+      "allow": [
+        "bash",
+        "context",
+        "filesystem",
+        "guidelines",
+        "help",
+        "image",
+        "instance",
+        "knowledge",
+        "midflight",
+        "nest-report",
+        "pok",
+        "room",
+        "self",
+        "shared_meta_kv",
+        "time"
+      ],
+      "deny": [
+        "edit_file",
+        "image_save",
+        "write_file"
+      ],
+      "innate": [
+        "todo"
+      ]
+    },
+    "sonic-reviewer": {
+      "allow": [
+        "bash",
+        "context",
+        "filesystem",
+        "help",
+        "image",
+        "nest-report",
+        "pok",
+        "self",
+        "time"
+      ],
+      "deny": [
+        "edit_file",
+        "image_save",
+        "infra",
+        "instance",
+        "mcp",
+        "midflight",
+        "proc",
+        "secrets",
+        "service",
+        "shared_meta_kv",
+        "write_file"
+      ],
+      "innate": []
+    },
+    "sonic-tester": {
+      "allow": [
+        "bash",
+        "context",
+        "filesystem",
+        "help",
+        "nest-report",
+        "pok",
+        "proc",
+        "self",
+        "time"
+      ],
+      "deny": [
+        "infra",
+        "instance",
+        "mcp",
+        "midflight",
+        "secrets",
+        "service",
+        "shared_meta_kv"
+      ],
+      "innate": []
+    },
+    "sweeper": {
+      "allow": [
+        "bash",
+        "filesystem",
+        "help",
+        "nest-report",
+        "pok",
+        "proc",
+        "self",
+        "time"
+      ],
+      "deny": [
+        "edit_file",
+        "write_file"
+      ],
+      "innate": []
+    },
+    "tester": {
+      "allow": [
+        "bash",
+        "blueprint",
+        "context",
+        "db",
+        "filesystem",
+        "help",
+        "image",
+        "image-gen",
+        "instance",
+        "knowledge",
+        "mcp",
+        "midflight",
+        "nest-report",
+        "pok",
+        "proc",
+        "project_future",
+        "secrets",
+        "self",
+        "service",
+        "shared_meta_kv",
+        "snapshot_create",
+        "snapshot_search",
+        "subtree_messages",
+        "subtree_status",
+        "time"
+      ],
+      "deny": [],
+      "innate": [
+        "dynamic-skill",
+        "test-pack",
+        "todo"
+      ]
+    },
+    "tidier": {
+      "allow": [
+        "bash",
+        "context",
+        "filesystem",
+        "help",
+        "image",
+        "instance",
+        "knowledge",
+        "mcp",
+        "nest-report",
+        "pok",
+        "proc",
+        "project_future",
+        "self",
+        "service",
+        "shared_meta_kv",
+        "time"
+      ],
+      "deny": [],
+      "innate": [
+        "chart",
+        "dynamic-skill",
+        "todo"
+      ]
+    },
+    "tidier[v2]": {
+      "allow": [
+        "bash",
+        "context",
+        "filesystem",
+        "help",
+        "image",
+        "instance",
+        "knowledge",
+        "mcp",
+        "nest-report",
+        "pok",
+        "proc",
+        "project_future",
+        "self",
+        "service",
+        "shared_meta_kv",
+        "time"
+      ],
+      "deny": [],
+      "innate": [
+        "chart",
+        "dynamic-skill",
+        "todo"
+      ]
+    },
+    "video-capturer": {
+      "allow": [
+        "bash",
+        "context",
+        "filesystem",
+        "help",
+        "image",
+        "knowledge",
+        "midflight",
+        "nest-report",
+        "pok",
+        "proc",
+        "room",
+        "service",
+        "shared_meta_kv",
+        "time",
+        "todo"
+      ],
+      "deny": [],
+      "innate": [
+        "dynamic-skill",
+        "todo"
+      ]
+    },
+    "video-editor": {
+      "allow": [
+        "bash",
+        "context",
+        "filesystem",
+        "help",
+        "image",
+        "midflight",
+        "nest-report",
+        "pok",
+        "proc",
+        "room",
+        "shared_meta_kv",
+        "time",
+        "todo",
+        "view-views"
+      ],
+      "deny": [],
+      "innate": [
+        "dynamic-skill",
+        "todo"
+      ]
+    },
+    "video-producer": {
+      "allow": [
+        "context",
+        "filesystem",
+        "help",
+        "image",
+        "instance",
+        "knowledge",
+        "midflight",
+        "nest-report",
+        "pok",
+        "question",
+        "room",
+        "shared_meta_kv",
+        "subtree_messages",
+        "subtree_status",
+        "time",
+        "todo",
+        "view-views"
+      ],
+      "deny": [],
+      "innate": [
+        "dynamic-skill",
+        "todo"
+      ]
+    },
+    "video-verifier": {
+      "allow": [
+        "bash",
+        "context",
+        "filesystem",
+        "help",
+        "image",
+        "knowledge",
+        "midflight",
+        "nest-report",
+        "pok",
+        "proc",
+        "room",
+        "shared_meta_kv",
+        "time",
+        "todo"
+      ],
+      "deny": [],
+      "innate": [
+        "dynamic-skill",
+        "todo"
+      ]
+    },
+    "wanderer": {
+      "allow": [
+        "bash",
+        "blueprint",
+        "context",
+        "db",
+        "explore",
+        "filesystem",
+        "help",
+        "infra",
+        "instance",
+        "mcp",
+        "metrics-read",
+        "nest-report",
+        "nest-report-read",
+        "pok",
+        "proc",
+        "rag",
+        "self",
+        "service",
+        "shared_meta_kv",
+        "time"
+      ],
+      "deny": [],
+      "innate": [
+        "chart",
+        "dynamic-skill",
+        "todo"
+      ]
+    },
+    "watcher": {
+      "allow": [],
+      "deny": [],
+      "innate": []
+    },
+    "worker": {
+      "allow": [
+        "bash",
+        "context",
+        "dynamic-skill",
+        "ens-env",
+        "filesystem",
+        "help",
+        "image",
+        "image-gen",
+        "infra",
+        "knowledge",
+        "mcp",
+        "nest-report",
+        "plane_sync",
+        "pok",
+        "proc",
+        "room",
+        "secrets",
+        "self",
+        "service",
+        "shared_meta_kv",
+        "snapshot_create",
+        "snapshot_search",
+        "system-log",
+        "time"
+      ],
+      "deny": [],
+      "innate": [
+        "dynamic-skill",
+        "todo"
+      ]
+    }
+  },
+  "categories": {
+    "attestation": [
+      "attest_completion"
     ],
-    "_mother": [
-      "context",
-      "help",
-      "instance",
-      "knowledge",
-      "mcp",
-      "mother",
-      "nest-report",
-      "pok",
-      "self",
-      "shared_meta_kv"
+    "bash": [
+      "bash"
     ],
-    "aegis": [
-      "bash",
-      "context",
-      "dynamic-skill",
-      "filesystem",
-      "help",
-      "instance",
-      "knowledge",
-      "mcp",
-      "midflight",
-      "nest-report",
-      "pok",
-      "proc",
-      "question",
-      "self",
-      "shared_meta_kv",
-      "time",
-      "todo"
+    "blueprint": [
+      "blueprint_acknowledge_pending",
+      "blueprint_claim_pending",
+      "blueprint_create",
+      "blueprint_disable",
+      "blueprint_get",
+      "blueprint_get_pending_count",
+      "blueprint_list",
+      "blueprint_release_lease",
+      "blueprint_search",
+      "blueprint_update"
     ],
-    "approver": [
-      "bash",
-      "context",
-      "filesystem",
-      "help",
-      "image",
-      "instance",
-      "knowledge",
-      "mcp",
-      "nest-report",
-      "pok",
-      "proc",
-      "project_future",
-      "self",
-      "service",
-      "shared_meta_kv",
-      "time"
+    "board": [
+      "board_create",
+      "board_get",
+      "board_list",
+      "board_update"
     ],
-    "approver[v2]": [
-      "bash",
-      "context",
-      "filesystem",
-      "help",
-      "image",
-      "instance",
-      "knowledge",
-      "mcp",
-      "nest-report",
-      "pok",
-      "proc",
-      "project_future",
-      "self",
-      "service",
-      "shared_meta_kv",
-      "time"
+    "board-link": [
+      "board_link"
     ],
-    "architect": [
-      "bash",
-      "context",
-      "council",
-      "filesystem",
-      "help",
-      "image",
-      "instance",
-      "knowledge",
-      "mcp",
-      "nest-report",
-      "pok",
-      "proc",
-      "project_future",
-      "self",
-      "service",
-      "shared_meta_kv",
-      "time"
+    "chart": [
+      "generate_chart"
     ],
-    "ari": [
-      "bash",
-      "board",
-      "board-link",
-      "context",
-      "filesystem",
-      "guidelines",
-      "help",
-      "image",
-      "image-gen",
-      "instance_ops",
-      "instance_read",
-      "job",
-      "job_inject",
-      "job_messages",
-      "job_progress",
-      "job_tree",
-      "mcp_rpc",
-      "memoir",
-      "mission",
-      "nest-report",
-      "notify-user",
-      "pause_instance",
-      "pok",
-      "project",
-      "prompt-assent",
-      "prompt-reload",
-      "question",
-      "resume_instance",
-      "room",
-      "scheduling",
-      "secrets",
-      "self",
-      "self-alarm",
-      "service",
-      "settings",
-      "shared_meta_kv",
-      "system_restart",
-      "system_upgrade",
-      "time",
-      "view-views",
-      "view-write",
-      "wedge-capture"
+    "context": [
+      "list_context",
+      "read_context"
     ],
-    "blueprinter": [
-      "blueprint",
-      "commit_docs_validated",
-      "filesystem",
-      "help",
-      "instance",
-      "nest-report",
-      "pok",
-      "self",
-      "time"
+    "council": [
+      "clear_councilor_errors",
+      "convene_council",
+      "convene_council_with_skill",
+      "spawn_councilor"
     ],
-    "canary": [
-      "bash",
-      "filesystem",
-      "help",
-      "pok",
-      "time"
+    "critical_notes": [
+      "project_cn_add",
+      "project_cn_backfill_embeddings",
+      "project_cn_list",
+      "project_cn_pin",
+      "project_cn_remove",
+      "project_cn_supersede"
     ],
-    "charter": [
-      "bash",
-      "context",
-      "filesystem",
-      "image",
-      "nest-report",
-      "pok",
-      "proc",
-      "service",
-      "shared_meta_kv"
+    "db": [
+      "db_conn_add",
+      "db_conn_delete",
+      "db_conn_list",
+      "db_conn_test",
+      "db_postgres_dml_select"
     ],
-    "coder": [
-      "bash",
-      "context",
-      "filesystem",
-      "help",
-      "instance",
-      "knowledge",
-      "midflight",
-      "nest-report",
-      "pok",
-      "proc",
-      "self",
-      "service",
-      "shared_meta_kv",
-      "snapshot_create",
-      "snapshot_search",
-      "time"
+    "design": [
+      "compare_images"
     ],
-    "cracker": [
-      "bash",
-      "filesystem",
-      "help",
-      "nest-report",
-      "pok",
-      "proc",
-      "self",
-      "time"
+    "dynamic-skill": [
+      "skill_create",
+      "skill_feedback",
+      "skill_fix",
+      "skill_list",
+      "skill_search",
+      "skill_view"
     ],
-    "critic": [
-      "design",
-      "image",
-      "nest-report",
-      "pok",
-      "read_file"
+    "ens-db": [
+      "ens_db_inspect",
+      "ens_db_pool_status",
+      "ens_db_postgres_select",
+      "ens_db_repair_execute"
     ],
-    "designer": [
-      "bash",
-      "context",
-      "design",
-      "dynamic-skill",
-      "filesystem",
-      "help",
-      "image",
-      "instance",
-      "knowledge",
-      "mcp",
-      "midflight",
-      "nest-report",
-      "pok",
-      "proc",
-      "self",
-      "service",
-      "shared_meta_kv",
-      "time",
-      "view-views"
+    "ens-env": [
+      "ens_env_read"
     ],
-    "developer": [
-      "bash",
-      "context",
-      "filesystem",
-      "help",
-      "image",
-      "instance",
-      "knowledge",
-      "mcp",
-      "nest-report",
-      "pok",
-      "proc",
-      "project_future",
-      "self",
-      "service",
-      "shared_meta_kv",
-      "time"
-    ],
-    "developer[v2]": [
-      "bash",
-      "context",
-      "filesystem",
-      "help",
-      "image",
-      "image-gen",
-      "instance",
-      "knowledge",
-      "mcp",
-      "nest-report",
-      "pok",
-      "proc",
-      "project_future",
-      "self",
-      "service",
-      "shared_meta_kv",
-      "time"
-    ],
-    "devops": [
-      "bash",
-      "context",
-      "db",
-      "dynamic-skill",
-      "filesystem",
-      "guidelines",
-      "help",
-      "image",
-      "infra",
-      "knowledge",
-      "mcp",
-      "metrics-read",
-      "midflight",
-      "nest-report",
-      "nest-report-read",
-      "pok",
-      "proc",
-      "project",
-      "project_future",
-      "question",
-      "self",
-      "service",
-      "shared_meta_kv",
-      "time"
-    ],
-    "doc-maintainer": [
-      "comment_edit",
-      "doc_write",
+    "filesystem": [
+      "edit_file",
       "glob_files",
       "grep_files",
-      "help",
       "list_directory",
-      "nest-report",
-      "pok",
       "read_file",
-      "shared_meta_kv",
-      "skill_search",
-      "time"
+      "write_file"
     ],
-    "doc-writer": [
-      "bash",
-      "context",
-      "filesystem",
-      "help",
-      "nest-report",
-      "pok",
-      "proc",
-      "service",
-      "shared_meta_kv",
-      "time"
+    "guidelines": [
+      "guideline_read",
+      "guidelines_list"
     ],
-    "experiencer": [
-      "context",
-      "help",
-      "mcp",
-      "nest-report",
-      "pok",
-      "rag",
-      "shared_meta_kv",
-      "time"
-    ],
-    "explorer": [
-      "blueprint",
-      "context",
-      "filesystem",
-      "help",
-      "mcp",
-      "nest-report",
-      "pok",
-      "rag",
-      "shared_meta_kv",
-      "time"
-    ],
-    "gaia": [
-      "bash",
-      "filesystem",
-      "help",
-      "nest-report",
-      "pok",
-      "proc",
-      "system"
-    ],
-    "giter": [
-      "bash",
-      "context",
-      "filesystem",
-      "help",
-      "image",
-      "knowledge",
-      "mcp",
-      "nest-report",
-      "pok",
-      "proc",
-      "self",
-      "service",
-      "shared_meta_kv",
-      "time"
-    ],
-    "governor": [
-      "council",
-      "help",
-      "instance",
-      "knowledge",
-      "nest-report",
-      "pok",
-      "project",
-      "self",
-      "shared_meta_kv",
-      "time"
-    ],
-    "hacker": [
-      "bash",
-      "filesystem",
-      "help",
-      "nest-report",
-      "pok",
-      "proc",
-      "self",
-      "time"
-    ],
-    "image-comparator": [
-      "bash",
-      "context",
-      "filesystem",
-      "nest-report",
-      "pok",
-      "proc",
-      "service",
-      "shared_meta_kv"
-    ],
-    "image-reader": [
-      "context",
-      "help",
-      "knowledge",
-      "mcp",
-      "nest-report",
-      "pok",
-      "self",
-      "time"
-    ],
-    "jober": [
-      "context",
-      "help",
-      "job",
-      "knowledge",
-      "mcp",
-      "mission",
-      "nest-report",
-      "pok",
-      "project",
-      "scheduling",
-      "self",
-      "shared_meta_kv",
-      "time"
-    ],
-    "kb-importer": [
-      "context",
-      "help",
-      "mcp",
-      "nest-report",
-      "pok",
-      "rag",
-      "shared_meta_kv",
-      "time"
-    ],
-    "kb-writer": [
-      "nest-report",
-      "pok",
-      "rag_insert_text",
-      "time",
+    "help": [
       "tool_help"
     ],
-    "leader": [
-      "attestation",
-      "critical_notes",
-      "guidelines",
-      "help",
-      "image",
-      "image-gen",
-      "instance",
-      "job_pause",
-      "job_resume",
-      "knowledge",
-      "mcp",
-      "mcp_rpc",
-      "midflight",
-      "nest-report",
-      "pok",
-      "project",
-      "project_future",
-      "project_history",
-      "question",
-      "room",
-      "scheduling",
-      "secrets",
-      "self",
-      "settings",
-      "shared_meta_kv",
+    "image": [
+      "explain_image",
+      "image_get",
+      "image_list",
+      "image_save"
+    ],
+    "image-gen": [
+      "generate_image"
+    ],
+    "infra": [
+      "infra_asset_create",
+      "infra_asset_delete",
+      "infra_asset_get",
+      "infra_asset_list",
+      "infra_asset_search",
+      "infra_asset_update",
+      "infra_history_get",
+      "infra_type_list",
+      "infra_type_register",
+      "kms_attach",
+      "kms_lookup_handle",
+      "kms_request",
+      "mcp_set_env"
+    ],
+    "instance": [
+      "get_instance_info",
+      "list_instances",
+      "pause_instance",
+      "resume_instance",
+      "send_message",
+      "set_instance_tunable",
+      "spawn_instance",
       "subtree_messages",
       "subtree_status",
-      "view-views",
-      "wedge-capture"
+      "terminate_instance"
     ],
-    "maintenancer": [
-      "db",
-      "ens-db",
-      "instance_ops",
-      "instance_read",
-      "knowledge",
-      "metrics-read",
-      "nest-report",
-      "nest-report-read",
-      "pok",
-      "system-log",
-      "system_restart",
-      "system_upgrade",
-      "wedge-capture"
+    "instance_ops": [
+      "instance_answer",
+      "instance_dismiss",
+      "instance_mark",
+      "instance_nudge",
+      "instance_reclaim",
+      "instance_terminate"
     ],
-    "planner": [
-      "bash",
-      "context",
-      "filesystem",
-      "help",
-      "image",
-      "instance",
-      "knowledge",
-      "mcp",
-      "nest-report",
-      "pok",
-      "proc",
-      "project_future",
-      "self",
-      "service",
-      "shared_meta_kv",
-      "time"
+    "instance_read": [
+      "fleet_capacity_summary",
+      "instance_fleet_summary",
+      "instance_get",
+      "instance_health",
+      "instance_list"
     ],
-    "planner[v2]": [
-      "bash",
-      "context",
-      "filesystem",
-      "help",
-      "image",
-      "instance",
-      "knowledge",
-      "mcp",
-      "nest-report",
-      "pok",
-      "proc",
-      "project_future",
-      "self",
-      "service",
-      "shared_meta_kv",
-      "time"
+    "job": [
+      "dlq_list",
+      "dlq_replay",
+      "job_answer",
+      "job_cancel",
+      "job_continue",
+      "job_create",
+      "job_delete",
+      "job_get",
+      "job_inject",
+      "job_list",
+      "job_messages",
+      "job_pause",
+      "job_progress",
+      "job_restore",
+      "job_resume",
+      "job_retry",
+      "job_tree",
+      "list_watched_jobs",
+      "queue_create",
+      "queue_list",
+      "queue_update",
+      "unwatch_job",
+      "watch_job",
+      "watch_jobs"
     ],
-    "project-manager": [
-      "chart",
-      "explore",
-      "filesystem",
-      "image",
-      "instance",
-      "nest-report",
-      "plane_complete_cycle",
-      "plane_count_work_items",
-      "plane_create_cycle",
-      "plane_create_work_item",
-      "plane_create_work_item_comment",
-      "plane_delete_cycle",
-      "plane_delete_work_item",
-      "plane_delete_work_item_comment",
-      "plane_list_cycle_work_items",
-      "plane_list_cycles",
-      "plane_list_projects",
-      "plane_list_states",
-      "plane_list_work_item_comments",
-      "plane_list_work_item_types",
-      "plane_list_work_items",
-      "plane_manage_cycle_archive",
-      "plane_manage_cycle_work_items",
-      "plane_manage_work_item_assignee",
-      "plane_resolve_work_item_type",
-      "plane_retrieve_cycle",
-      "plane_retrieve_work_item",
-      "plane_retrieve_work_item_by_identifier",
-      "plane_retrieve_work_item_comment",
-      "plane_search_work_items",
-      "plane_transfer_cycle_work_items",
-      "plane_update_cycle",
-      "plane_update_work_item",
-      "plane_update_work_item_comment",
-      "pok",
+    "knowledge": [
+      "experience",
+      "explore"
+    ],
+    "language": [
+      "language_skip_check"
+    ],
+    "mcp_rpc": [
+      "mcp_rpc_command",
+      "mcp_rpc_connect",
+      "mcp_rpc_disconnect",
+      "mcp_rpc_list_machine"
+    ],
+    "memoir": [
+      "memoir_about",
+      "memoir_persona_ratify",
+      "memoir_pin",
+      "memoir_recall",
+      "memoir_review",
+      "memoir_timeline",
+      "memoir_unpin",
+      "memoir_write"
+    ],
+    "metrics-read": [
+      "metrics_families",
+      "metrics_history",
+      "metrics_snapshot"
+    ],
+    "midflight": [
+      "mid_flight_report"
+    ],
+    "mission": [
+      "await_mission",
+      "get_mission",
+      "list_missions",
+      "watch_mission"
+    ],
+    "mother": [
+      "agent_create",
+      "agent_delete",
+      "agent_list",
+      "agent_modify",
+      "agent_read"
+    ],
+    "nest-report": [
+      "report_anomaly"
+    ],
+    "nest-report-read": [
+      "anomaly_clusters",
+      "anomaly_report_detail"
+    ],
+    "notify-user": [
+      "notify_user"
+    ],
+    "plane_sync": [
+      "plane_sync_project"
+    ],
+    "pok": [
+      "pok_census",
+      "pok_curate",
+      "pok_gate_answer",
+      "pok_query",
+      "pok_upsert"
+    ],
+    "proc": [
+      "proc_list",
+      "proc_logs",
+      "proc_run",
+      "proc_status",
+      "proc_stop"
+    ],
+    "project": [
       "project_add_directory",
       "project_add_shortname",
       "project_add_tag",
-      "project_cn_add",
-      "project_cn_list",
-      "project_cn_remove",
       "project_create",
+      "project_delete",
       "project_delete_metadata",
       "project_get",
       "project_get_by_directory",
       "project_get_by_instance",
-      "project_history_add",
-      "project_history_list",
-      "project_history_search",
       "project_link",
       "project_list",
       "project_remove_directory",
@@ -576,331 +1626,497 @@
       "project_set_status",
       "project_set_tags",
       "project_unlink",
-      "project_update",
-      "shared_meta_kv",
+      "project_update"
+    ],
+    "project_future": [
+      "project_future_add",
+      "project_future_list",
+      "project_future_remove"
+    ],
+    "project_history": [
+      "project_history_add",
+      "project_history_delete",
+      "project_history_list",
+      "project_history_search"
+    ],
+    "prompt-assent": [
+      "prompt_assent"
+    ],
+    "prompt-reload": [
+      "prompt_reload"
+    ],
+    "question": [
+      "ask_questions"
+    ],
+    "rag": [
+      "rag_create_entity",
+      "rag_create_relation",
+      "rag_delete_docs",
+      "rag_delete_entity",
+      "rag_delete_relation",
+      "rag_get_entity",
+      "rag_get_graph",
+      "rag_insert_text",
+      "rag_insert_texts",
+      "rag_list_docs",
+      "rag_merge_entities",
+      "rag_query",
+      "rag_query_data",
+      "rag_search_labels",
+      "rag_track_status",
+      "rag_update_entity"
+    ],
+    "room": [
+      "room_close",
+      "room_create",
+      "room_post",
+      "room_read",
+      "room_task_decision"
+    ],
+    "scheduling": [
+      "task_schedule",
+      "task_schedule_cancel",
+      "task_schedule_list",
+      "task_schedule_update",
+      "tool_usage_digest"
+    ],
+    "secrets": [
+      "secret_generate_api_token",
+      "secret_generate_ssh_keypair",
+      "secret_list",
+      "secret_read_public",
+      "secret_retire",
+      "secret_store"
+    ],
+    "self": [
+      "access_memory",
+      "inner_soul"
+    ],
+    "self-alarm": [
+      "self_alarm"
+    ],
+    "service": [
+      "service_list",
+      "service_logs",
+      "service_start",
+      "service_status",
+      "service_stop"
+    ],
+    "settings": [
+      "settings_clear",
+      "settings_get",
+      "settings_set"
+    ],
+    "shared_meta_kv": [
+      "shared_meta_kv"
+    ],
+    "skill-evolution": [
+      "skill_analyze",
+      "skill_evolve",
+      "skill_execute_capture",
+      "skill_get_metrics",
+      "skill_resolve_ab"
+    ],
+    "snapshot": [
+      "snapshot_create",
+      "snapshot_search"
+    ],
+    "system": [
+      "system_config",
+      "system_env",
+      "system_health"
+    ],
+    "system-log": [
+      "ens_system_log_list",
+      "ens_system_log_read",
+      "ens_system_log_search",
+      "ens_system_log_tail"
+    ],
+    "system_upgrade": [
+      "release_info",
+      "system_restart",
+      "system_upgrade",
+      "upgrade_status"
+    ],
+    "time": [
+      "time"
+    ],
+    "todo": [
+      "todo_clear",
+      "todo_graph_add_edge",
+      "todo_graph_add_subtask",
+      "todo_graph_create",
+      "todo_graph_remove_edge",
+      "todo_graph_remove_subtask",
+      "todo_graph_update",
+      "todo_graph_update_subtask",
+      "todo_list_create",
+      "todo_list_update",
       "todo_view"
     ],
-    "reviewer": [
-      "bash",
-      "context",
-      "council",
-      "filesystem",
-      "help",
-      "image",
-      "image-gen",
-      "instance",
-      "knowledge",
-      "mcp",
-      "nest-report",
-      "pok",
-      "proc",
-      "project_future",
-      "self",
-      "service",
-      "shared_meta_kv",
-      "time"
+    "view-views": [
+      "view_link"
     ],
-    "reviewer[v2]": [
-      "bash",
-      "context",
-      "council",
-      "filesystem",
-      "help",
-      "image",
-      "instance",
-      "knowledge",
-      "mcp",
-      "nest-report",
-      "pok",
-      "proc",
-      "project_future",
-      "self",
-      "service",
-      "shared_meta_kv",
-      "time"
+    "view-write": [
+      "view_write"
     ],
-    "sketcher": [
-      "dynamic-skill",
-      "image",
-      "nest-report",
-      "od.compose_brief",
-      "od.generate",
-      "od.lint",
-      "od.save",
-      "pok"
-    ],
-    "skill-keeper": [
-      "dynamic-skill",
-      "glob_files",
-      "grep_files",
-      "help",
-      "knowledge",
-      "list_directory",
-      "nest-report",
-      "pok",
-      "read_file",
-      "self",
-      "shared_meta_kv",
-      "skill-evolution"
-    ],
-    "sonic-coder": [
-      "bash",
-      "context",
-      "filesystem",
-      "help",
-      "image",
-      "nest-report",
-      "pok",
-      "proc",
-      "self",
-      "shared_meta_kv",
-      "time"
-    ],
-    "sonic-developer": [
-      "bash",
-      "context",
-      "filesystem",
-      "help",
-      "image",
-      "instance",
-      "knowledge",
-      "nest-report",
-      "pok",
-      "proc",
-      "self",
-      "shared_meta_kv",
-      "time",
-      "todo"
-    ],
-    "sonic-leader": [
-      "bash",
-      "context",
-      "filesystem",
-      "guidelines",
-      "help",
-      "image",
-      "instance",
-      "knowledge",
-      "midflight",
-      "nest-report",
-      "pok",
-      "room",
-      "self",
-      "shared_meta_kv",
-      "time"
-    ],
-    "sonic-reviewer": [
-      "bash",
-      "context",
-      "filesystem",
-      "help",
-      "image",
-      "nest-report",
-      "pok",
-      "self",
-      "time"
-    ],
-    "sonic-tester": [
-      "bash",
-      "context",
-      "filesystem",
-      "help",
-      "nest-report",
-      "pok",
-      "proc",
-      "self",
-      "time"
-    ],
-    "sweeper": [
-      "bash",
-      "filesystem",
-      "help",
-      "nest-report",
-      "pok",
-      "proc",
-      "self",
-      "time"
-    ],
-    "tester": [
-      "bash",
-      "blueprint",
-      "context",
-      "db",
-      "filesystem",
-      "help",
-      "image",
-      "image-gen",
-      "instance",
-      "knowledge",
-      "mcp",
-      "midflight",
-      "nest-report",
-      "pok",
-      "proc",
-      "project_future",
-      "secrets",
-      "self",
-      "service",
-      "shared_meta_kv",
-      "snapshot_create",
-      "snapshot_search",
-      "subtree_messages",
-      "subtree_status",
-      "time"
-    ],
-    "tidier": [
-      "bash",
-      "context",
-      "filesystem",
-      "help",
-      "image",
-      "instance",
-      "knowledge",
-      "mcp",
-      "nest-report",
-      "pok",
-      "proc",
-      "project_future",
-      "self",
-      "service",
-      "shared_meta_kv",
-      "time"
-    ],
-    "tidier[v2]": [
-      "bash",
-      "context",
-      "filesystem",
-      "help",
-      "image",
-      "instance",
-      "knowledge",
-      "mcp",
-      "nest-report",
-      "pok",
-      "proc",
-      "project_future",
-      "self",
-      "service",
-      "shared_meta_kv",
-      "time"
-    ],
-    "video-capturer": [
-      "bash",
-      "context",
-      "filesystem",
-      "help",
-      "image",
-      "knowledge",
-      "midflight",
-      "nest-report",
-      "pok",
-      "proc",
-      "room",
-      "service",
-      "shared_meta_kv",
-      "time",
-      "todo"
-    ],
-    "video-editor": [
-      "bash",
-      "context",
-      "filesystem",
-      "help",
-      "image",
-      "midflight",
-      "nest-report",
-      "pok",
-      "proc",
-      "room",
-      "shared_meta_kv",
-      "time",
-      "todo",
-      "view-views"
-    ],
-    "video-producer": [
-      "context",
-      "filesystem",
-      "help",
-      "image",
-      "instance",
-      "knowledge",
-      "midflight",
-      "nest-report",
-      "pok",
-      "question",
-      "room",
-      "shared_meta_kv",
-      "subtree_messages",
-      "subtree_status",
-      "time",
-      "todo",
-      "view-views"
-    ],
-    "video-verifier": [
-      "bash",
-      "context",
-      "filesystem",
-      "help",
-      "image",
-      "knowledge",
-      "midflight",
-      "nest-report",
-      "pok",
-      "proc",
-      "room",
-      "shared_meta_kv",
-      "time",
-      "todo"
-    ],
-    "wanderer": [
-      "bash",
-      "blueprint",
-      "context",
-      "db",
-      "explore",
-      "filesystem",
-      "help",
-      "infra",
-      "instance",
-      "mcp",
-      "metrics-read",
-      "nest-report",
-      "nest-report-read",
-      "pok",
-      "proc",
-      "rag",
-      "self",
-      "service",
-      "shared_meta_kv",
-      "time"
-    ],
-    "watcher": [],
-    "worker": [
-      "bash",
-      "context",
-      "dynamic-skill",
-      "ens-env",
-      "filesystem",
-      "help",
-      "image",
-      "image-gen",
-      "infra",
-      "knowledge",
-      "mcp",
-      "nest-report",
-      "plane_sync",
-      "pok",
-      "proc",
-      "room",
-      "secrets",
-      "self",
-      "service",
-      "shared_meta_kv",
-      "snapshot_create",
-      "snapshot_search",
-      "system-log",
-      "time"
+    "wedge-capture": [
+      "wedge_capture_get",
+      "wedge_capture_list"
     ]
   },
-  "generated_from_commit": "a064fedf49a604f36cdcc3012161fe6cce9f7367"
+  "dynamic_prefixes": [
+    "plane_"
+  ],
+  "innate_skill_categories": {
+    "chart": [
+      "chart"
+    ],
+    "dynamic-skill": [
+      "dynamic-skill"
+    ],
+    "question": [
+      "question"
+    ],
+    "skill-evolution": [
+      "skill-evolution"
+    ],
+    "todo": [
+      "todo"
+    ]
+  },
+  "known_tool_names": [
+    "access_memory",
+    "agent_create",
+    "agent_delete",
+    "agent_list",
+    "agent_modify",
+    "agent_read",
+    "anomaly_clusters",
+    "anomaly_report_detail",
+    "ask_questions",
+    "attest_completion",
+    "await_mission",
+    "bash",
+    "blueprint_acknowledge_pending",
+    "blueprint_claim_pending",
+    "blueprint_create",
+    "blueprint_disable",
+    "blueprint_get",
+    "blueprint_get_pending_count",
+    "blueprint_list",
+    "blueprint_release_lease",
+    "blueprint_search",
+    "blueprint_update",
+    "board_create",
+    "board_get",
+    "board_link",
+    "board_list",
+    "board_update",
+    "clear_councilor_errors",
+    "comment_edit",
+    "commit_docs_validated",
+    "compare_images",
+    "convene_council",
+    "convene_council_with_skill",
+    "db_conn_add",
+    "db_conn_delete",
+    "db_conn_list",
+    "db_conn_test",
+    "db_postgres_dml_select",
+    "dlq_list",
+    "dlq_replay",
+    "doc_write",
+    "edit_file",
+    "ens_db_inspect",
+    "ens_db_pool_status",
+    "ens_db_postgres_select",
+    "ens_db_repair_execute",
+    "ens_env_read",
+    "ens_system_log_list",
+    "ens_system_log_read",
+    "ens_system_log_search",
+    "ens_system_log_tail",
+    "experience",
+    "explain_image",
+    "explore",
+    "fleet_capacity_summary",
+    "generate_chart",
+    "generate_image",
+    "get_instance_info",
+    "get_mission",
+    "glob_files",
+    "grep_files",
+    "guideline_read",
+    "guidelines_list",
+    "image_get",
+    "image_list",
+    "image_save",
+    "infra_asset_create",
+    "infra_asset_delete",
+    "infra_asset_get",
+    "infra_asset_list",
+    "infra_asset_search",
+    "infra_asset_update",
+    "infra_history_get",
+    "infra_type_list",
+    "infra_type_register",
+    "inner_soul",
+    "instance_answer",
+    "instance_dismiss",
+    "instance_fleet_summary",
+    "instance_get",
+    "instance_health",
+    "instance_list",
+    "instance_mark",
+    "instance_nudge",
+    "instance_reclaim",
+    "instance_terminate",
+    "job_answer",
+    "job_cancel",
+    "job_continue",
+    "job_create",
+    "job_delete",
+    "job_get",
+    "job_inject",
+    "job_list",
+    "job_messages",
+    "job_pause",
+    "job_progress",
+    "job_restore",
+    "job_resume",
+    "job_retry",
+    "job_tree",
+    "kms_attach",
+    "kms_lookup_handle",
+    "kms_request",
+    "language_skip_check",
+    "list_context",
+    "list_directory",
+    "list_instances",
+    "list_missions",
+    "list_watched_jobs",
+    "mcp_rpc_command",
+    "mcp_rpc_connect",
+    "mcp_rpc_disconnect",
+    "mcp_rpc_list_machine",
+    "mcp_set_env",
+    "memoir_about",
+    "memoir_persona_ratify",
+    "memoir_pin",
+    "memoir_recall",
+    "memoir_review",
+    "memoir_timeline",
+    "memoir_unpin",
+    "memoir_write",
+    "metrics_families",
+    "metrics_history",
+    "metrics_snapshot",
+    "mid_flight_report",
+    "notify_user",
+    "od.compose_brief",
+    "od.generate",
+    "od.lint",
+    "od.save",
+    "pause_instance",
+    "plane_sync_project",
+    "pok_census",
+    "pok_curate",
+    "pok_gate_answer",
+    "pok_query",
+    "pok_upsert",
+    "proc_list",
+    "proc_logs",
+    "proc_run",
+    "proc_status",
+    "proc_stop",
+    "project_add_directory",
+    "project_add_shortname",
+    "project_add_tag",
+    "project_cn_add",
+    "project_cn_backfill_embeddings",
+    "project_cn_list",
+    "project_cn_pin",
+    "project_cn_remove",
+    "project_cn_supersede",
+    "project_create",
+    "project_delete",
+    "project_delete_metadata",
+    "project_future_add",
+    "project_future_list",
+    "project_future_remove",
+    "project_get",
+    "project_get_by_directory",
+    "project_get_by_instance",
+    "project_history_add",
+    "project_history_delete",
+    "project_history_list",
+    "project_history_search",
+    "project_link",
+    "project_list",
+    "project_remove_directory",
+    "project_remove_shortname",
+    "project_remove_tag",
+    "project_search",
+    "project_set_metadata",
+    "project_set_shortnames",
+    "project_set_status",
+    "project_set_tags",
+    "project_unlink",
+    "project_update",
+    "prompt_assent",
+    "prompt_reload",
+    "queue_create",
+    "queue_list",
+    "queue_update",
+    "rag_create_entity",
+    "rag_create_relation",
+    "rag_delete_docs",
+    "rag_delete_entity",
+    "rag_delete_relation",
+    "rag_get_entity",
+    "rag_get_graph",
+    "rag_insert_text",
+    "rag_insert_texts",
+    "rag_list_docs",
+    "rag_merge_entities",
+    "rag_query",
+    "rag_query_data",
+    "rag_search_labels",
+    "rag_track_status",
+    "rag_update_entity",
+    "read_context",
+    "read_file",
+    "release_info",
+    "report_anomaly",
+    "resume_instance",
+    "room_close",
+    "room_create",
+    "room_post",
+    "room_read",
+    "room_task_decision",
+    "secret_generate_api_token",
+    "secret_generate_ssh_keypair",
+    "secret_list",
+    "secret_read_public",
+    "secret_retire",
+    "secret_store",
+    "self_alarm",
+    "send_message",
+    "service_list",
+    "service_logs",
+    "service_start",
+    "service_status",
+    "service_stop",
+    "set_instance_tunable",
+    "settings_clear",
+    "settings_get",
+    "settings_set",
+    "shared_meta_kv",
+    "skill_analyze",
+    "skill_create",
+    "skill_evolve",
+    "skill_execute_capture",
+    "skill_feedback",
+    "skill_fix",
+    "skill_get_metrics",
+    "skill_list",
+    "skill_resolve_ab",
+    "skill_search",
+    "skill_view",
+    "snapshot_create",
+    "snapshot_search",
+    "spawn_councilor",
+    "spawn_instance",
+    "subtree_messages",
+    "subtree_status",
+    "system_config",
+    "system_env",
+    "system_health",
+    "system_restart",
+    "system_upgrade",
+    "task_schedule",
+    "task_schedule_cancel",
+    "task_schedule_list",
+    "task_schedule_update",
+    "terminate_instance",
+    "time",
+    "todo_clear",
+    "todo_graph_add_edge",
+    "todo_graph_add_subtask",
+    "todo_graph_create",
+    "todo_graph_remove_edge",
+    "todo_graph_remove_subtask",
+    "todo_graph_update",
+    "todo_graph_update_subtask",
+    "todo_list_create",
+    "todo_list_update",
+    "todo_view",
+    "tool_help",
+    "tool_usage_digest",
+    "unwatch_job",
+    "upgrade_status",
+    "view_link",
+    "view_write",
+    "watch_job",
+    "watch_jobs",
+    "watch_mission",
+    "wedge_capture_get",
+    "wedge_capture_list",
+    "write_file"
+  ],
+  "privileged_categories": [
+    "board",
+    "board-link",
+    "ens-db",
+    "ens-env",
+    "guidelines",
+    "instance_ops",
+    "instance_read",
+    "mcp_rpc",
+    "memoir",
+    "metrics-read",
+    "nest-report-read",
+    "notify-user",
+    "prompt-assent",
+    "prompt-reload",
+    "room",
+    "secrets",
+    "self-alarm",
+    "settings",
+    "system-log",
+    "system_upgrade",
+    "view-views",
+    "view-write",
+    "wedge-capture"
+  ],
+  "provenance": {
+    "generator": "scripts/gen_tool_usage_allowlists.py",
+    "generator_version": 2,
+    "inputs": {
+      "agents": {
+        "content_sha256": "b0a7c89fb3931c3482c253b58cfa85cc0515e15aad90f48dbb997411e02a81d7",
+        "last_commit": "313dc080834b8b6d2bf79dfd61dfd4dd1bc96720"
+      },
+      "taxonomy": {
+        "content_sha256": "f3f2b8939ea640d0fbb19d49f4ebfe1eebc514928d9befe9dd986489f2bef5d5",
+        "last_commit": "792808052a5bd3fdc2ab5e2818c1ae2308c82240"
+      }
+    },
+    "tree_commit": "d7c15d45f65037844471c3d2ff2a06d4ed9afeec"
+  },
+  "runtime_only_categories": [
+    "mcp",
+    "plane"
+  ],
+  "schema_version": 2,
+  "unresolved": {
+    "allow": [],
+    "deny": [
+      {
+        "agent": "maintenancer",
+        "entry": "git_commit"
+      }
+    ]
+  }
 }

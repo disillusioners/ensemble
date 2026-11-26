@@ -43,6 +43,7 @@ skips that leg cleanly; the SQLite leg always runs.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -52,6 +53,11 @@ from sqlmodel import SQLModel, Session
 
 from daemon.repositories.tool_usage.models import ToolUsageDaily
 from daemon.services import tool_usage_digest as tud
+from daemon.tools._tool_registry import (
+    CATEGORY_MODULES,
+    DYNAMIC_TOOL_NAMES,
+    KNOWN_TOOL_NAMES,
+)
 from tests.helpers.tool_usage_t7_pg_fence import pg_throwaway_schema_engine
 
 #: The run date (D). 08:00 ICT == 01:00 UTC of the same UTC date.
@@ -241,9 +247,34 @@ def hermetic_artifacts(monkeypatch):
     of whatever the committed JSON artifacts currently carry (the
     sanctioned ``{}`` weight artifact means the fallback is the live state
     anyway — 9(a)).
+
+    ``allowlist_source`` is neutralized TOO, with a minimal VALID schema-2
+    envelope in state ``"ok"`` — never a degraded state. A degraded state
+    would turn EVERY verdict into ``"unknown"``, which is a verdict change
+    and would make these legs vacuous. An empty ``agents`` map makes NO
+    per-agent claim (§3.6.3 step 3), while the full 278-name vocabulary
+    keeps the reader's decision path live: a known name is DECIDED (``"no"``
+    against an empty flat map), an unknown name is genuinely undecidable.
     """
     monkeypatch.setattr(tud, "tool_weights", lambda: {})
     monkeypatch.setattr(tud, "allowlists", lambda: {})
+    monkeypatch.setattr(
+        tud,
+        "allowlist_source",
+        lambda: tud.AllowSource(
+            state="ok",
+            schema_version=2,
+            agents={},
+            categories={},
+            runtime_only_categories=[],
+            privileged_categories=[],
+            dynamic_prefixes=[],
+            innate_skill_categories={},
+            known_tool_names=set(KNOWN_TOOL_NAMES) | set(DYNAMIC_TOOL_NAMES),
+            unresolved={"allow": [], "deny": []},
+            provenance={},
+        ),
+    )
     return None
 
 
@@ -615,3 +646,35 @@ class TestRollupBodyHasNoNondeterministicSource:
         source = inspect.getsource(tud.render_markdown)
         assert "generated_at" in source
         assert "datetime.now" in source
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# R-EXPANSION — the reader consumes registry keys, never display names
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_the_digest_never_consumes_the_display_name_category_function():
+    """Node 38 (§3.9.2): a SOURCE pin plus a DATA pin.
+
+    The digest must never call the display-name category helper or import
+    the display-name constant: the artifact's category keys are REGISTRY
+    keys, and a display name ("File Operations", "Shell", ...) is not a
+    category the runtime can grant.
+    """
+    source = Path(tud.__file__).read_text(encoding="utf-8")
+    assert "get_tool_categories" not in source
+    assert "CATEGORY_NAME" not in source
+
+    artifact = (
+        Path(tud.__file__).resolve().parents[2]
+        / ".agents"
+        / "shared"
+        / "planning"
+        / "tool-usage-metrics-p1"
+        / "allowlists.json"
+    )
+    categories = json.loads(artifact.read_text(encoding="utf-8"))["categories"]
+    assert categories, "vacuity guard: the artifact must carry a category map"
+    assert set(categories) <= set(CATEGORY_MODULES)
+    for display_name in ("File Operations", "Nest Report", "Shell", "MCP"):
+        assert display_name not in categories

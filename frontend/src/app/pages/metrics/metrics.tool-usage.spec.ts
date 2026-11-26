@@ -456,6 +456,36 @@ describe('ToolUsageTabComponent — the summary source', () => {
     expect((fixture.nativeElement.querySelector('[data-test="tool-usage-table"]').textContent ?? '')).not.toContain('current');
   });
 
+  // POSITIVE pin: the corrected caveat carries the honest frequency-only
+  // ranking claim (the spec's §6.2 corrected copy). The paragraph is
+  // line-wrapped in the template, so the substring check runs against a
+  // whitespace-normalised copy of the text — a single-space literal
+  // checked against raw textContent would be defeated by a re-wrap.
+  it('the ranking caveat states that it ranks by frequency only', () => {
+    answerSummary([row()]);
+    const caveat = fixture.nativeElement.querySelector('[data-test="tool-usage-ranking-caveat"]');
+    expect(caveat).not.toBeNull();
+    const normalised = (caveat.textContent ?? '').replace(/\s+/g, ' ').trim();
+    expect(normalised).toContain('ranks by frequency only');
+  });
+
+  // NEGATIVE pin: the withdrawn over-claim "is the authoritative ranking
+  // surface" must not reappear. Withdrawn because there are NO per-tool
+  // schema weights published today (every tool carries the 230-token
+  // average fallback, so the Weight column is constant and the ranking
+  // is frequency-only) and the allow-list intersection the copy names is
+  // currently computed by exact string match against raw allow entries
+  // (wrong for categorized tools). The corrected copy says "is the
+  // authoritative day-figure and allow-list surface" instead. Normalised
+  // for the same re-wrap reason as the positive pin above.
+  it('the ranking caveat does NOT carry the withdrawn "authoritative ranking surface" claim', () => {
+    answerSummary([row()]);
+    const caveat = fixture.nativeElement.querySelector('[data-test="tool-usage-ranking-caveat"]');
+    expect(caveat).not.toBeNull();
+    const normalised = (caveat.textContent ?? '').replace(/\s+/g, ' ').trim();
+    expect(normalised).not.toContain('is the authoritative ranking surface');
+  });
+
   it('the heading carries the SERVER\u2019s instant (never the client clock) — M17', () => {
     // The generatedAt signal is seeded from payload.generated_at, so the
     // heading proves the timestamp is the daemon\u2019s, not the client\u2019s.

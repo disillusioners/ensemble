@@ -1060,43 +1060,39 @@ def list_tools_by_category() -> dict[str, list[str]]:
     return categories
 
 
-def _scan_category_module_sources() -> tuple[set[str], bool]:
-    """AST-scan every CATEGORY_MODULES source file for ``@tool``-decorated names.
+def scan_category_module_sources_by_category() -> "dict[str, dict[str, str | None]]":
+    """Per-category attribution sibling of ``_scan_category_module_sources()``.
 
-    Shared by ``discover_all_tool_names()`` (which then merges with the static
-    ``KNOWN_TOOL_NAMES`` fallback) and ``discover_source_only_tool_names()``
-    (which raises on zero-source — the frozen-binary case).
+    AST-scans every ``CATEGORY_MODULES`` source file and returns a mapping of
+    attributed category key -> {tool_name: defining_category_key_or_None}.
+
+    Attribution rule (per the spec, section 3.5):
+      * an explicit ``@register_tool_category("X")`` decorator arg wins
+        (resolved as a literal, or against the module's module-level
+        constants), and the value stored is that explicit category string;
+      * otherwise the defining module's ``CATEGORY_MODULES`` key is used,
+        and the value stored is ``None`` (no override).
+
+    The inner dict's KEYS are the tool names attributed to that category;
+    the VALUES carry the explicit-override string when one was present, else
+    ``None``.  This is a single AST walker shared with
+    ``_scan_category_module_sources()`` (no second walker).
 
     Returns:
-        (tool_names, any_source_read) — ``any_source_read`` is True iff at least
-        one category-module source file was actually read from disk. The AST
-        walker descends into every nested scope so factory-internal ``@tool``
-        decorations are caught (they never register at import time).
+        ``{category_key: {tool_name: override_or_None}}``.
     """
     import ast
     from pathlib import Path
 
-    tool_names: set[str] = set()
-    # Tracks whether ANY source file was actually read on this call. When the
-    # whole daemon/ tree is bytecode-only (frozen binary), this stays False and
-    # the caller decides what to do (fallback vs raise).
+    result: "dict[str, dict[str, str | None]]" = {}
     any_source_read = False
 
     for category_key, module_path_str in CATEGORY_MODULES.items():
         paths = module_path_str if isinstance(module_path_str, list) else [module_path_str]
         for mod_path in paths:
-            # Resolve module path to file path
-            # e.g. "daemon.tools.project" -> daemon/tools/project.py
             parts = mod_path.split(".")
-            # Skip the "daemon" prefix to find the package root
-            # Try relative path from this file's location
             try:
-                # Walk up from this file (daemon/tools/_tool_registry.py) to find the file
-                # daemon/tools/_tool_registry.py -> parent is daemon/tools/
                 base_dir = Path(__file__).parent  # daemon/tools/
-                # mod_path like "daemon.tools.project" -> parts ["daemon", "tools", "project"]
-                # We need the relative path from the daemon package root
-                # daemon/tools/ corresponds to "daemon.tools"
                 file_path = base_dir
                 for part in parts[2:]:  # skip "daemon", "tools"
                     file_path = file_path / part
@@ -1109,13 +1105,19 @@ def _scan_category_module_sources() -> tuple[set[str], bool]:
                 source = file_path.read_text()
                 tree = ast.parse(source)
 
-                # Walk the ENTIRE tree (not just top-level) to catch tools
-                # defined inside factory functions
+                # Module-level constants for resolving @register_tool_category(<name>).
+                module_consts: dict[str, str] = {}
+                for node in getattr(tree, "body", []):
+                    if isinstance(node, ast.Assign):
+                        for target in node.targets:
+                            if isinstance(target, ast.Name) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                                module_consts[target.id] = node.value.value
+
                 for node in ast.walk(tree):
                     if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                         continue
-                    # Check if any decorator is @tool (bare or called: @tool or @tool(...))
                     has_tool_decorator = False
+                    explicit_category = None
                     for dec in node.decorator_list:
                         dec_name = ""
                         if isinstance(dec, ast.Name):
@@ -1126,18 +1128,46 @@ def _scan_category_module_sources() -> tuple[set[str], bool]:
                             if isinstance(dec.func, ast.Name):
                                 dec_name = dec.func.id
                             elif isinstance(dec.func, ast.Attribute):
-                                dec_name = dec.func.attr
+                                dec_name = dec.attr
+                            # extract arg for register_tool_category
+                            if dec_name == "register_tool_category":
+                                if dec.args:
+                                    arg = dec.args[0]
+                                    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                                        explicit_category = arg.value
+                                    elif isinstance(arg, ast.Name):
+                                        explicit_category = module_consts.get(arg.id)
                         if dec_name == "tool":
                             has_tool_decorator = True
-                            break
 
-                    if has_tool_decorator:
-                        tool_names.add(node.name)
+                    if not has_tool_decorator:
+                        continue
+
+                    attributed = explicit_category if explicit_category is not None else category_key
+                    override_val = explicit_category if explicit_category is not None else None
+                    result.setdefault(attributed, {})[node.name] = override_val
 
             except (OSError, SyntaxError, Exception):
                 continue
 
+    scan_category_module_sources_by_category._any_source_read = any_source_read
+    return result
+
+
+def _scan_category_module_sources() -> tuple[set[str], bool]:
+    """Delegate to ``scan_category_module_sources_by_category()``.
+
+    Preserves the original return shape ``(tool_names, any_source_read)`` and
+    the same ``any_source_read`` semantics so ``discover_source_only_tool_names()``
+    and ``discover_all_tool_names()`` are behaviourally unchanged.
+    """
+    result = scan_category_module_sources_by_category()
+    tool_names: set[str] = set()
+    for cat, members in result.items():
+        tool_names.update(members.keys())
+    any_source_read = getattr(scan_category_module_sources_by_category, "_any_source_read", False)
     return tool_names, any_source_read
+
 
 
 def discover_source_only_tool_names() -> set[str]:

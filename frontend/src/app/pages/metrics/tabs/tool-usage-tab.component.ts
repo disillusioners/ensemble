@@ -62,9 +62,21 @@ import { chartSeriesColor } from '../../../components/charts/chart-theme';
  * ── THE RANKING IS A PROXY (U14 — surfaced in the UI copy) ──────────────
  *
  * The FE `calls_7d` sort is a frequency-only PROXY for layer-2
- * candidacy. The AUTHORITATIVE ranking surface is the Phase-3 daily
- * digest (schema-token weight × frequency + zero/near-zero + the
- * allow-list intersection). The table carries that caveat verbatim.
+ * candidacy — the Phase-3 daily digest (per-tool weight × frequency
+ * where per-tool weights are published, zero/near-zero, and the
+ * per-agent allow-list intersection) is the authoritative day-figure
+ * and allow-list surface; while no per-tool weights are published it
+ * ranks by frequency only — the same proxy as this table. calls 24h is
+ * a rolling surface — the digest's D−1 complete-UTC-day window is the
+ * precise day figure.
+ *
+ * The table carries that caveat verbatim. Note: there are NO per-tool
+ * schema weights published today (every tool carries the 230-token
+ * average fallback, so the Weight column is constant and the ranking is
+ * frequency-only), and the allow-list intersection the copy names is
+ * currently computed by exact string match against raw allow entries
+ * (wrong for categorized tools) — hence the withdrawn phrasing "is the
+ * authoritative ranking surface" must not reappear.
  *
  * ── THE D-7 DISCLOSURE ─────────────────────────────────────────────────
  *
@@ -212,10 +224,12 @@ import { chartSeriesColor } from '../../../components/charts/chart-theme';
         } @else {
           <p class="tab-hint" data-test="tool-usage-ranking-caveat">
             the calls (7d) sort is a frequency-only PROXY for layer-2 candidacy — the
-            Phase-3 daily digest (schema-token weight × frequency, zero/near-zero,
-            allow-list intersection) is the authoritative ranking surface.
-            calls 24h is a rolling surface — the digest's D−1 complete-UTC-day window
-            is the precise day figure.
+            Phase-3 daily digest (per-tool weight × frequency where per-tool weights are
+            published, zero/near-zero, and the per-agent allow-list intersection) is the
+            authoritative day-figure and allow-list surface; while no per-tool weights are
+            published it ranks by frequency only — the same proxy as this table. calls 24h
+            is a rolling surface — the digest's D−1 complete-UTC-day window is the precise
+            day figure.
           </p>
           <table class="tool-usage-table" data-test="tool-usage-table">
             <thead>
