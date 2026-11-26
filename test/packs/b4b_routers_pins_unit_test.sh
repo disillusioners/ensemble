@@ -1,4 +1,37 @@
 #!/usr/bin/env bash
+# =============================================================================
+# Test Pack: b4b_routers_pins_unit_test
+#
+# Lane: feature/pack-coverage-registration (base 40301a5e3) — Wave B family B4b
+#       ("recent-add singletons": router layer).
+#
+# WHAT IT PINS (3 pytest files)
+#   tests/unit/routers/test_jobs_list_badge_batch.py                    7 nodes
+#   tests/unit/routers/test_live_views_media.py                        46 nodes
+#   tests/unit/routers/test_maintenance_reports_router.py              15 nodes
+#   Total: 68 nodes (mechanical --collect-only census at this freeze
+#   40301a5e3 — re-verified at this base: 68 collected, RC=0, 0 collection
+#   errors; per-file counts 7/46/15; slicing proof OK).
+#
+# CENSUS NOTE: these three files had NO named PACKS.md row before this lane
+#   (the jobs-list badge batch pins, the live-views media pins, and the
+#   maintenance-reports router pins); together they close the B4b sub-family
+#   of the "recent-add singletons" family (B4). This script is their named
+#   admission record (PACKS.md block "B4b — Router Recent-Add Singletons").
+#   The 68-node count is re-derived on every run by the SLICING PROOF below
+#   and FAILS on drift.
+#
+# CONTRACT (house shape)
+#   - Dual-layer timeout: inner timeout 280; caller wraps with 300.
+#   - Serial + deterministic: -p no:xdist -p no:randomly.
+#   - PER-VARIABLE env scrub (a POSTGRES_* glob is a SILENT NO-OP in bash).
+#   - ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0 pinned EXPLICITLY.
+#   - Repo addopts KEPT.
+#   - SLICING PROOF: re-derives node count with --collect-only, FAILS on drift.
+#   - TIMEOUT (exit 124) is checked BEFORE the vacuous-verdict guard.
+#   - VACUOUS-VERDICT GUARD: zero passed or no summary line = FAIL.
+#   - Output: RESULT: PASS|FAIL|TIMEOUT. Exit: 0/1/124.
+# =============================================================================
 set -u
 
 PACK_NAME="b4b_routers_pins_unit_test"
@@ -103,6 +136,17 @@ PYTEST_EXIT="${PIPESTATUS[0]}"
 SUMMARY="$(grep -E '[0-9]+ (passed|failed|error|skipped|deselected)' "$OUT" | tail -1)"
 PASSED="$(printf '%s\n' "$SUMMARY" | grep -oE '[0-9]+ passed' | head -1 | grep -oE '^[0-9]+')"
 rm -f "$OUT"
+
+# NOTE (ordering): the TIMEOUT verdict is checked FIRST, before the
+# vacuous-verdict guard. A killed pytest produces NO summary line at all,
+# so the vacuous guard would fire and report `RESULT: FAIL` (exit 1) for a
+# genuine timeout — and the pack contract's `RESULT: TIMEOUT` / exit 124
+# would be unreachable. Timeout is a distinct verdict and must win.
+if [ "$PYTEST_EXIT" -eq 124 ]; then
+  echo
+  echo "RESULT: TIMEOUT"
+  exit 124
+fi
 
 if [ -z "$SUMMARY" ]; then
   echo

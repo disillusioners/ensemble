@@ -170,6 +170,17 @@ SUMMARY="$(grep -E '[0-9]+ (passed|failed|error|skipped|deselected)' "$OUT" | ta
 PASSED="$(printf '%s\n' "$SUMMARY" | grep -oE '[0-9]+ passed' | head -1 | grep -oE '^[0-9]+')"
 rm -f "$OUT"
 
+# NOTE (ordering): the TIMEOUT verdict is checked FIRST, before the
+# vacuous-verdict guard. A killed pytest produces NO summary line at all,
+# so the vacuous guard would fire and report `RESULT: FAIL` (exit 1) for a
+# genuine timeout — and the pack contract's `RESULT: TIMEOUT` / exit 124
+# would be unreachable. Timeout is a distinct verdict and must win.
+if [ "$PYTEST_EXIT" -eq 124 ]; then
+  echo
+  echo "RESULT: TIMEOUT"
+  exit 124
+fi
+
 if [ -z "$SUMMARY" ]; then
   echo
   echo "RESULT: FAIL (VACUOUS — pytest produced NO summary: the suite did not run)"

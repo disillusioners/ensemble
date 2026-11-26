@@ -166,6 +166,17 @@ SUMMARY="$(grep -E '[0-9]+ (passed|failed|error|skipped|deselected)' "$OUT" | ta
 PASSED="$(printf '%s\n' "$SUMMARY" | grep -oE '[0-9]+ passed' | head -1 | grep -oE '^[0-9]+')"
 rm -f "$OUT"
 
+# NOTE (ordering): the TIMEOUT verdict is checked FIRST, before the
+# vacuous-verdict guard. A killed pytest produces NO summary line at all,
+# so the vacuous guard would fire and report `RESULT: FAIL` (exit 1) for a
+# genuine timeout — and the pack contract's `RESULT: TIMEOUT` / exit 124
+# would be unreachable. Timeout is a distinct verdict and must win.
+if [ "$PYTEST_EXIT" -eq 124 ]; then
+  echo
+  echo "RESULT: TIMEOUT"
+  exit 124
+fi
+
 if [ -z "$SUMMARY" ]; then
   echo
   echo "RESULT: FAIL (VACUOUS — pytest produced NO summary: the suite did not run)"
@@ -186,12 +197,17 @@ env \
   ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0 \
   ENSEMBLE_SELF_ENV=dev \
   PYTHONDONTWRITEBYTECODE=1 \
-  "$PYTHON_BIN" tests/unit/tools/test_promote_launchd_survivorship_python.py > "$SCRIPT_OUT" 2>&1
+  timeout 300 "$PYTHON_BIN" tests/unit/tools/test_promote_launchd_survivorship_python.py > "$SCRIPT_OUT" 2>&1
 SCRIPT_EXIT="$?"
+# VACUOUS guard: exit 0 with NO output is not a pass — an empty run proves nothing.
+SCRIPT_EMPTY=0; [ -s "$SCRIPT_OUT" ] || SCRIPT_EMPTY=1
 tail -2 "$SCRIPT_OUT"
 rm -f "$SCRIPT_OUT"
 if [ "$SCRIPT_EXIT" -ne 0 ]; then
   echo "STANDALONE SCRIPT: FAIL (exit=$SCRIPT_EXIT)"
+elif [ "$SCRIPT_EMPTY" -ne 0 ]; then
+  echo "STANDALONE SCRIPT: FAIL (VACUOUS — exit 0 but produced NO output)"
+  SCRIPT_EXIT=1
 else
   echo "STANDALONE SCRIPT: PASS (exit 0)"
 fi

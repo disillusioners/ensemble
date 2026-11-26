@@ -79,7 +79,7 @@
 #     wraps with `timeout 300`.
 #   - `set -u` ONLY, never `set -e`: under `set -e` a bare `X=$?` after a
 #     failing pytest NEVER executes, so `RESULT: FAIL` becomes
-#     unreachable (the defect 122 of 544 house packs carry). The pytest
+#     unreachable. The pytest
 #     exit code is taken from `PIPESTATUS[0]`.
 #   - Serial + deterministic: `-p no:xdist -p no:randomly`.
 #   - The repo's OWN pytest config is kept as-is (the `-m 'not integration
