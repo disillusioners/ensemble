@@ -427,8 +427,10 @@ P_C_RECENCY_BOUND_SECONDS: int = DEFAULT_MIN_PENDING_AGE_SECONDS
 #: ``_recency_call_site`` instead of a third argument. A ContextVar (not a
 #: service attribute) is required because the chain runs on
 #: ``asyncio.to_thread`` workers — a shared attribute would race.
+#: The default is FAIL-CLOSED (``False``): a call site that omits the
+#: context inherits NO recency (the pre-change, defer-more behaviour).
 _COMPONENT_C_APPLY_RECENCY: ContextVar[bool] = ContextVar(
-    "component_c_apply_recency", default=True
+    "component_c_apply_recency", default=False
 )
 
 
@@ -5320,14 +5322,11 @@ Provide a concise summary:"""
                         f"{{paused,completed,error}}); skipping "
                         f"completion side effects (TOCTOU defense)"
                     )
-                    if suppress_mint:
-                        _emit_tool_lane_suppression_record(
-                            instance_id, completed_message_id,
-                            classification=_suppress_class,
-                            blocking_source=_suppress_block_source,
-                            blocking_message_id=_suppress_block_message_id,
-                            blocking_status=_suppress_block_status,
-                        )
+                    # W-2 (leader ruling 2026-11-26): NO suppress record and NO
+                    # counter bump on this LOST-RACE exit. The ledger's emission
+                    # point is "after the CAS has succeeded"; the regular lane's
+                    # lost-race exit is silent by design. The R-K2 under-count
+                    # here is the disclosed advisory (observability-only).
                     return _ChildCompletionDbResult(
                         outcome="idempotency_skip",
                         instance_id=instance_id,
