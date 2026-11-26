@@ -394,11 +394,37 @@ def _emit_retrying_obligation_info(
 # deferral log line are UNCHANGED.
 
 #: P-C-WATCHDOG-SOURCES — the WC-watchdog's own provenance markers, as
-#: stamped onto ``message_queue.source``.
-WATCHDOG_NOTICE_SOURCES: tuple[str, ...] = (
-    "system:watchdog",        # waiting_children_watchdog.WATCHDOG_SOURCE
-    "system:watchdog:wedge",  # waiting_children_watchdog.WEDGE_SOURCE
-)
+#: stamped onto ``message_queue.source``. BOUND to the watchdog's own
+#: constants (review S-2; values byte-identical to the former literals
+#: ``"system:watchdog"`` / ``"system:watchdog:wedge"``). Resolved LAZILY
+#: (``_watchdog_notice_sources`` / the module ``__getattr__`` below): a
+#: module-level import of ``waiting_children_watchdog`` closes an
+#: order-dependent import cycle (see the helper's docstring).
+
+
+def _watchdog_notice_sources() -> tuple[str, ...]:
+    """The watchdog's OWN source constants — imported at CALL time.
+
+    ``waiting_children_watchdog.WATCHDOG_SOURCE`` / ``WEDGE_SOURCE`` are
+    the single source of truth (imported, never re-declared). The import
+    is deferred because a module-level import here closes an
+    order-dependent cycle: ``daemon.repositories.*`` (partially
+    initialized) → ``daemon/services/__init__`` → this module →
+    ``waiting_children_watchdog`` → ``daemon.repositories.instance.repository``
+    (still mid-execution) — the ``tests/support/conftest.py`` entry order
+    hits it (ImportError on ``SQLModelInstanceRepository``).
+    """
+    from .waiting_children_watchdog import WEDGE_SOURCE, WATCHDOG_SOURCE
+
+    return (WATCHDOG_SOURCE, WEDGE_SOURCE)
+
+
+def __getattr__(name: str):
+    """PEP 562: ``WATCHDOG_NOTICE_SOURCES`` as a lazily bound module
+    attribute (house precedent: ``daemon/graph.py``)."""
+    if name == "WATCHDOG_NOTICE_SOURCES":
+        return _watchdog_notice_sources()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 #: P-C-WATCHDOG-METADATA-KEYS — the markers the WC watchdog stamps into
 #: ``message_queue.metadata`` (``watchdog_notice`` = hang,
@@ -454,7 +480,7 @@ def _watchdog_notice_exists_expression():
     containing ``?`` (SQLite reads ``?`` as a bind placeholder).
     """
     return or_(
-        MessageQueue.source.in_(WATCHDOG_NOTICE_SOURCES),
+        MessageQueue.source.in_(_watchdog_notice_sources()),
         *(
             MessageQueue.message_metadata[key].as_string().is_not(None)
             for key in WATCHDOG_NOTICE_METADATA_KEYS
@@ -475,7 +501,7 @@ def _is_watchdog_notice_row(row: MessageQueue) -> bool:
     (``system:resume_wake`` / ``system:wedge-resolve`` /
     ``system:memoir-proposal`` / ``system:injection_drain``) still count.
     """
-    if row.source in WATCHDOG_NOTICE_SOURCES:
+    if row.source in _watchdog_notice_sources():
         return True
     metadata = row.message_metadata or {}
     return any(metadata.get(key) is not None for key in WATCHDOG_NOTICE_METADATA_KEYS)
@@ -4792,11 +4818,18 @@ Provide a concise summary:"""
                 # the pending-task seam. The shared predicate
                 # ``finalizer_counts_as_pending`` is NOT modified
                 # globally. Non-watchdog system wakes still count.
+                # ORDERING (review S-1): the exclusion is applied FIRST so an
+                # excluded row never reaches the finalizer — the finalizer
+                # costs one SELECT per row and raises the task-less-READY
+                # WARNING (Refinement 2) for any row it is asked about. The
+                # two predicates are a CONJUNCTION, so the counted set is
+                # IDENTICAL to the pre-reorder form; only the wasted SELECT
+                # and the spurious warning on excluded rows go away.
                 pending_count = sum(
                     1
                     for _row in _candidate_rows
-                    if finalizer_counts_as_pending(_row, self._manager.engine)
-                    and not _is_watchdog_notice_row(_row)
+                    if not _is_watchdog_notice_row(_row)
+                    and finalizer_counts_as_pending(_row, self._manager.engine)
                 )
                 del _candidate_rows  # scope hygiene
 
