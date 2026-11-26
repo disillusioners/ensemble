@@ -43,6 +43,8 @@ from daemon.repositories.source.models import (
     SourceStatus,
 )
 from daemon.repositories.source.maintenance_seed import (
+    CANONICAL_SEED_NAME,
+    CANONICAL_SEED_SOURCE_ID,
     CHAIN_MODE,
     FINDING_KIND_RESULTS_ROOT_EMPTY,
     SEED_NAME,
@@ -204,33 +206,46 @@ class TestSeedLifecycle:
         assert second.action == "noop_existing"
         rows = _rows(guard_engine)
         assert len(rows) == 1
-        assert rows[0].source_id == SEED_SOURCE_ID
-        assert rows[0].name == SEED_NAME
+        # The CANONICAL identity (architecture v3 §4.3): the seeder writes
+        # a canonical recurring row under a DISTINCT label — the chain
+        # label stays free for the legacy chain row (its history stays
+        # greppable) and the dead-label reuse never arises.
+        assert rows[0].source_id == CANONICAL_SEED_SOURCE_ID
+        assert rows[0].name == CANONICAL_SEED_NAME
         assert rows[0].source_type == SEED_SOURCE_TYPE
 
-    def test_the_seeded_row_carries_the_chain_block(self, guard_engine, results_root):
+    def test_the_seeded_row_is_canonical_and_carries_no_chain_block(
+        self, guard_engine, results_root
+    ):
+        """The seeded row is CANONICAL (architecture v3 §4.3): ONE
+        user-facing mechanism — ``recurrence=weekly`` + a raw cron + the
+        local time + the timezone, under a DISTINCT label.
+
+        There is NO ``chain`` block (the chain marker is demoted to an
+        internal compatibility representation, readable for legacy rows
+        but never composed for new ones) and NO ``run_at`` (a recurring
+        row re-arms itself through its cron expression)."""
         seed_central_maintenance_schedule(guard_engine, results_root=results_root)
-        row = _row(guard_engine, SEED_SOURCE_ID)
+        row = _row(guard_engine, CANONICAL_SEED_SOURCE_ID)
         assert row is not None
         config = row.config
         assert config["agent"] == "maintenancer"
         assert config["message"] == WEEKLY_RUN_MESSAGE
         assert config["timezone"] == "Asia/Ho_Chi_Minh"
-        assert config["recurrence"] == "once"
+        assert config["recurrence"] == "weekly"
         assert config["instance_mode"] == "new_instance"
         assert config["project_id"]
-        chain = config["chain"]
-        assert chain["mode"] == CHAIN_MODE
-        assert chain["window_start"] == "01:00"
-        assert chain["window_end"] == "05:00"
-        assert chain["weekday"] == 0
-        assert chain["timezone"] == "Asia/Ho_Chi_Minh"
-        assert chain["run_at_utc"] == config["run_at"]
-        assert config["local_time"]
+        assert "chain" not in config
+        assert "run_at" not in config
+        # The FIXED slot: the window START on the configured weekday
+        # (jitter is refused until a recurring collision is MEASURED —
+        # architecture v3 §2.2, Branch A).
+        assert config["local_time"] == "01:00"
+        assert config["schedule"] == "0 1 * * 0"
 
     def test_the_seeded_row_is_running_and_enabled(self, guard_engine, results_root):
         seed_central_maintenance_schedule(guard_engine, results_root=results_root)
-        row = _row(guard_engine, SEED_SOURCE_ID)
+        row = _row(guard_engine, CANONICAL_SEED_SOURCE_ID)
         assert row is not None
         assert row.status == SourceStatus.RUNNING.value
         assert row.enabled is True
@@ -1058,11 +1073,13 @@ class TestP5T54Br3ArchiveExact:
             t54_engine, results_root=results_root
         )
         assert outcome.action == "created"  # NOT "revived"
-        row = _row(t54_engine, SEED_SOURCE_ID)
+        row = _row(t54_engine, CANONICAL_SEED_SOURCE_ID)
         assert row is not None
-        # A FRESH chain — never the foreign snapshot dressed up as one.
+        # A FRESH CANONICAL row — never the foreign snapshot dressed up
+        # as one, and never a chain row (architecture v3 §4.3).
         assert row.config["agent"] == "maintenancer"
-        assert row.config["chain"]["mode"] == CHAIN_MODE
+        assert row.config["recurrence"] == "weekly"
+        assert "chain" not in row.config
 
     def test_leg_e_missing_row_with_no_archive_is_created_deterministically(
         self, guard_engine, results_root
@@ -1077,18 +1094,25 @@ class TestP5T54Br3ArchiveExact:
         )
         assert outcome.action == "created"
         # The deterministic uuid5 identity (mirror of the tool-usage
-        # seed lifecycle pin).
-        assert SEED_SOURCE_ID == str(uuid.uuid5(uuid.NAMESPACE_DNS, SEED_NAME))
+        # seed lifecycle pin) — now the CANONICAL identity, under its own
+        # DISTINCT label (architecture v3 §4.3).
+        assert CANONICAL_SEED_SOURCE_ID == str(
+            uuid.uuid5(uuid.NAMESPACE_DNS, CANONICAL_SEED_NAME)
+        )
+        assert CANONICAL_SEED_NAME != SEED_NAME
         rows = _rows(guard_engine)
         assert len(rows) == 1
         row = rows[0]
-        assert row.source_id == SEED_SOURCE_ID
-        assert row.name == SEED_NAME
+        assert row.source_id == CANONICAL_SEED_SOURCE_ID
+        assert row.name == CANONICAL_SEED_NAME
         assert row.source_type == SEED_SOURCE_TYPE
         assert row.enabled is True
         assert row.status == SourceStatus.RUNNING.value
-        assert row.config["chain"]["mode"] == CHAIN_MODE
-        assert outcome.source_id == SEED_SOURCE_ID
+        # CANONICAL shape: no chain block, a cron expression instead.
+        assert "chain" not in row.config
+        assert row.config["recurrence"] == "weekly"
+        assert row.config["schedule"]
+        assert outcome.source_id == CANONICAL_SEED_SOURCE_ID
         # The uuid5 keying makes the next boot a no-op on the SAME row.
         second = seed_central_maintenance_schedule(
             guard_engine, results_root=results_root

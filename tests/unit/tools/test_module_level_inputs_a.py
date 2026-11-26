@@ -40,10 +40,17 @@ Four pins, in order of strength:
   function-local class statement IS counted.
 * **(c) BYTE-IDENTITY** — the second build's
   ``convert_to_openai_tool(tool)`` payloads are byte-identical to the
-  BASE fixture captured from the PRE-HOIST tree
+  BASE fixture
   (``tests/unit/tools/fixtures/module_level_inputs_a_base.json``),
   compared with ``json.dumps`` equality at the EXACT key order (no
-  ``sort_keys``).  The agent-visible schema must not move.
+  ``sort_keys``).  The agent-visible schema must not move.  The BASE
+  fixture is the original PRE-HOIST capture (``base_commit``
+  ``670b4e6ba``), deliberately RE-BASELINED on 2026-11-26 for
+  exactly ONE leaf — ``create_scheduling_tools`` →
+  ``task_schedule_cancel`` → ``label.description``, now carrying the
+  post-``f3ffcf6bb`` wording; the fixture's ``meta.rebaseline`` block
+  records that change and the five factories that stayed
+  byte-identical.
 * **(d) THE FIXTURE ITSELF** — the BASE fixture carries the expected
   tool-name roster for all six factories, so a fixture that lost a tool
   (or a factory that grew one) is caught.
@@ -356,7 +363,14 @@ def test_the_class_counter_detects_a_function_local_class(monkeypatch):
     ),
 )
 def test_warm_payloads_are_byte_identical_to_the_base_fixture(factory_name: str):
-    """The second build's OpenAI payloads must equal the PRE-HOIST fixture.
+    """The second build's OpenAI payloads must equal the BASE fixture.
+
+    The BASE fixture is the original PRE-HOIST capture (``base_commit``
+    ``670b4e6ba``) as deliberately RE-BASELINED on 2026-11-26 for
+    exactly ONE leaf — ``create_scheduling_tools`` →
+    ``task_schedule_cancel`` → ``label.description``, now carrying the
+    post-``f3ffcf6bb`` wording; every other leaf is still the PRE-HOIST
+    capture.  See the fixture's ``meta.rebaseline`` block.
 
     Compared with ``json.dumps`` equality at the EXACT key order — no
     ``sort_keys`` — so a re-ordered or mutated schema is caught, not just
@@ -404,8 +418,8 @@ def test_base_fixture_covers_every_factory_and_tool():
     assert set(fixture["factories"]) == set(_factories()), (
         "the BASE fixture does not cover exactly the six cohort-A factories"
     )
-    assert fixture["meta"]["base_commit"] == "3506a326d", (
-        "the BASE fixture was not captured against the pre-hoist base commit"
+    assert fixture["meta"]["base_commit"] == "670b4e6ba", (
+        "the BASE fixture's recorded base_commit does not match the expected literal"
     )
     expected_names = {
         "create_job_tools": [

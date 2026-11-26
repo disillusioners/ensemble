@@ -155,7 +155,18 @@ def service_env(monkeypatch):
     registry.unregister = MagicMock(return_value=True)
     registry._create_adapter_from_config = AsyncMock(return_value=MagicMock(name="fresh-adapter"))
     registry.register = MagicMock()
-    registry.start_adapter = AsyncMock(return_value=True)
+
+    async def _start_adapter(source_id):
+        # The REAL registry writes RUNNING onto the row when the adapter
+        # starts (``daemon/sources/registry.py``) — the double does the
+        # same, so the echo's armed gate sees the REAL post-write status
+        # (MA-2: the echo reflects the post-write row).
+        row = repo.rows.get(source_id)
+        if row is not None:
+            row.status = "running"
+        return True
+
+    registry.start_adapter = AsyncMock(side_effect=_start_adapter)
 
     _configure_service(repo, registry, monkeypatch)
     yield repo, registry

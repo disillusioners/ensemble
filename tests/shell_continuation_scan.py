@@ -98,26 +98,6 @@ class Hit:
 #
 # Each entry is "path:line" -> one-line reason.
 KNOWN_PRE_EXISTING: dict[str, str] = {
-    "test/packs/por_b2_wedge_repro_pins_unit_test.sh:137": (
-        "pre-existing: the env-scrub prefix is truncated by the NOTE "
-        "comment that follows it (pytest then runs without the scrub)"
-    ),
-    "test/packs/por_b_boot_consistency_unit_test.sh:133": (
-        "pre-existing: the env-scrub prefix is truncated by the NOTE "
-        "comment that follows it (pytest then runs without the scrub)"
-    ),
-    "test/packs/por_b3_receipt_supervisor_unit_test.sh:136": (
-        "pre-existing: the env-scrub prefix is truncated by the NOTE "
-        "comment that follows it (pytest then runs without the scrub)"
-    ),
-    "test/packs/por_b4_stale_running_sweep_unit_test.sh:139": (
-        "pre-existing: the env-scrub prefix is truncated by the NOTE "
-        "comment that follows it (pytest then runs without the scrub)"
-    ),
-    "test/packs/por_c_checkpoint_retention_unit_test.sh:136": (
-        "pre-existing: the env-scrub prefix is truncated by the NOTE "
-        "comment that follows it (pytest then runs without the scrub)"
-    ),
     "tests/packs/soak_gate_mcp_warmup_acceptance.sh:389": (
         "pre-existing: the env-scrub prefix is truncated by the comment "
         "that follows it (pytest then runs without the scrub)"
