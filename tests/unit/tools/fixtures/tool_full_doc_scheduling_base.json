@@ -7,6 +7,7 @@
     "pydantic": "2.12.5",
     "langchain_core": "1.2.16",
     "base_commit": "1a8310eb8",
+    "base_commit_semantics": "the code commit whose _full_doc_ output was captured; the fixture file itself was introduced by 2a537c972",
     "entry_shape": "[tool_name, get_full_doc(tool_name) after scan_tools_for_full_docs]",
     "scope_note": "Closes the last uncovered agent-visible channel: _full_doc_ extended tool_help text for task_schedule / task_schedule_list / task_schedule_cancel / task_schedule_update. Captured via the same code path tool_help consumes (scan_tools_for_full_docs -> _full_docs -> get_full_doc), never hand-copied from scheduling.py."
   },
