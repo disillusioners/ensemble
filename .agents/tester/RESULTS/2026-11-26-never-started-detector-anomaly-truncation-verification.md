@@ -6,7 +6,7 @@
 - **Base**: `4a17398d2` (origin/latest) · **Reviewed HEAD**: `9099badfb` · **Lane HEAD after T8**: `adbe840f3`
 - **Adjudicated range**: `4a17398d2..adbe840f3` — 11 files, +992 −52 (the extra commit is the T8 docs-only PACKS.md line)
 - **Role**: independent test + verification (tester). No product code modified, nothing pushed, no release cut.
-- **Verdict**: **Both defects under test PASS.** Lane **NOT READY** — one net-new red (stale test fixture, test-side debt) outstanding.
+- **Verdict**: **Defect (1) PASS. Defect (2) PASS on the normal path, with a CONFIRMED residual gap (silent-cut path — §1b).** Lane **NOT READY** — one net-new red (stale test fixture, test-side debt) outstanding.
 
 ## Scope decision
 
@@ -22,7 +22,7 @@ F-1 tool-artifact-drift trap does not apply. Recipe: `.agents/tester/skills/blas
 | # | Task | Result | Evidence |
 |---|---|---|---|
 | T1 | `TestNeverStartedRunningDetector` (9 nodes) | **PASS 9/9** | 16.74s; cases (a)–(f) + pairing + table-count fence + degraded-leg fail-closed all PASS |
-| T2 | anomaly roundtrip + scrub + registration (86 nodes) | **PASS 86/86** | 30.3s wall; 3000-char round trip byte-for-byte; loud marker with original length 8519 |
+| T2 | anomaly roundtrip + scrub + registration (86 nodes) | **PASS 86/86** (normal path) | 30.3s wall; 3000-char round trip byte-for-byte; loud marker with original length 8519. **Residual gap CONFIRMED — see §1b** |
 | T3 | dual-side regression (D1+D2-core+D2-seam) | **FAIL — 1 net-new red** | see Findings §1 |
 | T4 | read-only proof of detector | **PASS** | 3 independent legs; 25006 demonstrated |
 | T5 | fixture pairing render | **PASS** | populated row, all 4 fields, negative control clean |
@@ -167,6 +167,62 @@ touched neither the test nor the fixture. The branch's own eight-detector assert
 Remedy: regenerate that one fixture. Sibling probes `_a`/`_c`/`_d` pass 71/71 on both legs (blast radius confined to `_b`).
 **Not applied by the verifier** — outside the granted write scope, and fixing the red under report would destroy the evidence.
 
+### §1b 🟠 CONFIRMED residual gap — silent cut with NO marker and NO envelope flag (defect (2))
+
+Found via the sibling tidier lane's deferred findings; **independently re-verified by me** (read-only, real SQLite +
+real migration UP sections + real `AnomalyService` + `NestReportConfig()`). **This qualifies the defect-(2) PASS.**
+
+**Mechanism (verified, with the sibling claim's stated mechanism CORRECTED):**
+- `daemon/services/anomaly_service.py:609` `original_len = len(value)` (PRE-scrub) → `:615` `if mark_truncated and
+  original_len > cap:` decides the marker on the PRE-scrub length → `:625/:626` `scrubbed[:cap-len(marker)]+marker` /
+  `scrubbed[:cap]` applies the cut to the POST-scrub text. **No cap is re-applied between the decision and the cut.**
+- `daemon/services/secret_persistence_scrub.py:637-638` — `mint_marker` (`secret_service.py:177-190`) replaces a
+  registered secret's plaintext with `__ENS_SECRET__<uuid4>__` = **52 chars**, with no re-cap before `scrubbed[:cap]`.
+- **Correction to the sibling claim**: the growth is NOT from `redact_secret_shapes` — `daemon/_redact.py:283-288` masks
+  to `***` and applies `limit` AFTER masking, so it SHRINKS and never emits a 52-char marker.
+
+**Reproduction (real stored result):** description of 7999 chars (just under the 8000 cap) containing a **bare short
+registered-secret plaintext** (14 chars, in the scrubber's secret set, matching no redaction regex):
+- CASE 2 → +38 growth → 8037 post-scrub → `[:8000]` cuts 37 chars:
+  (i) stored_len = **8000**; (ii) `[TRUNCATED:` **ABSENT**; (iii) envelope `truncated` = **False**; (iv) tail
+  `"THE-LOST-TAIL"` **silently lost**. The cut also sliced *through* the 52-char marker → the stored row ends in a
+  **broken partial marker** (`…a__ENS_SECRET__4cc33d1b-a7fa-4`) — a secondary redaction-integrity issue.
+- CASE 1 (no registered scrubber, `api_key=` shape) → shrinks to 7977, no loss, no marker, `truncated=False` — correct.
+
+⇒ The "filed and silently lost half" failure mode **survives on this path** and violates the fix's own contract
+("a residual cut carries the loud marker"). Reachability: the filed description must quote a registered secret's
+plaintext (e.g. an agent filing an anomaly that echoes a credential) — not exotic, but narrower than the normal path.
+**Suggested fix (not applied — product code):** re-apply the cap and re-evaluate the marker decision AFTER scrubbing
+(decide on the POST-scrub length), and re-run the secret scrubber over the marker-bearing suffix so the cut cannot
+split a marker.
+
+### §1c 🟡 CONFIRMED — duplicate `queued_jobs_behind_queue` entries (defect (1) render path)
+
+`daemon/tools/instance_read.py:1994-2000` extends `queued_jobs_behind_queue` once per held lock with no dedup; the
+render at `:2094/:2111/:2118` passes the list through unchanged. Fenced fixture (1 instance, **2 locks on ONE queue**,
+1 queued job) → `len(queued_jobs_behind_queue) = 2`, job_ids `['queued1', 'queued1']`.
+**My T5 fixture held exactly ONE lock ⇒ this path was outside my fixture's shape** (disclosed). Note the lane's own test
+`tests/unit/test_instance_read_shakedown_defects.py:2415` uses a SET comprehension `{job["job_id"] for job in queued}`,
+which MASKS the duplication. Fix: dedup by queue (or collect queues first, then one lookup per queue).
+
+### §1d 🟢 CONFIRMED but fixture-only — `lock_id` NULL renders as the literal `"None"`
+
+`daemon/tools/instance_read.py:1951` `"lock_id": str(row[1])` with no None guard (also `:2095` joins `str(lock.get("lock_id"))`).
+Fenced fixture with a NULL `lock_id` rendered `repr = 'None'`, type `str`. **Reachability caveat: `job_locks.lock_id` is a
+TEXT PRIMARY KEY** (`20260420_000001_add_job_system_improvements.sql:10`; `models.py:513`) ⇒ NOT NULL on production
+PostgreSQL; a NULL row is constructible only on SQLite. Defense-in-depth nit, not a live defect.
+
+### §1e 🟠 CONFIRMED — "seven detector classes" survives in the ARI prompt artifact (defect (1) doc surface)
+
+`agents/ari/tools_note.md:1015` still reads `- **\`instance_health\`** — the wedge report (seven detector classes)` while the
+branch's tool doc says eight (`daemon/tools/instance_read.py:95`, `:1190`, `:1211`). The artifact is hash-pinned at
+`agents/.prompt-artifacts.sha256:32` (`99bd8726…  agents/ari/tools_note.md`); the file's current sha256 still equals the pin,
+and `scripts/protection/generate_prompt_artifact_baseline.py --check` exits 1 on drift ⇒ **a prompt-versioning lane must
+regenerate the baseline**. Enforcement is ADVISORY (boot `daemon/api.py:1783-1792` is WARN-only; stage
+`scripts/upgrade/stage.sh:1040-1082` logs+journals, never gates).
+⇒ Together with §1 this is ONE drift class: the branch changed a count-bearing string in the tool doc but did not refresh
+the **frozen test fixture** (§1) or the **prompt artifact** (§1e).
+
 ### §2 🟠 Scan time-budget can starve the new detector; the skip is silent at detector level
 
 The detector is registered **LAST** (`:2543-2570`); its row-local candidate leg sits inside the per-row walk, and the
@@ -232,16 +288,27 @@ the 19th (`test_the_default_scrub_is_silent_for_harvested_excerpts`) passes at b
   a residual cut carries the loud [TRUNCATED: original N chars; stored prefix only] marker`. Not pushed.
 - Two workers created additive corpus skills (`instance-health-detector-coverage-gap-audit`,
   `prod-ro-role-grant-gap-evidence-capture`) — no product impact.
+- A **sibling tidier lane** (code-quality review of the same branch) has an uncommitted
+  `.agents/tidier/notes.md` edit in this worktree — **not mine, left untouched**. Its independent cross-check states the
+  two commits above touch neither `daemon/` nor `tests/`, so all 10 reviewed product/test files are byte-identical and
+  every line citation stands. Its 6 deferred correctness findings were re-verified by me where they touched my verdicts
+  (§1b/§1c/§1d/§1e); the remainder remain its findings, not certified by me.
 - No daemon booted; port 8079 untouched; no product code modified; nothing pushed; no release cut.
 - Canonical checkout `/home/nea/ensemble-src` (detached `bf4bfde6e`) and lane
   `/home/nea/ensemble-src-wt-revive-wedge` untouched.
 
 ## Overall status
 
-- **Defect (1) `never-started-running` detector**: ✅ PASS
-- **Defect (2) `report_anomaly` truncation fix**: ✅ PASS
+- **Defect (1) `never-started-running` detector**: ✅ PASS (render-path residuals §1c/§1d/§2, doc drift §1e)
+- **Defect (2) `report_anomaly` truncation fix**: ⚠️ **PASS on the normal path** (T2 86/86) — **residual gap CONFIRMED**
+  (§1b): a cut can occur with NO `[TRUNCATED: …]` marker and NO envelope `truncated=true` when a registered secret's
+  short plaintext is substituted by the longer 52-char `__ENS_SECRET__` marker. The "filed and silently lost half"
+  mode survives on that path; the normal path is correct.
 - **Lane regression (T3)**: ❌ FAIL — 1 net-new red (stale fixture, §1), owner decision needed
 - **ensure.md Tier-1 gate**: scoped dual-side leg executed (D1 + D2-core + D2-seam); D2-fe not runnable, not required;
   D2-wide dropped by scope decision
-- **Testing complete**: ❌ NOT READY — refresh `tests/unit/tools/fixtures/module_level_inputs_b_base.json`, then re-run
-  `tests/unit/tools/test_module_level_inputs_b.py` to green.
+- **Testing complete**: ❌ NOT READY — three items:
+  1. refresh `tests/unit/tools/fixtures/module_level_inputs_b_base.json` (§1), then re-run
+     `tests/unit/tools/test_module_level_inputs_b.py` to green;
+  2. decide the §1b silent-cut gap (fix = re-apply the cap and re-decide the marker AFTER scrubbing);
+  3. prompt-versioning lane must refresh `agents/ari/tools_note.md` (§1e — still "seven detector classes", hash-pinned).
