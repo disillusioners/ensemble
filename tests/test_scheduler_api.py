@@ -11,12 +11,52 @@ import os
 import httpx
 from fastapi import FastAPI
 
+# The auth env is captured when ``daemon.api`` builds the app at IMPORT
+# time (``create_app`` → ``load_config().auth`` → AuthMiddleware), so a
+# per-variable scrub must happen BEFORE that import — not in a
+# function-scoped fixture, which runs after every module-level import.
+# This module-level loop is the explicit, per-variable equivalent of the
+# shell fence; it names ONLY the seven ENSEMBLE_AUTH_* variables this
+# host exports (no family glob — ``env -u ENSEMBLE_AUTH_*`` is a NO-OP).
+for _auth_env_name in (
+    "ENSEMBLE_AUTH_ENABLED",
+    "ENSEMBLE_AUTH_ISSUER",
+    "ENSEMBLE_AUTH_DISCOVERY_URL",
+    "ENSEMBLE_AUTH_CLIENT_ID",
+    "ENSEMBLE_AUTH_CLIENT_SECRET",
+    "ENSEMBLE_AUTH_ALLOWED_ORIGINS",
+    "ENSEMBLE_AUTH_EXTERNAL_REDIRECT_BASE",
+):
+    os.environ.pop(_auth_env_name, None)
+
+
 # Import the app and manager directly
 from daemon import api as api_module
 from daemon.models.source import SourceStatus
 
 
 # ==================== Fixtures ====================
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_auth_env(monkeypatch):
+    """Keep the file hermetic for the duration of every test.
+
+    The module-level scrub above handles the import-time capture; this
+    autouse fixture re-applies the SAME per-variable scrub at test time
+    (and restores the process env afterwards via monkeypatch) so a test
+    that mutates os.environ cannot leak auth state into its neighbours.
+    """
+    for _name in (
+        "ENSEMBLE_AUTH_ENABLED",
+        "ENSEMBLE_AUTH_ISSUER",
+        "ENSEMBLE_AUTH_DISCOVERY_URL",
+        "ENSEMBLE_AUTH_CLIENT_ID",
+        "ENSEMBLE_AUTH_CLIENT_SECRET",
+        "ENSEMBLE_AUTH_ALLOWED_ORIGINS",
+        "ENSEMBLE_AUTH_EXTERNAL_REDIRECT_BASE",
+    ):
+        monkeypatch.delenv(_name, raising=False)
 
 
 @pytest_asyncio.fixture
@@ -475,6 +515,7 @@ class TestCreatorCaptureRest:
         row.config = None
         row.enabled = True
         repo.get_source_config_by_name = Mock(return_value=None)
+        repo.list_source_configs = Mock(return_value=[])
         repo.create_source_config = Mock(return_value=row)
         repo.get_source_config = Mock(return_value=row)
         orig = ss._require_repo
@@ -2015,3 +2056,648 @@ class TestDeleteGuardPlacement:
         assert response.status_code == 200
         assert response.json()["deleted"] is True
         mock_manager._source_repository.delete_source_config.assert_called_once()
+
+
+# ===========================================================================
+# PIN — the schedule LISTING tells the truth (schedule listing truth, Phase 1)
+#
+# Architecture v3 §3.3 — the listing floor, on EVERY surface:
+#   1. recurrence truth (a chain task NEVER renders as "once"),
+#   2. window (start / end / weekday / timezone),
+#   3. the ACTUAL next-fire from ONE authoritative source (the STORED
+#      config) — non-null for an armed recurring row,
+#   4. last-fire + status (rendered from ``schedule_executions`` AS
+#      STORED — never synthesized),
+#   5. project scope.
+#
+# The tool surface is pinned in
+# ``tests/unit/services/test_schedule_listing_truth.py``; BOTH surfaces
+# derive through the SAME functions (``listing_view`` +
+# ``compute_next_run``), so one derivation mutation breaks both.
+#
+# MUTATION-VERIFIED (skill ``mutation-verified-regression-pins``): the
+# "adapter-only next-fire source" mutation turns this pin RED; the
+# restore turns it GREEN again.
+# ===========================================================================
+
+
+class TestScheduleListingTruthRest:
+    """The REST list surface of the truth-telling listing.
+
+    ENVIRONMENTAL NOTE (measured 2026-11-23): this whole file needs the
+    ambient AUTH environment scrubbed, or every request is answered by
+    the auth middleware with a 302 and the tests fail with
+    ``assert 302 == 200`` (70 of 73 at the base commit — PRE-EXISTING,
+    not a regression).  Scrub the auth variables PER VARIABLE, e.g.::
+
+        unset ENSEMBLE_AUTH_ENABLED ENSEMBLE_AUTH_EXTERNAL_REDIRECT_BASE \
+              ENSEMBLE_AUTH_ISSUER ENSEMBLE_AUTH_DISCOVERY_URL \
+              ENSEMBLE_AUTH_CLIENT_ID ENSEMBLE_AUTH_CLIENT_SECRET \
+              ENSEMBLE_AUTH_ALLOWED_ORIGINS
+
+    (``env -u ENSEMBLE_AUTH_*`` is a NO-OP — bash does not glob env
+    names.)
+    """
+
+    def _chain_source(self, source_id="chain-1", name="central-maintenance-weekly"):
+        """A chain-shaped (windowed) scheduler row — the shape the
+        maintenance seeder writes: ``recurrence="once"`` + a ``chain``
+        block, with a ``run_at`` in the future."""
+        from datetime import datetime, timedelta, timezone as _tz
+
+        run_at = datetime.now(_tz.utc) + timedelta(days=3)
+        source = Mock()
+        source.source_id = source_id
+        source.source_type = "scheduler"
+        source.name = name
+        source.config = {
+            "agent": "maintenancer",
+            "message": "weekly run",
+            "timezone": "Asia/Ho_Chi_Minh",
+            "recurrence": "once",
+            "local_time": "03:30",
+            "run_at": run_at.isoformat(),
+            "instance_mode": "new_instance",
+            "project_id": "agents-ensemble",
+            "chain": {
+                "mode": "weekly-random",
+                "window_start": "01:00",
+                "window_end": "05:00",
+                "weekday": 0,
+                "timezone": "Asia/Ho_Chi_Minh",
+                "run_at_utc": run_at.isoformat(),
+            },
+        }
+        source.credentials = None
+        source.enabled = True
+        source.status = "running"
+        source.error_message = None
+        source.created_at = "2026-11-01T00:00:00+00:00"
+        source.updated_at = "2026-11-01T00:00:00+00:00"
+        return source
+
+    @pytest.mark.asyncio
+    async def test_rest_list_renders_the_truth_for_a_chain_row(self, client, mock_manager):
+        """1 + 2 + 3 + 5 on the REST surface."""
+        mock_manager._source_repository.list_source_configs = Mock(
+            return_value=[self._chain_source()]
+        )
+        mock_manager._source_repository.get_latest_execution = Mock(return_value=None)
+
+        response = await client.get("/schedules")
+        assert response.status_code == 200
+        schedules = response.json()["schedules"]
+        assert len(schedules) == 1
+        item = schedules[0]
+        # 1. recurrence truth — NEVER the stored "once".
+        assert item["recurrence"] != "once"
+        assert item["recurrence"] == "weekly (windowed)"
+        # 2. window.
+        assert item["window"] == {
+            "start": "01:00",
+            "end": "05:00",
+            "weekday": 0,
+            "timezone": "Asia/Ho_Chi_Minh",
+        }
+        # 3. the next-fire is NON-NULL (the stored config is the source).
+        assert item["next_run_at"] is not None
+        # 5. project scope.
+        assert item["project_id"] == "agents-ensemble"
+        # 4. last-fire + status are rendered from schedule_executions AS
+        #    STORED — with no execution row they are null, never
+        #    synthesized.
+        assert item["last_run_at"] is None
+        assert item["last_execution_status"] is None
+
+    @pytest.mark.asyncio
+    async def test_the_stored_config_wins_over_the_live_adapter(self, client, mock_manager):
+        """ONE field, ONE source — the STORED config is authoritative on
+        the REST surface too.  The adapter's in-memory value is a SECOND
+        source (and it goes null whenever the adapter is absent); it
+        survives only as a fallback for a row whose stored config yields
+        no next-fire at all."""
+        from datetime import datetime, timezone as _tz
+
+        source = self._chain_source()
+        mock_manager._source_repository.list_source_configs = Mock(
+            return_value=[source]
+        )
+        mock_manager._source_repository.get_latest_execution = Mock(return_value=None)
+        # A live adapter that claims a DIFFERENT next-fire.
+        adapter = Mock()
+        adapter._get_next_trigger_time = Mock(
+            return_value=datetime(1999, 1, 1, 0, 0, tzinfo=_tz.utc)
+        )
+        registry = Mock()
+        registry.get = Mock(return_value=adapter)
+        mock_manager.source_registry = registry
+
+        response = await client.get("/schedules")
+        assert response.status_code == 200
+        item = response.json()["schedules"][0]
+        # The adapter's value would be 1999 — the STORED config wins.
+        assert not item["next_run_at"].startswith("1999")
+        assert item["next_run_at"].startswith(
+            source.config["run_at"][:13]
+        )
+
+
+# ==================== Phase-1 fix-round REST pins (M-C / M-D / M-A) ====================
+
+
+class TestSchedulePhase1GuardsRest:
+    """REST-level pins for the Phase-1 fix-round (branch
+    feature/schedule-listing-truth-phase1, round commits 38cb02c2c /
+    a70b3980d / b6157743a).
+
+    * **M-C** — a REST PUT RENAME enforces the live-label namespace
+      EXCLUDING the row being renamed; a live/live collision is refused
+      with HTTP 409 code ``SCHEDULE_LABEL_CONFLICT``.  Sub-cases:
+      rename onto a CANCELLED row's label is ALLOWED; rename to the
+      row's OWN name is a no-op (never a self-conflict); rename onto
+      another LIVE row's label is 409.  A broken namespace scan is 503
+      ``SCHEDULE_LABEL_CHECK_UNAVAILABLE`` (M-E's REST mapping).
+    * **M-D/M-A REST legs** — the REST list renders the SAME instant as
+      the shared service helper for the SAME row (ONE next-fire value);
+      a disarmed (paused/cancelled) row renders ``next_run_at`` null
+      with ``enabled``/``armed`` visible; REST GET likewise; a PUT on a
+      disarmed row renders the same gate.
+
+    The unit-side pins live in
+    ``tests/unit/services/test_schedule_phase1_guards.py``; the seed
+    (M-B) pins live in ``tests/unit/test_maintenance_seed_selfheal.py``.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_svc_deps(self):
+        """Reset the shared scheduling-service deps after each test so a
+        configured service never leaks into a neighbour."""
+        yield
+        from daemon.services import scheduling_service as _svc
+
+        _svc._deps.source_repo = None
+        _svc._deps.source_registry = None
+        _svc._deps.project_repository = None
+        _svc._source_locks.clear()
+
+    # -- row builders -------------------------------------------------------
+
+    def _rest_source(
+        self,
+        source_id="sched-1",
+        name="my-schedule",
+        config=None,
+        status="running",
+        enabled=True,
+    ):
+        """A scheduler source Mock with EXPLICIT status/enabled (the
+        file-level ``create_scheduler_source`` helper hardcodes
+        status='stopped' — these pins need armed rows too)."""
+        source = Mock()
+        source.source_id = source_id
+        source.source_type = "scheduler"
+        source.name = name
+        source.config = config or {
+            "agent": "./agents/maintenancer",
+            "message": "weekly run",
+            "timezone": "Asia/Ho_Chi_Minh",
+            "recurrence": "weekly",
+            "local_time": "03:30",
+            "schedule": "30 3 * * 0",
+            "instance_mode": "new_instance",
+            "project_id": "agents-ensemble",
+        }
+        source.credentials = None
+        source.enabled = enabled
+        source.status = status
+        source.error_message = None
+        source.created_at = "2026-11-01T00:00:00+00:00"
+        source.updated_at = "2026-11-01T00:00:00+00:00"
+        return source
+
+    def _fake_repo(self):
+        """A minimal PAGE-AWARE repo double for the TOOL surface (the
+        identity pin derives the tool value through the REAL service)."""
+        class _Repo:
+            def __init__(self):
+                self.rows = {}
+
+            def add(self, row):
+                self.rows[row.source_id] = row
+                return row
+
+            def get_source_config(self, source_id):
+                return self.rows.get(source_id)
+
+            def get_source_config_by_name(self, name):
+                for row in self.rows.values():
+                    if row.name == name:
+                        return row
+                return None
+
+            def list_source_configs(self, enabled=None, status=None, limit=100, offset=0):
+                rows = list(self.rows.values())
+                if status is not None:
+                    rows = [r for r in rows if r.status == status]
+                if enabled is not None:
+                    rows = [r for r in rows if r.enabled == enabled]
+                return rows[offset : offset + limit]
+
+            def get_latest_execution(self, schedule_id):
+                return None
+
+        return _Repo()
+
+    # -- M-C: the REST PUT rename conflict gate ------------------------------
+
+    @pytest.mark.asyncio
+    async def test_put_rename_onto_another_live_row_label_is_409(
+        self, client, mock_manager
+    ):
+        """M-C — renaming onto another LIVE row's label is refused with
+        409 SCHEDULE_LABEL_CONFLICT."""
+        existing = self._rest_source("sched-1", "my-schedule")
+        live_other = self._rest_source("sched-2", "taken-label", status="running")
+        mock_manager._source_repository.get_source_config = Mock(return_value=existing)
+        mock_manager._source_repository.list_source_configs = Mock(
+            return_value=[live_other]
+        )
+        # The rename is NOT expected to reach the repository — but the
+        # repository double is still shaped like a successful write so a
+        # REGRESSION (the gate removed) surfaces as a clean status-code
+        # assertion (200 != 409) instead of an incidental fixture error.
+        updated = self._rest_source("sched-1", "taken-label")
+        mock_manager._source_repository.update_source_config = Mock(return_value=updated)
+        mock_manager._source_repository.get_latest_execution = Mock(return_value=None)
+
+        response = await client.put("/schedules/sched-1", json={"name": "taken-label"})
+        assert response.status_code == 409, response.text
+        assert response.json()["detail"]["code"] == "SCHEDULE_LABEL_CONFLICT"
+        # The rename never reached the repository.
+        mock_manager._source_repository.update_source_config.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_put_rename_onto_a_cancelled_row_label_succeeds(
+        self, client, mock_manager
+    ):
+        """M-C sub-case — a CANCELLED row keeps its name for history but
+        no longer OWNS it: renaming onto its label is ALLOWED."""
+        existing = self._rest_source("sched-1", "my-schedule")
+        cancelled = self._rest_source("sched-3", "old-cancelled", status="cancelled")
+        mock_manager._source_repository.get_source_config = Mock(return_value=existing)
+        mock_manager._source_repository.list_source_configs = Mock(
+            return_value=[cancelled]
+        )
+        updated = self._rest_source("sched-1", "old-cancelled")
+        mock_manager._source_repository.update_source_config = Mock(return_value=updated)
+        mock_manager._source_repository.get_latest_execution = Mock(return_value=None)
+
+        response = await client.put("/schedules/sched-1", json={"name": "old-cancelled"})
+        assert response.status_code == 200, response.text
+        assert response.json()["name"] == "old-cancelled"
+
+    @pytest.mark.asyncio
+    async def test_put_rename_to_the_own_name_is_a_noop_never_a_self_conflict(
+        self, client, mock_manager
+    ):
+        """M-C sub-case — renaming to the row's OWN name is a no-op: the
+        conflict gate is skipped entirely (the exclusion guard keeps the
+        row from ever conflicting with itself).  The scan sees the row
+        ITSELF — so a broken exclusion (exclude-every-row mutation shape)
+        turns this pin RED with a 409.
+
+        The own-name SHORT-CIRCUIT is pinned by the scan never running:
+        a rename to the row's own label must not even reach the
+        namespace scan (MA-4).
+
+        COUNTER-MUTATION: drop the ``updated_name != existing.name``
+        guard in the router ⇒ the scan RUNS ⇒ the assert below fails ⇒
+        RED."""
+        existing = self._rest_source("sched-1", "my-schedule")
+        mock_manager._source_repository.get_source_config = Mock(return_value=existing)
+        # The scan WILL see the row itself.
+        mock_manager._source_repository.list_source_configs = Mock(
+            return_value=[existing]
+        )
+        updated = self._rest_source("sched-1", "my-schedule")
+        mock_manager._source_repository.update_source_config = Mock(return_value=updated)
+        mock_manager._source_repository.get_latest_execution = Mock(return_value=None)
+
+        response = await client.put("/schedules/sched-1", json={"name": "my-schedule"})
+        assert response.status_code == 200, response.text
+        assert response.json()["name"] == "my-schedule"
+        # The own-name short-circuit skipped the namespace scan entirely.
+        mock_manager._source_repository.list_source_configs.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_put_case_variant_self_rename_exercises_the_conflict_gate(
+        self, client, mock_manager
+    ):
+        """M-C/MA-4 — a CASE-VARIANT self-rename ("Weekly Report" →
+        "weekly report") is NOT the own-name short-circuit: the collision
+        GATE runs.  The namespace scan reports a row that carries the
+        TARGET label under the row's OWN source id — the exclusion's
+        raison d'être (a row never conflicts with itself) — so the
+        exclusion is LOAD-BEARING in this leg.
+
+        COUNTER-MUTATION: drop ``exclude_source_id=schedule_id`` from the
+        router's ``live_label_conflict`` call ⇒ the scanned row matches
+        ⇒ 409 SCHEDULE_LABEL_CONFLICT ⇒ RED."""
+        existing = self._rest_source("sched-1", "Weekly Report")
+        # The scan sees the row ITSELF, carrying the label the client asks for.
+        scanned_self = self._rest_source("sched-1", "weekly report")
+        mock_manager._source_repository.get_source_config = Mock(return_value=existing)
+        mock_manager._source_repository.list_source_configs = Mock(
+            return_value=[scanned_self]
+        )
+        updated = self._rest_source("sched-1", "weekly report")
+        mock_manager._source_repository.update_source_config = Mock(return_value=updated)
+        mock_manager._source_repository.get_latest_execution = Mock(return_value=None)
+
+        response = await client.put("/schedules/sched-1", json={"name": "weekly report"})
+        assert response.status_code == 200, response.text
+        assert response.json()["name"] == "weekly report"
+
+    @pytest.mark.asyncio
+    async def test_put_whitespace_padded_rename_colliding_with_a_live_row_is_409(
+        self, client, mock_manager
+    ):
+        """M-4 — the rename NORMALISES the label (strip) exactly like
+        create does: "  taken-label  " collides with the LIVE row that
+        owns "taken-label" ⇒ 409 SCHEDULE_LABEL_CONFLICT (NOT 200).
+
+        COUNTER-MUTATION: drop the ``.strip()`` in the router's rename ⇒
+        the padded label misses the namespace ⇒ the rename is accepted ⇒
+        200 ⇒ RED."""
+        existing = self._rest_source("sched-1", "my-schedule")
+        live_other = self._rest_source("sched-2", "taken-label", status="running")
+        mock_manager._source_repository.get_source_config = Mock(return_value=existing)
+        mock_manager._source_repository.list_source_configs = Mock(
+            return_value=[live_other]
+        )
+        updated = self._rest_source("sched-1", "taken-label")
+        mock_manager._source_repository.update_source_config = Mock(return_value=updated)
+        mock_manager._source_repository.get_latest_execution = Mock(return_value=None)
+
+        response = await client.put(
+            "/schedules/sched-1", json={"name": "  taken-label  "}
+        )
+        assert response.status_code == 409, response.text
+        assert response.json()["detail"]["code"] == "SCHEDULE_LABEL_CONFLICT"
+        # The rename never reached the repository.
+        mock_manager._source_repository.update_source_config.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_put_whitespace_only_rename_is_400(self, client, mock_manager):
+        """M-4 — a whitespace-ONLY rename is a 400 (the label is EMPTY
+        after the strip) — symmetric with create's "label must be a
+        non-empty string".
+
+        COUNTER-MUTATION: drop the ``.strip()`` (and the empty check) in
+        the router's rename ⇒ the blank label is accepted ⇒ 200 ⇒ RED."""
+        existing = self._rest_source("sched-1", "my-schedule")
+        mock_manager._source_repository.get_source_config = Mock(return_value=existing)
+        mock_manager._source_repository.list_source_configs = Mock(return_value=[])
+        updated = self._rest_source("sched-1", "my-schedule")
+        mock_manager._source_repository.update_source_config = Mock(return_value=updated)
+        mock_manager._source_repository.get_latest_execution = Mock(return_value=None)
+
+        response = await client.put("/schedules/sched-1", json={"name": "   "})
+        assert response.status_code == 400, response.text
+        assert response.json()["detail"]["code"] == "INVALID_REQUEST"
+        # The rename never reached the repository.
+        mock_manager._source_repository.update_source_config.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_put_rename_with_an_unavailable_scan_is_503(
+        self, client, mock_manager
+    ):
+        """M-E REST mapping — a broken namespace scan on a rename is
+        503 SCHEDULE_LABEL_CHECK_UNAVAILABLE (never 'no conflict')."""
+        existing = self._rest_source("sched-1", "my-schedule")
+        mock_manager._source_repository.get_source_config = Mock(return_value=existing)
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("repository unavailable")
+
+        mock_manager._source_repository.list_source_configs = _boom
+
+        response = await client.put("/schedules/sched-1", json={"name": "other-label"})
+        assert response.status_code == 503, response.text
+        assert (
+            response.json()["detail"]["code"] == "SCHEDULE_LABEL_CHECK_UNAVAILABLE"
+        )
+
+    # -- M-D/M-A REST legs ---------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_rest_list_next_run_is_the_same_instant_as_the_service_value(
+        self, client, mock_manager
+    ):
+        """M-D — ONE next-fire value: the REST list renders the SAME
+        instant as the shared service helper for the SAME row.  The row's
+        stored config yields NO next-fire (a past-due one-shot) and a
+        live adapter CLAIMS 1999 — the adapter's value must never reach
+        either surface (the historical two-source divergence class)."""
+        from datetime import datetime, timedelta, timezone as _tz
+        from types import SimpleNamespace as _NS
+
+        from daemon.services import scheduling_service as svc
+
+        run_at_past = datetime.now(_tz.utc) - timedelta(days=1)
+        row = _NS(
+            source_id="past-1",
+            source_type="scheduler",
+            name="past-once",
+            config={
+                "agent": "ari",
+                "message": "hi",
+                "timezone": "UTC",
+                "recurrence": "once",
+                "local_time": run_at_past.strftime("%H:%M"),
+                "run_at": run_at_past.isoformat(),
+                "instance_mode": "new_instance",
+                "project_id": "agents-ensemble",
+            },
+            credentials=None,
+            enabled=True,
+            autostart=True,
+            status="running",
+            error_message=None,
+            created_at="2026-11-01T00:00:00+00:00",
+            updated_at="2026-11-01T00:00:00+00:00",
+        )
+        fake = self._fake_repo()
+        fake.add(row)
+        adapter = Mock()
+        adapter._get_next_trigger_time = Mock(
+            return_value=datetime(1999, 1, 1, 0, 0, tzinfo=_tz.utc)
+        )
+        registry = Mock()
+        registry.get = Mock(return_value=adapter)
+        # The TOOL surface derives through the real service.
+        svc.configure(source_repo=fake, source_registry=registry)
+        # The REST surface sees the SAME row; the registry is visible to
+        # it too (so a reintroduced adapter path WOULD be exercised).
+        mock_manager._source_repository.list_source_configs = Mock(return_value=[row])
+        mock_manager._source_repository.get_latest_execution = Mock(return_value=None)
+        mock_manager.source_registry = registry
+
+        response = await client.get("/schedules")
+        assert response.status_code == 200
+        items = response.json()["schedules"]
+        assert len(items) == 1
+        rest_next = items[0]["next_run_at"]
+        tool_items = {i.source_id: i for i in await svc.list_schedules()}
+        tool_next = tool_items["past-1"].next_run_at_utc
+        # Same row, same instant — the stored-config helper's value
+        # (null here), NEVER the adapter's 1999.
+        assert tool_next is None
+        assert rest_next is None, (
+            "the REST list must render the shared helper's value "
+            f"({tool_next!r}), not an adapter-derived one ({rest_next!r})"
+        )
+        assert not str(rest_next or "").startswith("1999")
+
+    @pytest.mark.asyncio
+    async def test_rest_list_disarmed_rows_render_null_next_run_with_enabled_armed_visible(
+        self, client, mock_manager
+    ):
+        """M-A — a paused (enabled=False + stopped) row and a cancelled
+        row render ``next_run_at`` null with ``enabled``/``armed``
+        visible on the REST list."""
+        paused = self._rest_source("paused-1", "paused-cron", status="stopped", enabled=False)
+        cancelled = self._rest_source(
+            "gone-1", "gone-row", status="cancelled", enabled=False
+        )
+        armed = self._rest_source("armed-1", "armed-cron", status="running", enabled=True)
+        mock_manager._source_repository.list_source_configs = Mock(
+            return_value=[paused, cancelled, armed]
+        )
+        mock_manager._source_repository.get_latest_execution = Mock(return_value=None)
+
+        response = await client.get("/schedules", params={"include_cancelled": "true"})
+        assert response.status_code == 200
+        items = {s["id"]: s for s in response.json()["schedules"]}
+        # PAUSED: no next-fire, disarmed, visible.
+        assert items["paused-1"]["next_run_at"] is None
+        assert items["paused-1"]["enabled"] is False
+        assert items["paused-1"]["armed"] is False
+        # CANCELLED: same gate.
+        assert items["gone-1"]["next_run_at"] is None
+        assert items["gone-1"]["armed"] is False
+        # The ARMED neighbour keeps its next-fire (asymmetry control).
+        assert items["armed-1"]["next_run_at"] is not None
+        assert items["armed-1"]["enabled"] is True
+        assert items["armed-1"]["armed"] is True
+
+    @pytest.mark.asyncio
+    async def test_rest_get_disarmed_row_renders_null_next_run(
+        self, client, mock_manager
+    ):
+        """M-A — REST GET renders the same gate for a paused row, with
+        ``enabled``/``armed`` visible."""
+        from unittest.mock import AsyncMock
+
+        from daemon.services import scheduling_service as svc
+
+        repo = self._fake_repo()
+        repo.add(
+            self._rest_source("paused-2", "paused-weekly", status="stopped", enabled=False)
+        )
+        svc.configure(
+            source_repo=repo, source_registry=Mock()
+        )
+        detail = await svc.get_schedule("paused-2")
+        assert detail is not None
+        mock_manager.scheduling_service.get_schedule = AsyncMock(return_value=detail)
+
+        response = await client.get("/schedules/paused-2")
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["next_run_at_local"] is None
+        assert body["next_run_at_utc"] is None
+        assert body["enabled"] is False
+        assert body["armed"] is False
+
+    @pytest.mark.asyncio
+    async def test_rest_put_past_due_row_with_a_live_adapter_renders_null_next_run(
+        self, client, mock_manager
+    ):
+        """M-D — a REST PUT on a PAST-DUE row (the stored config yields NO
+        next-fire) renders ``next_run_at`` NULL even though a LIVE adapter
+        claims an instant: the stored config is the ONLY next-fire source
+        on the PUT span too (M-D deleted BOTH adapter-fallback spans in
+        the router).
+
+        COUNTER-MUTATION: reintroduce an adapter-derived next-fire in the
+        router's PUT path ⇒ the adapter's 1999 reaches the response ⇒
+        RED."""
+        from datetime import datetime, timedelta, timezone as _tz
+
+        run_at_past = datetime.now(_tz.utc) - timedelta(days=1)
+        config = {
+            "agent": "ari",
+            "message": "hi",
+            "timezone": "UTC",
+            "recurrence": "once",
+            "local_time": run_at_past.strftime("%H:%M"),
+            "run_at": run_at_past.isoformat(),
+            "instance_mode": "new_instance",
+            "project_id": "agents-ensemble",
+        }
+        existing = self._rest_source(
+            "past-1", "past-once", config=config, status="running", enabled=True
+        )
+        updated = self._rest_source(
+            "past-1", "past-once", config=config, status="running", enabled=True
+        )
+        mock_manager._source_repository.get_source_config = Mock(return_value=existing)
+        mock_manager._source_repository.list_source_configs = Mock(return_value=[])
+        mock_manager._source_repository.update_source_config = Mock(return_value=updated)
+        mock_manager._source_repository.get_latest_execution = Mock(return_value=None)
+        # A LIVE adapter that claims a DIFFERENT next-fire.
+        adapter = Mock()
+        adapter._get_next_trigger_time = Mock(
+            return_value=datetime(1999, 1, 1, 0, 0, tzinfo=_tz.utc)
+        )
+        registry = Mock()
+        registry.get = Mock(return_value=adapter)
+        mock_manager.source_registry = registry
+
+        response = await client.put(
+            "/schedules/past-1", json={"config": {"priority": 3}}
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        # The stored config is the authority ⇒ NULL (never the adapter's 1999).
+        assert body["next_run_at"] is None
+        assert not str(body["next_run_at"] or "").startswith("1999")
+        # The row is ARMED — the null comes from the stored config, not
+        # from the armed gate (the asymmetry control).
+        assert body["armed"] is True
+        assert body["enabled"] is True
+
+    @pytest.mark.asyncio
+    async def test_rest_put_on_a_disarmed_row_renders_null_next_run(
+        self, client, mock_manager
+    ):
+        """M-A — a PUT on a paused row renders NO next-fire in the
+        response echo, with ``enabled``/``armed`` visible."""
+        existing = self._rest_source("paused-3", "paused-daily", status="stopped", enabled=False)
+        updated = self._rest_source(
+            "paused-3", "paused-daily", status="stopped", enabled=False
+        )
+        mock_manager._source_repository.get_source_config = Mock(return_value=existing)
+        mock_manager._source_repository.list_source_configs = Mock(return_value=[])
+        mock_manager._source_repository.update_source_config = Mock(return_value=updated)
+        mock_manager._source_repository.get_latest_execution = Mock(return_value=None)
+
+        response = await client.put(
+            "/schedules/paused-3", json={"config": {"priority": 3}}
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["next_run_at"] is None
+        assert body["enabled"] is False
+        assert body["armed"] is False
