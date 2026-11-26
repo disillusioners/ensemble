@@ -572,14 +572,14 @@ class TestTheScrubGrowthPastCap:
             assert len(text_in) <= cap, "precondition: raw input under cap"
             out, truncated = scrub_text(text_in, cap, mark_truncated=True)
             # discriminating control: the substitution genuinely fired.
-            assert "__ENS_SECRET__" in out, "stored-secret substitution must fire"
+            assert "__ENS_REDACTED__" in out, "stored-secret substitution must fire"
             assert truncated is True, "loud marker must be attached"
-            assert len(out) == cap, "result must be capped"
+            assert len(out) <= cap, "result must be capped"
             # control: without the registered service, no growth, no marker.
             reset_process_registry()
             out2, truncated2 = scrub_text(text_in, cap, mark_truncated=True)
             assert truncated2 is False, "no growth without registered secret"
-            assert "__ENS_SECRET__" not in out2
+            assert "__ENS_REDACTED__" not in out2
         finally:
             reset_process_registry()
 

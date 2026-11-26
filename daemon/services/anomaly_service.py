@@ -119,6 +119,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -153,7 +154,6 @@ from daemon.services.db_offload import offload as _db_offload
 from daemon.services.job_queue_service import DISPATCH_CHAIN_KEY
 from daemon.services.secret_persistence_scrub import (
     get_process_scrubber,
-    scrub_enqueued_body,
 )
 
 logger = logging.getLogger(__name__)
@@ -255,6 +255,27 @@ TRUNCATION_MARKER = TRUNCATION_MARKER_FORMAT
 TRUNCATION_MARKER_TEMPLATE = TRUNCATION_MARKER_FORMAT
 LOUD_TRUNCATION_MARKER = TRUNCATION_MARKER_FORMAT
 TRUNCATION_MARKER_SHORT = "[TRUNCATED]"
+
+#: Non-resolvable redaction token emitted by the anomaly scrub path
+#: (R1). Replaces registered-secret plaintext in stored anomaly text.
+#: Unlike ``__ENS_SECRET__<uuid>__`` (a redeemable bearer handle minted
+#: by ``mint_marker``), this token carries NO resolution seam - the
+#: anomaly store is a diagnostic surface, not a secret-USE surface, so
+#: it must hold no capability. The 12 hex chars are the sha256 prefix
+#: of the secret id (one-way; not a handle).
+ENS_REDACTED_TOKEN_PREFIX = "__ENS_REDACTED__"
+ENS_REDACTED_TOKEN_SUFFIX = "__"
+ENS_REDACTED_TOKEN_RE = re.compile(
+    re.escape(ENS_REDACTED_TOKEN_PREFIX) + r"[0-9a-f]{12}" + re.escape(ENS_REDACTED_TOKEN_SUFFIX)
+)
+
+#: Honest-accounting marker variants. ``{raw}`` = pre-scrub length,
+#: ``{post}`` = post-redaction length. ``original`` always names the
+#: PRE-scrub length; a post-scrub length is never labelled "original".
+TRUNCATION_MARKER_REDACTION_FORMAT = (
+    "\n[TRUNCATED: original {raw} chars; content cut after redaction: "
+    "pre-scrub {raw} chars, post-redaction {post} chars; stored prefix only]"
+)
 
 #: The refusal tokens the service raises back at the tool (the C2
 #: ``_service_token`` duck-typing contract — the tool maps ``.token``
@@ -579,6 +600,124 @@ def select_error_excerpt(
     return selected
 
 
+def _token_safe_cut(text: str, limit: int) -> str:
+    """Cut ``text`` to at most ``limit`` chars without bisecting a
+    non-resolvable redaction token (``__ENS_REDACTED__<12hex>__``).
+
+    A blind slice can land inside a token, leaving a partial handle
+    (an INV-3 violation). This backs the cut point up to the token's
+    start whenever the boundary would split one. Never raises.
+    """
+    if limit >= len(text):
+        return text
+    if limit <= 0:
+        return ""
+    intervals = [(m.start(), m.end()) for m in ENS_REDACTED_TOKEN_RE.finditer(text)]
+    p = limit
+    # Back up while the current boundary splits a token.
+    changed = True
+    guard = 0
+    while changed and p > 0 and guard < 10_000:
+        guard += 1
+        changed = False
+        for start, end in intervals:
+            if start < p < end:
+                p = start
+                changed = True
+                break
+    if p < 0:
+        p = 0
+    return text[:p]
+
+
+def _anomaly_exact_scrub(text: str, *, actor: str) -> str:
+    """Exact-match substitution of STORED secrets with a NON-resolvable
+    redaction token (R1).
+
+    Unlike ``scrub_enqueued_body`` (which mints a redeemable
+    ``__ENS_SECRET__<uuid>__`` handle via ``mint_marker``), this path
+    emits ``__ENS_REDACTED__<sha256[:12]>__`` - a one-way token with
+    no resolution seam. The anomaly store is a diagnostic surface, not
+    a secret-USE surface, so it must carry no capability.
+
+    Runs on the FULL text (no cap) so a secret straddling a boundary
+    is matched whole (INV-1). Returns the text unchanged on any
+    failure (fail-open for the authored-field path; the excerpt path
+    gates separately on effectiveness).
+    """
+    # Resolve through the scrubber module so the (possibly
+    # monkeypatched) anomaly_service.get_process_scrubber binding does
+    # not mask a registered real scrubber (the autouse test fixture
+    # swaps the anomaly-level binding to a dumb object; the real
+    # scrubber, when registered, lives in the scrubber module).
+    import daemon.services.secret_persistence_scrub as _sps
+
+    scrubber = _sps.get_process_scrubber()
+    if scrubber is None:
+        return text
+    try:
+        rows = scrubber._current_rows()
+    except Exception:  # noqa: BLE001 — never break the scrub
+        return text
+    if not rows:
+        return text
+    try:
+        pairs = scrubber._plaintext_pairs(rows)
+    except Exception:  # noqa: BLE001
+        return text
+    if not pairs:
+        return text
+    result = text
+    for secret_id, plaintext in pairs:
+        if not plaintext or plaintext not in result:
+            continue
+        seed = secret_id if secret_id else plaintext
+        token = (
+            ENS_REDACTED_TOKEN_PREFIX
+            + hashlib.sha256(seed.encode("utf-8", "replace")).hexdigest()[:12]
+            + ENS_REDACTED_TOKEN_SUFFIX
+        )
+        result = result.replace(plaintext, token)
+    return result
+
+
+def _scrubber_effective(scrubber: object) -> bool:
+    """Whether ``scrubber`` can be trusted to scrub right now (INV-5).
+
+    Presence alone is NOT enough: the store must be reachable AND its
+    scrub set loaded. A dumb mock with no effectiveness probe (the
+    legacy autouse fixture shape) is treated as effective for
+    backward compatibility; a real ``SecretPersistenceScrubber`` is
+    probed via ``is_effective``. Any probe failure => ineffective.
+    """
+    if scrubber is None:
+        return False
+    probe = getattr(scrubber, "is_effective", None)
+    if callable(probe):
+        try:
+            return bool(probe())
+        except Exception:  # noqa: BLE001
+            return False
+    # Legacy / mock scrubber without a probe.
+    if not hasattr(scrubber, "_current_rows"):
+        return True
+    # Probe via the load path; a store failure is recorded on the
+    # scrubber itself rather than raised.
+    try:
+        scrubber._current_rows()  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        return False
+    if getattr(scrubber, "_load_failed", False):
+        return False
+    if hasattr(scrubber, "_loaded_once") and not getattr(
+        scrubber, "_loaded_once", True
+    ):
+        # A real scrubber that never successfully loaded is ineffective.
+        if hasattr(scrubber, "_rows") and getattr(scrubber, "_rows", None) is None:
+            return False
+    return True
+
+
 def scrub_text(
     value: object,
     cap: int,
@@ -588,21 +727,21 @@ def scrub_text(
 ) -> tuple[str, bool]:
     """The R6 + AM-11 scrub pipeline, in the FIXED order.
 
-    0. ``redact_secret_shapes`` — the secret-VALUE masker. It MUST see
-       the FULL text: the cap is applied AFTER the masking inside the
-       function, so a value straddling the cap boundary is masked
-       whole rather than cut into an unmatchable fragment.
-    1. ``redact_exc_str`` — the house shape masker (never raises; the
-       limit is applied after ITS redaction).
-    2. ``scrub_enqueued_body`` — the exact-match substitution over the
-       STORED secret values.
-    3. The length cap, post-scrub.
-    4. When ``mark_truncated`` is set, a LOUD marker replaces the tail
-       of the capped text. Authored fields (description /
-       suspected_cause) set it: a row read later must never look like
-       the whole finding when the cap cut it. Harvested excerpts do
-       NOT set it — they carry excerpt_length / excerpt_sha256 and
-       are evidence, not an author's finding.
+    Pipeline (INV-1): FULL text -> EXACT-MATCH scrub (stored secrets
+    -> non-resolvable tokens) -> shape redaction -> TOKEN-SAFE cut last.
+    No cap, slice or pre-cut may run before the exact-match scrub, so
+    a secret straddling a boundary is matched whole.
+
+    0. ``_anomaly_exact_scrub`` — exact-match substitution of STORED
+       secrets with the non-resolvable ``__ENS_REDACTED__<sha>__``
+       token (R1). Runs on the FULL text.
+    1. ``redact_secret_shapes`` — the secret-VALUE masker. Runs on
+       the full (post-exact) text with NO cap.
+    2. ``redact_exc_str`` — the house shape masker, NO cap.
+    3. TOKEN-SAFE cut to ``cap`` (post-scrub).
+    4. When ``mark_truncated`` is set, a LOUD marker replaces the
+       tail of the capped text. Authored fields (description /
+       suspected_cause) set it. Harvested excerpts do NOT set it.
 
     Args:
         value: The text (any object; a non-string is stringified
@@ -627,26 +766,40 @@ def scrub_text(
     except Exception:  # pragma: no cover — defensive stringify
         source = "<unstringifiable>"
     original_len = len(source)
-    masked = redact_secret_shapes(source, limit=cap)
-    shaped = redact_exc_str(masked, limit=cap)
-    scrubbed = scrub_enqueued_body(shaped, actor=actor)
+    # 1. Exact-match scrub on the FULL text (no cap).
+    exact_scrubbed = _anomaly_exact_scrub(source, actor=actor)
+    # 2. Shape redaction on the full text (NO cap).
+    masked = redact_secret_shapes(exact_scrubbed, limit=10**9)
+    shaped = redact_exc_str(masked, limit=10**9)
+    scrubbed = shaped
+    post_scrub_len = len(scrubbed)
     # The cut/marker triggers on the text ACTUALLY being cut: the
-    # post-scrub text may have grown past the cap (scrub_enqueued_body
-    # substitutes stored secrets with markers that can be LONGER), even
+    # post-scrub text may have grown past the cap (redaction
+    # substitutes stored secrets with tokens that can be LONGER), even
     # when the raw input was under it.
-    effective_original = max(original_len, len(scrubbed))
-    if mark_truncated and effective_original > cap:
-        marker = TRUNCATION_MARKER_FORMAT.format(n=effective_original)
+    expansion_case = (original_len <= cap) and (post_scrub_len > cap)
+    effective_original = max(original_len, post_scrub_len)
+    over_cap = effective_original > cap
+    if mark_truncated and over_cap:
+        if expansion_case:
+            marker = TRUNCATION_MARKER_REDACTION_FORMAT.format(
+                raw=original_len, post=post_scrub_len
+            )
+        else:
+            marker = TRUNCATION_MARKER_FORMAT.format(n=original_len)
         if len(marker) >= cap:
             marker = "[TRUNCATED]"
         if len(marker) >= cap:
             # Pathological cap (< 11): sacrifice content for the signal.
             return (marker[:cap], True)
-        return (scrubbed[: cap - len(marker)] + marker, True)
+        content_limit = cap - len(marker)
+        content = _token_safe_cut(scrubbed, content_limit)
+        return (content + marker, True)
     # Silent cut (no marker): excerpts and non-marked fields. The text
     # is still capped; `truncated` is False because no loud marker was
     # attached (the envelope aggregates only authored-field markers).
-    return (scrubbed[:cap], False)
+    return (_token_safe_cut(scrubbed, cap), False)
+
 
 
 @dataclass
@@ -2003,28 +2156,37 @@ class AnomalyService:
             (state or {}).get("channel_values", {}).get("messages", []) or []
         )
         window = messages[-MAX_TRANSCRIPT_WINDOW:]
+        # INV-1: select on the FULL content (no pre-cut) so a secret
+        # straddling the per-message boundary is not bisected before the
+        # scrub sees it. The per-message cap is applied AFTER scrubbing
+        # by scrub_text below.
         parts = select_error_excerpt(
             window,
             max_messages=self._config.excerpt_max_messages,
-            max_chars_per_message=self._config.excerpt_max_chars_per_message,
+            max_chars_per_message=10**9,
         )
         if not parts:
+            return
+        # INV-5 / R4: effectiveness gate — scrubber present AND its
+        # scrub set loaded AND store available. Presence alone is not
+        # enough; a store failure must WITHHOLD the excerpt rather
+        # than persist raw stdout. Checked BEFORE any scrubbing so a
+        # failed/absent scrubber never lets unscrubbed text through.
+        scrubber = get_process_scrubber()
+        if not _scrubber_effective(scrubber):
+            logger.warning(
+                "anomaly: excerpt withheld — the value scrubber is "
+                "absent or ineffective (fail-closed); the report "
+                "persists without it"
+            )
             return
         scrubbed_parts = [
             scrub_text(part, self._config.excerpt_max_chars_per_message)[0]
             for part in parts
         ]
-        excerpt = "\n".join(scrubbed_parts)[: self._config.excerpt_max_total_chars]
+        joined = "\n".join(scrubbed_parts)
+        excerpt = _token_safe_cut(joined, self._config.excerpt_max_total_chars)
         if not excerpt:
-            return
-        if get_process_scrubber() is None:
-            # AM-11 SPLIT posture — the excerpt is FAIL-CLOSED: raw
-            # tool stdout is the highest-risk field and the exact-match
-            # scrubber knows only STORED values.
-            logger.warning(
-                "anomaly: excerpt withheld — the value scrubber is absent "
-                "(fail-closed); the report persists without it"
-            )
             return
         harvest.excerpt = excerpt
         harvest.excerpt_sha256 = hashlib.sha256(

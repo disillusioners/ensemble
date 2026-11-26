@@ -335,7 +335,23 @@ class SecretPersistenceScrubber:
         # is the rule — holds for both the stale-refresh case
         # AND the never-loaded case.
         self._last_attempt_at: float = -float("inf")
+        # Effectiveness tracking (anomaly INV-5): whether the most recent
+        # load attempt succeeded. ``_rows is None`` alone cannot
+        # distinguish "never loaded" from "loaded empty", so track it.
+        self._load_failed: bool = False
+        self._loaded_once: bool = False
         self._lock = threading.Lock()
+
+    def is_effective(self) -> bool:
+        """Whether the scrubber can be trusted right now.
+
+        Triggers (and TTL-gates) a load attempt, then reports success
+        only if the store was reachable. An empty scrub set is still
+        effective (nothing to scrub); an unreachable store is not.
+        """
+        self._current_rows()
+        with self._lock:
+            return bool(self._loaded_once) and not self._load_failed
 
     # ── R3 invalidation ─────────────────────────────────────────
 
@@ -371,6 +387,8 @@ class SecretPersistenceScrubber:
             self._rows = None
             self._loaded_at = -float("inf")
             self._last_attempt_at = -float("inf")
+            self._load_failed = False
+            self._loaded_once = False
 
     #: Public alias — the wiring sites and tests may force a refresh
     #: explicitly (mirrors the "single subscriber swaps the id-set"
@@ -464,6 +482,7 @@ class SecretPersistenceScrubber:
             with self._lock:
                 self._last_attempt_at = now
                 self._loaded_at = now
+                self._load_failed = True
                 if self._rows is not None:
                     return self._rows
                 return []
@@ -471,6 +490,8 @@ class SecretPersistenceScrubber:
             self._rows = rows
             self._loaded_at = now
             self._last_attempt_at = now
+            self._load_failed = False
+            self._loaded_once = True
             return self._rows
 
     # ── Decrypt-on-scrub value pairs ────────────────────────────

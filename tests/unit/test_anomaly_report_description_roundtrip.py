@@ -264,8 +264,8 @@ async def test_envelope_truncated_flag_agrees_with_stored_marker(tmp_path) -> No
         (tmp_path / "grew").mkdir(exist_ok=True)
         engine3, service3 = _harness(tmp_path / "grew")
         cap = NestReportConfig().description_max_chars
-        # 201 copies of "a" (<= cap) whose substitution grows scrubbed past cap.
-        description3 = "a" * 201
+        # 300 copies of "a" (<= cap) whose substitution grows scrubbed past cap.
+        description3 = "a" * 300
         assert len(description3) <= cap
         result3 = await service3.accept_report(
             agent_id="worker",
@@ -282,7 +282,7 @@ async def test_envelope_truncated_flag_agrees_with_stored_marker(tmp_path) -> No
         assert result3.truncated == marker_in_stored3, (
             f"grew: envelope={result3.truncated} marker_in_stored={marker_in_stored3}"
         )
-        assert "__ENS_SECRET__" in (stored3 or "") or "TRUNCATED" in (stored3 or "")
+        assert "__ENS_REDACTED__" in (stored3 or "") or "TRUNCATED" in (stored3 or "")
 
         # suspected_cause path: None case already covered (cause is None).
         # Additionally verify a fits suspected_cause does not set flag.
