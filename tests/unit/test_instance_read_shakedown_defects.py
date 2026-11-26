@@ -1,10 +1,13 @@
 """Unit pins for the nest-ops shakedown defect patch — READ-SIDE core (Phase 1).
 
-Seven defects are pinned here: **F12** (status filter dropped at the
+Eight defects are pinned here: **F12** (status filter dropped at the
 lifecycle→repo seam), **F4** (pagination flags + full-age-range scan),
 **F3** (the never-dispatched husk detector), **F2** (census + totals
 reconciliation), **F8** (read-path purity), **F5** (dlq vs dead-job
-measures) and **F1** (the ``instance_fleet_summary`` alias).
+measures), **F1** (the ``instance_fleet_summary`` alias) and the
+**never-started-running** wedge detector (the EIGHTH detector class —
+its predicate, its degradation branches, its coverage limits and its
+read-only fence).
 
 Every pin names its PLANNED MUTATION in the class docstring — the
 mutation cycles are executed by the tester in Phase 4, not here. One
@@ -19,7 +22,10 @@ daemon on ``:9797``.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import logging
+import re
 import tempfile
 import threading
 import time
@@ -54,9 +60,43 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 # ────────────────────────────────────────────────────────────────────────
-# F12 — the ``status`` filter must reach the repository
+# The read-path probe helpers (session frame + statement capture)
 # ────────────────────────────────────────────────────────────────────────
 
+
+def _declare_session_timezone(engine, timezone_name: str) -> None:
+    """Declare a NON-UTC session ``TimeZone`` on every connection.
+
+    A no-op on SQLite (it has no session timezone); on PostgreSQL this
+    is the hostile frame the house rule warns about — the session
+    ``TimeZone`` (+07 in production) that a SQL-side timestamp
+    comparison would be cast through, flipping every age predicate.
+    """
+    from sqlalchemy import event
+
+    @event.listens_for(engine, "connect")
+    def _on_connect(dbapi_connection, connection_record):
+        if engine.dialect.name != "postgresql":
+            return
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute(f"SET TIME ZONE '{timezone_name}'")
+        finally:
+            cursor.close()
+
+
+def _capture_statements(engine, sink: list[str]) -> None:
+    """Record every statement the engine executes — for the SQL pins."""
+    from sqlalchemy import event
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def _before(conn, cursor, statement, parameters, context, executemany):
+        sink.append(statement)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# F12 — the ``status`` filter must reach the repository
+# ────────────────────────────────────────────────────────────────────────
 
 
 @pytest.fixture(autouse=True)
@@ -2200,24 +2240,70 @@ class TestHuskEvidenceLegsDegradation:
 # ────────────────────────────────────────────────────────────────────────
 
 
+class _FrozenDatetime(datetime):
+    """A ``datetime`` whose ``now()`` is PINNED — for the boundary pin.
+
+    The age comparison is exact to the sub-second, so the boundary pin
+    needs a clock that does not move between the fixture's seed and the
+    detector's read.
+    """
+
+    frozen: datetime | None = None
+
+    @classmethod
+    def now(cls, tz=None):
+        base = cls.frozen
+        if base is None:
+            return datetime.now(tz)
+        if tz is None:
+            return base
+        return base.astimezone(tz)
+
+
 class TestNeverStartedRunningDetector:
-    """The eight-class surface's new READ-ONLY wedge detector.
+    """The eight-class surface's READ-ONLY never-started wedge detector.
 
-    Predicate (schema-adapted, verbatim-equivalent): running + older than
-    ``NEVER_STARTED_MIN_AGE_SECONDS`` + zero ``checkpoints`` rows for the
-    thread + a ``task`` row with ``status='pending'`` and
-    ``started_at IS NULL``. Cases a–f of the commission are pinned below;
-    the actionability pairing (f) is asserted on the RENDERED finding,
-    not on an internal helper.
+    PREDICATE (the ruling is binding — the CLOCK IS THE TASK CLOCK):
 
-    PLANNED MUTATION (one behaviour per run):
+        instances.status = 'running'
+        AND NOT EXISTS (checkpoints WHERE thread_id = instances.instance_id)
+        AND EXISTS (task t WHERE t.instance_id = instances.instance_id
+                    AND t.status = 'pending' AND t.started_at IS NULL
+                    AND t.created_at < now() - NEVER_STARTED_MIN_AGE_SECONDS)
+
+    THE CASES (a–h) plus the degradation / coverage pins:
+
+      * (a) running + zero checkpoints + an AGED pending task → FLAGGED;
+      * (b) a long-running instance that HAS a checkpoint → not flagged;
+      * (c) a YOUNG pending task (inside the measured pickup tail) →
+        not flagged;
+      * (d) a task that actually STARTED → not flagged;
+      * (e) a non-running instance → not flagged (that is the husk's job);
+      * (f) the rendered finding pairs the held lock with the jobs
+        queued behind that queue;
+      * (g) a NUDGED instance (recent ``last_activity_at``) is still
+        flagged — liveness is read from TASK + CHECKPOINT state only;
+      * (h) a FRESH task on an OLD instance → NOT flagged (the ruling's
+        false-positive class);
+      * the read-only fence (row CONTENT, not just row counts);
+      * the degradation pins (a failed leg, a raised context probe);
+      * the coverage pins (the candidate probe's own row cap).
+
+    PLANNED MUTATION (ONE behaviour per run — one line per pin):
+
       * drop the checkpoint NOT EXISTS leg → (b) fires → RED;
-      * drop the age leg → (c) fires → RED;
+      * drop the TASK-age leg → (c) fires → RED;
+      * use the INSTANCE clock instead of the TASK clock → (h) fires → RED;
       * drop the ``started_at IS NULL`` conjunct → (d) fires → RED;
       * drop the ``status='running'`` conjunct → (e) fires → RED;
       * drop the actionability context → (f) loses the lock/job pairing
         → RED;
-      * add any write to the path → the table-count fence below → RED.
+      * read the age from ``last_activity_at`` → the nudge case (g)
+        fires → RED;
+      * write anything in the path → the read-only fence → RED;
+      * swallow a failed predicate leg → the degradation pin → RED;
+      * drop the per-queue cap → the cap pin → RED;
+      * read the candidate set from the walk → the budget pin → RED.
     """
 
     async def _health(self, manager):
@@ -2235,24 +2321,53 @@ class TestNeverStartedRunningDetector:
         }
 
     @staticmethod
-    def _wedge(iid: str, **kw):
-        """A running instance aged past the 45-minute threshold."""
+    def _now():
+        """The clock the fixtures and the detector share."""
+        return ir.datetime.now(timezone.utc)
+
+    @classmethod
+    def _wedge(cls, iid: str, **kw):
+        """A running instance OLDER than the detector's threshold.
+
+        The instance age is rendered FROM the constant (never a spelled
+        literal) and is deliberately past the threshold: the detector's
+        clock is the TASK's, so the instance age only proves that the
+        row is not a fresh spawn.
+        """
         defaults = dict(
             status="running",
-            created_at=datetime.now(timezone.utc)
+            created_at=cls._now()
             - timedelta(seconds=ir.NEVER_STARTED_MIN_AGE_SECONDS + 600),
         )
         defaults.update(kw)
         return _instance(iid, **defaults)
 
-    @staticmethod
-    def _pending_task(iid: str, started_at=None):
-        return Task(
+    @classmethod
+    def _pending_task(cls, iid: str, started_at=None, *, age_seconds=None, **kw):
+        """A pending, never-started task with a CONTROLLED age.
+
+        ``age_seconds`` seeds the TASK's age — the clock the detector
+        reads. The default is AGED (past the threshold), because a young
+        pending task is not a never-started wedge.
+
+        The seeded value is NAIVE-UTC DIGITS, the house frame for the
+        ``task`` table's ``created_at`` column (see
+        ``daemon/services/timestamps.py``).
+        """
+        if age_seconds is None:
+            age_seconds = ir.NEVER_STARTED_MIN_AGE_SECONDS + 600
+        created_at = (cls._now() - timedelta(seconds=age_seconds)).replace(
+            tzinfo=None
+        )
+        task = Task(
             instance_id=iid,
             task_type="PROCESS_MESSAGE",
             status="pending",
             started_at=started_at,
+            **kw,
         )
+        task.created_at = created_at
+        return task
 
     @staticmethod
     def _counts(engine):
@@ -2269,8 +2384,40 @@ class TestNeverStartedRunningDetector:
                 )
             }
 
+    @staticmethod
+    def _fingerprint(engine):
+        """A CONTENT hash of the seeded rows — NOT a row count.
+
+        A per-table ``COUNT(*)`` cannot see an in-place UPDATE: a
+        restamped ``last_activity_at`` or a flipped task status leaves
+        every count unchanged, so the old fence stayed GREEN for the
+        exact mutation its own docstring named. The fingerprint hashes
+        the row CONTENT, so any in-place change moves it.
+        """
+        digest = hashlib.sha256()
+        columns_by_table = (
+            ("instances", ("instance_id", "status", "last_activity_at", "created_at")),
+            ("task", ("id", "instance_id", "status", "started_at", "created_at")),
+            ("job_locks", ("lock_id", "instance_id", "queue_id")),
+            ("job_queue_items", ("job_id", "queue_id", "admission_state")),
+            ("job_queues", ("queue_id", "queue_name")),
+        )
+        with engine.connect() as conn:
+            for table, columns in columns_by_table:
+                rows = conn.execute(
+                    text(
+                        f"SELECT {', '.join(columns)} FROM {table} "
+                        "ORDER BY 1"
+                    )
+                ).all()
+                for row in rows:
+                    digest.update(repr(tuple(row)).encode("utf-8"))
+        return digest.hexdigest()
+
+    # ── (a) the positive wedge ─────────────────────────────────────────
+
     async def test_a_positive_wedge_is_flagged(self, fleet_db):
-        """(a) running + zero checkpoints + pending never-started task."""
+        """(a) running + zero checkpoints + an AGED pending task."""
         _insert_instances(fleet_db, [self._wedge("nsr-a")])
         with Session(fleet_db) as session:
             session.add(self._pending_task("nsr-a"))
@@ -2283,11 +2430,47 @@ class TestNeverStartedRunningDetector:
         detector = self._detector(payload)
         assert detector["count"] == 1
         assert detector["evidence_legs"] == "ok"
+        assert detector["scope"] == "complete"
         row = detector["instances"][0]
         assert row["pending_task_id"] is not None
+        # BOTH ages are reported: the instance age (the commission) and
+        # the TASK age (the threshold-bearing one).
         assert row["age_minutes"] >= ir.NEVER_STARTED_MIN_AGE_SECONDS / 60
+        assert row["pending_task_age_minutes"] >= (
+            ir.NEVER_STARTED_MIN_AGE_SECONDS / 60
+        )
         assert "never started" in row["detail"]
         assert "started_at NULL" in row["detail"]
+        # The task's shape is SURFACED, never filtered on.
+        assert row["pending_task_is_background"] is False
+        assert row["pending_task_is_deferred"] is False
+        assert row["pending_task_type"] == "PROCESS_MESSAGE"
+
+    async def test_a_background_task_is_surfaced_not_filtered(self, fleet_db):
+        """The observed wedge ``ba4c32fe`` WAS a background task.
+
+        Excluding background/deferred work would blind the detector to
+        its own incident class, so the flags are SURFACED on the
+        finding instead.
+        """
+        _insert_instances(fleet_db, [self._wedge("nsr-bg")])
+        with Session(fleet_db) as session:
+            session.add(
+                self._pending_task(
+                    "nsr-bg", is_background=True, is_deferred=True
+                )
+            )
+            session.commit()
+        manager = RepoBackedManager(fleet_db)
+
+        payload = await self._health(manager)
+
+        assert self._flagged_ids(payload) == {"nsr-bg"}
+        row = self._detector(payload)["instances"][0]
+        assert row["pending_task_is_background"] is True
+        assert row["pending_task_is_deferred"] is True
+
+    # ── (b) the zero-checkpoint leg ────────────────────────────────────
 
     async def test_b_healthy_long_running_with_checkpoints(self, fleet_db):
         """(b) a long-running instance that HAS a checkpoint is not flagged."""
@@ -2302,8 +2485,10 @@ class TestNeverStartedRunningDetector:
 
         assert "nsr-b" not in self._flagged_ids(payload)
 
-    async def test_c_young_instance_inside_pickup_tail(self, fleet_db):
-        """(c) age < threshold — inside the measured p99/max pickup tail."""
+    # ── (c) the TASK-age leg ───────────────────────────────────────────
+
+    async def test_c_a_young_pending_task_is_not_flagged(self, fleet_db):
+        """(c) the pending TASK is young — inside the measured pickup tail."""
         young = _instance(
             "nsr-c",
             status="running",
@@ -2311,13 +2496,15 @@ class TestNeverStartedRunningDetector:
         )
         _insert_instances(fleet_db, [young])
         with Session(fleet_db) as session:
-            session.add(self._pending_task("nsr-c"))
+            session.add(self._pending_task("nsr-c", age_seconds=300))
             session.commit()
         manager = RepoBackedManager(fleet_db)
 
         payload = await self._health(manager)
 
         assert "nsr-c" not in self._flagged_ids(payload)
+
+    # ── (d) the started_at leg ─────────────────────────────────────────
 
     async def test_d_task_with_started_at_is_not_flagged(self, fleet_db):
         """(d) a task that actually STARTED is not a never-started wedge."""
@@ -2334,6 +2521,8 @@ class TestNeverStartedRunningDetector:
         payload = await self._health(manager)
 
         assert "nsr-d" not in self._flagged_ids(payload)
+
+    # ── (e) the running leg ────────────────────────────────────────────
 
     async def test_e_non_running_instance_is_not_flagged(self, fleet_db):
         """(e) that is the husk detector's job, not this one's."""
@@ -2355,6 +2544,8 @@ class TestNeverStartedRunningDetector:
         payload = await self._health(manager)
 
         assert "nsr-e" not in self._flagged_ids(payload)
+
+    # ── (f) the actionability pairing ──────────────────────────────────
 
     async def test_f_rendered_finding_pairs_lock_with_queued_jobs(self, fleet_db):
         """(f) held lock id + the jobs queued behind that queue, RENDERED."""
@@ -2420,47 +2611,58 @@ class TestNeverStartedRunningDetector:
         assert all(job["admission_state"] == "queued" for job in queued)
         assert all(job["age_seconds"] is not None for job in queued)
         assert "lock-nsr" in row["detail"]
-        assert row.get("context_degraded") is None
+        assert row["context_state"] == "ok"
+        assert row["context_degraded"] is False
+        assert row["queued_jobs_capped"] is False
+        assert row["queued_jobs_total"] == 2
 
-    async def test_read_only_path_writes_nothing(self, fleet_db):
-        """The detector path is strictly READ-ONLY — no table changes."""
-        _insert_instances(fleet_db, [self._wedge("nsr-ro")])
+    async def test_a_null_lock_id_never_renders_as_the_string_none(self, fleet_db):
+        """A6 — a NULL column must NEVER render as the literal "None".
+
+        The lock query LEFT JOINs the queue and the job item, so a lock
+        whose queue or job row is gone carries NULLs — and the pre-fix
+        shape stringified them into a plausible-looking ``"None"`` that
+        a machine consumer cannot tell apart from a real id.
+        """
+        _insert_instances(fleet_db, [self._wedge("nsr-null")])
         with Session(fleet_db) as session:
-            session.add(self._pending_task("nsr-ro"))
+            session.add(self._pending_task("nsr-null"))
+            session.commit()
+        with Session(fleet_db) as session:
+            # A lock whose queue row and job row do NOT exist — the
+            # LEFT JOINs therefore yield NULLs.
+            session.add(
+                JobLock(
+                    lock_id="lock-null",
+                    project_id="p-null",
+                    queue_id="q-missing",
+                    job_id="job-missing",
+                    instance_id="nsr-null",
+                    acquired_at=datetime.now(timezone.utc).isoformat(),
+                )
+            )
             session.commit()
         manager = RepoBackedManager(fleet_db)
-        before = self._counts(fleet_db)
 
-        await self._health(manager)
+        payload = await self._health(manager)
 
-        assert self._counts(fleet_db) == before
+        row = self._detector(payload)["instances"][0]
+        lock = row["held_job_locks"][0]
+        assert lock["lock_id"] == "lock-null"
+        assert lock["queue_id"] == "q-missing"
+        assert lock["queue_name"] is None
+        assert lock["agent_id"] is None
+        assert "None" not in row["detail"]
+        # The helper itself: a NULL stays None, never the string.
+        assert ir._opt_str(None) is None
+        assert ir._opt_str("x") == "x"
 
-    async def test_failed_predicate_probe_does_not_flag(self, fleet_db):
-        """A predicate leg that cannot run suppresses the verdict."""
-        _insert_instances(fleet_db, [self._wedge("nsr-deg")])
-        with Session(fleet_db) as session:
-            session.add(self._pending_task("nsr-deg"))
-            session.commit()
-        manager = RepoBackedManager(fleet_db)
-        original = ir._checkpoint_thread_ids
-
-        def _boom(_manager, _ids):
-            raise RuntimeError("checkpoint probe unavailable")
-
-        ir._checkpoint_thread_ids = _boom
-        try:
-            payload = await self._health(manager)
-        finally:
-            ir._checkpoint_thread_ids = original
-
-        detector = self._detector(payload)
-        assert detector["count"] == 0
-        assert detector["evidence_legs"] == "degraded"
+    # ── (g) the liveness rule ──────────────────────────────────────────
 
     async def test_nudged_instance_with_recent_last_activity_at_is_still_flagged(
         self, fleet_db
     ):
-        """(f) a NUDGED instance (recent ``last_activity_at``) is still flagged.
+        """(g) a NUDGED instance (recent ``last_activity_at``) is still flagged.
 
         The binding liveness rule: for a never-started instance, liveness
         is read from TASK + CHECKPOINT state ONLY — never from
@@ -2469,13 +2671,13 @@ class TestNeverStartedRunningDetector:
         reads a never-started instance as FRESH; that must not hide the
         wedge.
 
-        The fixture: ``status='running'``, ZERO checkpoint rows, a pending
-        task with ``started_at IS NULL``, ``created_at`` older than the
-        threshold, and ``last_activity_at`` set to NOW. The sibling
-        detector's verdict makes the fixture non-vacuous — the
-        idle-based ``stale-running`` view must NOT flag the nudged row
-        (so the nudge really did make it read as fresh), while
-        ``never-started-running`` still flags it.
+        The fixture: ``status='running'``, ZERO checkpoint rows, an AGED
+        pending task with ``started_at IS NULL``, and
+        ``last_activity_at`` set to NOW. The sibling detector's verdict
+        makes the fixture non-vacuous — the idle-based ``stale-running``
+        view must NOT flag the nudged row (so the nudge really did make
+        it read as fresh), while ``never-started-running`` still flags
+        it.
         """
         nudged = self._wedge(
             "nsr-nudge",
@@ -2499,5 +2701,434 @@ class TestNeverStartedRunningDetector:
         row = self._detector(payload)["instances"][0]
         assert row["instance_id"] == "nsr-nudge"
         assert row["pending_task_id"] is not None
-        # The age still comes from created_at — the nudge must not shorten it.
+        # The ages still come from the created_at stamps — the nudge must
+        # not shorten them.
         assert row["age_minutes"] >= ir.NEVER_STARTED_MIN_AGE_SECONDS / 60
+        assert row["pending_task_age_minutes"] >= (
+            ir.NEVER_STARTED_MIN_AGE_SECONDS / 60
+        )
+
+    # ── (h) THE RULING — the instance clock is NOT the clock ───────────
+
+    async def test_h_a_fresh_task_on_an_old_instance_is_not_flagged(self, fleet_db):
+        """(h) the ruling's false-positive class: OLD instance, FRESH task.
+
+        The instance is far past the threshold, but the TASK was created
+        a moment ago — so the task was picked up (or is being picked up)
+        right now. Measuring the INSTANCE clock would flag this row
+        seconds after a healthy dispatch, and a detector that cries wolf
+        is a detector nobody acts on.
+        """
+        _insert_instances(fleet_db, [self._wedge("nsr-fresh")])
+        with Session(fleet_db) as session:
+            session.add(self._pending_task("nsr-fresh", age_seconds=60))
+            session.commit()
+        manager = RepoBackedManager(fleet_db)
+
+        payload = await self._health(manager)
+
+        assert "nsr-fresh" not in self._flagged_ids(payload)
+        assert self._detector(payload)["count"] == 0
+
+    # ── the boundary ───────────────────────────────────────────────────
+
+    async def test_the_age_boundary_is_exact_to_the_sub_second(self, fleet_db, monkeypatch):
+        """A9 — 45 min + 0.5 s flags; 45 min - 0.5 s does NOT.
+
+        The comparison is a ``timedelta`` comparison: ``int(seconds)``
+        truncates 2700.5 to 2700, and the row would NOT flag.
+        """
+        threshold = ir.NEVER_STARTED_MIN_AGE_SECONDS
+        _FrozenDatetime.frozen = datetime.now(timezone.utc).replace(microsecond=0)
+        monkeypatch.setattr(ir, "datetime", _FrozenDatetime)
+        _insert_instances(
+            fleet_db,
+            [self._wedge("nsr-edge"), self._wedge("nsr-edge-young")],
+        )
+        with Session(fleet_db) as session:
+            session.add(self._pending_task("nsr-edge", age_seconds=threshold + 0.5))
+            session.add(
+                self._pending_task("nsr-edge-young", age_seconds=threshold - 0.5)
+            )
+            session.commit()
+        manager = RepoBackedManager(fleet_db)
+
+        payload = await self._health(manager)
+
+        assert self._flagged_ids(payload) == {"nsr-edge"}
+
+    # ── the timestamp frame ────────────────────────────────────────────
+
+    async def test_the_task_age_is_independent_of_the_session_timezone(
+        self, fleet_db, monkeypatch
+    ):
+        """A2 — the age comparison is TZ-INDEPENDENT.
+
+        The house rule: the ``task`` table's ``created_at`` holds
+        NAIVE-UTC DIGITS, and it must be compared against the naive-UTC
+        clock. A comparison done IN SQL would be cast through the
+        PostgreSQL session ``TimeZone`` (+07 in production) and flip
+        every age predicate — a genuinely YOUNG task would read as
+        seven hours old and be flagged.
+
+        The pin has two halves:
+
+        1. the BEHAVIOUR — a young task is not flagged and an aged task
+           is, with the session timezone declared as ``+07``; and
+        2. the STRUCTURE — the candidate probe's SQL carries NO
+           timestamp comparison at all, so the session frame has no
+           path to the predicate.
+        """
+        _declare_session_timezone(fleet_db, "Asia/Bangkok")
+        statements: list[str] = []
+        _capture_statements(fleet_db, statements)
+
+        _insert_instances(fleet_db, [self._wedge("nsr-tz")])
+        with Session(fleet_db) as session:
+            session.add(self._pending_task("nsr-tz", age_seconds=300))
+            session.add(self._pending_task("nsr-tz-old", age_seconds=300))
+            session.commit()
+        # A second, AGED instance — the pair proves the comparison
+        # separates the two, not merely that it finds nothing.
+        _insert_instances(fleet_db, [self._wedge("nsr-tz-old")])
+        with Session(fleet_db) as session:
+            session.add(
+                self._pending_task(
+                    "nsr-tz-old",
+                    age_seconds=ir.NEVER_STARTED_MIN_AGE_SECONDS + 600,
+                )
+            )
+            session.commit()
+        manager = RepoBackedManager(fleet_db)
+
+        payload = await self._health(manager)
+
+        # The YOUNG task is not flagged; the AGED one is.
+        assert self._flagged_ids(payload) == {"nsr-tz-old"}
+        # The candidate probe ran, and its SQL compares NO timestamp.
+        probe_statements = [
+            s for s in statements if "FROM task t" in s
+        ]
+        assert probe_statements, "the candidate probe did not run"
+        for statement in probe_statements:
+            assert "now(" not in statement.lower()
+            assert not re.search(
+                r"created_at\s*(?:<|>|<=|>=|!=)", statement.lower()
+            ), statement
+        # The frame itself: a naive-UTC digit value is read AS UTC.
+        naive = datetime(2026, 1, 2, 3, 4, 5)
+        assert ir._parse_timestamp(naive) == datetime(
+            2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc
+        )
+        assert ir._parse_timestamp(naive.isoformat()) == datetime(
+            2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc
+        )
+
+    # ── the scan-budget decoupling ─────────────────────────────────────
+
+    async def test_the_candidate_set_survives_an_exhausted_walk_budget(
+        self, fleet_db, monkeypatch
+    ):
+        """A8 — the candidate set is PROBE-derived, not walk-derived.
+
+        The fleet walk is ``created_at DESC`` and wall-clock-bounded, so
+        a truncated walk drops the OLDEST rows first — exactly where the
+        aged never-started candidates live. The detector's own probe is
+        independent of that budget, so the aged candidate still surfaces
+        with the walk cut off at zero.
+        """
+        _insert_instances(fleet_db, [self._wedge("nsr-budget")])
+        with Session(fleet_db) as session:
+            session.add(self._pending_task("nsr-budget"))
+            session.commit()
+        manager = RepoBackedManager(fleet_db)
+        monkeypatch.setattr(ir, "FLEET_SCAN_TIME_BUDGET_SECONDS", 0)
+
+        payload = await self._health(manager)
+
+        assert payload["scan_truncated"] is True
+        assert payload["scan_stop_reason"] == "time_budget"
+        # The walk was cut off — and the detector still found the wedge.
+        assert self._flagged_ids(payload) == {"nsr-budget"}
+        assert self._detector(payload)["scope"] == "complete"
+
+    async def test_the_scope_is_partial_when_the_candidate_probe_hits_its_cap(
+        self, fleet_db, monkeypatch
+    ):
+        """A8 — the detector row says so when its own probe is capped."""
+        _insert_instances(fleet_db, [self._wedge("nsr-cap-scope")])
+        with Session(fleet_db) as session:
+            session.add(self._pending_task("nsr-cap-scope"))
+            session.commit()
+        manager = RepoBackedManager(fleet_db)
+        monkeypatch.setattr(ir, "NEVER_STARTED_CANDIDATE_LIMIT", 1)
+
+        payload = await self._health(manager)
+
+        detector = self._detector(payload)
+        assert detector["scope"] == "partial"
+        # The scope marker NEVER overloads the degradation marker.
+        assert detector["evidence_legs"] == "ok"
+
+    # ── the bounded payload ────────────────────────────────────────────
+
+    async def test_the_queued_job_list_is_capped_and_deduped(self, fleet_db):
+        """A7 — the queued list is BOUNDED per queue and DEDUPED by job id."""
+        _insert_instances(fleet_db, [self._wedge("nsr-cap")])
+        with Session(fleet_db) as session:
+            session.add(self._pending_task("nsr-cap"))
+            session.add(
+                JobQueue(
+                    queue_id="q-cap",
+                    project_id="p-cap",
+                    queue_name="cap_queue",
+                    queue_name_lower="cap_queue",
+                    queue_type="fifo",
+                    concurrency_limit=1,
+                )
+            )
+            session.commit()
+        with Session(fleet_db) as session:
+            # TWO locks on the SAME queue (distinct slots — the
+            # (project_id, queue_id, lock_slot) uniqueness constraint) —
+            # the queue's jobs must be listed ONCE, not twice.
+            for lock_id, slot in (("lock-cap-1", 0), ("lock-cap-2", 1)):
+                session.add(
+                    JobLock(
+                        lock_id=lock_id,
+                        project_id="p-cap",
+                        queue_id="q-cap",
+                        job_id="job-cap-held",
+                        instance_id="nsr-cap",
+                        lock_slot=slot,
+                        acquired_at=datetime.now(timezone.utc).isoformat(),
+                    )
+                )
+            for index in range(60):
+                session.add(
+                    JobItem(
+                        job_id=f"job-cap-{index:03d}",
+                        agent_id="worker",
+                        agent_dir="/tmp/agents/worker",
+                        message="work",
+                        queue_id="q-cap",
+                        project_id="p-cap",
+                        admission_state="queued",
+                    )
+                )
+            session.commit()
+        manager = RepoBackedManager(fleet_db)
+
+        payload = await self._health(manager)
+
+        row = self._detector(payload)["instances"][0]
+        queued = row["queued_jobs_behind_queue"]
+        assert len(queued) == ir.NEVER_STARTED_QUEUED_JOB_LIMIT
+        assert row["queued_jobs_capped"] is True
+        assert row["queued_jobs_total"] == 60
+        job_ids = [job["job_id"] for job in queued]
+        assert len(job_ids) == len(set(job_ids))
+
+    # ── the degradation pins ───────────────────────────────────────────
+
+    async def test_a_raised_actionability_probe_still_reports_the_finding(
+        self, fleet_db
+    ):
+        """B1(i) + A4 — the finding survives; the context is UNKNOWN.
+
+        The context probe is an ENRICHMENT: its failure must not drop
+        the finding, and it must not render a numeric ZERO it never
+        measured.
+        """
+        _insert_instances(fleet_db, [self._wedge("nsr-ctx")])
+        with Session(fleet_db) as session:
+            session.add(self._pending_task("nsr-ctx"))
+            session.commit()
+        manager = RepoBackedManager(fleet_db)
+        original = ir._never_started_context
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("actionability probe unavailable")
+
+        ir._never_started_context = _boom
+        try:
+            payload = await self._health(manager)
+        finally:
+            ir._never_started_context = original
+
+        detector = self._detector(payload)
+        assert detector["count"] == 1
+        row = detector["instances"][0]
+        assert row["held_job_locks"] is None
+        assert row["queued_jobs_behind_queue"] is None
+        assert row["queued_jobs_total"] is None
+        assert row["context_state"] == "unknown"
+        assert row["context_degraded"] is True
+        # The detail NEVER states a zero the probe did not measure.
+        assert "0 job lock" not in row["detail"]
+        assert "UNKNOWN" in row["detail"]
+
+    async def test_a_candidate_probe_that_returns_none_suppresses_the_verdict(
+        self, fleet_db
+    ):
+        """B1(ii) — a leg that cannot run ⇒ count 0 AND "degraded"."""
+        _insert_instances(fleet_db, [self._wedge("nsr-none")])
+        with Session(fleet_db) as session:
+            session.add(self._pending_task("nsr-none"))
+            session.commit()
+        manager = RepoBackedManager(fleet_db)
+        original = ir._never_started_candidates
+
+        def _none(*_args, **_kwargs):
+            return None
+
+        ir._never_started_candidates = _none
+        try:
+            payload = await self._health(manager)
+        finally:
+            ir._never_started_candidates = original
+
+        detector = self._detector(payload)
+        assert detector["count"] == 0
+        assert detector["evidence_legs"] == "degraded"
+        # The payload-level field is the AGGREGATE over every detector
+        # that reports legs.
+        assert payload["evidence_legs"] == "degraded"
+
+    async def test_failed_predicate_probe_does_not_flag(self, fleet_db):
+        """A predicate leg that cannot run suppresses the verdict."""
+        _insert_instances(fleet_db, [self._wedge("nsr-deg")])
+        with Session(fleet_db) as session:
+            session.add(self._pending_task("nsr-deg"))
+            session.commit()
+        manager = RepoBackedManager(fleet_db)
+        original = ir._checkpoint_thread_ids
+
+        def _boom(_manager, _ids):
+            raise RuntimeError("checkpoint probe unavailable")
+
+        ir._checkpoint_thread_ids = _boom
+        try:
+            payload = await self._health(manager)
+        finally:
+            ir._checkpoint_thread_ids = original
+
+        detector = self._detector(payload)
+        assert detector["count"] == 0
+        assert detector["evidence_legs"] == "degraded"
+
+    async def test_one_failure_mode_logs_one_line_naming_the_calling_detector(
+        self, fleet_db, caplog
+    ):
+        """A5 — one failure mode, one line, and it names THIS detector.
+
+        The shared probes used to catch internally AND log, while the
+        callers wrapped them AGAIN — so one failure produced two lines
+        with two different detector names, and the operator triaging the
+        eighth detector read a line naming the WRONG one.
+        """
+        _insert_instances(fleet_db, [self._wedge("nsr-log")])
+        with Session(fleet_db) as session:
+            session.add(self._pending_task("nsr-log"))
+            session.commit()
+        manager = RepoBackedManager(fleet_db)
+        original = ir._never_started_candidates
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("candidate probe unavailable")
+
+        ir._never_started_candidates = _boom
+        try:
+            with caplog.at_level(logging.WARNING, logger=ir.logger.name):
+                payload = await self._health(manager)
+        finally:
+            ir._never_started_candidates = original
+
+        lines = [
+            record.getMessage()
+            for record in caplog.records
+            if "never-started" in record.getMessage()
+        ]
+        assert len(lines) == 1
+        assert "never-started-running" in lines[0]
+        assert "husk" not in lines[0]
+        assert self._detector(payload)["evidence_legs"] == "degraded"
+
+    async def test_the_shared_checkpoint_probe_names_the_calling_detector(
+        self, fleet_db, caplog
+    ):
+        """A5 — the shared checkpoint probe never names the WRONG detector."""
+        _insert_instances(fleet_db, [self._wedge("nsr-shared")])
+        with Session(fleet_db) as session:
+            session.add(self._pending_task("nsr-shared"))
+            session.commit()
+        manager = RepoBackedManager(fleet_db)
+        original = ir._checkpoint_thread_ids
+
+        def _boom(_manager, _ids):
+            raise RuntimeError("checkpoint probe unavailable")
+
+        ir._checkpoint_thread_ids = _boom
+        try:
+            with caplog.at_level(logging.WARNING, logger=ir.logger.name):
+                await self._health(manager)
+        finally:
+            ir._checkpoint_thread_ids = original
+
+        never_started_lines = [
+            record.getMessage()
+            for record in caplog.records
+            if "never-started-running" in record.getMessage()
+        ]
+        assert len(never_started_lines) == 1
+        assert "husk" not in never_started_lines[0]
+
+    # ── the read-only fence ────────────────────────────────────────────
+
+    async def test_read_only_path_writes_nothing(self, fleet_db):
+        """The detector path is strictly READ-ONLY.
+
+        The fence compares the row CONTENT (a hash of the seeded rows),
+        NOT just the per-table counts: a count comparison cannot see an
+        in-place UPDATE, so the old fence stayed GREEN for the exact
+        mutation its own docstring named. What this pin proves: no
+        seeded table's row count changed AND no seeded row's content
+        changed. It does not prove that a table OUTSIDE the seeded set
+        was untouched.
+        """
+        _insert_instances(fleet_db, [self._wedge("nsr-ro")])
+        with Session(fleet_db) as session:
+            session.add(self._pending_task("nsr-ro"))
+            session.commit()
+        manager = RepoBackedManager(fleet_db)
+        before = self._counts(fleet_db)
+        before_fingerprint = self._fingerprint(fleet_db)
+
+        await self._health(manager)
+
+        assert self._counts(fleet_db) == before
+        assert self._fingerprint(fleet_db) == before_fingerprint
+
+    async def test_the_content_fence_catches_an_in_place_update(self, fleet_db):
+        """The fence is NOT vacuous: an in-place UPDATE moves it.
+
+        A per-table COUNT(*) comparison cannot see this mutation — the
+        counts are identical before and after — so the fence must hash
+        the row CONTENT.
+        """
+        _insert_instances(fleet_db, [self._wedge("nsr-fence")])
+        with Session(fleet_db) as session:
+            session.add(self._pending_task("nsr-fence"))
+            session.commit()
+        before_counts = self._counts(fleet_db)
+        before_fingerprint = self._fingerprint(fleet_db)
+
+        with Session(fleet_db) as session:
+            row = session.get(Instance, "nsr-fence")
+            row.last_activity_at = datetime.now(timezone.utc)
+            session.commit()
+
+        # The counts are UNCHANGED — the old fence would have stayed
+        # green — but the content fingerprint moved.
+        assert self._counts(fleet_db) == before_counts
+        assert self._fingerprint(fleet_db) != before_fingerprint

@@ -70,7 +70,8 @@ import asyncio
 import json
 import logging
 import time
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
 from pydantic import BaseModel, Field
@@ -214,31 +215,40 @@ DEFAULT_HUSK_MIN_AGE_SECONDS: int = 86_400
 #: It is deliberately NOT a tool argument — like the age threshold, it
 #: moves by editing this constant, never by widening the tool schema.
 SPAWN_STAMP_WINDOW_SECONDS: int = 60
-#: The minimum age (seconds) of a RUNNING instance with ZERO checkpoint
-#: rows and a still-PENDING, never-started task before the
-#: ``never-started-running`` detector reports it (the EIGHTH detector).
-#: 45 minutes.
+#: The minimum age of the PENDING TASK — NOT of the instance — before
+#: the ``never-started-running`` detector reports an instance (the
+#: EIGHTH detector).
 #:
 #: THRESHOLD BASIS — MEASURED, not guessed: across 863 tasks the pickup
-#: distribution was p50 3 s, p90 12 min, p99 26 min, max 30 min. 45 min
-#: clears the OBSERVED MAXIMUM (30 min) with a 15-minute margin, so a
-#: legitimately slow pickup inside the tail is never flagged. Do NOT
-#: reuse ``stale_minutes`` here: that argument measures activity AFTER a
-#: turn has run; this constant measures "no turn ever ran" from creation.
+#: distribution was p50 3 s, p90 12 min, p99 26 min, max 30 min. The
+#: threshold clears the OBSERVED MAXIMUM (30 min) with a 15-minute
+#: margin. n=863 is a SAMPLE, not a bound: beyond the sample a
+#: legitimately slow pickup cannot be excluded — the margin is a
+#: cushion, not a guarantee. Do NOT reuse ``stale_minutes`` here: that
+#: argument measures activity AFTER a turn has run; this constant
+#: measures "no turn ever STARTED".
 #:
 #: Deliberately NOT a tool argument — the threshold moves by editing
 #: this constant, never by widening the tool schema.
-#:
-#: LIVENESS RULE (binding) — for a never-started instance, liveness is
-#: read from TASK + CHECKPOINT state ONLY: never from
-#: ``instances.last_activity_at`` and never from any idle-based
-#: freshness. A nudge restamps ``last_activity_at``, so an idle-based
-#: view would read a never-started instance as FRESH and hide the
-#: wedge. That is why this detector's age comes from ``created_at``
-#: exactly, and why its verdict legs are the TASK row
-#: (``status='pending' AND started_at IS NULL``) and the CHECKPOINT
-#: table (zero rows for the thread).
 NEVER_STARTED_MIN_AGE_SECONDS: int = 45 * 60
+#: The SAME threshold as a ``timedelta``. The age comparison is done on
+#: the DELTA, never on ``int(seconds)``: the integer truncation makes
+#: "the threshold + 0.5 s" read as the threshold exactly and NOT flag.
+NEVER_STARTED_MIN_AGE_DELTA: timedelta = timedelta(
+    seconds=NEVER_STARTED_MIN_AGE_SECONDS
+)
+#: The row cap for the never-started CANDIDATE probe. The probe reads
+#: the fleet's pending never-started tasks OLDEST-FIRST, so the cap
+#: keeps the OLDEST rows — the aged candidates — and the coverage flag
+#: the probe returns is therefore provable (see the probe's docstring).
+NEVER_STARTED_CANDIDATE_LIMIT: int = 500
+#: The per-queue cap on the ACTIONABILITY context's queued-job list.
+#: The backlog behind a wedged instance's queue is unbounded under
+#: exactly the saturation this detector targets, and the list is
+#: duplicated per flagged instance — so the payload carries a BOUNDED
+#: sample plus the TRUE total (``queued_jobs_total``) and a
+#: ``queued_jobs_capped`` marker that says the sample is a sample.
+NEVER_STARTED_QUEUED_JOB_LIMIT: int = 50
 #: The maximum number of checkpoint messages ``instance_get`` returns.
 MAX_LAST_MESSAGES = 20
 
@@ -347,6 +357,73 @@ def _seconds_since(value: Any, *, now: datetime) -> int | None:
     if parsed is None:
         return None
     return max(0, int((now - parsed).total_seconds()))
+
+
+def _opt_str(value: Any) -> str | None:
+    """Render a column value as a string — a NULL stays ``None``.
+
+    ONE helper for every optional-string column in this module. A NULL
+    must NEVER render as the literal string ``"None"``: that is a
+    plausible-looking value a machine consumer cannot tell apart from
+    a real id (the pre-fix shape did exactly that for ``lock_id``).
+    """
+    if value is None:
+        return None
+    return str(value)
+
+
+def _parse_timestamp(value: Any) -> datetime | None:
+    """Parse a timestamp COLUMN value into an aware-UTC datetime.
+
+    Two shapes reach this helper:
+
+    * a ``datetime`` from a DATETIME/TIMESTAMP column — the ``task``
+      table's ``created_at``; and
+    * an ISO-8601 ``str`` from a TEXT column — the ``instances`` table's
+      ``created_at``.
+
+    NAIVE digits are read as UTC — the house frame
+    (``daemon/services/timestamps.py``): these columns store naive-UTC
+    digits, so a naive value IS UTC and is never session-local. The
+    result is therefore independent of the PostgreSQL session
+    ``TimeZone`` (+07 in production) — which is exactly why the age
+    comparisons below are done in PYTHON on the raw column value and
+    are NEVER pushed into SQL, where the session frame could flip them.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value)
+        except (TypeError, ValueError):
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _metadata_of(raw: Any) -> dict[str, Any]:
+    """The instance's metadata as a dict, read straight off the column.
+
+    The column is JSON on SQLite and JSONB on PostgreSQL, so the raw
+    value is usually already a dict — the string branch is the
+    defensive one (a driver that hands the JSON text back).
+    """
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw:
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
 
 
 def _redact_metadata(metadata: Any) -> dict[str, Any]:
@@ -1176,18 +1253,19 @@ Examples:
             # was covered), `window_cap` (too many windows) or
             # `time_budget` (the walk ran out of wall-clock).
             "scan_stop_reason": scan_stop_reason,
-            # The husk detector's evidence-leg state — "ok" or
-            # "degraded". "degraded" means an evidence leg COULD NOT
-            # RUN, so the husk count is a LOWER BOUND, not the truth.
-            # Without this field a failed probe and a genuinely empty
-            # husk set are indistinguishable (both read "count: 0").
-            # The never-started-running detector reports its OWN leg
-            # state on its detector row (unchanged payload semantics).
+            # The AGGREGATE evidence-leg state — "ok" or "degraded".
+            # "degraded" means at least ONE detector's leg COULD NOT
+            # RUN, so some count in this payload is a LOWER BOUND, not
+            # the truth. Without this field a failed probe and a
+            # genuinely empty detector set are indistinguishable (both
+            # read "count: 0"). Each detector row carries its OWN
+            # `evidence_legs`, so the aggregate never hides WHICH
+            # detector degraded.
             "evidence_legs": evidence_legs,
         }
         return json.dumps(payload, default=str)
 
-    instance_health._full_doc_ = """Wedge report — eight read-only detector classes.
+    instance_health._full_doc_ = f"""Wedge report — eight read-only detector classes.
 
 This NEVER repairs anything. It reports what looks sick so you can
 decide what to do; the acts are separate tools.
@@ -1214,21 +1292,45 @@ Returns:
     `never-started-running`.
 
     `never-started-running` is the EIGHTH detector: a `running` instance
-    aged past `NEVER_STARTED_MIN_AGE_SECONDS` (45 minutes — measured
-    pickup p50 3 s / p90 12 min / p99 26 min / max 30 min across 863
-    tasks, so the threshold clears the observed max with margin) that
-    has ZERO rows in `checkpoints` for its thread AND still owns a
-    `task` with `status='pending'` and `started_at IS NULL`. It holds
-    an agent's concurrency slot without ever having run a turn.
-    Each flagged row adds `age_minutes`, `pending_task_id`,
+    that has ZERO rows in `checkpoints` for its thread AND still owns a
+    `task` with `status='pending'` and `started_at IS NULL` whose TASK
+    is older than `NEVER_STARTED_MIN_AGE_SECONDS`
+    ({NEVER_STARTED_MIN_AGE_SECONDS // 60} minutes — the threshold's
+    measured basis is documented on the constant itself). It holds an
+    agent's concurrency slot without ever having run a turn.
+
+    THE CLOCK IS THE TASK CLOCK, and that is deliberate: the threshold
+    is derived from the task-PICKUP distribution, so the age it bounds
+    is the age of the task that was never picked up. An OLD instance
+    that receives a FRESH task is NOT flagged — measuring the instance
+    instead would flag it seconds after a healthy dispatch, and a
+    detector that cries wolf is a detector nobody acts on.
+
+    Each flagged row adds `age_minutes` (the INSTANCE age),
+    `pending_task_id`, `pending_task_age_minutes` (the TASK age — the
+    threshold-bearing one), `pending_task_is_background`,
+    `pending_task_is_deferred` and `pending_task_type` (SURFACED, never
+    filtered on: background and deferred tasks are legitimate wedges),
     `held_job_locks` (lock id + queue/agent held) and
     `queued_jobs_behind_queue` (job ids + queue + age/status) — the
     instance-to-blocked-queue pairing that makes the finding
-    actionable. Its own `evidence_legs` says `degraded` when a
-    predicate leg could not run (the count is then a LOWER BOUND); a
-    failed ACTIONABILITY context probe only sets `context_degraded`
-    on the row. This detector is strictly READ-ONLY: no repair, no
-    kill, no state mutation anywhere in its path.
+    actionable. The queued list is CAPPED per queue: `queued_jobs_total`
+    carries the true total and `queued_jobs_capped` says the list is a
+    sample. Its own `evidence_legs` says `degraded` when a predicate
+    leg could not run (the count is then a LOWER BOUND) and its own
+    `scope` says `partial` when its candidate probe hit its row cap (a
+    coverage limit — a different signal from a leg that could not run).
+    A failed ACTIONABILITY context probe leaves `held_job_locks` and
+    `queued_jobs_behind_queue` NULL and sets `context_state` to
+    `unknown`: the report NEVER states a zero it did not measure. This
+    detector is strictly READ-ONLY: no repair, no kill, no state
+    mutation anywhere in its path.
+
+    The payload-level `evidence_legs` is the AGGREGATE over every
+    detector that reports legs — "degraded" means at least one leg
+    could not run, so some count in the payload is a LOWER BOUND. Each
+    detector row carries its own state, so the aggregate never hides
+    which detector degraded.
 
     `never-dispatched-husk` is the SEVENTH detector (added 2026-10-24,
     F3): a row that was SPAWNED but never received any work at all —
@@ -1265,7 +1367,8 @@ Returns:
 Side effects:
     NONE. A health report never triggers a repair. The scan issues
     SELECTs only — the fleet walk, the per-candidate evidence probes
-    (two batched round trips) and the job-active census are all reads.
+    (the husk's batched legs and the never-started detector's own
+    candidate probe) and the job-active census are all reads.
 
 Examples:
     instance_health()                 # 30-minute threshold
@@ -1519,39 +1622,30 @@ def _job_item_counts_by_instance(
     limit.
 
     Returns the ``{instance_id: count}`` mapping, or ``None`` when the
-    probe could not run — the caller must then NOT flag (a husk verdict
-    must not rest on an unavailable leg).
+    probe could not run because there is no engine — the caller must
+    then NOT flag (a husk verdict must not rest on an unavailable leg).
+    A genuine query FAILURE RAISES: the probe does not catch and does
+    not log, so the CALLER owns the one log line for that failure mode
+    (the same rule the checkpoint probe follows).
     """
     engine = getattr(manager, "engine", None)
     if engine is None or not instance_ids:
         return None
     counts: dict[str, int] = {}
-    try:
-        from sqlalchemy import bindparam, text
+    from sqlalchemy import bindparam, text
 
-        stmt = text(
-            "SELECT instance_id, COUNT(*) FROM job_queue_items "
-            "WHERE instance_id IN :ids GROUP BY instance_id"
-        ).bindparams(bindparam("ids", expanding=True))
-        with engine.connect() as conn:
-            for chunk in chunked(list(instance_ids), _HUSK_PROBE_CHUNK):
-                if not chunk:
-                    continue
-                rows = conn.execute(stmt, {"ids": list(chunk)}).all()
-                for instance_id, count in rows:
-                    if instance_id:
-                        counts[str(instance_id)] = int(count or 0)
-    except Exception as exc:  # noqa: BLE001 — read-only probe
-        # WARNING, not DEBUG: this leg's failure DEGRADES the husk
-        # detector's verdict (it cannot clear a candidate), and the
-        # operator must be able to see that in the payload (see
-        # ``_husk_flagged_rows`` and the ``evidence_legs`` field).
-        logger.warning(
-            "instance_read: job-item evidence read failed — the husk "
-            "detector's evidence legs are DEGRADED: %s",
-            exc,
-        )
-        return None
+    stmt = text(
+        "SELECT instance_id, COUNT(*) FROM job_queue_items "
+        "WHERE instance_id IN :ids GROUP BY instance_id"
+    ).bindparams(bindparam("ids", expanding=True))
+    with engine.connect() as conn:
+        for chunk in chunked(list(instance_ids), _HUSK_PROBE_CHUNK):
+            if not chunk:
+                continue
+            rows = conn.execute(stmt, {"ids": list(chunk)}).all()
+            for instance_id, count in rows:
+                if instance_id:
+                    counts[str(instance_id)] = int(count or 0)
     return counts
 
 
@@ -1571,16 +1665,24 @@ def _checkpoint_thread_ids(
 
     Returns the SET of threads with >= 1 checkpoint row (so the caller
     can exclude them), or ``None`` when the leg could not be evaluated
-    — the checkpoints table is absent (SQLite unit-test fixtures do not
-    create it; graceful degradation, fail-closed: a missing proof never
-    produces a flag) OR the probe failed. The caller must then NOT flag
-    and must surface the degradation.
+    because the ``checkpoints`` table is absent (SQLite unit-test
+    fixtures do not create it; graceful degradation, fail-closed: a
+    missing proof never produces a flag) or because there is no engine.
+    The caller must then NOT flag and must surface the degradation. A
+    genuine probe FAILURE RAISES to the caller, which owns the one log
+    line for that failure mode.
 
     Detection of absence: SQLAlchemy's ``inspect(engine).has_table`` —
     engine-agnostic (works on both SQLite and PostgreSQL), no exception
     is relied on to signal "table missing". A genuine query failure
-    (any exception) ALSO returns ``None`` so a broken probe degrades
-    instead of silently passing.
+    (any exception) PROPAGATES: the probe does NOT catch and does NOT
+    log, because the CALLER owns the failure report — one caller, one
+    log line, and the line names the CALLING detector (the husk
+    detector or the never-started-running detector), never this shared
+    helper. The old shape logged here AND in the caller, so one
+    failure produced two lines with two different detector names, and
+    the operator triaging the eighth detector read a line naming the
+    wrong one.
 
     Scope note: only the ``checkpoints`` table is probed. The companion
     ``checkpoint_blobs`` table was measured on the live fleet
@@ -1596,41 +1698,25 @@ def _checkpoint_thread_ids(
         return None
     if not instance_ids:
         return set()
-    try:
-        from sqlalchemy import inspect as _sa_inspect
+    from sqlalchemy import inspect as _sa_inspect
 
-        if not _sa_inspect(engine).has_table("checkpoints"):
-            return None
-    except Exception as exc:  # noqa: BLE001 — read-only probe
-        logger.warning(
-            "instance_read: checkpoint evidence probe could not inspect "
-            "the schema — the husk detector's evidence legs are DEGRADED: %s",
-            exc,
-        )
+    if not _sa_inspect(engine).has_table("checkpoints"):
         return None
     thread_ids: set[str] = set()
-    try:
-        from sqlalchemy import text, bindparam
+    from sqlalchemy import text, bindparam
 
-        stmt = text(
-            "SELECT DISTINCT thread_id FROM checkpoints "
-            "WHERE thread_id IN :ids"
-        ).bindparams(bindparam("ids", expanding=True))
-        with engine.connect() as conn:
-            for chunk in chunked(list(instance_ids), _HUSK_PROBE_CHUNK):
-                if not chunk:
-                    continue
-                rows = conn.execute(stmt, {"ids": list(chunk)}).all()
-                for (thread_id,) in rows:
-                    if thread_id:
-                        thread_ids.add(str(thread_id))
-    except Exception as exc:  # noqa: BLE001 — read-only probe
-        logger.warning(
-            "instance_read: checkpoint evidence read failed — the husk "
-            "detector's evidence legs are DEGRADED: %s",
-            exc,
-        )
-        return None
+    stmt = text(
+        "SELECT DISTINCT thread_id FROM checkpoints "
+        "WHERE thread_id IN :ids"
+    ).bindparams(bindparam("ids", expanding=True))
+    with engine.connect() as conn:
+        for chunk in chunked(list(instance_ids), _HUSK_PROBE_CHUNK):
+            if not chunk:
+                continue
+            rows = conn.execute(stmt, {"ids": list(chunk)}).all()
+            for (thread_id,) in rows:
+                if thread_id:
+                    thread_ids.add(str(thread_id))
     return thread_ids
 
 
@@ -1795,7 +1881,17 @@ def _husk_flagged_rows(
         # E1/E2 cleared EVERY candidate — there is nothing left for the
         # E3/E7 probes to check. "0 husks" is TRUE, not degraded.
         return [], False
-    job_counts = _job_item_counts_by_instance(manager, surviving)
+    try:
+        job_counts = _job_item_counts_by_instance(manager, surviving)
+    except Exception as exc:  # noqa: BLE001 — read-only probe boundary
+        # The CALLER owns the failure report (the probe does not log):
+        # ONE line, and it names THIS detector.
+        logger.warning(
+            "instance_read: job-item evidence probe failed — the husk "
+            "detector's evidence legs are DEGRADED: %s",
+            exc,
+        )
+        return [], True
     if job_counts is None:
         # The E3 leg could not run — the count is a LOWER BOUND.
         return [], True
@@ -1805,7 +1901,17 @@ def _husk_flagged_rows(
         # E3 cleared EVERY surviving candidate — nothing left for E7.
         # "0 husks" is TRUE, not degraded.
         return [], False
-    checkpoint_threads = _checkpoint_thread_ids(manager, job_free)
+    try:
+        checkpoint_threads = _checkpoint_thread_ids(manager, job_free)
+    except Exception as exc:  # noqa: BLE001 — read-only probe boundary
+        # The CALLER owns the failure report (the probe does not log):
+        # ONE line, and it names THIS detector.
+        logger.warning(
+            "instance_read: checkpoint evidence probe failed — the husk "
+            "detector's evidence legs are DEGRADED: %s",
+            exc,
+        )
+        return [], True
     if checkpoint_threads is None:
         # The E7 leg could not run — the count is a LOWER BOUND.
         return [], True
@@ -1839,56 +1945,170 @@ def _husk_flagged_rows(
     return flagged, False
 
 
-def _pending_task_ids_by_instance(
-    manager: Any, instance_ids: list[str]
-) -> dict[str, str] | None:
-    """The EXISTS leg of ``never-started-running``, as a BATCHED probe.
+@dataclass(frozen=True)
+class _NeverStartedCandidate:
+    """ONE never-started candidate, as the candidate probe found it.
 
-    Returns ``{instance_id: task_id}`` for every instance owning at least
-    one task with ``status='pending' AND started_at IS NULL`` — the FIRST
-    such task (lowest integer ``id``) is the reported id. The predicate is
-    spelled here, portably: no dialect-specific ``now()`` / ``::`` cast,
-    so the same SQL runs on SQLite fixtures and PostgreSQL production.
+    Typed on purpose: the candidate crosses three layers (probe →
+    survivor filter → rendered row), and a bare dict let a MISSING key
+    read exactly like a present one.
+    """
 
-    ``None`` means the leg could not be evaluated (no engine, or a query
-    failure). The caller must then NOT flag: a verdict must never rest on
-    a leg the scanner could not actually read.
+    instance_id: str
+    agent_id: str | None
+    status: str | None
+    instance_created_at: str | None
+    last_activity_at: Any
+    metadata: dict[str, Any]
+    task_id: str
+    task_created_at: Any
+    task_age_seconds: float
+    is_background: bool
+    is_deferred: bool
+    task_type: str | None
+
+
+@dataclass
+class _NeverStartedContext:
+    """The ACTIONABILITY context for ONE flagged instance.
+
+    ``held_job_locks`` / ``queued_jobs_behind_queue`` are ``None`` when
+    the context probe could not run — a degraded probe must NEVER
+    render a numeric zero it did not measure (the mirror of the husk
+    detector's original "failed probe reads as count 0" defect).
+    """
+
+    held_job_locks: list[dict[str, Any]] | None = None
+    queued_jobs_behind_queue: list[dict[str, Any]] | None = None
+    queued_jobs_total: int | None = None
+    queued_jobs_capped: bool = False
+    #: The job ids already attached to this instance — the DEDUPE key.
+    #: One instance holding two locks on the same queue must not list
+    #: that queue's jobs twice.
+    seen_job_ids: set[str] = field(default_factory=set)
+
+
+def _never_started_candidates(
+    manager: Any, *, limit: int, now: datetime
+) -> tuple[list[_NeverStartedCandidate], bool] | None:
+    """The CANDIDATE probe — the detector's OWN batched read.
+
+    Returns ``(candidates, partial)``:
+
+    * ``candidates`` — one entry per instance that is ``running`` and
+      owns a still-PENDING, never-started task (``status='pending' AND
+      started_at IS NULL``), OLDEST TASK FIRST.
+    * ``partial`` — the COVERAGE flag. ``True`` when the probe hit its
+      row cap AND at least one candidate is aged, so more aged
+      candidates may exist beyond the cap. ``False`` otherwise — and
+      ``False`` is PROVABLE: the probe reads the oldest rows first, so
+      when the oldest row it read is still YOUNGER than the threshold,
+      every row it did not read is younger still, and no aged candidate
+      can be hiding past the cap.
+
+    ``None`` means the probe could not run (no engine, or a query
+    failure). The caller must then NOT flag: a verdict must never rest
+    on a leg the scanner could not actually read.
+
+    WHY THIS PROBE EXISTS (the scan-budget decoupling): the candidate
+    set used to be collected during the FLEET WALK, which is
+    ``created_at DESC`` and wall-clock-bounded — a truncated walk drops
+    the OLDEST rows first, exactly where aged never-started candidates
+    live. This probe is INDEPENDENT of the walk, so a budget cut can
+    never silently hide an aged candidate.
+
+    THE AGE IS COMPARED HERE, IN PYTHON, ON THE RAW COLUMN VALUE — never
+    in SQL. A SQL comparison against a timestamp would be cast through
+    the PostgreSQL session ``TimeZone`` (+07 in production) and flip
+    every age predicate (house rule: naive-UTC digits, compared against
+    the naive-UTC clock).
+
+    THE FRAME (verified, not assumed): the ``task`` table's
+    ``created_at`` is a naive-UTC DATETIME column —
+    ``daemon/repositories/task/models.py`` declares it as
+    ``created_at: datetime = Field(default_factory=_default_created_at_naive_utc)``
+    — so the digits read back are UTC digits, and ``_parse_timestamp``
+    reads a naive value AS UTC. ``started_at`` is
+    ``datetime | None``; the ``IS NULL`` conjunct is what makes the
+    task "never started".
     """
     engine = getattr(manager, "engine", None)
     if engine is None:
         return None
-    if not instance_ids:
-        return {}
-    pending: dict[str, str] = {}
-    try:
-        from sqlalchemy import bindparam, text
+    from sqlalchemy import text
 
-        stmt = text(
-            "SELECT instance_id, MIN(id) FROM task "
-            "WHERE status = 'pending' AND started_at IS NULL "
-            "AND instance_id IN :ids GROUP BY instance_id"
-        ).bindparams(bindparam("ids", expanding=True))
-        with engine.connect() as conn:
-            for chunk in chunked(list(instance_ids), _HUSK_PROBE_CHUNK):
-                if not chunk:
-                    continue
-                rows = conn.execute(stmt, {"ids": list(chunk)}).all()
-                for instance_id, task_id in rows:
-                    if instance_id and task_id is not None:
-                        pending[str(instance_id)] = str(task_id)
-    except Exception as exc:  # noqa: BLE001 — read-only probe
-        logger.warning(
-            "instance_read: pending-task probe failed — the "
-            "never-started-running detector will NOT flag: %s",
-            exc,
+    # The predicate is spelled here, portably: no dialect-specific
+    # ``now()`` / ``::`` cast, so the same SQL runs on the SQLite
+    # fixtures and on PostgreSQL production. NO timestamp comparison
+    # appears in it — the age is settled in Python (see the docstring).
+    stmt = text(
+        "SELECT t.instance_id AS instance_id, "
+        "t.id AS task_id, "
+        "t.created_at AS task_created_at, "
+        "t.is_background AS is_background, "
+        "t.is_deferred AS is_deferred, "
+        "t.task_type AS task_type, "
+        "i.agent_id AS agent_id, "
+        "i.status AS status, "
+        "i.created_at AS instance_created_at, "
+        "i.last_activity_at AS last_activity_at, "
+        "i.metadata AS metadata "
+        "FROM task t "
+        "JOIN instances i ON i.instance_id = t.instance_id "
+        "WHERE t.status = 'pending' AND t.started_at IS NULL "
+        "AND i.status = 'running' "
+        "ORDER BY t.created_at ASC, t.id ASC "
+        "LIMIT :cap"
+    )
+    with engine.connect() as conn:
+        rows = conn.execute(stmt, {"cap": int(limit)}).mappings().all()
+
+    hit_cap = len(rows) >= int(limit)
+    candidates: list[_NeverStartedCandidate] = []
+    seen_instances: set[str] = set()
+    aged_found = False
+    for row in rows:
+        instance_id = _opt_str(row["instance_id"])
+        if instance_id is None or instance_id in seen_instances:
+            continue
+        task_created = _parse_timestamp(row["task_created_at"])
+        if task_created is None:
+            continue
+        # THE AGE COMPARISON (Python, on the raw naive-UTC digits). A
+        # timedelta comparison — never ``int(seconds)``, whose truncation
+        # makes "the threshold + 0.5 s" read as the threshold exactly and
+        # NOT flag.
+        age = now - task_created
+        if age < NEVER_STARTED_MIN_AGE_DELTA:
+            continue
+        aged_found = True
+        seen_instances.add(instance_id)
+        candidates.append(
+            _NeverStartedCandidate(
+                instance_id=instance_id,
+                agent_id=_opt_str(row["agent_id"]),
+                status=_opt_str(row["status"]),
+                instance_created_at=_opt_str(row["instance_created_at"]),
+                last_activity_at=row["last_activity_at"],
+                metadata=_metadata_of(row["metadata"]),
+                task_id=_opt_str(row["task_id"]) or "",
+                task_created_at=row["task_created_at"],
+                task_age_seconds=age.total_seconds(),
+                is_background=bool(row["is_background"]),
+                is_deferred=bool(row["is_deferred"]),
+                task_type=_opt_str(row["task_type"]),
+            )
         )
-        return None
-    return pending
+    # The coverage flag is PROVABLE (see the docstring): the cap can
+    # only hide an aged candidate when the cap was hit AND an aged
+    # candidate was already found.
+    partial = bool(hit_cap and aged_found)
+    return candidates, partial
 
 
 def _never_started_context(
     manager: Any, instance_ids: list[str], *, now: datetime
-) -> dict[str, dict[str, Any]] | None:
+) -> dict[str, _NeverStartedContext] | None:
     """The ACTIONABILITY legs: held locks + the jobs queued behind them.
 
     Two batched SELECTs over the flagged instances:
@@ -1898,228 +2118,389 @@ def _never_started_context(
        row (the AGENT whose slot is held).
     2. ``job_queue_items`` in ``admission_state='queued'`` for each held
        ``queue_id`` — the jobs BLOCKED behind that lock, with their age
-       and admission state.
+       and admission state, CAPPED per queue.
 
     The pairing of a wedged instance to a blocked queue is what makes the
     finding actionable; a wedged-instance list alone is another orphan
     list nobody acts on. Both queries are SELECTs only — this helper is
     part of a strictly READ-ONLY detector path.
 
-    ``None`` means a context probe failed. The FLAG itself rests only on
-    the four predicate legs, so the caller still reports the finding and
-    marks its context as degraded rather than dropping the finding.
+    THE QUEUED LIST IS BOUNDED: a per-queue ``LIMIT`` keeps the payload
+    small under exactly the saturation this detector targets, and the
+    TRUE per-queue total travels alongside it (``queued_jobs_total``)
+    with a ``queued_jobs_capped`` marker, so a truncated list is never
+    read as a complete one.
+
+    ``None`` means the context probe failed. The FLAG itself rests only
+    on the predicate legs, so the caller still reports the finding and
+    marks its context as UNKNOWN rather than dropping the finding.
     """
     engine = getattr(manager, "engine", None)
     if engine is None:
         return None
     if not instance_ids:
         return {}
-    context: dict[str, dict[str, Any]] = {
-        iid: {"held_job_locks": [], "queued_jobs_behind_queue": []}
-        for iid in instance_ids
+    context: dict[str, _NeverStartedContext] = {
+        iid: _NeverStartedContext() for iid in instance_ids
     }
     queue_ids: set[str] = set()
-    try:
-        from sqlalchemy import bindparam, text
+    from sqlalchemy import bindparam, text
 
-        # The lock query projects ``instance_id`` so each row can be
-        # bucketed to its finding (one round trip per chunk, SELECT only).
-        lock_stmt = text(
-            "SELECT l.instance_id, l.lock_id, l.queue_id, l.job_id, "
-            "l.project_id, l.acquired_at, l.lock_slot, q.queue_name, "
-            "j.agent_id "
-            "FROM job_locks l "
-            "LEFT JOIN job_queues q ON q.queue_id = l.queue_id "
-            "LEFT JOIN job_queue_items j ON j.job_id = l.job_id "
-            "WHERE l.instance_id IN :ids "
-            "ORDER BY l.acquired_at, l.lock_id"
-        ).bindparams(bindparam("ids", expanding=True))
+    # The lock query projects ``instance_id`` so each row can be
+    # bucketed to its finding (one round trip per chunk, SELECT only).
+    lock_stmt = text(
+        "SELECT l.instance_id AS instance_id, "
+        "l.lock_id AS lock_id, "
+        "l.queue_id AS queue_id, "
+        "l.job_id AS job_id, "
+        "l.project_id AS project_id, "
+        "l.acquired_at AS acquired_at, "
+        "l.lock_slot AS lock_slot, "
+        "q.queue_name AS queue_name, "
+        "j.agent_id AS agent_id "
+        "FROM job_locks l "
+        "LEFT JOIN job_queues q ON q.queue_id = l.queue_id "
+        "LEFT JOIN job_queue_items j ON j.job_id = l.job_id "
+        "WHERE l.instance_id IN :ids "
+        "ORDER BY l.acquired_at, l.lock_id"
+    ).bindparams(bindparam("ids", expanding=True))
+    with engine.connect() as conn:
+        for chunk in chunked(list(instance_ids), _HUSK_PROBE_CHUNK):
+            if not chunk:
+                continue
+            rows = conn.execute(lock_stmt, {"ids": list(chunk)}).mappings().all()
+            for row in rows:
+                iid = _opt_str(row["instance_id"])
+                if iid is None or iid not in context:
+                    continue
+                queue_id = _opt_str(row["queue_id"])
+                if queue_id:
+                    queue_ids.add(queue_id)
+                ctx = context[iid]
+                if ctx.held_job_locks is None:
+                    ctx.held_job_locks = []
+                ctx.held_job_locks.append(
+                    {
+                        "lock_id": _opt_str(row["lock_id"]),
+                        "queue_id": queue_id,
+                        "queue_name": _opt_str(row["queue_name"]),
+                        "job_id": _opt_str(row["job_id"]),
+                        "project_id": _opt_str(row["project_id"]),
+                        "agent_id": _opt_str(row["agent_id"]),
+                        "acquired_at": _opt_str(row["acquired_at"]),
+                        "lock_slot": row["lock_slot"],
+                    }
+                )
+
+    if queue_ids:
+        # The per-queue CAP: ROW_NUMBER() partitions the backlog by
+        # queue and keeps the oldest rows of each. The companion COUNT
+        # carries the TRUE total, so the payload says what it dropped.
+        queued_stmt = text(
+            "SELECT job_id, queue_id, agent_id, admission_state, "
+            "created_at, queue_name FROM ("
+            "SELECT i.job_id AS job_id, "
+            "i.queue_id AS queue_id, "
+            "i.agent_id AS agent_id, "
+            "i.admission_state AS admission_state, "
+            "i.created_at AS created_at, "
+            "q.queue_name AS queue_name, "
+            "ROW_NUMBER() OVER (PARTITION BY i.queue_id "
+            "ORDER BY i.created_at, i.job_id) AS rn "
+            "FROM job_queue_items i "
+            "LEFT JOIN job_queues q ON q.queue_id = i.queue_id "
+            "WHERE i.queue_id IN :qids "
+            "AND i.admission_state = 'queued' "
+            "AND i.deleted_at IS NULL"
+            ") AS capped WHERE rn <= :cap"
+        ).bindparams(bindparam("qids", expanding=True))
+        total_stmt = text(
+            "SELECT queue_id, COUNT(*) FROM job_queue_items "
+            "WHERE queue_id IN :qids "
+            "AND admission_state = 'queued' "
+            "AND deleted_at IS NULL GROUP BY queue_id"
+        ).bindparams(bindparam("qids", expanding=True))
+        totals_by_queue: dict[str, int] = {}
         with engine.connect() as conn:
-            for chunk in chunked(list(instance_ids), _HUSK_PROBE_CHUNK):
+            for chunk in chunked(sorted(queue_ids), _HUSK_PROBE_CHUNK):
                 if not chunk:
                     continue
-                rows = conn.execute(lock_stmt, {"ids": list(chunk)}).all()
+                rows = conn.execute(total_stmt, {"qids": list(chunk)}).all()
+                for queue_id, total in rows:
+                    qid = _opt_str(queue_id)
+                    if qid is not None:
+                        totals_by_queue[qid] = int(total or 0)
+        with engine.connect() as conn:
+            for chunk in chunked(sorted(queue_ids), _HUSK_PROBE_CHUNK):
+                if not chunk:
+                    continue
+                rows = conn.execute(
+                    queued_stmt,
+                    {"qids": list(chunk), "cap": NEVER_STARTED_QUEUED_JOB_LIMIT},
+                ).mappings().all()
+                # The accumulator is CHUNK-scoped: only the queues of
+                # THIS chunk are attached in this pass, so a queue read
+                # in another chunk is never attached twice.
+                queued_by_queue: dict[str, list[dict[str, Any]]] = {}
                 for row in rows:
-                    iid = str(row[0]) if row[0] else ""
-                    if iid not in context:
-                        continue
-                    queue_id = str(row[2]) if row[2] else None
-                    if queue_id:
-                        queue_ids.add(queue_id)
-                    context[iid]["held_job_locks"].append(
+                    qid = _opt_str(row["queue_id"]) or ""
+                    queued_by_queue.setdefault(qid, []).append(
                         {
-                            "lock_id": str(row[1]),
-                            "queue_id": queue_id,
-                            "queue_name": str(row[7]) if row[7] else None,
-                            "job_id": str(row[3]) if row[3] else None,
-                            "project_id": str(row[4]) if row[4] else None,
-                            "agent_id": str(row[8]) if row[8] else None,
-                            "acquired_at": str(row[5]) if row[5] else None,
-                            "lock_slot": row[6],
+                            "job_id": _opt_str(row["job_id"]),
+                            "queue_id": qid,
+                            "queue_name": _opt_str(row["queue_name"]),
+                            "agent_id": _opt_str(row["agent_id"]),
+                            "admission_state": _opt_str(row["admission_state"]),
+                            "created_at": _opt_str(row["created_at"]),
+                            "age_seconds": _seconds_since(
+                                str(row["created_at"]), now=now
+                            ),
                         }
                     )
-
-        if queue_ids:
-            queued_stmt = text(
-                "SELECT i.job_id, i.queue_id, i.agent_id, "
-                "i.admission_state, i.created_at, q.queue_name "
-                "FROM job_queue_items i "
-                "LEFT JOIN job_queues q ON q.queue_id = i.queue_id "
-                "WHERE i.queue_id IN :qids "
-                "AND i.admission_state = 'queued' "
-                "AND i.deleted_at IS NULL "
-                "ORDER BY i.created_at, i.job_id"
-            ).bindparams(bindparam("qids", expanding=True))
-            with engine.connect() as conn:
-                for chunk in chunked(sorted(queue_ids), _HUSK_PROBE_CHUNK):
-                    if not chunk:
-                        continue
-                    rows = conn.execute(queued_stmt, {"qids": list(chunk)}).all()
-                    queued_by_queue: dict[str, list[dict[str, Any]]] = {}
-                    for row in rows:
-                        qid = str(row[1]) if row[1] else ""
-                        queued_by_queue.setdefault(qid, []).append(
-                            {
-                                "job_id": str(row[0]),
-                                "queue_id": qid,
-                                "queue_name": str(row[5]) if row[5] else None,
-                                "agent_id": str(row[2]) if row[2] else None,
-                                "admission_state": str(row[3])
-                                if row[3]
-                                else None,
-                                "created_at": str(row[4]) if row[4] else None,
-                                "age_seconds": _seconds_since(str(row[4]), now=now),
-                            }
-                        )
-                    for iid, ctx in context.items():
-                        for lock in ctx["held_job_locks"]:
-                            qid = lock["queue_id"]
-                            if qid and qid in queued_by_queue:
-                                ctx["queued_jobs_behind_queue"].extend(
-                                    queued_by_queue[qid]
-                                )
-    except Exception as exc:  # noqa: BLE001 — read-only probe
-        logger.warning(
-            "instance_read: never-started actionability probe failed — "
-            "the finding will render with DEGRADED context: %s",
-            exc,
-        )
-        return None
+                for ctx in context.values():
+                    if ctx.queued_jobs_behind_queue is None:
+                        ctx.queued_jobs_behind_queue = []
+                    for lock in ctx.held_job_locks or []:
+                        qid = lock.get("queue_id")
+                        if not qid or qid not in queued_by_queue:
+                            continue
+                        for job in queued_by_queue[qid]:
+                            job_id = job.get("job_id")
+                            if job_id is None or job_id in ctx.seen_job_ids:
+                                continue
+                            ctx.seen_job_ids.add(job_id)
+                            ctx.queued_jobs_behind_queue.append(job)
+        # The TRUE per-instance totals, from the per-queue counts.
+        for ctx in context.values():
+            held = {
+                lock.get("queue_id")
+                for lock in (ctx.held_job_locks or [])
+                if lock.get("queue_id")
+            }
+            ctx.queued_jobs_total = sum(
+                totals_by_queue.get(qid, 0) for qid in held
+            )
+            ctx.queued_jobs_capped = any(
+                totals_by_queue.get(qid, 0) > NEVER_STARTED_QUEUED_JOB_LIMIT
+                for qid in held
+            )
     return context
 
 
 def _never_started_flagged_rows(
     manager: Any,
-    candidates: list[tuple[dict[str, Any], int]],
     *,
     threshold: int,
     now: datetime,
-) -> tuple[list[dict[str, Any]], bool]:
-    """Resolve the BATCHED predicate legs over the row-local candidates.
+) -> tuple[list[dict[str, Any]], bool, str]:
+    """Resolve the never-started predicate and render the findings.
 
-    The row-local legs (``status='running'``, age > threshold) ran during
-    the fleet walk. Here two batched probes settle the remaining two:
+    THE PREDICATE (verbatim — the ruling is binding):
 
-    * ``_checkpoint_thread_ids`` — the NOT EXISTS leg. A thread with ANY
-      checkpoint row has executed a turn; ``None`` (table absent / probe
-      failed) suppresses the verdict, fail-closed.
-    * ``_pending_task_ids_by_instance`` — the EXISTS leg, returning the
-      pending task id for the actionable output. ``None`` likewise
-      suppresses the verdict.
+        instances.status = 'running'
+        AND NOT EXISTS (checkpoints WHERE thread_id = instances.instance_id)
+        AND EXISTS (task t WHERE t.instance_id = instances.instance_id
+                    AND t.status = 'pending' AND t.started_at IS NULL
+                    AND t.created_at < now() - NEVER_STARTED_MIN_AGE_SECONDS)
 
-    A third, NON-predicate probe adds the actionable context (held locks
-    + queued jobs behind them). Its failure does NOT suppress the finding
-    — it only marks the row ``context_degraded`` — because the flag rests
-    on the four predicate legs, not on the enrichment.
+    THE CLOCK IS THE TASK CLOCK. The threshold's justification IS the
+    task-pickup distribution (the measured basis is documented ONCE, on
+    ``NEVER_STARTED_MIN_AGE_SECONDS`` itself), so the age the threshold
+    bounds is the age of the TASK that was never picked up — not the age
+    of the instance that owns it.
 
-    Returns ``(flagged, degraded)`` where ``degraded`` means a PREDICATE
-    leg could not run (so the count is a lower bound).
+    WHY THE INSTANCE CLOCK WAS REJECTED: an instance older than the
+    threshold that receives a FRESH task (a never-dispatched child
+    messaged later) would be flagged seconds after a healthy dispatch —
+    a transient false positive that turns the detector into an orphan
+    list nobody acts on. Task age is strictly tighter (a task is never
+    older than its instance), so it loses no true positive and kills
+    that whole class.
+
+    LIVENESS RULE (binding) — for a never-started instance, liveness is
+    read from TASK + CHECKPOINT state ONLY: never from
+    ``instances.last_activity_at`` and never from any idle-based
+    freshness. A nudge restamps ``last_activity_at``, so an idle-based
+    view would read a never-started instance as FRESH and hide the
+    wedge. That is why the verdict legs are the TASK row
+    (``status='pending' AND started_at IS NULL``) and the CHECKPOINT
+    table (zero rows for the thread), and why the instance age is
+    REPORTED (``age_minutes``) but never GATES the verdict.
+
+    THE ZERO-CHECKPOINT LEG IS KEPT: a thread with ANY checkpoint row
+    has executed a turn and is not a never-started wedge.
+
+    BACKGROUND / DEFERRED TASKS ARE DELIBERATELY NOT EXCLUDED. The
+    observed wedge ``ba4c32fe`` WAS a ``system_background_queue`` task,
+    so excluding background work would blind the detector to its own
+    incident class. The flags are SURFACED on the finding
+    (``pending_task_is_background`` / ``pending_task_is_deferred`` /
+    ``pending_task_type``) instead of being filtered on.
+
+    Returns ``(flagged, degraded, scope)``:
+
+    * ``degraded`` — a PREDICATE leg could not run, so the count is a
+      LOWER BOUND (never a false "clean").
+    * ``scope`` — ``"complete"`` or ``"partial"``: the coverage of THIS
+      detector's own candidate probe. ``"partial"`` means the probe hit
+      its row cap and more aged candidates may exist. It is NOT the
+      same signal as ``degraded`` (a leg that could not run) and never
+      overloads it.
     """
+    try:
+        probed = _never_started_candidates(
+            manager, limit=NEVER_STARTED_CANDIDATE_LIMIT, now=now
+        )
+    except Exception as exc:  # noqa: BLE001 — read-only probe boundary
+        logger.warning(
+            "instance_read: never-started candidate probe failed — the "
+            "never-started-running detector will NOT flag: %s",
+            exc,
+        )
+        return [], True, "complete"
+    if probed is None:
+        return [], True, "complete"
+    candidates, partial = probed
     if not candidates:
-        return [], False
-    candidate_ids = [
-        (info.get("instance_id") or "") for info, _age in candidates
-    ]
+        return [], False, "partial" if partial else "complete"
+
+    candidate_ids = [candidate.instance_id for candidate in candidates]
     try:
         checkpoint_threads = _checkpoint_thread_ids(manager, candidate_ids)
     except Exception as exc:  # noqa: BLE001 — read-only probe boundary
         logger.warning(
-            "instance_read: checkpoint probe raised — the never-started "
-            "detector will NOT flag: %s",
+            "instance_read: checkpoint probe failed — the "
+            "never-started-running detector will NOT flag: %s",
             exc,
         )
-        return [], True
+        return [], True, "complete"
     if checkpoint_threads is None:
-        return [], True
-    try:
-        pending_tasks = _pending_task_ids_by_instance(manager, candidate_ids)
-    except Exception as exc:  # noqa: BLE001 — read-only probe boundary
-        logger.warning(
-            "instance_read: pending-task probe raised — the never-started "
-            "detector will NOT flag: %s",
-            exc,
-        )
-        return [], True
-    if pending_tasks is None:
-        return [], True
+        return [], True, "complete"
 
+    # THE SURVIVOR FILTER (explicit — no walrus comprehension): a
+    # candidate survives when its thread has NO checkpoint row.
     survivors = [
-        (info, age, pending_tasks[iid])
-        for info, age in candidates
-        if (iid := info.get("instance_id") or "")
-        and iid not in checkpoint_threads
-        and iid in pending_tasks
+        candidate
+        for candidate in candidates
+        if candidate.instance_id not in checkpoint_threads
     ]
     if not survivors:
-        return [], False
+        return [], False, "partial" if partial else "complete"
 
     try:
         context = _never_started_context(
             manager,
-            [info.get("instance_id") or "" for info, _, _ in survivors],
+            [candidate.instance_id for candidate in survivors],
             now=now,
         )
     except Exception as exc:  # noqa: BLE001 — enrichment is best-effort
         logger.warning(
-            "instance_read: never-started actionability probe raised — "
-            "the finding renders with DEGRADED context: %s",
+            "instance_read: never-started actionability probe failed — "
+            "the finding renders with UNKNOWN context: %s",
             exc,
         )
         context = None
+
     flagged: list[dict[str, Any]] = []
-    for info, age, task_id in survivors:
-        iid = info.get("instance_id") or ""
-        ctx = (context or {}).get(iid) or {}
-        locks = ctx.get("held_job_locks") or []
-        queued = ctx.get("queued_jobs_behind_queue") or []
-        lock_ids = ",".join(str(lock.get("lock_id")) for lock in locks) or "none"
-        held_queues = ",".join(
-            sorted(
-                {
-                    str(lock.get("queue_name") or lock.get("queue_id"))
-                    for lock in locks
-                }
+    for candidate in survivors:
+        ctx = context.get(candidate.instance_id) if context is not None else None
+        if ctx is None:
+            # A DEGRADED context probe must NOT assert a zero it did
+            # not measure: the locks and the queued backlog are
+            # UNKNOWN, and the detail says so in words.
+            locks: list[dict[str, Any]] | None = None
+            queued: list[dict[str, Any]] | None = None
+            queued_total: int | None = None
+            queued_capped = False
+            context_state = "unknown"
+            lock_phrase = "holds UNKNOWN job lock(s) [unknown] on queue(s) [unknown]"
+            queued_phrase = (
+                "UNKNOWN job(s) queued behind the held queue(s) — the "
+                "actionability probe could not run, so nothing was measured"
             )
-        ) or "none"
-        row = _flagged_row(
-            info,
-            idle_seconds=age,
-            detail=(
-                f"never started: running, zero checkpoint rows, first task "
-                f"{task_id} still pending with started_at NULL; holds "
-                f"{len(locks)} job lock(s) [{lock_ids}] on queue(s) "
-                f"[{held_queues}], {len(queued)} job(s) queued behind the "
-                f"held queue(s); age {age}s (threshold {threshold}s)"
-            ),
+        else:
+            locks = ctx.held_job_locks
+            queued = ctx.queued_jobs_behind_queue
+            queued_total = ctx.queued_jobs_total
+            queued_capped = ctx.queued_jobs_capped
+            context_state = "ok"
+            lock_ids = (
+                ",".join(
+                    str(lock.get("lock_id"))
+                    for lock in (locks or [])
+                    if lock.get("lock_id") is not None
+                )
+                or "none"
+            )
+            held_queues = (
+                ",".join(
+                    sorted(
+                        {
+                            str(lock.get("queue_name") or lock.get("queue_id"))
+                            for lock in (locks or [])
+                            if lock.get("queue_name") or lock.get("queue_id")
+                        }
+                    )
+                )
+                or "none"
+            )
+            lock_phrase = (
+                f"holds {len(locks or [])} job lock(s) [{lock_ids}] on "
+                f"queue(s) [{held_queues}]"
+            )
+            queued_phrase = (
+                f"{len(queued or [])} job(s) queued behind the held "
+                f"queue(s)"
+            )
+            if queued_capped:
+                queued_phrase += (
+                    f" (capped sample — {queued_total} queued in total)"
+                )
+
+        instance_age = _seconds_since(candidate.instance_created_at, now=now)
+        detail = (
+            f"never started: running, zero checkpoint rows, first task "
+            f"{candidate.task_id} still pending with started_at NULL; "
+            f"pending task age {candidate.task_age_seconds:.0f}s "
+            f"(threshold {threshold}s), instance age "
+            f"{instance_age if instance_age is not None else 'unknown'}s; "
+            f"{lock_phrase}, {queued_phrase}"
         )
-        row["age_minutes"] = round(age / 60, 1)
-        row["pending_task_id"] = task_id
-        row["held_job_locks"] = locks
-        row["queued_jobs_behind_queue"] = queued
-        if context is None:
-            row["context_degraded"] = True
-        flagged.append(row)
-    return flagged, False
+        # ONE SHAPE: the row is built in a single literal — never
+        # assembled by a helper and then extended key by key.
+        flagged.append(
+            {
+                "instance_id": candidate.instance_id,
+                "agent_id": candidate.agent_id,
+                "status": candidate.status,
+                # ``idle_seconds`` is the INSTANCE age (the same
+                # convention the husk detector uses for "no turn ever
+                # ran"); the TASK age is the threshold-bearing one.
+                "idle_seconds": instance_age,
+                "pause_marker": _pause_marker_of(candidate.metadata),
+                "detail": detail,
+                "age_minutes": (
+                    round(instance_age / 60, 1) if instance_age is not None else None
+                ),
+                "pending_task_id": candidate.task_id,
+                "pending_task_age_seconds": candidate.task_age_seconds,
+                "pending_task_age_minutes": round(
+                    candidate.task_age_seconds / 60, 1
+                ),
+                # The task's shape is SURFACED, never filtered on (the
+                # observed wedge was a background task).
+                "pending_task_is_background": candidate.is_background,
+                "pending_task_is_deferred": candidate.is_deferred,
+                "pending_task_type": candidate.task_type,
+                "held_job_locks": locks,
+                "queued_jobs_behind_queue": queued,
+                "queued_jobs_total": queued_total,
+                "queued_jobs_capped": queued_capped,
+                "context_state": context_state,
+                "context_degraded": context_state != "ok",
+            }
+        )
+    return flagged, False, "partial" if partial else "complete"
 
 
 def _build_health_report(
@@ -2156,13 +2537,19 @@ def _build_health_report(
     Returns:
         ``(detectors, scan_truncated, scan_stop_reason, evidence_legs)``.
 
-        ``evidence_legs`` is ``"ok"`` or ``"degraded"`` — the state of
-        the husk detector's batched EVIDENCE legs (the E1/E2 message +
-        task probe and the E3 JobItem probe). ``"degraded"`` means a
-        leg COULD NOT RUN, so the husk count is a LOWER BOUND rather
-        than the truth; the pre-fix shape swallowed the failure into
-        an empty list and the operator could not tell "0 husks" from
-        "the scan never looked".
+        ``evidence_legs`` is ``"ok"`` or ``"degraded"`` — the AGGREGATE
+        state of every detector that reports legs: the husk detector's
+        batched EVIDENCE legs (the E1/E2 message + task probe and the E3
+        JobItem probe) and the never-started-running detector's PREDICATE
+        legs (its candidate probe and the zero-checkpoint leg).
+        ``"degraded"`` means at least one leg COULD NOT RUN, so some
+        count in the payload is a LOWER BOUND rather than the truth; the
+        pre-fix shape swallowed the failure into an empty list and the
+        operator could not tell "0 husks" from "the scan never looked".
+        Each detector row carries its OWN ``evidence_legs`` and the
+        never-started-running row also carries its own ``scope``
+        (``"complete"`` / ``"partial"``) — the coverage of its candidate
+        probe, which is a DIFFERENT signal from a leg that could not run.
     """
     from ..constants import ALIVE_INSTANCE_STATUSES, TERMINAL_INSTANCE_STATUSES
 
@@ -2209,10 +2596,9 @@ def _build_health_report(
     # The id list is the ONLY thing that survives the walk — the batched
     # evidence legs are resolved once, after the loop.
     husk_candidates: list[tuple[dict[str, Any], int]] = []
-    # The never-started-running detector's row-local candidates: same
-    # (row, age-since-created) shape — the batched predicate legs and the
-    # actionability context are resolved once, after the walk.
-    never_started_candidates: list[tuple[dict[str, Any], int]] = []
+    # The never-started-running detector has NO walk accumulator: its
+    # candidate set comes from its OWN batched probe (below), so the
+    # walk's wall-clock budget can never hide an aged candidate.
 
     # Compact cross-row state: the ONLY per-row field a detector needs
     # from another row is the parent's STATUS.
@@ -2228,7 +2614,7 @@ def _build_health_report(
     # dedupe on their own — they are keyed by id. The LIST-backed
     # accumulators (``stale_running`` / ``dead_parent`` /
     # ``paused_no_task`` / ``orphans`` / ``failed_unreported`` /
-    # ``husk_candidates`` / ``never_started_candidates``) do NOT: a
+    # ``husk_candidates``) do NOT: a
     # row served twice was APPENDED
     # twice, so the payload's counts and ``total_flagged`` were
     # inflated by exactly the drift the F4b walk exists to survive.
@@ -2403,14 +2789,12 @@ def _build_health_report(
                 husk_candidates.append((info, candidate_age))
 
             # ── 8. never-started-running (the ROW-LOCAL legs) ────────
-            # A running instance older than NEVER_STARTED_MIN_AGE_SECONDS
-            # is a CANDIDATE only. The two batched predicate legs (zero
-            # checkpoints, a pending never-started task) settle the verdict
-            # after the walk, alongside the actionability context.
-            if status == "running":
-                age = _seconds_since(info.get("created_at"), now=now)
-                if age is not None and age > NEVER_STARTED_MIN_AGE_SECONDS:
-                    never_started_candidates.append((info, age))
+            # NOT HERE. The never-started detector's candidate set comes
+            # from its OWN batched probe, NOT from this walk: the walk is
+            # ``created_at DESC`` and wall-clock-bounded, so a truncated
+            # walk drops the OLDEST rows first — exactly where the aged
+            # never-started candidates live. The probe is independent of
+            # the walk's budget (see ``_never_started_candidates``).
 
         window_index += 1
     else:
@@ -2543,31 +2927,52 @@ def _build_health_report(
     # ── 8. never-started-running (the BATCHED predicate legs) ───────
     # Appended LAST, like the husk before it: a pure addition, so the
     # seven existing detector indices stay stable for positional readers.
-    # The predicate is exactly:
-    #   status='running' AND created_at < now() - 45 min
+    #
+    # THE PREDICATE (the ruling is binding — the clock is the TASK
+    # clock; see ``_never_started_flagged_rows`` for the full comment):
+    #   status='running'
     #   AND NOT EXISTS (checkpoints WHERE thread_id = instance_id)
-    #   AND EXISTS (task WHERE instance_id = ... AND status='pending'
-    #               AND started_at IS NULL)
-    never_started_flagged, never_started_degraded = _never_started_flagged_rows(
-        manager,
-        never_started_candidates,
-        threshold=NEVER_STARTED_MIN_AGE_SECONDS,
-        now=now,
+    #   AND EXISTS (task t WHERE t.instance_id = instances.instance_id
+    #               AND t.status = 'pending' AND t.started_at IS NULL
+    #               AND t.created_at < now() - NEVER_STARTED_MIN_AGE_SECONDS)
+    #
+    # The candidate set comes from the detector's OWN probe, not from
+    # the walk — so the walk's budget cannot hide an aged candidate.
+    never_started_flagged, never_started_degraded, never_started_scope = (
+        _never_started_flagged_rows(
+            manager,
+            threshold=NEVER_STARTED_MIN_AGE_SECONDS,
+            now=now,
+        )
     )
     detectors.append(
         {
             "detector": "never-started-running",
             "instances": never_started_flagged,
             "count": len(never_started_flagged),
-            # On THIS row (the payload-level `evidence_legs` stays the
-            # husk's — unchanged behaviour): "degraded" means a
-            # PREDICATE leg could not run, so this count is a LOWER BOUND.
+            # On THIS row: "degraded" means a PREDICATE leg could not
+            # run, so this count is a LOWER BOUND.
             "evidence_legs": "degraded" if never_started_degraded else "ok",
+            # The COVERAGE of this detector's own candidate probe:
+            # "complete" or "partial" (the probe hit its row cap and
+            # more aged candidates may exist). It is NOT the same
+            # signal as ``evidence_legs`` — a leg that could not run is
+            # "degraded"; a probe that ran but did not read everything
+            # is "partial" — and it never overloads the other.
+            "scope": never_started_scope,
             # No observable classify-only counterpart: an honest gap,
             # declared the same way the legacy detectors declare theirs.
             "disagreement_pin": None,
         }
     )
+
+    # The PAYLOAD-level ``evidence_legs`` is the AGGREGATE over every
+    # detector that reports legs (the husk's and the never-started
+    # one's): "degraded" means AT LEAST ONE leg could not run, so some
+    # count in this payload is a LOWER BOUND. Each detector row carries
+    # its OWN state, so the aggregate never hides which one degraded.
+    if never_started_degraded:
+        evidence_legs = "degraded"
 
     # F4b: the flag is TRUE when the walk did NOT cover the fleet —
     # either fewer distinct rows than the count promised, or the walk

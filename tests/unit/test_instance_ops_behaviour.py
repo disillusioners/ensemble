@@ -629,6 +629,7 @@ class TestCascadeOrphans:
 
 class TestTier1FaultInjection:
     async def test_audit_failure_rolls_the_terminate_back(self, fleet):
+
         class BoomManager(FakeManager):
             async def terminate_instance(self, instance_id, terminal_reason="aborted", audit_sink=None):
                 self.terminated.append(instance_id)
@@ -672,6 +673,7 @@ class TestTier1FaultInjection:
 
 class TestTier2WriteAhead:
     async def test_crash_mid_act_leaves_pending(self, fleet):
+
         class CrashManager(FakeManager):
             async def enqueue_message(self, instance_id, message, source="api", **kw):
                 raise RuntimeError("simulated crash mid-act")

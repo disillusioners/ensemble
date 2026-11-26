@@ -251,7 +251,14 @@ workers_busy = register_family_metric(
     name="ensemble_workers_busy",
     kind="gauge",
     verdict="PARTIAL",
-    seam="daemon/tools/instance_read.py:2092",
+    # The seam names the FUNCTION and the BEHAVIOUR, never a line
+    # number: the file grows under every edit, so a pinned line number
+    # silently re-points at unrelated code (the line this seam used to
+    # cite now sits inside an unrelated docstring).
+    seam=(
+        "daemon/tools/instance_read.py (_build_health_report — the "
+        "job-active census: the instances owning an ACTIVE job item)"
+    ),
     label_keys=("pool",),
     allowed_values={"pool": vocab.WORKER_POOL_NAMES},
     help="The number of workers currently holding a task.",
@@ -394,7 +401,13 @@ instance_status_count = register_family_metric(
     name="ensemble_instance_status_count",
     kind="gauge",
     verdict="PARTIAL",
-    seam="daemon/tools/instance_read.py:2019",
+    # Behaviour seam, not a line number — see the note on
+    # ``workers_busy`` above.
+    seam=(
+        "daemon/tools/instance_read.py (_marginalize_census — the fleet "
+        "census's per-status buckets; the census itself is "
+        "count_fleet_by_status_and_agent)"
+    ),
     label_keys=("status",),
     allowed_values={"status": vocab.instance_statuses()},
     help="The number of instances per status.",
@@ -409,7 +422,13 @@ instance_liveness_count = register_family_metric(
     name="ensemble_instance_liveness_count",
     kind="gauge",
     verdict="PARTIAL",
-    seam="daemon/tools/instance_read.py:2019",
+    # Behaviour seam, not a line number — see the note on
+    # ``workers_busy`` above.
+    seam=(
+        "daemon/tools/instance_read.py (_marginalize_census + "
+        "_liveness_for — the census's per-status buckets mapped through "
+        "the canonical status→liveness map)"
+    ),
     label_keys=("liveness",),
     allowed_values={"liveness": vocab.INSTANCE_LIVENESS},
     help="The number of instances per liveness class.",
