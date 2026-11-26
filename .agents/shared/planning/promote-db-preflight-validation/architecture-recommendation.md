@@ -8,9 +8,16 @@
 
 ---
 
+## Revision history
+
+- **v1 → v2 (amended in place, 2026-11-26).** The D6 worker landed **after v1 was written** and **refuted one detail** of it. v1 ruled that the R6 opt-in is read from the daemon's own `os.environ`. That surface is **boot-time only** on this deployment — the systemd unit carries a **zero-env contract**, the runtime env is minted by `launcher.sh` at spawn time, and `load_config` *"`reads os.environ ONCE`"* — so it **cannot express a per-promote opt-in**. **v2 moves the opt-in to a tool-call parameter** on `system_upgrade`, bound into the `PendingOp` at arm time. **No other ruling changed.**
+  The superseded v1 is preserved in git at commit `99df5d98c` (`git show 99df5d98c:.agents/shared/planning/promote-db-preflight-validation/architecture-recommendation.md`). The lane ships **one** artifact per the commission, so the amendment is in place with the prior text retained in git rather than as a second file.
+
+---
+
 ## 0. The ruling in one paragraph
 
-The promote ceremony's DB preflight stops dumping the live database and instead **validates the newest daily backup artifact by reading the lane's own registry metadata** over the sanctioned PostgreSQL channel. The leg lives in the **daemon tool lane**, as a new check in the `system_upgrade` arm preflight — the only place that holds the registry table's **owner** credential, the per-promote **lock**, and a **pre-nonce refusal** path. The remembered identity lives as a **new top-level key `db_preflight` in `releases/state.json`** — the upgrade lane owns no database table, and this is the seventh key added through `ensure_extensions`. The shell ceremony (`promote.sh` / `lib.sh`) is **not touched at all**. The freshness bound is **48 h measured on the artifact's own `finished_at`**. Staleness **fails the promote loudly**. The `full-dump` opt-in **cannot mean "dump from the ceremony"** — a VM-side dump is impossible on five independent grounds — so the flag is shipped as an **explicit, loud refusal**, with the real dump capability framed as a **cluster-side Job for the Emperor**.
+The promote ceremony's DB preflight stops dumping the live database and instead **validates the newest daily backup artifact by reading the lane's own registry metadata** over the sanctioned PostgreSQL channel. The leg lives in the **daemon tool lane**, as a new check in the `system_upgrade` arm preflight — the only place that holds the registry table's **owner** credential, the per-promote **lock**, and a **pre-nonce refusal** path. The remembered identity lives as a **new top-level key `db_preflight` in `releases/state.json`** — the upgrade lane owns no database table, and this is the seventh key added through `ensure_extensions`. The shell ceremony (`promote.sh` / `lib.sh`) is **not touched at all**. The freshness bound is **48 h measured on the artifact's own `finished_at`**. Staleness **fails the promote loudly**. The `full-dump` opt-in **cannot mean "dump from the ceremony"** — a VM-side dump is impossible on five independent grounds — so the opt-in is **recognised and refused loudly**, carried per-promote on a **tool-call parameter** (`system_upgrade(..., db_preflight=…)`) that crosses **no** executor boundary, with the real dump capability framed as a **cluster-side Job for the Emperor**.
 
 ---
 
@@ -23,11 +30,11 @@ The promote ceremony's DB preflight stops dumping the live database and instead 
 | Req | Ruling | Where it lands |
 |---|---|---|
 | **R1** stop dumping; validate the latest daily backup | Validated | new arm-preflight check, `daemon/tools/upgrade_db_preflight.py` |
-| **R2** cheap + meaningful; corrupted/truncated FAILS LOUDLY, naming the artifact | Validated **as metadata** (lane's own `zstd -t` verdict); see §5 (D4) and §11 (disclosure) | `integrity_ok` + `bytes>0` + age bound, table-level read |
+| **R2** cheap + meaningful; corrupted/truncated FAILS LOUDLY, naming the artifact | Validated **as metadata** (lane's own `zstd -t` verdict); see §5 (D4) and §15 (disclosure) | `integrity_ok` + `bytes>0` + age bound, table-level read |
 | **R3** remember the identity durably; NOT POK | `releases/state.json` → `db_preflight` | `ensure_extensions` + `journal_write` |
 | **R4** skip when unchanged; log LOUDLY; stamp MUST ADVANCE on skip | Implemented; stamp advances; history row appended | `record_db_preflight` helper |
 | **R5** no backup / broken ⇒ FAIL LOUDLY; never silently proceed; never fall back to dumping | Implemented; five distinct refusal tokens | `_refusal()` |
-| **R6** full dump behind an explicit opt-in | **Honoured as an explicit refusal** — no VM-side dump exists (five grounds, §8) | `db-preflight-full-dump-unavailable` |
+| **R6** full dump behind an explicit opt-in | **Honoured as an explicit refusal** — no VM-side dump exists (five grounds, §8). The opt-in is carried per-promote on a tool-call parameter and **never crosses the executor boundary** | `db-preflight-full-dump-unavailable` |
 | **R7** do not weaken the transaction | **The shell preflight is untouched by construction** (§9) | arm-side only |
 | **R8** C-1 class discipline | Satisfied trivially — **the lane adds no shell code** | — |
 
@@ -142,7 +149,7 @@ LIMIT 1
 
   A 36 h bound would block **normal morning promotes** whenever the scanner lag runs long — the ceremony would be blocked by the *observability path*, not by an absent backup, which is the opposite of the Emperor's intent.
 - **Still catches the real hazard.** The lane's ENOSPC era left ~2-month-old artifacts; under a 48 h bound those fail by a wide margin.
-- **A structural caveat, stated plainly:** one bound cannot express both the **data-loss ceiling** and the **spurious-block ceiling** — they are different quantities, and the registry can only expose the *visible* age (which is ≥ the true age). A tight 24 h data-loss bound is therefore **not implementable** against a lagging publisher without a publisher-side fix or a schema change. The bound is an Emperor-level risk-appetite decision (§13, Q1).
+- **A structural caveat, stated plainly:** one bound cannot express both the **data-loss ceiling** and the **spurious-block ceiling** — they are different quantities, and the registry can only expose the *visible* age (which is ≥ the true age). A tight 24 h data-loss bound is therefore **not implementable** against a lagging publisher without a publisher-side fix or a schema change. The bound is an Emperor-level risk-appetite decision (§16, Q1).
 
 **Skip / bound interaction — the trap, closed:** the freshness bound is evaluated on **every** invocation, **unconditionally**. The identity-skip (R4) may short-circuit only the *immutable* checks (integrity, byte count, name consistency); it may **never** short-circuit the age check. An unchanged artifact that has aged past the bound **fails** — a skipped step that never re-checks freshness would let a backup age forever behind a skip.
 
@@ -154,7 +161,7 @@ LIMIT 1
 
 **Ruling: staleness FAILS the promote, loudly.** Not warn-and-continue: the daily backup is the thing covering the risk the per-promote dump used to cover, and a stale backup provides no such cover. Not a third outcome: the bound is one gate with one action.
 
-**The stale condition is *not* "no backup".** The two are distinguished by **reason token**, because the remedy differs (wait for the publisher vs. fix the lane). Under the daemon seam there is **no exit code** — a refusal is a returned `Error:` string plus a journaled `refusal` event plus an SSE alert. The house's `0/75/76/78` exit vocabulary belongs to `scripts/audit/dump_lane_staleness.py`, a **repo-only** probe in a different vocabulary, and is **not** imported here.
+**The stale condition is *not* "no backup".** The two are distinguished by **reason token**, because the remedy differs (wait for the publisher vs. fix the lane). Under the daemon seam there is **no exit code** — a refusal is a returned `Error:` string plus a journaled `refusal` event plus an SSE alert (`ALERT_KIND_BY_EVENT["refusal"] = "upgrade_promote_refusal"`). The house's `0/75/76/78` exit vocabulary belongs to `scripts/audit/dump_lane_staleness.py`, a **repo-only** probe in a different vocabulary, and is **not** imported here. `exit 76` / `exit 77` / `rc=76` / `rc=77` have **zero** hits in `scripts/upgrade/` — **no new exit code is claimed.**
 
 **Full condition → action table:**
 
@@ -234,11 +241,27 @@ LIMIT 1
 4. **New connections are refused at 99.7 % of the PG container's 4 GiB cgroup** (established ones survive).
 5. **The VM's `pg_dump` is 16.15 and aborts against the 18.4 server.**
 
-**Therefore:** `ENSEMBLE_PROMOTE_DB_PREFLIGHT=full-dump` is **recognised and refused loudly** with `db-preflight-full-dump-unavailable` and a remediation naming the cluster-side path. It **never** silently degrades to validation-only. An unrecognised value is refused (`db-preflight-mode-unknown`) rather than treated as validation-only — a typo must not silently downgrade the mode.
+**Therefore:** `full-dump` is **recognised and refused loudly** with `db-preflight-full-dump-unavailable` and a remediation naming the cluster-side path. It **never** silently degrades to validation-only. An unrecognised value is refused (`db-preflight-mode-unknown`) rather than treated as validation-only — a typo must not silently downgrade the mode.
 
-**The flag never crosses the executor boundary.** It is read from the **daemon's own `os.environ`** inside the arm check. Consequently: **no** `EXECUTOR_ENV_ALLOWLIST` entry, **no** `EXECUTOR_ENV_PREFIXES` change, **no** `_verified_arm_extras` entry, **no** `promote.sh` `flag)` case label, and **no** `argv_ext_probe` membership — so **Check 3** (`upgrade_tools.py:4177-4200`, which refuses `preflight-argv-malformed` when an arm flag has no case label in `promote.sh`) is **unaffected**.
+### The transport (revised in v2)
 
-**The honest answer to "does the flag still have a coherent VM-side meaning?"** — **No, not as a capability. Yes, as an explicit refusal.** The flag's only coherent VM-side behaviour today is to say *"you asked for a full dump; this host cannot perform one; refusing rather than silently validating."* That is strictly better than not shipping the flag (an operator who set it would otherwise get an unannounced validation-only promote), and it honours R6's requirement that the opt-in be **reachable** and **honoured** rather than ignored.
+**The opt-in never crosses the executor boundary — and it cannot be carried by `os.environ` either.** The daemon's environment is fixed at boot:
+
+- `scripts/systemd/ensemble-daemon.service:20-26` — the **zero-env contract**: *"every unit generated from it carry NO .env-derived `Environment=` lines"*; the single static line is `Environment=MALLOC_ARENA_MAX=2` (`:121`). The operator cannot add an `Environment=` line to the running daemon.
+- `launcher.sh:4599` — `load_env_file "$INSTALL_DIR/.env"` (env-first, last-wins) mints the runtime env at spawn time.
+- `daemon/config.py:7946-7948` — *"The boot path … reads `os.environ` ONCE and threads the string through."*
+
+⇒ **an `os.environ` variable is a boot-time setting, not a per-promote surface.** A `.env` edit would apply to the *next* daemon, not to the one performing this preflight.
+
+**The per-promote surface is a tool-call parameter.** The tool's own signature is `async def system_upgrade(target_env, version=None, user_confirmed=False, dry_run=True, nonce=None)` (`upgrade_tools.py:3610-3617`); it gains `db_preflight: str | None = None`. It is per-call, reaches the daemon directly, needs no restart, and crosses **no** executor boundary.
+
+**Consequently:** **no** `EXECUTOR_ENV_ALLOWLIST` entry, **no** `EXECUTOR_ENV_PREFIXES` change, **no** `_verified_arm_extras` entry, **no** `promote.sh` `flag)` case label, and **no** `argv_ext_probe` membership. `argv_ext_probe` (`upgrade_tools.py:4146-4150`) is fed **only** from `uj._verified_arm_extras(probe_op)` when `uj.is_verified_arm(probe_op)` holds, and `_verified_arm_extras` (`upgrade_journal.py:2341-2352`) currently returns just `(["--f2-verified-closed"], {…})` — so **Check 3 (`:4179-4200`) is unaffected**.
+
+**The value is bound to the human's attestation.** It is captured into the `PendingOp` at arm time (`upgrade_tools.py:4463-4478`, alongside `nonce_consumed` / `confirmed_source`) so the journal records what was requested and an agent cannot later claim a mode the human did not confirm. When the value is non-default it must be **surfaced in the dry-run / confirmation text** — the branch that mints the live nonce (`:3764-3773`) — so the human reads what they are attesting.
+
+**Why not `ENSEMBLE_PROMOTE_DB_PREFLIGHT` as an env var.** R6 names it as an *example* ("e.g."). On this deployment it would be a **sticky boot-time trap** applying to every future promote, changeable only by a daemon restart, with the only current behaviour being a refusal. One surface, per-promote: the tool-call parameter. **If the Emperor authorises the cluster-side Job**, the transport is re-ruled then, using the house's own split — env for a human at a shell, attested argv for the daemon-armed path (`PROMOTE_STRICT_STALENESS=1` vs `--block-on-stale`, `lib.sh:4161-4178` / `promote.sh:95-117`).
+
+**The honest answer to "does the opt-in still have a coherent VM-side meaning?"** — **No, not as a capability. Yes, as an explicit refusal.** The opt-in's only coherent VM-side behaviour today is to say *"you asked for a full dump; this host cannot perform one; refusing rather than silently validating."* That is strictly better than not shipping it (an operator who asked would otherwise get an unannounced validation-only promote), and it honours R6's requirement that the opt-in be **reachable** and **honoured** rather than ignored.
 
 **The real dump capability is CLUSTER-SIDE and is the Emperor's decision, not this lane's.** The devops addendum's framing (already filed): a one-shot Job in `postgres18` running the same `pg_dumpall → zstd → zstd -t` path, writing a **named** `.zst` to the dump PVC and publishing a row to the same `public.dump_lane_artifacts` relation. Its failure modes are the Emperor's to own: the PVC **ENOSPC race** (which needs the prune/expand first), the re-introduction of a per-promote dump the ruling removed (so it must stay opt-in), a partial write never passing (both the `zstd -t` verdict **and** the registry row are required), and its own cluster credentials. **This lane proposes no PG or k8s change** — the memory re-tune and the PVC prune/expand are the Emperor's, and the dump lane's command / destination / retention belong to the in-flight mapping job `ca665904`.
 
@@ -258,9 +281,9 @@ If the validation lives only in the tool arm path, an operator who runs `bash sc
 
 The arm→executor window is seconds-to-minutes wide; the property it would re-check (artifact freshness) has an **hour-scale** bound. A newer artifact could publish in that window (making the validated one not-quite-newest) — harmless, since the bound is hours. The registry could flip `integrity_ok` — vanishingly unlikely in seconds, and the verdict is about a completed artifact.
 
-Building the belt would require: stamping the identity onto the `PendingOp`, a **new shell-side comparison**, and a **new refusal path in `promote.sh`** — a second failure surface, a second schema, and a change to the very file whose preflight R7 wants untouched. The house precedent does the opposite: `promote_plugin_staleness_check` evaluates its predicate **once** at preflight and does not re-validate. **"Simple always better"** (cn 2509c6d5) settles it.
+Building the belt would require: a **new shell-side comparison**, a **new refusal path in `promote.sh`**, and a second schema the two sides must agree on — a second failure surface and a change to the very file whose preflight R7 wants untouched. The house precedent does the opposite: `promote_plugin_staleness_check` evaluates its predicate **once** at preflight and does not re-validate. **"Simple always better"** (cn 2509c6d5) settles it.
 
-**Ruling: validate at arm time, accept the seconds-wide window, and DISCLOSE it.** The audit trail is carried by the journal-always history row (`db_preflight_validated` / `db_preflight_skipped`), written in the same shape as the sibling `arm-scripts-provenance` row — *not* by extending the `PendingOp` schema.
+**Ruling: validate at arm time, accept the seconds-wide window, and DISCLOSE it.** The audit trail is carried by the journal-always history row (`db_preflight_validated` / `db_preflight_skipped`), written in the same shape as the sibling `arm-scripts-provenance` row.
 
 ---
 
@@ -273,7 +296,7 @@ Building the belt would require: stamping the identity onto the `PendingOp`, a *
 | File | Change |
 |---|---|
 | `daemon/tools/upgrade_db_preflight.py` | **new** — the registry read, the five gates, the verdict, the skip predicate |
-| `daemon/tools/upgrade_tools.py` | new arm-preflight check at `:4377-4380`; the dry-run PLAN string at `:3759-3761` corrected to match reality |
+| `daemon/tools/upgrade_tools.py` | new arm-preflight check at `:4377-4380`; the dry-run PLAN string at `:3759-3761` corrected to match reality; **the `system_upgrade` signature gains `db_preflight: str \| None = None`** (`:3610-3617`); a non-default value is **surfaced in the dry-run / confirmation text**; the value is captured into the `PendingOp` at arm time (`:4463-4478`) |
 | `daemon/tools/upgrade_journal.py` | `ensure_extensions` seeds `db_preflight`; new `record_db_preflight()` helper modelled on `arm_pending_wake` |
 | `tests/unit/test_upgrade_db_preflight.py` | **new** — hermetic unit nodes (§11) |
 | `PACKS.md` | **new** row — the ownership chain (cn 2039b459): task → artifact → File cell → leg row → PACKS.md row |
@@ -285,6 +308,13 @@ Building the belt would require: stamping the identity onto the `PendingOp`, a *
 **Constants:**
 - `DB_PREFLIGHT_LANE = "pgdumpall"`
 - `DB_PREFLIGHT_MAX_AGE_S = 172800` (48 h) — env-overridable via `ENSEMBLE_PROMOTE_DB_PREFLIGHT_MAX_AGE_S` (a risk-appetite knob the Emperor may want to tune without a release; the house precedent is the env-overridable `JOURNAL_SIZE_GUARD_BYTES`).
+- `DB_PREFLIGHT_MODES = {"validation-only", "full-dump"}` — anything else is refused as `db-preflight-mode-unknown`.
+
+**The opt-in, end to end:**
+1. The operator (or the agent relaying the instruction) passes `db_preflight="full-dump"` on the `system_upgrade` call.
+2. The arm check reads it; `"full-dump"` ⇒ refuse `db-preflight-full-dump-unavailable` (never a silent fallback); absent ⇒ validation-only.
+3. The value is surfaced in the dry-run / confirmation text so the human sees what is being attested.
+4. The value is written into the `PendingOp` so the journal binds it to the human's confirmation.
 
 **Reason tokens** (house kebab-case, one greppable family): `db-preflight-registry-unavailable`, `db-preflight-no-backup`, `db-preflight-artifact-broken`, `db-preflight-artifact-empty`, `db-preflight-artifact-stale`, `db-preflight-identity-conflict`, `db-preflight-journal-torn`, `db-preflight-full-dump-unavailable`, `db-preflight-mode-unknown`.
 
@@ -299,11 +329,11 @@ Building the belt would require: stamping the identity onto the `PendingOp`, a *
 | **(a) the masking pin** | A registry whose **newest overall** artifact has `integrity_ok = false`, while an **older** artifact is verified ⇒ the check **REFUSES** with `db-preflight-artifact-broken`, naming the newest artifact. This is the pin that proves the view-masking hazard is defeated — and it is **mutation-proven**: reintroduce a view-based read and it goes RED. | R1, R2 |
 | **(b) the skip + stamp-advance pin** | Two consecutive invocations with an unchanged, fresh artifact ⇒ the second records `verdict="skipped"`, `last_checked_at` **advances**, and a `db_preflight_skipped` history row **naming the artifact** is appended. **Third case:** the same unchanged artifact aged past the bound ⇒ the skip does **not** fire and the check refuses `db-preflight-artifact-stale`. | R4 |
 | **(c) the loud-failure pin** | Zero rows ⇒ `db-preflight-no-backup`; registry relation absent ⇒ `db-preflight-registry-unavailable`; torn/absent journal ⇒ `db-preflight-journal-torn`. All three assert **no** `pending_op` is written and the **nonce is unspent** — a refusal is never a silent proceed. | R5, R7 |
-| **(d) the opt-in pin** | `full-dump` ⇒ `db-preflight-full-dump-unavailable`; an unrecognised value ⇒ `db-preflight-mode-unknown`; unset ⇒ validation-only proceeds. **Plus** a pin that the flag never crosses the executor boundary — asserting `ENSEMBLE_PROMOTE_DB_PREFLIGHT` ∉ `EXECUTOR_ENV_ALLOWLIST` and ∉ the `EXECUTOR_ENV_PREFIXES` match, mirroring the house's existing T0c pin shape (`tests/unit/tools/test_agent_restart.py:188-193` asserts `ENSEMBLE_RESTART_LIVE`/`ENSEMBLE_UPGRADE_LIVE` are absent from the allowlist). | R6, R8 |
+| **(d) the opt-in pin** | `full-dump` ⇒ `db-preflight-full-dump-unavailable`; an unrecognised value ⇒ `db-preflight-mode-unknown`; the parameter absent ⇒ validation-only proceeds. **Plus two boundary pins:** (i) the opt-in never crosses the executor boundary — asserting `ENSEMBLE_PROMOTE_DB_PREFLIGHT` ∉ `EXECUTOR_ENV_ALLOWLIST` and ∉ the `EXECUTOR_ENV_PREFIXES` match, mirroring the house's existing T0c pin shape (`tests/unit/tools/test_agent_restart.py:188-193` asserts `ENSEMBLE_RESTART_LIVE`/`ENSEMBLE_UPGRADE_LIVE` are absent from the allowlist); and (ii) the opt-in is **nonce-bound** — the value appears in the `PendingOp` written at arm time, so the journal records the requested mode alongside the human's attestation. | R6, R8 |
 | **(e) the transaction pin** | (1) `scripts/upgrade/promote.sh` and `scripts/upgrade/lib.sh` are **byte-unchanged** by this lane (a path-scoped diff pin against the base commit). (2) A refusal at the new check leaves the **nonce unspent** and **no `pending_op`** written — so the arm "simply did not happen". (3) The check runs **after** the lock acquire and **before** the nonce burn (ordering asserted structurally). | R7 |
 | **(f) the durability pin** | The record round-trips a simulated restart (a fresh process reads the journal and the skip fires); `ensure_extensions` seeds the key so the journal shape is stable; ADR-034's structural round-trip holds (an unrelated extra key survives). | R3 |
 
-**R8 (C-1 class discipline):** satisfied **trivially** — the lane adds **no shell code**, so there is no new surface for the continuation-comment defect (`tests/shell_continuation_scan.py`). If a future revision adds a shell leg, the lint and the `set -u` unbound-argument rule apply to it, and `lib.sh`'s Bash 3.2 / BSD-only / no-`flock(1)` constraints apply.
+**R8 (C-1 class discipline):** satisfied **trivially** — the lane adds **no shell code**, so there is no new surface for the continuation-comment defect (`tests/shell_continuation_scan.py`; CLI `0` clean / `1` new hit / `2` usage). If a future revision adds a shell leg, the lint and the `set -u` unbound-argument rule apply to it (`${VAR:-default}`, never bare `$VAR`), and `lib.sh`'s Bash 3.2 / BSD-only / no-`flock(1)` / no-`set`-line constraints apply.
 
 ---
 
@@ -342,7 +372,7 @@ The shell preflight runs **entirely after the lock and entirely before the txn o
 
 | Axis | Rating | One-line justification |
 |---|---|---|
-| **Complexity** | **Low** | One SELECT, one module, one journal key, one helper; every atomicity/lock/audit mechanism is reused, none is reinvented. |
+| **Complexity** | **Low** | One SELECT, one module, one journal key, one helper, one tool parameter; every atomicity/lock/audit mechanism is reused, none is reinvented. |
 | **Scalability** | **High** | One bounded metadata SELECT per promote on a pooled connection; O(1) journal read; no byte movement, no restore, no cluster-side work. |
 | **Maintainability** | **High** | The shell ceremony is untouched; the concept has one home; `ensure_extensions` + `pending_wakes` is a worked template; the reason tokens are one greppable family. |
 | **Risk** | **Low–Medium** | The residual risk is **external ownership**: the registry relation is owned by a cluster-side publisher with **no repo contract** and was **absent as recently as 2026-11-25**. Mitigated by fail-loud naming, not by optimism. |
@@ -396,7 +426,7 @@ The shell preflight runs **entirely after the lock and entirely before the txn o
 
 **Q1 — The freshness bound: 48 h (my ruling) vs 24 h.** 48 h never blocks a healthy daily lane (worst-case visible age ≈ 41 h) and still fails a 2-month-old artifact. A 24 h bound expresses a tighter **data-loss** ceiling but **cannot be implemented** against the measured publication lag without a publisher-side fix or a registry schema change — it would block normal morning promotes on scanner lag alone. **My ruling: 48 h.** If the Emperor wants a 24 h *data-loss* ceiling, the correct fix is upstream (publish promptly, or publish the artifact's own checksum), not a tighter downstream bound.
 
-**Q2 — R6: authorise the cluster-side one-shot dump Job?** The devops addendum's framing is already filed. It is **outside this lane's no-k8s-change fence** and depends on the Emperor's PVC prune/expand. Until then, `full-dump` ships as an explicit refusal.
+**Q2 — R6: accept (a) as the honest substitute for R6's literal "full dump stays reachable"?** **My ruling: (a)** — the opt-in is **reachable and recognised** (via the `system_upgrade` `db_preflight` parameter) but the capability is unavailable on this host, so it refuses loudly. The Emperor may instead authorise (b), the cluster-side one-shot dump Job (the devops addendum's framing, already filed) — which is **outside this lane's no-k8s-change fence** and depends on the PVC prune/expand. *The strongest objection to (a), which I concede as a fair reading:* *"the Emperor made validation the **default**; he did not rule a full dump impossible"* — correct, and (a) is the conservative reading. If a real dump leg is later found in the live pinned scripts worktree (`ENSEMBLE_UPGRADE_SCRIPTS_DIR`) or an unmerged branch, `full-dump` could honestly invoke it, and (b) reopens as Emperor-gated.
 
 **Q3 — F1: must the direct-operator path be covered?** The only available mechanism is a shell-side belt in `promote.sh`, which touches the file R7 wants untouched and buys a weak guarantee. **My ruling: arm-path only + disclosure.** If the Emperor wants the gap closed, that is a deliberate R7 trade, not an oversight.
 
@@ -414,18 +444,17 @@ The shell preflight runs **entirely after the lock and entirely before the txn o
 | `9053feeb-a70f-40b8-8fec-52db31d26636` | D1 approach **C** — hybrid (`system-decomposition`) | ✅ landed; its central justification refuted on evidence (§3) |
 | `03eb97bf-1ee0-480b-aff8-bcdbfdc276e1` | D4/D5 — validation semantics (`resilience-design`) | ✅ landed; the skip/bound trap closed (§5) |
 | `502dc25f-a1fd-4efb-b016-39090c3128e9` | D3 — durable state seam (`structural-design`) | ✅ landed; option (i) confirmed (§7) |
+| `00eca015-5b97-4a7e-8ebe-48b31f8d1fa3` | D6 — R6 transport (`system-decomposition`) | ✅ landed; **confirmed** option (a) + "Check 3 unaffected" + "no new exit code" (`exit 76`/`77` have zero hits in `scripts/upgrade/`), and **refuted v1's transport** — `os.environ` is boot-time-only ⇒ the opt-in moved to a tool-call parameter (§8, revision history) |
 | `47e52e10-426e-4554-8f1c-4f6fee01658c` | D1 approach **A** — shell seam (`system-decomposition`) | ⏳ **in flight at write time** — see the explicit partial marker below |
-| `00eca015-5b97-4a7e-8ebe-48b31f8d1fa3` | D6 — R6 transport (`system-decomposition`) | ⏳ **in flight at write time** — see the explicit partial marker below |
 
-**⚠️ EXPLICIT PARTIAL FAN-IN MARKER.** Two of six workers were still running when this artifact was written. **Their questions are foreclosed by verified evidence, not left open:**
-- *D1-A (shell seam)* — foreclosed by the five grounds in §8, each independently verified; plus §3's direct greps (`scripts/upgrade/` has DB access only in the **unshipped** `boot_smoke.sh`; `POSTGRES_HOST/USER/PASSWORD/PORT` are stripped by `EXECUTOR_ENV_ALLOWLIST`; the `("PG",)` prefix contributes nothing). Its outcome cannot change the D1 ruling.
-- *D6 (R6 transport)* — foreclosed by §8: the flag is read from the daemon's own `os.environ`, so it never crosses the executor boundary (no allowlist entry, no `_verified_arm_extras` entry, no `promote.sh` case label, no `argv_ext_probe` membership ⇒ **Check 3 unaffected**); and `full-dump` is impossible VM-side on five grounds.
+**⚠️ EXPLICIT PARTIAL FAN-IN MARKER.** One of six workers (D1 approach **A**, the shell seam) was still running when this artifact was written. **Its question is foreclosed by verified evidence, not left open:** the shell cannot read the registry (no credential path across the executor boundary; the only upgrade script with DB access is the **unshipped** `boot_smoke.sh`), and a VM-side dump is impossible on the five grounds in §8. Its outcome cannot change the D1 ruling.
 
-**If either report lands with a fact that contradicts a ruling above, this artifact becomes `architecture-recommendation-v2.md`** — it is not silently revised.
+**If that report lands with a fact that contradicts a ruling above, this artifact becomes `architecture-recommendation-v2.md`** — it is not silently revised. (Note: the *in-place* v1→v2 amendment described in the Revision history is a different thing — a correction to this same decision, with v1 retained at git commit `99df5d98c`.)
 
-**Sources folded in:** the leader's recon update #2 (out-of-tree devops addendum receipt `88212d6d`; the arm-path / preserve-list map; this lane's own publication-lag measurement), the live registry query of 2026-11-26, the four worker reports, and my own reads of `origin/latest` = `8b646ae37` — every anchor quoted in this artifact was read directly at that commit, except where explicitly attributed to the recon's map.
+**Sources folded in:** the leader's recon update #2 (out-of-tree devops addendum receipt `88212d6d`; the arm-path / preserve-list map; this lane's own publication-lag measurement), the live registry query of 2026-11-26, the five landed worker reports, and my own reads of `origin/latest` = `8b646ae37` — every anchor quoted in this artifact was read directly at that commit, except where explicitly attributed to the recon's map.
 
 **Corrections carried into this artifact** (superseding the commission's stated evidence):
 1. The brief's *"legacy PVC lane failing ENOSPC since ~Sep 1"* is **out of date** — POK `pg-host-clockwork-landscape-01` (corrected 2026-11-25) records the lane **green again**, PVC expanded 20→60 Gi, retention disabled.
 2. The **48 h** bound replaces the 36 h default proposed by the semantics worker — 36 h would block normal morning promotes on scanner lag alone (§5).
 3. The **reminder that `integrity_ok` is the cluster-side `zstd -t` verdict** — this is what makes the metadata validation meaningful, and it is not inspectable from the DB or the repo.
+4. **v1's D6 transport was wrong** — `os.environ` cannot express a per-promote opt-in on this deployment; the opt-in is a tool-call parameter bound into the `PendingOp`.
