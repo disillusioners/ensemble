@@ -461,3 +461,120 @@ class TestDiagnosticLogging:
         assert reason2 == "no_completed_message_id"
         assert reason3 == "no_parent_id"
         assert len({reason1, reason2, reason3}) == 3, "All reason strings should be unique"
+
+
+# ─── Revive-wedge terminalization: P-TWIN lockstep pin ────────────────────────
+# The dead-code twin ``_should_send_completion_report`` and the live
+# inlined guard in ``_process_child_completion_db_sync`` must evaluate the
+# SAME two-arm predicate. Both call the ONE module-level builder
+# ``_mint_guard_suppress_predicate``; a drift in EITHER twin (a locally
+# inlined or re-widened predicate) turns the structural pin RED. The
+# behavioural half pins the load-bearing consequence: a DELIVERED
+# (COMPLETED) prior under a DIFFERENT anchor no longer blocks the twin,
+# while a READY prior under a different anchor still does (ARM B).
+
+class TestMintGuardTwinLockstep:
+    """gate-matrix.md §0 — dead-code twin pin (COMPLETED prior, different anchor)."""
+
+    def test_both_twins_evaluate_the_one_shared_two_arm_predicate(self):
+        import inspect
+
+        from daemon.services import child_reports as module
+        from sqlalchemy.dialects import sqlite
+
+        twin_src = inspect.getsource(
+            module.ChildReportsService._should_send_completion_report
+        )
+        live_src = inspect.getsource(
+            module.ChildReportsService._process_child_completion_db_sync
+        )
+        builder_src = inspect.getsource(module._mint_guard_suppress_predicate)
+
+        # The pin is a LOCKSTEP pin: either twin drifting away from the
+        # shared builder is a failure, not just a wrong result here.
+        assert "_mint_guard_suppress_predicate(" in twin_src, (
+            "the dead-code twin no longer evaluates the shared guard"
+        )
+        assert "_mint_guard_suppress_predicate(" in live_src, (
+            "the live inlined guard no longer evaluates the shared guard"
+        )
+        assert (
+            'MessageQueue.source == f"internal_report:{instance_id}:'
+            '{completed_message_id}"' in builder_src
+        ), "ARM A (same-anchor equality) is missing from the builder"
+        assert (
+            'MessageQueue.source.startswith(f"internal_report:'
+            '{instance_id}:", autoescape=True)' in builder_src
+        ), "ARM B (child prefix, colon boundary) is missing from the builder"
+
+        # Character-for-character status sets of the compiled predicate:
+        # S-A = ('ready','processing','completed'), S-B excludes COMPLETED.
+        sql = str(
+            module._mint_guard_suppress_predicate("child-123", "msg-new-789")
+            .compile(
+                dialect=sqlite.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        )
+        assert "'internal_report:child-123:msg-new-789'" in sql
+        assert "status IN ('ready', 'processing', 'completed')" in sql
+        assert "status IN ('ready', 'processing')" in sql
+        assert "ESCAPE '/'" in sql, "autoescape=True must carry the ESCAPE clause"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("prior_status", "expected_send", "expected_reason"),
+        [
+            (MessageStatus.COMPLETED.value, True, "all_checks_passed"),
+            (MessageStatus.READY.value, False, "idempotency_skip"),
+        ],
+        ids=["delivered-prior-unblocks-a-new-anchor", "outstanding-prior-still-blocks"],
+    )
+    async def test_twin_guard_splits_status_sets_by_arm(
+        self, mock_manager, mock_events_service,
+        prior_status, expected_send, expected_reason,
+    ):
+        # A REAL in-memory session — the guard is a SQL predicate, so a
+        # MagicMock ``exec`` (which returns the seeded row unconditionally)
+        # cannot prove that a COMPLETED prior under a different anchor is
+        # actually filtered out.
+        from sqlalchemy import create_engine
+        from sqlalchemy.pool import StaticPool
+        from sqlmodel import SQLModel, Session
+
+        engine = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        SQLModel.metadata.create_all(engine)
+        with Session(engine) as session:
+            session.add(Instance(
+                instance_id="child-123",
+                agent_id="developer",
+                agent_name="developer",
+                agent_dir="/tmp/developer",
+                parent_id="parent-456",
+                status=InstanceStatus.RUNNING.value,
+                version=1,
+                instance_metadata={},
+            ))
+            session.add(MessageQueue(
+                message_id="msg-old",
+                instance_id="parent-456",
+                content="prior report",
+                source="internal_report:child-123:anchor-old",
+                type=MessageType.COMPLETION_REPORT.value,
+                status=prior_status,
+            ))
+            session.commit()
+
+            service = ChildReportsService(
+                manager=mock_manager,
+                events_service=mock_events_service,
+            )
+            should_send, reason = await service._should_send_completion_report(
+                session, "child-123", completed_message_id="anchor-new"
+            )
+
+        assert (should_send, reason) == (expected_send, expected_reason)
