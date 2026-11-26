@@ -244,6 +244,18 @@ def __getattr__(name: str) -> Any:
 #: The scrub actor recorded on the value-substitution audit rows.
 SCRUB_ACTOR = "nest_report"
 
+
+#: The LOUD truncation marker format — the single home for the marker
+#: string.  The docstrings (tool doc, models docstring, service doc)
+#: quote this literal so the documented marker cannot drift from the
+#: one actually emitted.  ``{n}`` is the measured (raw-or-post-scrub)
+#: original length.
+TRUNCATION_MARKER_FORMAT = "\n[TRUNCATED: original {n} chars; stored prefix only]"
+TRUNCATION_MARKER = TRUNCATION_MARKER_FORMAT
+TRUNCATION_MARKER_TEMPLATE = TRUNCATION_MARKER_FORMAT
+LOUD_TRUNCATION_MARKER = TRUNCATION_MARKER_FORMAT
+TRUNCATION_MARKER_SHORT = "[TRUNCATED]"
+
 #: The refusal tokens the service raises back at the tool (the C2
 #: ``_service_token`` duck-typing contract — the tool maps ``.token``
 #: onto the house envelope rungs; anything else is ``persist-failed``).
@@ -573,7 +585,7 @@ def scrub_text(
     *,
     actor: str = SCRUB_ACTOR,
     mark_truncated: bool = False,
-) -> str:
+) -> tuple[str, bool]:
     """The R6 + AM-11 scrub pipeline, in the FIXED order.
 
     0. ``redact_secret_shapes`` — the secret-VALUE masker. It MUST see
@@ -598,32 +610,43 @@ def scrub_text(
         cap: The field cap.
         actor: The audit actor for the value-substitution rows.
         mark_truncated: Append a ``[TRUNCATED: ...]`` marker when the
-            ORIGINAL input exceeded the cap. The marker is measured
-            INTO the cap, so the returned text never exceeds it.
+            input (raw OR post-scrub) exceeded the cap. The marker is
+            measured INTO the cap, so the returned text never exceeds
+            it.
 
     Returns:
-        The scrubbed, capped (and, when requested, loudly marked)
-        text. Never raises.
+        ``(text, truncated)`` — the scrubbed, capped (and, when
+        requested, loudly marked) text plus a boolean that is True iff a
+        loud marker was attached (i.e. the text was cut). Never raises.
     """
+    # Stringify ONCE, the same way the maskers do, so the measured
+    # length can never disagree with the text the masker actually
+    # produced (L1: never derive a length from a placeholder literal).
     try:
-        original_len = len(value if isinstance(value, str) else str(value))
+        source = value if isinstance(value, str) else str(value)
     except Exception:  # pragma: no cover — defensive stringify
-        original_len = len("<unstringifiable>")
-    masked = redact_secret_shapes(value, limit=cap)
+        source = "<unstringifiable>"
+    original_len = len(source)
+    masked = redact_secret_shapes(source, limit=cap)
     shaped = redact_exc_str(masked, limit=cap)
     scrubbed = scrub_enqueued_body(shaped, actor=actor)
-    if mark_truncated and original_len > cap:
-        marker = (
-            f"\n[TRUNCATED: original {original_len} chars; "
-            "stored prefix only]"
-        )
+    # The cut/marker triggers on the text ACTUALLY being cut: the
+    # post-scrub text may have grown past the cap (scrub_enqueued_body
+    # substitutes stored secrets with markers that can be LONGER), even
+    # when the raw input was under it.
+    effective_original = max(original_len, len(scrubbed))
+    if mark_truncated and effective_original > cap:
+        marker = TRUNCATION_MARKER_FORMAT.format(n=effective_original)
         if len(marker) >= cap:
             marker = "[TRUNCATED]"
         if len(marker) >= cap:
             # Pathological cap (< 11): sacrifice content for the signal.
-            return marker[:cap]
-        return scrubbed[: cap - len(marker)] + marker
-    return scrubbed[:cap]
+            return (marker[:cap], True)
+        return (scrubbed[: cap - len(marker)] + marker, True)
+    # Silent cut (no marker): excerpts and non-marked fields. The text
+    # is still capped; `truncated` is False because no loud marker was
+    # attached (the envelope aggregates only authored-field markers).
+    return (scrubbed[:cap], False)
 
 
 @dataclass
@@ -833,22 +856,20 @@ class AnomalyService:
         # mid-predicate, and a silently halved finding is worse than no
         # finding. The residual cap is LOUD: the stored text carries a
         # marker, so a later reader cannot mistake a cut for the whole.
-        truncated = False
         description_cap = self._config.description_max_chars
         cause_cap = self._config.suspected_cause_max_chars
-        if len(description) > description_cap:
-            truncated = True
-        if suspected_cause is not None and len(suspected_cause) > cause_cap:
-            truncated = True
 
-        scrubbed_description = scrub_text(
+        scrubbed_description, desc_truncated = scrub_text(
             description, description_cap, mark_truncated=True
         )
-        scrubbed_cause = (
-            scrub_text(suspected_cause, cause_cap, mark_truncated=True)
-            if suspected_cause is not None
-            else None
-        )
+        if suspected_cause is not None:
+            scrubbed_cause, cause_truncated = scrub_text(
+                suspected_cause, cause_cap, mark_truncated=True
+            )
+        else:
+            scrubbed_cause = None
+            cause_truncated = False
+        truncated = bool(desc_truncated or cause_truncated)
 
         harvest = await self.harvest(instance_id=instance_id, severity=severity_value)
 
@@ -1115,14 +1136,14 @@ class AnomalyService:
                 description,
                 self._config.description_max_chars,
                 mark_truncated=True,
-            ),
+            )[0],
             suspected_cause=(
                 scrub_text(
                     suspected_cause,
                     self._config.suspected_cause_max_chars,
                     mark_truncated=True,
-                )
-                if suspected_cause
+                )[0]
+                if suspected_cause is not None
                 else None
             ),
             cluster_id=None,
@@ -1990,7 +2011,7 @@ class AnomalyService:
         if not parts:
             return
         scrubbed_parts = [
-            scrub_text(part, self._config.excerpt_max_chars_per_message)
+            scrub_text(part, self._config.excerpt_max_chars_per_message)[0]
             for part in parts
         ]
         excerpt = "\n".join(scrubbed_parts)[: self._config.excerpt_max_total_chars]
@@ -2118,5 +2139,9 @@ __all__ = [
     "AnomalyService",
     "canonical_boot_epoch",
     "scrub_text",
+    "TRUNCATION_MARKER_FORMAT",
+    "TRUNCATION_MARKER",
+    "TRUNCATION_MARKER_TEMPLATE",
+    "TRUNCATION_MARKER_SHORT",
     "select_error_excerpt",
 ]

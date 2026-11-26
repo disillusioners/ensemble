@@ -544,16 +544,18 @@ ARGUMENTS
     preserved verbatim (capped at 64 chars) so a vocabulary gap stays
     visible.
   description (str, REQUIRED) — what is wrong, in your own words.
-    Non-empty; capped at 8000 chars (never refused). If the cap is
-    exceeded the STORED text carries a loud
+    Non-empty; capped at NestReportConfig.description_max_chars
+    (env: ENSEMBLE_NEST_REPORT_DESCRIPTION_MAX_CHARS; never refused).
+    If the cap is exceeded the STORED text carries a loud
     ``[TRUNCATED: original N chars; stored prefix only]`` marker —
     a halved finding must never read like the whole one.
   severity (str, default "major") — one of minor | major | critical. An
     out-of-set value is REFUSED, never folded (folding critical down to
     major would hide a nest-level event).
   suspected_cause (str | None, optional) — your hypothesis about the
-    cause; capped at 2000 chars, with the same loud stored marker when
-    the cap is exceeded.
+    cause; capped at NestReportConfig.suspected_cause_max_chars
+    (env: ENSEMBLE_NEST_REPORT_SUSPECTED_CAUSE_MAX_CHARS), with the
+    same loud stored marker when the cap is exceeded.
 
 THE SUCCESS ENVELOPE (one field per line)
   OK: anomaly accepted

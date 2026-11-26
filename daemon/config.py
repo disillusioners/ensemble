@@ -3933,9 +3933,8 @@ class NestReportConfig(BaseSettings):
         ge=1,
         description="The description cap (authored text; over-length "
                     "input is stored WITH a loud [TRUNCATED: ...] marker "
-                    "and an envelope note, never silently cut). 8000 "
-                    "fits a full multi-paragraph finding (the 1000-char "
-                    "cap cut wedge predicates mid-predicate). Env: "
+                    "and an envelope note, never silently cut). Default "
+                    "8000. Env: "
                     "ENSEMBLE_NEST_REPORT_DESCRIPTION_MAX_CHARS.",
     )
     suspected_cause_max_chars: int = Field(
@@ -3943,7 +3942,8 @@ class NestReportConfig(BaseSettings):
         ge=1,
         description="The suspected_cause cap (authored text; over-length "
                     "input is stored WITH a loud [TRUNCATED: ...] marker "
-                    "and an envelope note, never silently cut). Env: "
+                    "and an envelope note, never silently cut). Default "
+                    "2000. Env: "
                     "ENSEMBLE_NEST_REPORT_SUSPECTED_CAUSE_MAX_CHARS.",
     )
     retention_days: int = Field(

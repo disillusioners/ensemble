@@ -33,6 +33,7 @@ import json
 import logging
 
 import pytest
+from cryptography.fernet import Fernet
 from sqlalchemy import create_engine
 from sqlmodel import Session, SQLModel
 
@@ -45,6 +46,15 @@ from daemon.services.anomaly_service import (
     AnomalyRefusalError,
     AnomalyService,
     scrub_text,
+    TRUNCATION_MARKER_FORMAT,
+)
+from daemon.services.secret_persistence_scrub import (
+    register_secret_service,
+    reset_process_registry,
+)
+from daemon.services.secret_service import (
+    SecretCipher,
+    SecretService,
 )
 
 # ── the planted, NON-STORED secrets ──────────────────────────────────────
@@ -362,7 +372,7 @@ class TestTheScrubPipeline:
         assert out
 
     def test_the_pipeline_never_raises_for_an_unstringifiable_input(self) -> None:
-        out = scrub_text(_Boom(), 100)
+        out = scrub_text(_Boom(), 100)[0]
         assert isinstance(out, str)
 
     def test_the_limit_is_applied_after_the_redaction(self) -> None:
@@ -373,39 +383,39 @@ class TestTheScrubPipeline:
         provider-key shape) and the fragment would survive into the
         database.
         """
-        out = scrub_text(SK_SECRET + " trailing", 10)
+        out = scrub_text(SK_SECRET + " trailing", 10)[0]
         assert "sk-proj-" not in out
         assert len(out) == 10
 
     def test_the_limit_is_applied_after_the_redaction_for_a_passphrase(self) -> None:
         payload = json.dumps({"password": PASSPHRASE})
-        out = scrub_text(payload, 30)
+        out = scrub_text(payload, 30)[0]
         for word in PASSPHRASE_WORDS:
             assert word not in out
 
     def test_the_scrubbed_text_never_exceeds_the_cap(self) -> None:
-        out = scrub_text("x" * 500, 32)
+        out = scrub_text("x" * 500, 32)[0]
         assert len(out) == 32
 
     def test_the_default_scrub_is_silent_for_harvested_excerpts(self) -> None:
         # Only the authored-field call sites opt into mark_truncated;
         # excerpts already carry excerpt_length / excerpt_sha256.
-        out = scrub_text("x" * 500, 32)
+        out = scrub_text("x" * 500, 32)[0]
         assert out == "x" * 32
         assert "TRUNCATED" not in out
 
     def test_the_loud_marker_fits_inside_the_cap(self) -> None:
-        out = scrub_text("x" * 500, 80, mark_truncated=True)
+        out = scrub_text("x" * 500, 80, mark_truncated=True)[0]
         assert len(out) == 80
         assert out.endswith("stored prefix only]")
         assert "original 500 chars" in out
 
     def test_a_tiny_cap_still_carries_a_marker(self) -> None:
-        out = scrub_text("x" * 500, 4, mark_truncated=True)
+        out = scrub_text("x" * 500, 4, mark_truncated=True)[0]
         assert out == "[TRU"  # the signal wins over content at a tiny cap
     def test_the_secret_shape_masker_leaves_benign_prose_alone(self) -> None:
         text = "the token expired because the password policy rotated"
-        assert scrub_text(text, 200) == text
+        assert scrub_text(text, 200)[0] == text
 
     def test_the_secret_shape_masker_keeps_the_token_metering_fields(self) -> None:
         # E3: the token-metering diagnostics are the text a
@@ -418,14 +428,14 @@ class TestTheScrubPipeline:
         # intact, so a name-only assertion stays green.
         for name in ("max_tokens", "input_tokens", "output_tokens", "token_count"):
             payload = json.dumps({name: 200000})
-            out = scrub_text(payload, 200)
+            out = scrub_text(payload, 200)[0]
             assert name in out
             assert "200000" in out, f"{name}: the metering VALUE was masked"
-        out = scrub_text("token_budget: 200000", 200)
+        out = scrub_text("token_budget: 200000", 200)[0]
         assert "token_budget" in out
         assert "200000" in out
         # the plural family (the `*_tokens` suffix) — the value survives too.
-        out = scrub_text(json.dumps({"total_tokens": 987654}), 200)
+        out = scrub_text(json.dumps({"total_tokens": 987654}), 200)[0]
         assert "total_tokens" in out
         assert "987654" in out
 
@@ -433,7 +443,7 @@ class TestTheScrubPipeline:
         # R-a: the keyword FAMILY masks (the suffix legs).
         for name in ("secret_note", "password_hint", "client_secret_id"):
             payload = json.dumps({name: "value-xyz"})
-            assert "value-xyz" not in scrub_text(payload, 200)
+            assert "value-xyz" not in scrub_text(payload, 200)[0]
 
     def test_the_secret_shape_masker_masks_the_w2_council_keywords(self) -> None:
         """W2 (code council fix cycle, 2026-11-05) — ``credential`` /
@@ -445,29 +455,29 @@ class TestTheScrubPipeline:
         over). One leg per keyword per shape class: plain / JSON /
         quoted multi-word (E1) + the ``*_``-env-var shape family."""
         # credential — plain + JSON
-        assert "super-cred-9" not in scrub_text("credential=super-cred-9", 200)
-        assert "hunter2" not in scrub_text('{"credential": "hunter2"}', 200)
+        assert "super-cred-9" not in scrub_text("credential=super-cred-9", 200)[0]
+        assert "hunter2" not in scrub_text('{"credential": "hunter2"}', 200)[0]
         # pwd — plain + JSON + quoted multi-word (E1: the WHOLE value)
-        assert "hunter2" not in scrub_text("pwd=hunter2", 200)
-        assert "hunter2" not in scrub_text('{"pwd": "hunter2"}', 200)
+        assert "hunter2" not in scrub_text("pwd=hunter2", 200)[0]
+        assert "hunter2" not in scrub_text('{"pwd": "hunter2"}', 200)[0]
         assert "two word secret" not in scrub_text(
             'pwd = "two word secret"', 200
-        )
+        )[0]
         # private_key — plain + JSON PEM + quoted
         assert "AKIA1234567890ABCDEF" not in scrub_text(
             "private_key=AKIA1234567890ABCDEF", 500
-        )
+        )[0]
         assert "BEGIN PRIVATE KEY" not in scrub_text(
             '{"private_key": "-----BEGIN PRIVATE KEY-----"}', 500
-        )
+        )[0]
         # the env-var shape family carries the same three words
         assert "sk-ant-XY1212345678" not in scrub_text(
             "MY_PRIVATE_KEY=sk-ant-XY1212345678", 500
-        )
+        )[0]
         assert "postgres-super-9" not in scrub_text(
             "DB_CREDENTIAL=postgres-super-9", 200
-        )
-        assert "abc123XYZ" not in scrub_text("SERVICE_PWD=abc123XYZ!", 200)
+        )[0]
+        assert "abc123XYZ" not in scrub_text("SERVICE_PWD=abc123XYZ!", 200)[0]
 
     def test_the_secret_shape_masker_masks_the_bare_key_suffix_class(self) -> None:
         """Condition B (code-council delta, 2026-11-05) — the bare-KEY
@@ -478,16 +488,16 @@ class TestTheScrubPipeline:
         (see the no-over-mask test)."""
         assert "s3cr3t-key-1" not in scrub_text(
             "encryption_key = s3cr3t-key-1", 200
-        )
+        )[0]
         assert "s3cr3t-key-2" not in scrub_text(
             '{"signing_key": "s3cr3t-key-2"}', 200
-        )
-        assert "s3cr3t-key-3" not in scrub_text("auth_key = s3cr3t-key-3", 200)
+        )[0]
+        assert "s3cr3t-key-3" not in scrub_text("auth_key = s3cr3t-key-3", 200)[0]
         assert "s3cr3t-key-4" not in scrub_text(
             "ENCRYPTION_KEY=s3cr3t-key-4", 500
-        )
-        assert "s3cr3t-key-5" not in scrub_text("SSH_KEY=s3cr3t-key-5", 500)
-        assert "s3cr3t-auth-6" not in scrub_text("MCP_AUTH=s3cr3t-auth-6", 500)
+        )[0]
+        assert "s3cr3t-key-5" not in scrub_text("SSH_KEY=s3cr3t-key-5", 500)[0]
+        assert "s3cr3t-auth-6" not in scrub_text("MCP_AUTH=s3cr3t-auth-6", 500)[0]
 
     def test_the_widened_family_does_not_mask_secret_free_prose(self) -> None:
         """The no-over-mask probes for the W2 words: prose carrying the
@@ -509,15 +519,106 @@ class TestTheScrubPipeline:
             "keyword search is slow today",
             "primary key: id",
         ):
-            assert scrub_text(text, 200) == text
+            assert scrub_text(text, 200)[0] == text
 
     def test_the_secret_shape_masker_is_the_sole_defence_for_non_stored_values(
         self,
     ) -> None:
         # C1c: scrubber PRESENCE is irrelevant to this class — the
         # pattern masker alone must carry it.
-        assert SK_SECRET not in scrub_text(f"token={SK_SECRET}", 500)
+        assert SK_SECRET not in scrub_text(f"token={SK_SECRET}", 500)[0]
 
+
+class TestTheScrubGrowthPastCap:
+    """Defect-1 (i)-(iii): scrubbed can grow past the cap via stored-secret
+    substitution; the loud marker must then fire and never be cut away."""
+
+    def _register_secret(self, value: str = "a") -> None:
+        reset_process_registry()
+        fernet_key = Fernet.generate_key().decode()
+        service = SecretService(
+            engine=None if False else None,  # placeholder, replaced below
+        ) if False else None
+        # build engine-less? SecretService requires engine. Use sqlite in-memory.
+        from sqlalchemy import create_engine
+        eng = create_engine("sqlite:///:memory:")
+        from sqlmodel import SQLModel
+        SQLModel.metadata.create_all(eng)
+        svc = SecretService(engine=eng, cipher=SecretCipher(encryption_key=fernet_key))
+        svc.store(name="growth-secret", kind="generic", value=value, actor="tester")
+        register_secret_service(svc)
+        self._svc = svc
+        self._eng = eng
+
+    def test_scrubbed_longer_than_cap_while_original_le_cap_marker_present(self) -> None:
+        # (i) Register a stored secret whose marker is LONGER than the
+        # value, so scrub_enqueued_body grows the text past the cap even
+        # though the raw input never exceeded it.
+        reset_process_registry()
+        from sqlalchemy import create_engine
+        from sqlmodel import SQLModel
+        fernet_key = Fernet.generate_key().decode()
+        eng = create_engine("sqlite:///:memory:")
+        SQLModel.metadata.create_all(eng)
+        svc = SecretService(engine=eng, cipher=SecretCipher(encryption_key=fernet_key))
+        svc.store(name="growth-secret", kind="generic", value="a", actor="tester")
+        register_secret_service(svc)
+
+        try:
+            # input is 2 chars (<= cap 50); "a" is stored -> marker (40 chars)
+            # so scrubbed ~= 80 chars (> 50).
+            text_in = "aa"
+            cap = 50
+            assert len(text_in) <= cap, "precondition: raw input under cap"
+            out, truncated = scrub_text(text_in, cap, mark_truncated=True)
+            # discriminating control: the substitution genuinely fired.
+            assert "__ENS_SECRET__" in out, "stored-secret substitution must fire"
+            assert truncated is True, "loud marker must be attached"
+            assert len(out) == cap, "result must be capped"
+            # control: without the registered service, no growth, no marker.
+            reset_process_registry()
+            out2, truncated2 = scrub_text(text_in, cap, mark_truncated=True)
+            assert truncated2 is False, "no growth without registered secret"
+            assert "__ENS_SECRET__" not in out2
+        finally:
+            reset_process_registry()
+
+    def test_text_that_fits_after_scrubbing_carries_no_false_marker(self) -> None:
+        # (ii) Mirror case: input under cap, no stored secret -> no marker.
+        reset_process_registry()
+        text_in = "x" * 10
+        cap = 100
+        out, truncated = scrub_text(text_in, cap, mark_truncated=True)
+        assert truncated is False
+        assert "TRUNCATED" not in out
+        assert out == text_in
+        # discriminating control: exceeding the cap DOES attach a marker.
+        out2, truncated2 = scrub_text("x" * 200, cap, mark_truncated=True)
+        assert truncated2 is True
+        assert "TRUNCATED" in out2
+
+    def test_marker_is_never_itself_cut_away_across_cap_sweep(self) -> None:
+        # (iii) Sweep caps: returned text always ends with a complete
+        # marker (or the documented tiny-cap sacrifice), never a partial.
+        reset_process_registry()
+        inp = "x" * 500
+        full_marker = TRUNCATION_MARKER_FORMAT.format(n=500)
+        short_marker = "[TRUNCATED]"
+        caps = [1, 2, 3, 4, 5, 10, 11, 20, 30, 47, 48, 49, 60, 80]
+        for cap in caps:
+            out, truncated = scrub_text(inp, cap, mark_truncated=True)
+            assert truncated is True, f"cap={cap}"
+            assert len(out) == cap, f"cap={cap}: len={len(out)}"
+            if cap >= len(short_marker):
+                assert out.endswith("]"), f"cap={cap}: partial marker {out!r}"
+            else:
+                assert out == short_marker[:cap], f"cap={cap}: {out!r}"
+            if cap >= len(full_marker):
+                assert out.endswith("stored prefix only]"), f"cap={cap}"
+        # discriminating control: a cap that fully fits the input -> no marker.
+        out0, flag0 = scrub_text("x" * 10, 100, mark_truncated=True)
+        assert flag0 is False
+        assert "TRUNCATED" not in out0
 
 class TestTheHouseMaskerContract:
     def test_the_house_masker_is_present_and_additive(self) -> None:

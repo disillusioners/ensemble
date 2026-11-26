@@ -115,10 +115,14 @@ class AnomalyReport(SQLModel, table=True):
             the folded-from value is preserved so a vocabulary gap
             stays visible.
         severity: ``minor`` | ``major`` | ``critical``.
-        description: The scrubbed authored description (≤8000 chars;
-            over-cap input ends in a loud [TRUNCATED: ...] marker).
-        suspected_cause: The scrubbed reporter hypothesis (≤2000 chars,
-            same loud marker), nullable.
+        description: The scrubbed authored description (capped at
+            NestReportConfig.description_max_chars, env
+            ENSEMBLE_NEST_REPORT_DESCRIPTION_MAX_CHARS; over-cap input
+            ends in a loud [TRUNCATED: ...] marker).
+        suspected_cause: The scrubbed reporter hypothesis (capped at
+            NestReportConfig.suspected_cause_max_chars, env
+            ENSEMBLE_NEST_REPORT_SUSPECTED_CAUSE_MAX_CHARS; same loud
+            marker), nullable.
         excerpt: The scrubbed transcript excerpt (≤2000 chars total),
             nullable — NULL for ``minor`` severity (no transcript read
             at all) and NULL when the scrubber is absent (the

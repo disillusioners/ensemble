@@ -403,9 +403,20 @@ class TestAM1TheRouteSetPin:
         }
 
     def test_the_metrics_router_source_is_untouched_by_this_lane(self) -> None:
-        """The door is FROZEN — this lane edits no line of it."""
+        """The door is FROZEN — this lane edits no line of it.
+
+        Meaningful only inside a git checkout: under a gitless base
+        extraction (``git archive | tar -x``, no ``.git``) the git
+        command prints empty stdout and the assert would pass vacuously.
+        Skip in that case so the pin can never pass vacuously.
+        """
         import subprocess
 
+        if not (REPO_ROOT / ".git").exists():
+            pytest.skip(
+                "no .git present — the git-diff pin cannot run "
+                "meaningfully outside a checkout"
+            )
         completed = subprocess.run(
             ["git", "diff", "--name-only", "22c144000", "--", "daemon/routers/metrics.py"],
             capture_output=True,
@@ -413,6 +424,7 @@ class TestAM1TheRouteSetPin:
             check=False,
             cwd=str(REPO_ROOT),
         )
+        assert completed.returncode == 0, completed.stderr
         assert completed.stdout.strip() == "", completed.stdout
 
 
