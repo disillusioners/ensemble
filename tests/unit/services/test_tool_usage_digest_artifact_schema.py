@@ -352,6 +352,53 @@ def test_a_missing_deny_list_is_not_read_as_an_empty_deny_list(monkeypatch, tmp_
     assert "a per-agent object lacks the mandatory 'deny' key" in banner
 
 
+# ── 50b. the schema-1 gate carries its OWN reason line ────────────────────
+
+
+def test_the_schema_1_gate_rejection_reason_is_surfaced(monkeypatch, tmp_path):
+    """N-3 — the schema-1 gate's reason line is pinned too.
+
+    The schema-1 payload is rejected by a DIFFERENT gate than the
+    missing-`deny` gate and it carries a DIFFERENT reason. Only the
+    missing-`deny` reason was pinned, so dropping `rejection_reason=` from
+    the schema-1 branch would silence the human-facing banner and leave
+    every test green.
+    """
+    artifact_dir = tmp_path / "artifacts"
+    _write_artifact(
+        artifact_dir,
+        {
+            # The OLD shape: schema 1 is never read.
+            "schema_version": 1,
+            "agents": {"ari": {"allow": ["filesystem"], "deny": [], "innate": []}},
+            "categories": {"filesystem": ["read_file"]},
+            "known_tool_names": ["read_file"],
+        },
+    )
+    _point_reader_at(monkeypatch, artifact_dir)
+
+    src = tud.allowlist_source()
+
+    assert src.state == "rejected"
+    assert src.schema_version == 1
+    assert src.rejection_reason == (
+        "the artifact's schema_version is not 2 (schema-1 payloads are not read)"
+    )
+
+    engine = _sqlite_engine(tmp_path)
+    _seed(engine, [_row(DAY_D1, PROJECT, "read_file", "ari", 3)])
+    data = tud.rollup(engine, RUN_DATE)
+
+    # The reason reaches the human-facing banner, not just the log.
+    assert data["allowlist_rejection_reason"] == (
+        "the artifact's schema_version is not 2 (schema-1 payloads are not read)"
+    )
+    md = tud.render_markdown(data, "FIXED")
+    banner = " ".join(_banner_lines(md))
+    assert "ARTIFACT SCHEMA REJECTED" in banner
+    assert "the artifact's schema_version is not 2 (schema-1 payloads are not read)" in banner
+
+
 # ── 51. MCP rows render unknown — never yes, never no ─────────────────────
 
 

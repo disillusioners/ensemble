@@ -429,6 +429,40 @@ def _weight_for(tool_name: str) -> int:
     return FALLBACK_WEIGHT
 
 
+def _weight_section(
+    weights: list[int],
+    artifact_empty: bool,
+    scope: str = "this project section",
+) -> tuple[str, list[str]]:
+    """§6.1 — the heading and the disclosure for ONE section of the digest.
+
+    The heading is decided by the SECTION's rendered rows: a section whose
+    rows all sit on the 230 fallback cannot be sorted by a weight that does
+    not discriminate.  The disclosure's VARIANT is decided by the ARTIFACT's
+    own emptiness — the "currently empty" claim and its trigger must agree
+    — while the counts it quotes are the SECTION's own rows, and the scope
+    is stated so the count describes exactly what it counts.
+    """
+    measured = sum(1 for w in weights if w != FALLBACK_WEIGHT)
+    fallback_rows = len(weights) - measured
+    heading = FALLBACK_WEIGHT_HEADING if measured == 0 else WEIGHT_HEADING
+    if artifact_empty:
+        disclosure = [
+            "> **Weight disclosure:** the per-tool schema-weight artifact (`tool-weights.json`) is currently empty.",
+            "> All tools in this section use the 230-token average fallback (deterministic; `phase3-plan.md` §3.3).",
+            "> While the fallback is in effect the Weight column is constant (230) and the ranking is frequency-only.",
+        ]
+    else:
+        row_phrase = "row uses" if fallback_rows == 1 else "rows use"
+        disclosure = [
+            "> **Weight disclosure:** the per-tool schema-weight artifact (`tool-weights.json`) carries measured "
+            f"weights for {measured} of {len(weights)} rendered rows in {scope}; "
+            f"{fallback_rows} {row_phrase} the 230-token average fallback (deterministic; `phase3-plan.md` §3.3).",
+            "> Rows on the fallback carry a constant Weight (230); their ranking contribution is frequency-only.",
+        ]
+    return heading, disclosure
+
+
 def _parse_run_date(run_date: str | None) -> date:
     if run_date:
         try:
@@ -599,6 +633,11 @@ def rollup(engine: Engine, run_date: str | None = None) -> dict[str, Any]:
             a["calls_24h"] += cnt
 
     wl: dict[str, int] = tool_weights()
+    # N-2: the fallback disclosure's TRIGGER is the ARTIFACT's own emptiness
+    # (what the artifact carries), NOT the rendered rows (what the digest
+    # happens to show). A non-empty artifact whose keys match no rendered
+    # tool must never be described as "currently empty".
+    artifact_empty = not wl
     al: dict[str, list[str]] = allowlists()
     # W2: the flat map carries its attribution alongside it. A plain-dict
     # monkeypatch has none — the reason degrades, the verdict does not.
@@ -655,29 +694,30 @@ def rollup(engine: Engine, run_date: str | None = None) -> dict[str, Any]:
                 "allow_listed_cell": cell,
             })
         tool_list.sort(key=lambda x: (-x["score"], x["tool_name"]))
-        project_list.append({"project_id": proj, "tools": tool_list})
+        # §6.1 — the heading and the disclosure are computed PER PROJECT
+        # SECTION: a section's heading and its counts describe THAT section's
+        # rows, never the digest's global totals. A section whose rows are
+        # all on the fallback must not carry a heading that claims a
+        # schema-weight sort.
+        section_heading, section_disclosure = _weight_section(
+            [t["weight"] for t in tool_list], artifact_empty
+        )
+        project_list.append({
+            "project_id": proj,
+            "tools": tool_list,
+            "weight_heading": section_heading,
+            "weight_disclosure": section_disclosure,
+        })
 
     # §6.1 — the heading and its permanent disclosure are COMPUTED from the
     # rendered rows, never hard-coded in the renderer. Score stays
-    # `weight × calls_7d` and the six-column table is unchanged.
+    # `weight × calls_7d` and the six-column table is unchanged. The
+    # digest-level pair below is the WHOLE-document summary; the RENDERED
+    # heading and disclosure are the per-section ones computed above.
     rendered_weights = [t["weight"] for p in project_list for t in p["tools"]]
-    measured = sum(1 for w in rendered_weights if w != FALLBACK_WEIGHT)
-    fallback_rows = len(rendered_weights) - measured
-    if measured == 0:
-        weight_heading = FALLBACK_WEIGHT_HEADING
-        weight_disclosure = [
-            "> **Weight disclosure:** the per-tool schema-weight artifact (`tool-weights.json`) is currently empty.",
-            "> All tools in this section use the 230-token average fallback (deterministic; `phase3-plan.md` §3.3).",
-            "> While the fallback is in effect the Weight column is constant (230) and the ranking is frequency-only.",
-        ]
-    else:
-        weight_heading = WEIGHT_HEADING
-        weight_disclosure = [
-            "> **Weight disclosure:** the per-tool schema-weight artifact (`tool-weights.json`) carries measured "
-            f"weights for {measured} of {len(rendered_weights)} rendered rows; {fallback_rows} rows use the "
-            "230-token average fallback (deterministic; `phase3-plan.md` §3.3).",
-            "> Rows on the fallback carry a constant Weight (230); their ranking contribution is frequency-only.",
-        ]
+    weight_heading, weight_disclosure = _weight_section(
+        rendered_weights, artifact_empty, scope="this digest"
+    )
 
     all_allowed_tools: set[str] = set()
     for agent, tools in al.items():
@@ -739,14 +779,22 @@ def render_markdown(rollup_data: dict[str, Any], generated_at: str | None = None
     for p in rollup_data["projects"]:
         lines.append(f"## Project: {p['project_id']}")
         lines.append("")
-        # §6.1: the heading is data, not a literal in the renderer. Hand-built
-        # rollups (tests) without the new fields degrade to the honest fallback.
-        heading = rollup_data.get("weight_heading")
+        # §6.1: the heading is data, not a literal in the renderer, and it is
+        # PER SECTION: a section whose rows are all on the fallback must not
+        # carry a heading that claims a schema-weight sort. Hand-built
+        # rollups (tests) without the per-section fields degrade to the
+        # honest per-section fallback computed from that section's rows.
+        heading = p.get("weight_heading")
         if not heading:
             weights = [t["weight"] for t in p["tools"]]
             heading = WEIGHT_HEADING if any(w != FALLBACK_WEIGHT for w in weights) else FALLBACK_WEIGHT_HEADING
         lines.append(heading)
-        for disclosure_line in rollup_data.get("weight_disclosure") or []:
+        # The disclosure is per section too: its counts describe THIS
+        # section's rows and the disclosure says so.
+        disclosure = p.get("weight_disclosure")
+        if disclosure is None:
+            disclosure = rollup_data.get("weight_disclosure") or []
+        for disclosure_line in disclosure:
             lines.append(disclosure_line)
         lines.append("")
         lines.append("| Tool | Weight | Calls 24h | Calls 7d | Score | Allow-listed |")

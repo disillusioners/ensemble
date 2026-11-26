@@ -695,10 +695,88 @@ def test_the_weight_heading_and_disclosure_are_computed_from_the_rollup(
         "### Tools (sorted by schema weight × calls 7d, descending)"
     )
     idx = measured_lines.index(tud.WEIGHT_HEADING)
-    assert "measured weights for 1 of 2 rendered rows; 1 rows use the 230-token average fallback" in measured_lines[idx + 1]
+    assert "measured weights for 1 of 2 rendered rows in this project section; 1 row uses the 230-token average fallback" in measured_lines[idx + 1]
     assert len(_table_row(measured_md, "w_heavy")) == 6
     assert "sorted by schema weight × calls, descending" not in fallback_md
     assert "sorted by schema weight × calls, descending" not in measured_md
+
+
+def test_the_weight_heading_and_disclosure_are_computed_per_project_section(
+    tmp_path, monkeypatch
+):
+    """N-1 — the heading and the disclosure are PER SECTION.
+
+    A digest that mixes a measured project with an all-fallback project must
+    not lend the measured project's heading (nor its counts) to the fallback
+    project: the heading and the counts describe THAT section's rows.
+    """
+    engine = _sqlite_engine(tmp_path, "weight-per-section.db")
+    monkeypatch.setattr(tud, "allowlists", lambda: {})
+    # A NON-EMPTY artifact (one measured weight, for one rendered tool).
+    monkeypatch.setattr(tud, "tool_weights", lambda: {"w_heavy": 50})
+    _seed(
+        engine,
+        [
+            _row(DAY_D1, PROJECT_AA, "w_heavy", "a", 4),
+            _row(DAY_D1, PROJECT_AA, "w_absent", "a", 2),
+            _row(DAY_D1, PROJECT_ZZ, "w_absent", "a", 3),
+        ],
+    )
+
+    data = tud.rollup(engine, RUN_DATE)
+    md = tud.render_markdown(data, "FIXED")
+    lines = md.splitlines()
+
+    aa_idx = lines.index(f"## Project: {PROJECT_AA}")
+    zz_idx = lines.index(f"## Project: {PROJECT_ZZ}")
+
+    # The MEASURED section carries the measured heading and ITS OWN counts.
+    assert lines[aa_idx + 2] == tud.WEIGHT_HEADING
+    assert (
+        "measured weights for 1 of 2 rendered rows in this project section; "
+        "1 row uses the 230-token average fallback"
+    ) in lines[aa_idx + 3]
+
+    # The ALL-FALLBACK section carries the fallback heading — NOT the
+    # measured one — and its own (zero measured) counts.
+    assert lines[zz_idx + 2] == tud.FALLBACK_WEIGHT_HEADING
+    assert (
+        "measured weights for 0 of 1 rendered rows in this project section; "
+        "1 row uses the 230-token average fallback"
+    ) in lines[zz_idx + 3]
+
+    # The measured heading appears ONCE — under the measured section only.
+    assert lines.count(tud.WEIGHT_HEADING) == 1
+    assert lines.count(tud.FALLBACK_WEIGHT_HEADING) == 1
+
+
+def test_a_non_empty_weight_artifact_is_never_described_as_empty(
+    tmp_path, monkeypatch
+):
+    """N-2 — the "currently empty" wording is triggered by the ARTIFACT.
+
+    A non-empty artifact whose keys match NO rendered tool must never be
+    described as "currently empty": the claim and its trigger must agree.
+    The heading still follows the section's own rows (all on the fallback).
+    """
+    engine = _sqlite_engine(tmp_path, "weight-artifact-nonempty.db")
+    monkeypatch.setattr(tud, "allowlists", lambda: {})
+    # A NON-EMPTY artifact: it carries a weight, but for NO rendered tool.
+    monkeypatch.setattr(tud, "tool_weights", lambda: {"w_not_rendered": 50})
+    _seed(engine, [_row(DAY_D1, PROJECT_MAIN, "w_absent", "a", 3)])
+
+    data = tud.rollup(engine, RUN_DATE)
+    md = tud.render_markdown(data, "FIXED")
+
+    assert "currently empty" not in md
+    assert (
+        "measured weights for 0 of 1 rendered rows in this project section; "
+        "1 row uses the 230-token average fallback"
+    ) in md
+    # The heading follows the SECTION's rows: every rendered row is on the
+    # fallback, so the weight does not discriminate.
+    assert tud.FALLBACK_WEIGHT_HEADING in md
+    assert tud.WEIGHT_HEADING not in md
 
 
 def test_the_digest_never_consumes_the_display_name_category_function():

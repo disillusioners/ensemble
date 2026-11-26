@@ -11,16 +11,17 @@
 #   tests/unit/repositories/test_tool_usage_seed_lifecycle.py      (79 nodes)
 #   tests/unit/repositories/test_tool_usage_seed_optout.py          (6 nodes)
 #   tests/unit/routers/test_tool_usage_router.py                   (16 nodes)
-#   tests/unit/services/test_tool_usage_digest_determinism.py      (39 nodes)
+#   tests/unit/services/test_tool_usage_digest_determinism.py      (41 nodes)
 #   tests/unit/services/test_tool_usage_digest_root.py               (9 nodes)
 #   tests/unit/services/test_tool_usage_observation.py             (21 nodes)
 #   tests/unit/tools/test_tool_usage_digest_registration.py       (24 nodes)
 #   tests/unit/services/test_tool_usage_digest_allow_semantics.py  (14 nodes)
-#   tests/unit/services/test_tool_usage_digest_artifact_schema.py   (9 nodes)
-#   Total: 232 nodes (mechanical `--collect-only` census re-stamped after the
-#   honest-weight / attribution / rejection-reason / mutant-gap fix:
-#   232 collected, RC=0, 0 collection errors; per-file 15+79+6+16+39+9+21+24+14+9
-#   = 232, the slice count equals the sum of the per-file counts).
+#   tests/unit/services/test_tool_usage_digest_artifact_schema.py  (10 nodes)
+#   Total: 235 nodes (mechanical `--collect-only` census re-stamped after the
+#   per-section weight heading/disclosure + artifact-empty trigger + schema-1
+#   reason pin fix:
+#   235 collected, RC=0, 0 collection errors; per-file 15+79+6+16+41+9+21+24+14+10
+#   = 235, the slice count equals the sum of the per-file counts).
 #
 #   The family is the tool-usage-metrics-p1 lane's (ENSEMBLE-37) unit
 #   surface. From the files' own docstrings:
@@ -105,7 +106,7 @@
 #     `env -u` on it: stripping the ambient guard makes the boot sweep
 #     SIGTERM/SIGKILL live processes).
 #   - SLICING PROOF: the pack re-derives its own node count with
-#     `--collect-only` and FAILS if it drifts from the declared 232 — a
+#     `--collect-only` and FAILS if it drifts from the declared 235 — a
 #     pack that silently runs a different node set is inadmissible. The
 #     SAME collect leg yields the per-file census for free (the node-id
 #     prefix), so each of the 10 files is counted individually and every
@@ -139,7 +140,7 @@
 set -u
 
 PACK_NAME="tool_usage_pins_unit_test"
-EXPECTED_NODES=232
+EXPECTED_NODES=235
 
 # ── the declared family slice + its frozen per-file census ────────────────
 UNIT_FILES=(
@@ -159,12 +160,12 @@ UNIT_EXPECTED=(
   79
   6
   16
-  39
+  41
   9
   21
   24
   14
-  9
+  10
 )
 
 echo "=== Test Pack: ${PACK_NAME} ==="

@@ -239,7 +239,7 @@ def _mutant_category_only(agent, src):
             if category not in (src.privileged_categories or [])
             for tool in (tools or [])
         }
-        reasons = {tool: "inherit-all (empty allow; non-privileged only)" for tool in granted}
+        reasons = {tool: "inherit-all (empty allow; non-privileged default universe)" for tool in granted}
         granted_categories = {
             category
             for category in src.category_keys
@@ -278,7 +278,7 @@ def _mutant_exact_match(agent, src):
             if category not in (src.privileged_categories or [])
             for tool in (tools or [])
         }
-        reasons = {tool: "inherit-all (empty allow; non-privileged only)" for tool in granted}
+        reasons = {tool: "inherit-all (empty allow; non-privileged default universe)" for tool in granted}
         granted_categories = {
             category
             for category in src.category_keys
