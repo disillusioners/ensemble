@@ -404,8 +404,8 @@ def test_base_fixture_covers_every_factory_and_tool():
     assert set(fixture["factories"]) == set(_factories()), (
         "the BASE fixture does not cover exactly the six cohort-A factories"
     )
-    assert fixture["meta"]["base_commit"] == "3506a326d", (
-        "the BASE fixture was not captured against the pre-hoist base commit"
+    assert fixture["meta"]["base_commit"] == "670b4e6ba", (
+        "the BASE fixture was not captured against a commit that CONTAINS it pre-rebaseline"
     )
     expected_names = {
         "create_job_tools": [

@@ -4,7 +4,8 @@
 # (phase-3 contract + delete-guard placement), (3) scheduled-tasks e2e,
 # (4) LEG 4 — scheduler Phase-1 + fix-round PIN FILES: listing-truth,
 # namespace, maintenance-seed canonical/guard/selfheal, phase-1 guards,
-# label-ambiguous 409 and namespace fail-closed 503. LEG 4 closes the POK
+# label-ambiguous 409, namespace fail-closed 503 and the tool_full_doc
+# scheduling tool-help contract. LEG 4 closes the POK
 # sched-02 gap where these pins passed standalone but were selected by NO
 # pack, so the merge gate never ran them. No hash-comment lines anywhere in
 # the continued exec below: a hash comment inside a backslash continuation
@@ -33,5 +34,6 @@ exec .venv/bin/python -m pytest \
   tests/unit/test_maintenance_seed_selfheal.py \
   tests/unit/services/test_schedule_label_ambiguous.py \
   tests/unit/services/test_schedule_namespace_fail_closed.py \
+  tests/unit/tools/test_tool_full_doc_scheduling.py \
   -m "integration or not integration" \
   -q -rA
