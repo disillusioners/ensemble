@@ -153,24 +153,46 @@ def boot_wipe_preserve_predicate_sql(
     return "(" + " OR ".join(parts) + ")"
 
 
+def _orphan_column_probe_sql(dialect_name: str) -> tuple[Any, dict, str]:
+    """Schema-qualified column probe for the ``task`` table.
+
+    Returns ``(statement, params, schema_label)``. The PostgreSQL probe
+    filters ``information_schema.columns`` by ``table_schema =
+    current_schema()`` — the schema SQLAlchemy resolves for the
+    unqualified ``task`` table (the model sets no ``__table__.schema``,
+    so the connection's search-path head is the owner). WITHOUT that
+    filter, another schema's ``task`` table could satisfy the probe
+    while ``public.task`` lacks the columns, arming an UPDATE that
+    would then fail inside the DELETE transaction.
+    """
+    if dialect_name == "sqlite":
+        # SQLite has no information_schema; PRAGMA table_info targets
+        # the main attached database, which is the only schema the
+        # harness (and this daemon's SQLite path) resolves ``task`` in.
+        return text("PRAGMA table_info(task)"), {}, "main"
+    return (
+        text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = :tname "
+            "AND table_schema = current_schema()"
+        ),
+        {"tname": "task"},
+        "current_schema()",
+    )
+
+
 def _orphan_error_column_available(engine: Engine) -> bool:
     """Whether ``task.error`` / ``task.completed_at`` exist for the
-    orphan-fail UPDATE. Production always carries them; minimal legacy
-    harness schemas may not. Evaluation failure is fail-closed."""
+    orphan-fail UPDATE, resolved in the schema that actually owns
+    ``task``. Production always carries them; minimal legacy harness
+    schemas may not — that SKIP is loud (WARNING), never silent.
+    Evaluation failure is fail-closed (raises)."""
     dialect_name = getattr(getattr(engine, "dialect", None), "name", "")
+    probe, params, schema_label = _orphan_column_probe_sql(dialect_name)
     try:
         with engine.connect() as conn:
-            if dialect_name == "sqlite":
-                rows = conn.execute(text("PRAGMA table_info(task)")).all()
-                names = {r[1] for r in rows}
-            else:
-                rows = conn.execute(
-                    text(
-                        "SELECT column_name FROM information_schema.columns "
-                        "WHERE table_name = 'task'"
-                    )
-                ).all()
-                names = {r[0] for r in rows}
+            rows = conn.execute(probe, params or None).all()
+            names = sorted({r[1] if dialect_name == "sqlite" else r[0] for r in rows})
     except Exception as inspect_err:  # noqa: BLE001 — re-raised fail-closed
         logger.error(
             "JOURNAL: boot-wipe task-column probe failed (%s) — "
@@ -181,7 +203,17 @@ def _orphan_error_column_available(engine: Engine) -> bool:
         raise BootWipePredicateError(
             f"boot-wipe task-column probe failed: {inspect_err!r}"
         ) from inspect_err
-    return {"error", "completed_at"}.issubset(names)
+    if not {"error", "completed_at"}.issubset(set(names)):
+        logger.warning(
+            "JOURNAL: boot-wipe orphan-fail belt DISARMED — task table "
+            "(schema=%s) lacks error/completed_at (columns found=%s); "
+            "a PENDING task whose message the purge deletes will NOT "
+            "be orphan-failed on this schema",
+            schema_label,
+            names,
+        )
+        return False
+    return True
 
 from daemon.repositories.job_queue.models import (
     active_admission_states_sql,
@@ -1478,6 +1510,13 @@ class SQLModelMessageQueueRepository:
                         ")"
                     )
                 ).all()
+                # KNOWN PRE-EXISTING TRAP (recorded, NOT fixed here):
+                # ``NOT IN`` yields no doomed ids at all if any
+                # PRESERVED task row carries message_id IS NULL — the
+                # purge then silently no-ops. Fail-safe (no data
+                # loss); verified pre-existing on base d7c15d45f on
+                # both trees; tracked as a separate project-operating
+                # fact.
                 doomed_ids = [r[0] for r in doomed_rows]
                 logger.warning(
                     "JOURNAL: MessageQueueRepository.clear_all "
@@ -1618,6 +1657,18 @@ class SQLModelMessageQueueRepository:
                     # a vanished message. Runs in the SAME transaction
                     # as the DELETE, after the row is gone, and is
                     # scoped to the exact ids this chunk removed.
+                    #
+                    # KNOWN RESIDUAL (review adjudication N1, NOT fixed
+                    # here): this is a raw UPDATE — it deliberately does
+                    # NOT route through TaskRepository.fail_task, so it
+                    # skips reconcile_turn_mirror(work_id) and
+                    # _notify_pending_task(). Belt-only in production
+                    # boot order (the task wipe runs BEFORE the deferred
+                    # message DELETE, so doomed PENDING tasks are
+                    # normally already gone; this fires only when
+                    # preservation changed between CAPTURE and DELETE).
+                    # Restructuring it through the transition machinery
+                    # widens blast radius past this lane's fence.
                     orphan_reason = (
                         "orphaned_by_boot_purge: backing message_queue "
                         "row was deleted by the deferred boot purge"

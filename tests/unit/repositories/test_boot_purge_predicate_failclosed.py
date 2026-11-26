@@ -193,6 +193,59 @@ def _task_row(engine: Engine, task_id: int) -> Task | None:
         return s.get(Task, task_id)
 
 
+def _task_ids(engine: Engine) -> set[int]:
+    with Session(engine) as s:
+        return set(s.exec(select(Task.id)).all())
+
+
+class _RecordingConn:
+    """Fake DBAPI-adjacent connection for compile-level psycopg pins.
+
+    Records each executed statement compiled under the production
+    dialect. NEVER connects to PostgreSQL.
+    """
+
+    def __init__(self) -> None:
+        self.seen: list[tuple[str, dict]] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+    def execute(self, stmt, params=None):
+        self.seen.append(
+            (
+                str(stmt.compile(dialect=postgresql.psycopg.dialect())),
+                dict(params or {}),
+            )
+        )
+
+        class _Result:
+            def first(self):
+                return (1,)
+
+            def all(self):
+                return []
+
+        return _Result()
+
+
+class _FakePgEngine:
+    """Engine stand-in whose dialect claims postgresql (compile-level
+    only — no driver, no connection, no network)."""
+
+    dialect = SimpleNamespace(name="postgresql")
+
+    def __init__(self) -> None:
+        self.conn = _RecordingConn()
+
+    def connect(self):
+        return self.conn
+
+
+
 # ---------------------------------------------------------------------------
 # P1 — parse/evaluation error: DELETE NOTHING, complain loudly
 # ---------------------------------------------------------------------------
@@ -267,36 +320,9 @@ def test_probe_uses_psycopg_bound_params_not_literal_colon() -> None:
     which psycopg sends literally → ``syntax error at or near ":"`` on
     every boot. This pins the fix's cross-dialect mechanism.
     """
-    recorded: list[tuple[str, dict]] = []
-
-    class _Conn:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return None
-
-        def execute(self, stmt, params=None):
-            recorded.append(
-                (
-                    str(stmt.compile(dialect=postgresql.psycopg.dialect())),
-                    dict(params or {}),
-                )
-            )
-
-            class _Result:
-                def first(self):
-                    return (1,)
-
-            return _Result()
-
-    class _Engine:
-        dialect = SimpleNamespace(name="postgresql")
-
-        def connect(self):
-            return _Conn()
-
-    fp1_arm, event_arm = mq_repo_mod._receipt_preserve_arms_sql(_Engine())
+    fake_engine = _FakePgEngine()
+    fp1_arm, event_arm = mq_repo_mod._receipt_preserve_arms_sql(fake_engine)
+    recorded = fake_engine.conn.seen
     assert len(recorded) == 2
     for sql, params in recorded:
         assert "%(tname)s" in sql, f"probe did not compile for psycopg: {sql}"
@@ -390,3 +416,260 @@ def test_p3_orphan_pending_task_is_failed_explicitly(
     assert all(mid in live_messages for mid in still_pending), (
         "no PENDING task may point at a vanished message_queue row"
     )
+
+
+# ---------------------------------------------------------------------------
+# F1 / T1 — task-side fail-closed at BOTH seams, boot call site survives
+# ---------------------------------------------------------------------------
+
+
+def test_t1_task_side_predicate_failure_is_fail_closed_and_boot_survives(
+    engine: Engine,
+    task_repo: TaskRepository,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Force the SHARED predicate to fail on the TASK side; assert the
+    repository seam raises fail-closed (zero rows deleted, loud ERROR)
+    AND the boot-path caller survives (F1 regression pin).
+
+    RED on base, two independent ways:
+      * base's ``TaskRepository.clear_all`` has no probe, so the
+        one-shot connect failure surfaces as a RAW ProgrammingError
+        (not ``BootWipePredicateError``) — the exception-type
+        assertion below fails;
+      * base has no ``daemon.manager._boot_task_wipe_fail_closed``,
+        so the boot call site is UNGUARDED — the reviewer verified
+        manually that this kills the boot.
+    """
+    task_id, _mid, _wid = _seed_unit(engine, label="t1-task")
+    tasks_before = _task_ids(engine)
+
+    real_connect = engine.connect
+    state = {"raise": True}
+
+    def _flaky_connect(*args, **kwargs):
+        if state["raise"]:
+            state["raise"] = False
+            raise ProgrammingError(
+                'syntax error at or near ":"',
+                {},
+                Exception('syntax error at or near ":"'),
+            )
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(engine, "connect", _flaky_connect)
+
+    # --- seam 1: the repository must RAISE fail-closed ---
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(Exception) as excinfo:
+            task_repo.clear_all(preserve_in_flight=True)
+    assert excinfo.type.__name__ == "BootWipePredicateError", (
+        f"expected the fail-closed BootWipePredicateError, got "
+        f"{excinfo.type.__module__}.{excinfo.type.__name__} (a raw error "
+        f"escaping the wipe seam is the boot-abort / fail-open defect)"
+    )
+    assert "FAIL-CLOSED" in caplog.text
+    assert _task_ids(engine) == tasks_before, "no task row may be deleted"
+
+    # --- seam 2: the BOOT CALL SITE must survive the raise ---
+    import daemon.manager as manager_mod
+
+    boot_guard = getattr(manager_mod, "_boot_task_wipe_fail_closed", None)
+    assert boot_guard is not None, (
+        "F1 regression: the task-side boot call site is UNGUARDED — "
+        "a predicate failure must not abort daemon startup"
+    )
+    state["raise"] = True  # re-arm the one-shot probe failure
+    with caplog.at_level(logging.ERROR):
+        deleted = boot_guard(task_repo, boot_epoch=None)
+    assert deleted == 0
+    assert "FAIL-CLOSED" in caplog.text, (
+        "the boot-call-site guard must complain loudly (ERROR), not silently"
+    )
+    assert "auto_continued_at" in caplog.text, (
+        "the ERROR log must name which predicate/arm set failed"
+    )
+    assert _task_ids(engine) == tasks_before, (
+        "the guarded boot path must delete NOTHING on a predicate failure"
+    )
+
+
+# ---------------------------------------------------------------------------
+# F3 / T2 — cross-side agreement over a full cycle
+# ---------------------------------------------------------------------------
+
+
+def test_t2_task_and_message_wipes_agree_over_full_cycle(
+    engine: Engine,
+    mq_repo: SQLModelMessageQueueRepository,
+    task_repo: TaskRepository,
+) -> None:
+    """capture → task wipe → message DELETE over a mixed fixture; the
+    task-side deleted set and the message-side doomed set must AGREE
+    (one shared keep-set), and no PENDING task may point at a vanished
+    message.
+
+    NOTE (stated plainly): this test is GREEN on the unfixed base —
+    SQLite accepted the raw ``:tname`` probe, so the base already
+    agreed on SQLite. Its value is pinning the AGREEMENT itself (the
+    psycopg revert is detected by test_f4 and by P1, not here).
+    """
+    survivors = {}
+    for label, kwargs in (
+        ("t2-fp1", {"job": AdmissionState.ACTIVE.value}),
+        ("t2-receipt", {"receipt": True}),
+        (
+            "t2-arm3",
+            {
+                "status": TaskStatus.COMPLETED.value,
+                "arm3": True,
+                "instance_status": "running",
+            },
+        ),
+    ):
+        _tid, mid, _wid = _seed_unit(engine, label=label, **kwargs)
+        survivors[mid] = _tid
+    doomed: dict[str, int | None] = {}
+    _tid, mid, _wid = _seed_unit(engine, label="t2-doomed-pending")
+    doomed[mid] = _tid
+    _tid, mid, _wid = _seed_unit(
+        engine, label="t2-doomed-terminal", status=TaskStatus.COMPLETED.value
+    )
+    doomed[mid] = _tid
+    orphan_mid = _seed_orphan_message(engine, "t2-orphan")
+    doomed[orphan_mid] = None
+
+    doomed_ids = mq_repo.capture_doomed_ids_and_audit(preserve_in_flight=True)
+    task_count = task_repo.clear_all(preserve_in_flight=True)
+    deleted = mq_repo.delete_doomed_ids(doomed_ids, preserve_in_flight=True)
+
+    assert deleted == len(doomed) == 3
+    assert task_count == 2  # the two doomed tasks; the orphan has none
+    assert set(doomed_ids) == set(doomed), (
+        "the message-side doomed set must be exactly the narrow set"
+    )
+    for mid, tid in {**{m: t for m, t in survivors.items()}, **doomed}.items():
+        task_alive = tid is not None and _task_row(engine, tid) is not None
+        message_alive = mid in _messages(engine)
+        assert task_alive == message_alive, (
+            f"task/message disagreement for {mid}: task_alive={task_alive} "
+            f"message_alive={message_alive} (the shared keep-set must hold "
+            f"on BOTH sides of the wipe)"
+        )
+    with Session(engine) as s:
+        still_pending = s.exec(
+            select(Task.message_id).where(Task.status == TaskStatus.PENDING.value)
+        ).all()
+        live_messages = set(s.exec(select(MessageQueue.message_id)).all())
+    assert all(m in live_messages for m in still_pending)
+
+
+# ---------------------------------------------------------------------------
+# F4 — psycopg compile-level pin of the FULL doomed predicate
+# ---------------------------------------------------------------------------
+
+
+def test_f4_full_doomed_predicate_compiles_on_psycopg_dialect() -> None:
+    """The FULL shared doomed predicate (all arms) must compile under
+    the production psycopg dialect with NO literal-colon leak.
+
+    RED on base: ``boot_wipe_preserve_predicate_sql`` does not exist
+    there (AttributeError) — this is the assertion that detects a
+    psycopg-side revert, which P2 (SQLite-only) cannot.
+    """
+    pred = mq_repo_mod.boot_wipe_preserve_predicate_sql(
+        _FakePgEngine(), arm3_active=True
+    )
+    assert ":tname" not in pred and ":id_" not in pred
+    # All four arms present:
+    assert "task.status IN ('running', 'paused')" in pred
+    assert "jqi.admission_state" in pred  # FP1
+    assert "message_received" in pred  # Event receipt
+    assert "auto_continued_at" in pred  # F-1 arm 3
+    compiled = str(
+        text(f"SELECT 1 FROM task WHERE NOT {pred}").compile(
+            dialect=postgresql.psycopg.dialect()
+        )
+    )
+    assert "NOT (" in compiled and compiled.count("(") == compiled.count(")")
+
+    # The chunked DELETE shape the boot DELETE phase actually runs must
+    # also compile — bound params become pyformat, no raw colons.
+    del_sql = (
+        "DELETE FROM message_queue WHERE message_id IN (:id_0) "
+        f"AND message_id NOT IN (SELECT message_id FROM task WHERE {pred})"
+    )
+    compiled_del = str(text(del_sql).compile(dialect=postgresql.psycopg.dialect()))
+    assert "%(id_0)s" in compiled_del, compiled_del
+    assert ":id_0" not in compiled_del, compiled_del
+
+
+# ---------------------------------------------------------------------------
+# F2 — schema-qualified, visible column probe
+# ---------------------------------------------------------------------------
+
+
+def test_f2_column_probe_full_schema_true_and_minimal_schema_loud_false(
+    tmp_path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The orphan belt must ARM on the real schema and SKIP LOUDLY on a
+    legacy minimal schema (WARNING names schema + columns found)."""
+    full = engine_probe_full(tmp_path)
+    try:
+        assert mq_repo_mod._orphan_error_column_available(full)
+    finally:
+        full.dispose()
+
+    minimal = create_engine(
+        f"sqlite:///{tmp_path}/minimal.db",
+        connect_args={"check_same_thread": False},
+        poolclass=NullPool,
+    )
+    with minimal.begin() as conn:
+        conn.exec_driver_sql(
+            "CREATE TABLE task (task_id VARCHAR PRIMARY KEY, "
+            "instance_id VARCHAR, status VARCHAR, auto_continued_at TIMESTAMP, "
+            "message_id VARCHAR)"
+        )
+    with caplog.at_level(logging.WARNING):
+        armed = mq_repo_mod._orphan_error_column_available(minimal)
+    minimal.dispose()
+    assert armed is False
+    assert "DISARMED" in caplog.text, (
+        "a legacy schema that disarms the orphan belt must be visible"
+    )
+    assert "main" in caplog.text and "error" in caplog.text
+
+
+def engine_probe_full(tmp_path) -> Engine:
+    """Full-schema engine (same shape as the module fixture)."""
+    eng = create_engine(
+        f"sqlite:///{tmp_path}/probe_full.db",
+        connect_args={"check_same_thread": False},
+        poolclass=NullPool,
+    )
+    SQLModel.metadata.create_all(eng)
+    return eng
+
+
+def test_f2_pg_column_probe_sql_is_schema_qualified() -> None:
+    """The PostgreSQL column probe must qualify by schema
+    (``table_schema = current_schema()``) so another schema's ``task``
+    table cannot arm the orphan UPDATE.
+
+    RED on base: ``_orphan_column_probe_sql`` does not exist there.
+    """
+    probe, params, schema_label = mq_repo_mod._orphan_column_probe_sql("postgresql")
+    compiled = str(probe.compile(dialect=postgresql.psycopg.dialect()))
+    assert "table_schema = current_schema()" in compiled, compiled
+    assert "%(tname)s" in compiled and ":tname" not in compiled, compiled
+    assert params == {"tname": "task"}
+    assert schema_label == "current_schema()"
+    # The SQLite path stays covered by PRAGMA (information_schema does
+    # not exist there) — exercised by the full/minimal test above.
+    sqlite_probe, sqlite_params, sqlite_label = (
+        mq_repo_mod._orphan_column_probe_sql("sqlite")
+    )
+    assert "PRAGMA table_info(task)" in str(sqlite_probe)
+    assert sqlite_params == {} and sqlite_label == "main"

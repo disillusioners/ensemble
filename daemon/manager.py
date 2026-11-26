@@ -654,6 +654,53 @@ def _dormant_descendants_with_work_en_route(
     return with_work
 
 
+def _boot_task_wipe_fail_closed(
+    task_repo: Any, *, boot_epoch: Any = None
+) -> int:
+    """BOOT-CALL-SITE GUARD for the task-side boot wipe (F1).
+
+    Doctrine: a DELETE whose predicate cannot be evaluated fails CLOSED
+    (delete nothing, complain loudly) — it must NOT crash the daemon.
+    The repository seam still RAISES ``BootWipePredicateError`` (that
+    contract is load-bearing and testable); this guard converts the
+    raise into: ERROR log + zero rows deleted + purge skipped for this
+    boot (the next boot's capture re-derives and retries).
+
+    SHARED SHAPE with the message side: ``daemon/api.py`` wraps
+    ``delete_doomed_ids`` in the SAME guard pattern (ERROR log +
+    no DELETE + boot survives) — see its ``BootWipePredicateError``
+    except arm. Both purge halves must keep these two guards in
+    lockstep so neither side can regress to either fail-open (delete
+    with a degraded predicate) or boot-abort (raise past the call
+    site).
+    """
+    from daemon.repositories.message_queue.repository import (
+        BootWipePredicateError as _PredicateError,
+    )
+
+    try:
+        return task_repo.clear_all(
+            preserve_in_flight=True,
+            # F-1 belt consumer (pre-promote fix): reuse the belt's
+            # already-captured variable — _boot_epoch is bound on both
+            # the try and except paths of the capture above.
+            boot_epoch=boot_epoch,
+        )
+    except _PredicateError as err:
+        logger.error(
+            "discard_on_startup: task-wipe predicate FAIL-CLOSED (%s) — "
+            "the shared boot-wipe preserve predicate (arms: "
+            "running/paused + FP1 JobItem-anchor + message_received "
+            "Event receipt + F-1 auto_continued_at) could not be "
+            "evaluated; ZERO task rows deleted and the purge is "
+            "skipped this boot; underlying error: %r",
+            err,
+            err.__cause__,
+            exc_info=True,
+        )
+        return 0
+
+
 class InstanceManager:
     """Manages all agent instances, their graphs, and lifecycle."""
 
@@ -1763,16 +1810,13 @@ class InstanceManager:
                     # lists get the ``[+ N more truncated]`` marker.
                     f"investigation: {_capped_doomed_id_repr(completed_active_work_ids)}"
                 )
-            task_count = task_repo.clear_all(
-                preserve_in_flight=True,
-                # F-1 belt consumer (pre-promote fix): reuse the
-                # belt's already-captured variable — the queue-side
-                # lazy import binds ONLY the aliased names, so the
-                # prior bare get_boot_epoch() here was an unbound
-                # NameError on every discard_on_startup boot.
-                # _boot_epoch is pre-initialized to None at :788, so
-                # it is bound on both the try and except paths.
-                boot_epoch=_boot_epoch,
+            # BOOT-CALL-SITE GUARD (F1): the task wipe and the deferred
+            # message DELETE (api.py) use the SAME guard shape — a
+            # predicate failure logs ERROR, deletes nothing, and the
+            # boot survives; the next boot retries. See
+            # _boot_task_wipe_fail_closed for the shared-shape note.
+            task_count = _boot_task_wipe_fail_closed(
+                task_repo, boot_epoch=_boot_epoch
             )
             logger.info(
                 f"Cleared {task_count} backlog task(s) "

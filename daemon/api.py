@@ -321,6 +321,13 @@ async def _deferred_delete_doomed_ids(manager, app, doomed_ids: list[str]) -> No
         )
 
         if isinstance(_del_err, _PredicateError):
+            # BOOT-CALL-SITE GUARD (F1): mirrors the task-side guard in
+            # daemon/manager.py (_boot_task_wipe_fail_closed) — ERROR
+            # log, ZERO rows deleted, boot survives, next boot retries.
+            # Both purge halves must keep these guards in lockstep so
+            # neither side regresses to fail-open (delete with a
+            # degraded predicate) or boot-abort (raise past the call
+            # site).
             logger.error(
                 f"deferred DELETE_PHASE predicate FAIL-CLOSED "
                 f"(arm={fired_via}; doomed_ids={len(doomed_ids)}; "
