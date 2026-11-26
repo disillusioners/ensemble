@@ -17,6 +17,7 @@ this codebase before.
 
 import contextvars
 import json
+import logging
 import os
 import re
 import stat
@@ -32,6 +33,27 @@ from ._schema_registry import tool
 from ._tool_registry import register_tool_category
 from ._truncate import truncate_output
 from .prompt_artifacts import check_write as _check_prompt_artifact_write
+
+# F9 (read-surface honesty / scoped-refusal logging). The daemon journal
+# carries INFO from this module (daemon/logging_setup.py installs the stderr
+# handler; the systemd unit routes stderr to the journal). Before F9 this
+# module had NO logger at all — a scoped refusal lived only inside the tool
+# result, so no operator could count or audit it.
+logger = logging.getLogger(__name__)
+
+#: Stable, greppable token + structured event for scoped read refusals.
+#: Both the message text and ``extra={"event": ...}`` are pinned so an
+#: operator can count them with ONE grep of the unit journal.
+READ_SCOPE_REFUSAL_TOKEN = "READ_SCOPE_REFUSAL"
+READ_SCOPE_REFUSAL_EVENT = "read_scope_refusal"
+#: Same for the silent candidate drop (denied basenames / symlinks).
+READ_SCOPE_DROP_TOKEN = "READ_SCOPE_CANDIDATE_DROP"
+READ_SCOPE_DROP_EVENT = "read_scope_candidate_drop"
+#: Marker for the always-present read-surface disclosure block. Deliberately
+#: DISTINCT from "⚠ Search incomplete" (that banner means a cap FIRED).
+#: Each block line starts with "---" so existing result-line parsers that
+#: skip pagination/hint lines keep counting only real match rows.
+READ_SURFACE_MARKER = "[read surface]"
 
 # ---------------------------------------------------------------------------
 # Walk-tool guardrail constants (2026-09-23 memory-leak incident fix)
@@ -245,6 +267,16 @@ _CURRENT_TRUSTED_WORKDIR: contextvars.ContextVar[str | None] = (
     contextvars.ContextVar("ensemble_trusted_workdir", default=None)
 )
 
+#: The TOOL NAME for the current call, bound by ``_make_read_scope_aware``
+#: (daemon/tools/instance.py) alongside the caller identity and trusted
+#: workdir. The filesystem resolver knows the agent id and the refusal
+#: reason but NOT which of the four read tools was called — without this
+#: binding the journal line could not name the tool. ``None`` outside the
+#: factory (direct unit calls) renders as ``"unknown"``.
+_CURRENT_READ_TOOL_NAME: contextvars.ContextVar[str | None] = (
+    contextvars.ContextVar("ensemble_current_read_tool", default=None)
+)
+
 #: The only scope value Phase 1 defines. A DECLARED scope (any value)
 #: means "bounded" — the declaration is the opt-in, the value names the
 #: boundary in the refusal message.
@@ -313,6 +345,21 @@ def current_trusted_workdir() -> str | None:
     agent then has NO legal read base and every read is refused.
     """
     return _CURRENT_TRUSTED_WORKDIR.get()
+
+
+def set_current_read_tool_name(name: str | None):
+    """Bind the read TOOL NAME for the current call; return a reset token."""
+    return _CURRENT_READ_TOOL_NAME.set(name or None)
+
+
+def reset_current_read_tool_name(token) -> None:
+    """Restore the previous tool-name binding."""
+    _CURRENT_READ_TOOL_NAME.reset(token)
+
+
+def current_read_tool_name() -> str:
+    """Return the bound tool name, or ``"unknown"`` for direct calls."""
+    return _CURRENT_READ_TOOL_NAME.get() or "unknown"
 
 
 def declared_read_scope(agent_id: str | None) -> str | None:
@@ -459,6 +506,175 @@ def _trusted_scope_anchor() -> Path | None:
         return None
 
 
+def _log_scope_refusal(reason: str) -> tuple[None, str]:
+    """Log ONE scoped refusal at INFO and return the refusal tuple.
+
+    Single choke point for all five authored refusal strings in
+    :func:`_resolve_within_scope` — a refused call emits exactly one
+    journal line, never one per check. Content is NEVER logged: only the
+    agent id, tool name, and a short reason token.
+    """
+    logger.info(
+        "%s agent=%s tool=%s reason=%s",
+        READ_SCOPE_REFUSAL_TOKEN,
+        current_caller_agent_id() or "unknown",
+        current_read_tool_name(),
+        reason,
+        extra={"event": READ_SCOPE_REFUSAL_EVENT},
+    )
+    return None, reason
+
+
+def _git_commit_of_tree(anchor: Path | None) -> str:
+    """Short HEAD commit of *anchor*, read from ``.git`` metadata ONLY.
+
+    F9 read-surface honesty: a scoped agent must be able to SEE that its
+    anchor is a stale detached checkout. Every pre-existing commit probe
+    in the repo shells out to ``git`` (snapshot_tools.py:383,
+    upgrade_tools.py:4734, doc_commit_service.py:459, git_diff_service.py:31)
+    — none is a reusable read-only helper, and the tool layer must not
+    spawn processes. This resolver only OPENS and READS files under
+    ``.git``: no subprocess, no shell, no execution of repo content.
+
+    Shapes handled: a real ``.git`` DIRECTORY; a worktree ``.git`` FILE
+    containing ``gitdir: <path>`` (relative paths are relative to the
+    anchor); an anchor that IS a git dir; HEAD as a raw sha or a
+    ``ref: refs/...`` resolved from loose refs then ``packed-refs``
+    (including a linked worktree's ``commondir``).
+
+    Returns a short, greppable string. An absent/unreadable checkout is
+    reported HONESTLY as UNKNOWN — never silently omitted.
+    """
+    if anchor is None:
+        return "UNKNOWN (no trusted anchor)"
+    try:
+        anchor = Path(anchor).expanduser().resolve()
+    except (OSError, RuntimeError, ValueError):
+        return "UNKNOWN (not a git checkout)"
+
+    git_path = anchor / ".git"
+    git_dir: Path | None = None
+    try:
+        if git_path.is_dir():
+            git_dir = git_path
+        elif git_path.is_file():
+            raw = git_path.read_text(encoding="utf-8", errors="replace").strip()
+            if raw.startswith("gitdir:"):
+                pointed = Path(raw[len("gitdir:"):].strip()).expanduser()
+                if not pointed.is_absolute():
+                    pointed = anchor / pointed
+                git_dir = pointed.resolve()
+        elif (anchor / "HEAD").is_file() and (anchor / "objects").is_dir():
+            # Defensive: the anchor itself is a git dir (bare-ish shape).
+            git_dir = anchor
+    except (OSError, RuntimeError, ValueError):
+        return "UNKNOWN (not a git checkout)"
+
+    if git_dir is None or not git_dir.is_dir():
+        return "UNKNOWN (not a git checkout)"
+
+    try:
+        head = (git_dir / "HEAD").read_text(
+            encoding="utf-8", errors="replace"
+        ).strip()
+    except OSError:
+        return "UNKNOWN (not a git checkout)"
+
+    sha: str | None = None
+    if head.startswith("ref: "):
+        sha = _resolve_git_ref(git_dir, head[len("ref: "):].strip())
+    elif re.fullmatch(r"[0-9a-fA-F]{7,40}", head):
+        sha = head
+    if not sha:
+        return "UNKNOWN (not a git checkout)"
+    return f"{sha[:12]} (12-char short HEAD sha)"
+
+
+def _resolve_git_ref(git_dir: Path, ref: str) -> str | None:
+    """Resolve *ref* under *git_dir* from loose refs, then packed-refs.
+
+    A linked worktree keeps its refs in the shared ``commondir``, so that
+    directory is checked too. Ref names are validated before use — no
+    traversal, no absolute paths, no execution.
+    """
+    if not ref or Path(ref).is_absolute() or ".." in Path(ref).parts:
+        return None
+    sha_re = re.compile(r"[0-9a-fA-F]{7,40}\Z")
+
+    common: Path | None = None
+    try:
+        raw_common = (git_dir / "commondir").read_text(
+            encoding="utf-8", errors="replace"
+        ).strip()
+        if raw_common:
+            candidate = Path(raw_common).expanduser()
+            if not candidate.is_absolute():
+                candidate = git_dir / candidate
+            common = candidate.resolve()
+    except (OSError, RuntimeError, ValueError):
+        common = None
+
+    for base in (git_dir, common):
+        if base is None:
+            continue
+        try:
+            text = (base / ref).read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            continue
+        if sha_re.fullmatch(text):
+            return text
+
+    for base in (git_dir, common):
+        if base is None:
+            continue
+        try:
+            packed = (base / "packed-refs").read_text(
+                encoding="utf-8", errors="replace"
+            )
+        except OSError:
+            continue
+        for line in packed.splitlines():
+            line = line.strip()
+            if not line or line.startswith(("#", "^")):
+                continue
+            parts = line.split(None, 1)
+            if (
+                len(parts) == 2
+                and parts[1].strip() == ref
+                and sha_re.fullmatch(parts[0])
+            ):
+                return parts[0]
+    return None
+
+
+def _read_surface_context(search_root: Path) -> str:
+    """Always-present honesty footer for glob_files / grep_files results.
+
+    States the RESOLVED SEARCH ROOT, the trusted ANCHOR when one governs
+    the search, that anchor's own git COMMIT, and the walk LIMITS (so the
+    cap is discoverable even when it did not fire). The distinct
+    ``[read surface]`` marker is NOT the cap-fired "⚠ Search incomplete"
+    banner. Each line begins with ``---`` so existing tests that count
+    result rows while skipping hint lines keep working unchanged.
+    """
+    anchor = _trusted_scope_anchor()
+    subject = anchor or search_root
+    commit = _git_commit_of_tree(subject)
+    anchor_text = str(anchor) if anchor else "none (undeclared read scope)"
+    g = globals()
+    caps = (
+        f"file-count={g['WALK_MAX_FILE_COUNT']:,}; "
+        f"depth={g['WALK_MAX_DEPTH']}; "
+        f"wall-clock={g['WALK_TIMEOUT_SECONDS']:g}s; "
+        f"file-size={g['WALK_MAX_FILE_SIZE_BYTES'] / 1_048_576:.1f}MB; "
+        f"matches={g['WALK_MAX_MATCHES_PER_CALL']:,}"
+    )
+    return (
+        f"\n--- {READ_SURFACE_MARKER} search root: {search_root} | "
+        f"anchor: {anchor_text} | commit: {commit} | caps: {caps}"
+    )
+
+
 def _resolve_within_scope(
     path: str,
     scope: str,
@@ -493,14 +709,14 @@ def _resolve_within_scope(
     """
     anchor = _trusted_scope_anchor()
     if anchor is None:
-        return None, (
+        return _log_scope_refusal(
             f"ERROR: read scope {scope!r} has no trusted workdir anchor — the "
             "daemon could not resolve this instance's project directory. "
             "Reads are refused (the scope permits relative reads anchored "
             "at the trusted workdir only)."
         )
     if _is_absolute_path(path):
-        return None, (
+        return _log_scope_refusal(
             f"ERROR: read scope {scope!r} permits RELATIVE reads only, "
             f"anchored at {anchor}. The absolute path {path!r} is refused — "
             "read it as a relative path from the anchor."
@@ -508,13 +724,13 @@ def _resolve_within_scope(
     try:
         guard = WorkspaceGuard(str(anchor))
     except ValueError:
-        return None, (
+        return _log_scope_refusal(
             f"ERROR: trusted workdir does not exist: {anchor} — the daemon "
             "could not resolve this instance's project directory."
         )
     target, err = guard.resolve(path)
     if err:
-        return None, err
+        return _log_scope_refusal(err)
     # STRICT containment — ``WorkspaceGuard.resolve`` ALSO allows any target
     # inside an allowed TEMP dir (the house's "trusted by design" allowance).
     # For a SCOPED agent that allowance is a hole: an anchor that itself
@@ -522,12 +738,12 @@ def _resolve_within_scope(
     # climb out and land back inside temp and be accepted. A scope means the
     # anchor and nothing else.
     if target is not None and not WorkspaceGuard._normed_contains(anchor, target):
-        return None, (
+        return _log_scope_refusal(
             f"ERROR: read scope {scope!r} forbids reading outside the trusted "
             f"workdir ({anchor}); {target} is outside it."
         )
     if target is not None and _is_scope_denied_basename(target.name):
-        return None, (
+        return _log_scope_refusal(
             f"ERROR: read scope {scope!r} denies the credential-hazard "
             f"basename {target.name!r} — the `.env` family is refused at ANY "
             f"depth under the trusted workdir ({anchor})."
@@ -561,11 +777,27 @@ def _scope_filter_candidates(
     """
     if not scope:
         return files
-    return [
-        f
-        for f in files
-        if not _is_scope_denied_basename(f.name) and not f.is_symlink()
-    ]
+    kept: list[Path] = []
+    dropped = 0
+    for f in files:
+        if _is_scope_denied_basename(f.name) or f.is_symlink():
+            dropped += 1
+        else:
+            kept.append(f)
+    if dropped:
+        # F9: ONE journal line per CALL with the COUNT — never one line per
+        # dropped file (a large tree could otherwise flood the journal).
+        # No file NAMES or CONTENT are logged.
+        logger.info(
+            "%s agent=%s tool=%s dropped=%d candidates=%d reason=denied-basename-or-symlink",
+            READ_SCOPE_DROP_TOKEN,
+            current_caller_agent_id() or "unknown",
+            current_read_tool_name(),
+            dropped,
+            len(files),
+            extra={"event": READ_SCOPE_DROP_EVENT},
+        )
+    return kept
 
 
 def _resolve_within_workdir(
@@ -1206,6 +1438,18 @@ def glob_files(
         if not search_path.exists():
             return f"ERROR: Path does not exist: {path}"
 
+        # F9 type guard (NOT a scope change): os.walk on a FILE yields zero
+        # tuples, so a file-as-path was indistinguishable from a genuine
+        # no-match. Tool-specific text names the real filter argument.
+        if search_path.is_file():
+            return (
+                "ERROR: path is a FILE, not a directory — pass the containing "
+                "directory as path and put the glob in pattern."
+            )
+
+        # F9: always-present anchor/commit/caps disclosure.
+        surface = _read_surface_context(search_path)
+
         # Bounded walk — applies exclusions / depth / count / timeout caps.
         walk = _bounded_walk(search_path)
         # D-N1: a scoped agent's walk never enumerates credential-hazard
@@ -1222,9 +1466,10 @@ def glob_files(
 
         if not files:
             truncation_notice = _walk_truncation_notice(walk)
-            if truncation_notice:
-                return f"No files matching pattern: {pattern}{truncation_notice}"
-            return f"No files matching pattern: {pattern}"
+            return (
+                f"No files matching pattern: {pattern}"
+                f"{truncation_notice}{surface}"
+            )
 
         # Sort by modification time (newest first). One stat() per file; with
         # the walker's WALK_MAX_FILE_COUNT cap the syscall budget is bounded.
@@ -1288,9 +1533,12 @@ def glob_files(
                 f"Use offset={next_offset} for next page."
             )
 
-            return "\n".join(truncated_lines) + pagination_hint + truncation_notice
+            return (
+                "\n".join(truncated_lines) + pagination_hint + truncation_notice
+                + surface
+            )
 
-        return content + truncation_notice
+        return content + truncation_notice + surface
 
     except Exception as e:
         return f"ERROR: {str(e)}"
@@ -1314,7 +1562,13 @@ __pycache__, Library, .cache, .next, dist, build, target, and any hidden
 dir), depth cap (10 levels), file-count cap (10,000), and a 20-second
 wall-clock timeout. When a cap fires the result carries a loud "Search
 incomplete" notice pointing the caller to narrow the root or raise
-pattern specificity.
+pattern specificity. `path` must be a DIRECTORY — a file path is refused
+explicitly (put the glob in `pattern` instead).
+
+Every result carries a "--- [read surface]" footer stating the resolved
+search root, the trusted anchor (when one governs), that tree's git commit,
+and the walk caps — so staleness and limits are visible even on a no-match
+or a successful search. "⚠ Search incomplete" appears ONLY when a cap fired.
 
 Returns:
     List of matching file paths, sorted by modification time (newest first).
@@ -1755,6 +2009,7 @@ def grep_files(
     whole_word: bool = False,
     offset: int = 0,
     limit: int = 100,
+    fixed_string: bool = False,
 ) -> str:
     """Search file contents using regex patterns. Use tool_help("grep_files") for details."""
     # Walk-tool absolute-path guard (2026-09-23 incident fix). Bare absolute
@@ -1772,12 +2027,33 @@ def grep_files(
         if not search_path.exists():
             return f"ERROR: Path does not exist: {path}"
 
-        # Compile regex
-        flags = 0 if case_sensitive else re.IGNORECASE
-        if whole_word:
-            pattern = rf"\b{re.escape(pattern)}\b"
+        # F9 type guard (NOT a scope change): os.walk on a FILE yields zero
+        # tuples, so a file-as-path was indistinguishable from a genuine
+        # no-match. Tool-specific text names the real filter argument.
+        if search_path.is_file():
+            return (
+                "ERROR: path is a FILE, not a directory — pass the containing "
+                "directory as path and use include=<file basename>."
+            )
 
-        regex = re.compile(pattern, flags)
+        # F9: always-present anchor/commit/caps disclosure.
+        surface = _read_surface_context(search_path)
+
+        # Compile regex. Derive ONE literal form for fixed_string, then wrap
+        # it for whole_word — never escape twice (re.escape(re.escape(x))
+        # would match a literal backslash). whole_word-only keeps today's
+        # byte-identical \b{re.escape(pattern)}\b behaviour.
+        flags = 0 if case_sensitive else re.IGNORECASE
+        if fixed_string:
+            regex_source = re.escape(pattern)
+            if whole_word:
+                regex_source = rf"\b{regex_source}\b"
+        elif whole_word:
+            regex_source = rf"\b{re.escape(pattern)}\b"
+        else:
+            regex_source = pattern
+
+        regex = re.compile(regex_source, flags)
 
         # Bounded walk — applies exclusions / depth / count / timeout caps.
         # Single walk reused for both the filtered candidate list AND the
@@ -1878,9 +2154,15 @@ def grep_files(
         )
 
         if not matches:
-            if truncation_notice:
-                return f"No matches found for: {pattern}{truncation_notice}"
-            return f"No matches found for: {pattern}"
+            truncation_notice = _walk_truncation_notice(
+                walk,
+                oversized_skips=oversized_skips,
+                match_capped=match_capped,
+            )
+            return (
+                f"No matches found for: {pattern}"
+                f"{truncation_notice}{surface}"
+            )
 
         content = "\n".join(matches)
 
@@ -1899,9 +2181,12 @@ def grep_files(
                 f"Use offset={next_offset} for next page."
             )
 
-            return "\n".join(truncated_matches) + pagination_hint + truncation_notice
+            return (
+                "\n".join(truncated_matches) + pagination_hint + truncation_notice
+                + surface
+            )
 
-        return content + truncation_notice
+        return content + truncation_notice + surface
 
     except re.error as e:
         return f"ERROR: Invalid regex pattern: {e}"
@@ -1938,6 +2223,10 @@ Args:
               "**/*.ts", "*.{js,ts}", "src/**/*.html"
     case_sensitive: Whether search is case-sensitive (default: False)
     whole_word: Match whole words only (default: False)
+    fixed_string: Treat `pattern` as a LITERAL string, not a regex (default:
+                  False). Composes with `whole_word` (literal AND whole-word)
+                  and `case_sensitive`. `grep_files` ONLY — glob_files' pattern
+                  is a glob, so a fixed-string mode is meaningless there.
     offset: Number of results to skip (default: 0)
     limit: Maximum matches to return (default: 100)
 
@@ -1949,6 +2238,11 @@ dir), depth cap (10 levels), file-count cap (10,000), per-file size cap
 match-accumulation cap (10,000), and a 20-second wall-clock timeout. When
 a cap fires the result carries a loud "Search incomplete" notice pointing
 the caller to narrow the root or raise pattern specificity.
+
+Every result carries a "--- [read surface]" footer stating the resolved
+search root, the trusted anchor (when one governs), that tree's git commit,
+and the walk caps — so staleness and limits are visible even on a no-match
+or a successful search. "⚠ Search incomplete" appears ONLY when a cap fired.
 
 Returns:
     Matching lines with file path and line number (format: "path:line: content").
