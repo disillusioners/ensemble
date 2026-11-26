@@ -187,14 +187,34 @@ does not have one yet.
 | A full dump of the live database | 3.60 GiB (before a retention sweep removed old attachments: 11.99 GiB) |
 | Compressed | 0.52 GiB (zstd -3) |
 | Time to take that dump (11.99 GiB case) | **237 s** → ~54 MB/s of plain output |
+| The 11.99 GiB artifact itself | `pg_dumpall-2026-11-25-03-48.pgdump.zst`, 554,023,327 B — still on the backup volume (retention is off) |
 | Live connections / tables / indexes | 37 / 115 / 394 |
 
-Restoring is roughly the mirror image of dumping: read the dump, write the data, rebuild
-394 indexes, write the WAL. On a typical 4-core mini PC with an SSD that lands at:
+And the machine's I/O, measured directly (this host — a server; a mini PC is slower):
 
-> **Estimate: 10–20 minutes for an 11.99 GiB dump. Plan for 20.**
-> Uncertain by roughly 2× — this is arithmetic over measured dump rates, not a restore
-> that was actually timed.
+| Measurement | Value |
+|---|---|
+| Sequential write + flush (`dd conv=fdatasync`) | **175 MB/s** |
+| Cold read (page cache bypassed) | 183 MB/s |
+| `zstd -3` compress / decompress | 610 MB/s / **458 MB/s** |
+
+Restoring is roughly the mirror image of dumping: read the dump, write the data, rebuild
+394 indexes, write the WAL. Put the numbers together for an 11.99 GiB dump:
+
+* decompress 12.9 GB → ~28 s;
+* the server writes ~12.9 GB of data, ~0.5 GB of indexes, and ~25 GB of WAL
+  (`full_page_writes` roughly doubles the WAL) → **~38 GB of writes** → ~220 s of I/O floor
+  at 175 MB/s;
+* one `psql` stream parses and loads it, the server re-compresses the ~10 GB of
+  attachments, and 394 indexes are rebuilt → ~3–5 minutes of CPU.
+
+Overlapping, that is **5–9 minutes on this host**. A typical 8 GB mini PC has a slower
+sustained write rate and the same class of CPU, which puts it at:
+
+> **Estimate: 15–25 minutes for an 11.99 GiB dump. Plan for 20.**
+> Uncertain by roughly 2× — this is arithmetic over measured dump and I/O rates, not a
+> restore that was actually timed. The 5–9 minute figure above is the floor on
+> server-class hardware, not what a mini PC will do.
 
 **Disk, not just time.** A restore needs room for both the dump and the database it
 builds: **~25–30 GiB free** during the restore for an 11.99 GiB dump (12 GiB of data +
@@ -205,10 +225,14 @@ constraint, not the clock.
 a scratch volume — never on the box that holds the live database:
 
 ```bash
-# 1. restore into a throwaway cluster
-zstd -dc pg_dumpall-<stamp>.pgdump.zst | psql -U postgres -h <scratch-host> -p 5432
-# 2. time it
-time zstd -dc pg_dumpall-<stamp>.pgdump.zst | psql -U postgres -h <scratch-host> -p 5432
+# 1. create a scratch database on the scratch instance
+psql -h <scratch-host> -p 5432 -U postgres -c 'CREATE DATABASE scratch_restore;'
+
+# 2. restore into it, timed (the operator's repository ships this as
+#    infranstructure/k8s/postgres/verify/measure-restore-time.sh -- it refuses
+#    any target database not named scratch_*)
+bash measure-restore-time.sh --dump pg_dumpall-2026-11-25-03-48.pgdump.zst \
+     --host <scratch-host> --port 5432 --user postgres --db scratch_restore
 ```
 
 If your host is slow, add `pv` around the pipe for a progress bar. Do it once, on the
