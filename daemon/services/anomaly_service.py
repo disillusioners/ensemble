@@ -256,6 +256,16 @@ TRUNCATION_MARKER_TEMPLATE = TRUNCATION_MARKER_FORMAT
 LOUD_TRUNCATION_MARKER = TRUNCATION_MARKER_FORMAT
 TRUNCATION_MARKER_SHORT = "[TRUNCATED]"
 
+#: Emitted in place of an authored field (description / suspected_cause)
+#: when a real secret scrubber is registered but its store is
+#: unavailable, so INV-2 (no plaintext fragment of a registered
+#: secret) holds even during a store outage. The report still
+#: persists; only the field is withheld (mirrors the excerpt path's
+#: withhold posture).
+SCRUB_UNAVAILABLE_PLACEHOLDER = (
+    "[REDACTED: secret scrub unavailable; field withheld]"
+)
+
 #: Non-resolvable redaction token emitted by the anomaly scrub path
 #: (R1). Replaces registered-secret plaintext in stored anomaly text.
 #: Unlike ``__ENS_SECRET__<uuid>__`` (a redeemable bearer handle minted
@@ -671,7 +681,11 @@ def _anomaly_exact_scrub(text: str, *, actor: str) -> str:
     for secret_id, plaintext in pairs:
         if not plaintext or plaintext not in result:
             continue
-        seed = secret_id if secret_id else plaintext
+        # Token seed is the secret id (a UUID), never the plaintext
+        # (a plaintext seed would be an offline verification oracle for
+        # low-entropy secrets). An empty id falls back to a constant
+        # label, never to the plaintext.
+        seed = secret_id if secret_id else "redacted"
         token = (
             ENS_REDACTED_TOKEN_PREFIX
             + hashlib.sha256(seed.encode("utf-8", "replace")).hexdigest()[:12]
@@ -766,6 +780,18 @@ def scrub_text(
     except Exception:  # pragma: no cover — defensive stringify
         source = "<unstringifiable>"
     original_len = len(source)
+    # GAP-2: fail closed when a real scrubber is registered but its
+    # store is unavailable (registered secret values cannot be
+    # scrubbed -> plaintext would survive). No scrubber registered
+    # (None) means there are no registered secrets to leak, so the
+    # legacy fail-open (shape redaction only) posture is retained.
+    import daemon.services.secret_persistence_scrub as _sps
+
+    _real_scrubber = _sps.get_process_scrubber()
+    if _real_scrubber is not None and not _scrubber_effective(
+        _real_scrubber
+    ):
+        return (SCRUB_UNAVAILABLE_PLACEHOLDER, True)
     # 1. Exact-match scrub on the FULL text (no cap).
     exact_scrubbed = _anomaly_exact_scrub(source, actor=actor)
     # 2. Shape redaction on the full text (NO cap).

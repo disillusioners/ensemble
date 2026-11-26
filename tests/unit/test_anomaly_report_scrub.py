@@ -574,7 +574,7 @@ class TestTheScrubGrowthPastCap:
             # discriminating control: the substitution genuinely fired.
             assert "__ENS_REDACTED__" in out, "stored-secret substitution must fire"
             assert truncated is True, "loud marker must be attached"
-            assert len(out) <= cap, "result must be capped"
+            assert cap - len("[TRUNCATED]") <= len(out) <= cap, "result must be capped"
             # control: without the registered service, no growth, no marker.
             reset_process_registry()
             out2, truncated2 = scrub_text(text_in, cap, mark_truncated=True)
@@ -838,3 +838,201 @@ class TestTheAcceptPathContract:
             "seam (await self._offload(...)), never as a direct "
             "synchronous call on the event loop"
         )
+
+
+# ── Iteration-2 pins (T-a..T-e + GAP-2) ──────────────────────────────
+import re as _re
+
+
+class _BrokenScrubber:
+    def is_effective(self) -> bool:
+        return False
+
+    def _current_rows(self):
+        raise RuntimeError("store down")
+
+
+class TestIteration2Pins:
+    def _register_secret(self, value: str = "STRADDLESECRET123"):
+        reset_process_registry()
+        from sqlalchemy import create_engine
+        from sqlmodel import SQLModel
+        fernet_key = Fernet.generate_key().decode()
+        eng = create_engine("sqlite:///:memory:")
+        SQLModel.metadata.create_all(eng)
+        svc = SecretService(engine=eng, cipher=SecretCipher(encryption_key=fernet_key))
+        svc.store(name="iter2-secret", kind="generic", value=value, actor="tester")
+        register_secret_service(svc)
+        return value
+
+    # T-a
+    def test_t_a_description_straddle_no_fragment_survives(self) -> None:
+        secret = self._register_secret("STRADDLESECRET123")
+        cap = 60
+        content = "x" * (cap - 5) + secret
+        out, _ = scrub_text(content, cap, mark_truncated=False)
+        for i in range(len(secret) - 7):
+            gram = secret[i : i + 8]
+            assert gram not in out, f"fragment survived: {gram!r} in {out!r}"
+        reset_process_registry()
+
+    # T-c (handle + bisected token)
+    def test_t_c_no_redeemable_handle_or_bisected_token(self) -> None:
+        secret = self._register_secret("STRADDLESECRET123")
+        cap = 60
+        content = "x" * (cap - 5) + secret
+        out, _ = scrub_text(content, cap, mark_truncated=True)
+        assert _re.search(r"__ENS_SECRET__[0-9a-f-]{36}__", out) is None, out
+        for m in _re.finditer(r"__ENS_REDACTED__", out):
+            # every occurrence must be a COMPLETE token
+            tail = out[m.start() :]
+            assert _re.match(r"__ENS_REDACTED__[0-9a-f]{12}__", tail), (
+                f"bisected token: {tail[:40]!r}"
+            )
+        reset_process_registry()
+
+    # T-d
+    def test_t_d_honest_accounting(self) -> None:
+        secret = self._register_secret("a")
+        # expansion case
+        text_in = "a" * 300
+        cap = 8000
+        out, truncated = scrub_text(text_in, cap, mark_truncated=True)
+        assert truncated is True
+        import re as _r
+
+        m = _r.search(r"\[TRUNCATED[^\]]*\]", out)
+        assert m is not None
+        marker = m.group(0)
+        assert "original 300 chars" in marker or "pre-scrub 300 chars" in marker
+        assert "post-redaction" in marker
+        # post-scrub length (9000) must not be labelled "original"
+        assert "original 9000" not in marker
+        # normal case
+        out2, truncated2 = scrub_text("x" * 500, 200, mark_truncated=True)
+        assert truncated2 is True
+        m2 = _r.search(r"\[TRUNCATED[^\]]*\]", out2)
+        assert m2 is not None
+        assert "original 500 chars" in m2.group(0)
+        reset_process_registry()
+
+    # T-b + T-e + GAP-2 via accept_report
+    async def test_t_b_excerpt_straddle_no_fragment(self, tmp_path, monkeypatch) -> None:
+        secret = self._register_secret("STRADDLESECRET123")
+        from daemon.repositories.anomaly.models import AnomalyReport, AnomalyCluster
+        from sqlalchemy import create_engine
+        from sqlmodel import SQLModel
+
+        engine = create_engine(
+            f"sqlite:///{tmp_path / 't_b.db'}", connect_args={"check_same_thread": False}
+        )
+        SQLModel.metadata.create_all(
+            engine, tables=[AnomalyReport.__table__, AnomalyCluster.__table__]
+        )
+        from daemon.services.anomaly_service import AnomalyService
+        from daemon.config import NestReportConfig
+
+        class _CM:
+            def __init__(self, msgs):
+                self.checkpointer = type(
+                    "C", (), {"raw_saver": _FakeRawSaver(msgs)}
+                )()
+                self.metrics_query_provider = None
+                self._instance_repository = None
+                self._task_repo = None
+                self._job_queue_service = None
+                self._mission_record_service = None
+                self._wedge_capture_repository = None
+
+        # build a tool message whose content straddles the 500 boundary
+        msg_content = "x" * (500 - 5) + secret
+        from langchain_core.messages import ToolMessage
+
+        tm = ToolMessage(content=msg_content, tool_call_id="c1")
+        manager = _CM([tm])
+        service = AnomalyService(
+            engine, config=NestReportConfig(), manager=manager, offload=_passthrough
+        )
+        result = await service.accept_report(
+            agent_id="worker",
+            instance_id="inst-1",
+            category="tool-failure",
+            description="boom",
+            severity="major",
+        )
+        from sqlmodel import Session
+
+        with Session(engine) as s:
+            row = s.get(AnomalyReport, result.report_id)
+            s.expunge(row)
+        excerpt = row.excerpt
+        if excerpt is not None:
+            for i in range(len(secret) - 7):
+                gram = secret[i : i + 8]
+                assert gram not in excerpt, f"fragment in excerpt: {gram!r}"
+        reset_process_registry()
+
+    async def test_t_e_excerpt_store_unavailable_withheld(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(
+            anomaly_service, "get_process_scrubber", lambda: _BrokenScrubber(), raising=True
+        )
+        from daemon.repositories.anomaly.models import AnomalyReport, AnomalyCluster
+        from sqlalchemy import create_engine
+        from sqlmodel import SQLModel
+
+        engine = create_engine(
+            f"sqlite:///{tmp_path / 't_e.db'}", connect_args={"check_same_thread": False}
+        )
+        SQLModel.metadata.create_all(
+            engine, tables=[AnomalyReport.__table__, AnomalyCluster.__table__]
+        )
+        from daemon.services.anomaly_service import AnomalyService
+        from daemon.config import NestReportConfig
+
+        class _CM:
+            def __init__(self, msgs):
+                self.checkpointer = type(
+                    "C", (), {"raw_saver": _FakeRawSaver(msgs)}
+                )()
+                self.metrics_query_provider = None
+                self._instance_repository = None
+                self._task_repo = None
+                self._job_queue_service = None
+                self._mission_record_service = None
+                self._wedge_capture_repository = None
+
+        from langchain_core.messages import ToolMessage
+
+        tm = ToolMessage(content="ERROR: boom", tool_call_id="c1")
+        manager = _CM([tm])
+        service = AnomalyService(
+            engine, config=NestReportConfig(), manager=manager, offload=_passthrough
+        )
+        result = await service.accept_report(
+            agent_id="worker",
+            instance_id="inst-1",
+            category="tool-failure",
+            description="boom",
+            severity="major",
+        )
+        from sqlmodel import Session
+
+        with Session(engine) as s:
+            row = s.get(AnomalyReport, result.report_id)
+            s.expunge(row)
+        assert row.excerpt is None
+        reset_process_registry()
+
+    # GAP-2 pin
+    def test_gap2_description_store_unavailable_placeholder(self, monkeypatch) -> None:
+        import daemon.services.secret_persistence_scrub as _sps
+
+        monkeypatch.setattr(_sps, "get_process_scrubber", lambda: _BrokenScrubber(), raising=True)
+        monkeypatch.setattr(anomaly_service, "get_process_scrubber", lambda: _BrokenScrubber(), raising=True)
+        out, _ = scrub_text("hello world", 100, mark_truncated=False)
+        from daemon.services.anomaly_service import SCRUB_UNAVAILABLE_PLACEHOLDER
+
+        assert out == SCRUB_UNAVAILABLE_PLACEHOLDER
+        reset_process_registry()

@@ -5,6 +5,16 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed — anomaly report scrub path (security)
+
+- `report_anomaly` scrub pipeline now applies the exact-match secret scrub on the FULL text before any redaction or cap, so a registered secret straddling a boundary is matched whole instead of being cut into an unmatchable fragment (ordering fix).
+- The anomaly path now emits a non-resolvable redaction token `__ENS_REDACTED__<sha256[:12]>__` instead of the redeemable `__ENS_SECRET__<uuid>__` handle; the anomaly store is a diagnostic surface and must carry no capability. `mint_marker` and the legitimate secret-USE seams are untouched.
+- The transcript-excerpt path is now fail-closed on scrubber effectiveness (scrubber present AND store reachable AND scrub set loaded), not presence alone; raw tool stdout is withheld when the scrub cannot be trusted.
+- The truncation marker now reports the pre-scrub length; the redaction-expansion case names both the pre-scrub and post-redaction lengths distinctly. A post-scrub length is never labelled "original".
+- The payload cut is token-aware so a redaction token is never bisected.
+
 ## [v0.31.58] — 2026-11-25
 
 ### Fixed — promote hand-back recovery (board wi-aa89581b)
