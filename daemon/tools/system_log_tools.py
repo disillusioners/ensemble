@@ -13,6 +13,9 @@ All tools enforce:
 - Per-line length cap (2000 chars — lines truncated with "...(truncated)")
 - Log content redaction (mirrors daemon/tools/system.py:108-129 patterns)
 - Graceful handling of missing/empty log files
+- Search window anchoring: ens_system_log_search accepts an optional
+  start_line to anchor the scan at an earlier line (default tail window
+  is unchanged and byte-identical)
 - Streaming I/O (no full-file read_text() — memory-safe for multi-MB logs)
 """
 
@@ -43,7 +46,9 @@ log files with sizes and timestamps), ``ens_system_log_read`` (paged read),
 ``ens_system_log_search`` (regex grep with context), ``ens_system_log_tail``
 (recent lines). All tools enforce path traversal protection, size caps,
 per-line length cap (2000 chars), and log content redaction (API keys,
-tokens, passwords, Bearer tokens replaced with [REDACTED]).
+tokens, passwords, Bearer tokens replaced with [REDACTED]). The search
+window can be anchored to an earlier line via the optional start_line
+parameter (default tail window is unchanged and byte-identical).
 """
 
 # Maximum context lines per search result.
@@ -417,6 +422,7 @@ def create_system_log_tools(
         level: str | None = None,
         context=0,  # type-annotation-free: accept int OR non-int (validated below)
         limit: int = 50,
+        start_line: int | None = None,
     ) -> str:
         """Search daemon log lines matching a regex pattern.
 
@@ -434,6 +440,18 @@ def create_system_log_tools(
                 each match. Defaults to 0.
             limit: Maximum number of matches to return. Capped at 50.
                 Defaults to 50.
+            start_line: Optional 1-based absolute line number naming the
+                FIRST line to examine. When omitted or None, the search uses
+                the default tail window (the last MAX_LINES_SCAN lines) and
+                the output is byte-identical to the legacy behaviour. When
+                provided, the search window becomes the forward window
+                [start_line, min(total_lines, start_line + MAX_LINES_SCAN - 1)]
+                (at most MAX_LINES_SCAN lines) and REPLACES the tail window
+                (it never extends or merges). A line number printed by either
+                system-log tool is valid VERBATIM as a start_line argument;
+                the sibling ens_system_log_read uses a 0-based skip count, so
+                pass offset = N - 1 there for printed line N. Must be >= 1;
+                0 and negatives are rejected. Defaults to None.
 
         Returns:
             Matching lines with line numbers and context, grouped by match,
@@ -465,6 +483,17 @@ def create_system_log_tools(
         ctx = min(max(0, ctx), MAX_CONTEXT)
         context_before = ctx
         context_after = ctx
+
+        # Validate start_line (P-B4, P-B8): optional 1-based absolute line
+        # number. Reject non-integers and values < 1 with a friendly,
+        # self-documenting error (0 is NOT coerced to 1).
+        if start_line is not None and not (isinstance(start_line, int) and start_line >= 1):
+            return (
+                f"Error: Invalid start_line value {start_line!r}: "
+                "must be an integer >= 1 (start_line is 1-BASED — it names "
+                "the first line to examine, matching the line numbers this "
+                "tool prints; use start_line=1 for the beginning of the file)"
+            )
 
         # === TAIL-FIRST SCAN STRATEGY ===
         # Stream the file once into a bounded deque(maxlen=MAX_LINES_SCAN)
@@ -510,19 +539,41 @@ def create_system_log_tools(
         # uncaught out of the tool (regression vs. tail).
         log_dir = _resolve_log_dir()
         recent_lines = deque(maxlen=MAX_LINES_SCAN)
+        total_lines = 0
+        retained = 0
         try:
             with _open_log_file(filepath, log_dir) as f:
                 for i, raw_line in enumerate(f):
-                    # (0-indexed absolute file line number, raw text).
-                    # Store raw here so the count pass is cheap; truncation
-                    # + redaction happen during the scan pass below.
+                    total_lines = i + 1
+                    # Inert guard for the default path (start_line is None):
+                    # the predicate is False on every iteration, so the deque
+                    # receives the same tuples in the same order as before.
+                    # Explicit mode: a line is inside the window iff
+                    # ``i + 1 >= start_line`` (P-B3).
+                    if start_line is not None and (i + 1) < start_line:
+                        continue
+                    # Explicit mode retention bound: keep only the first
+                    # MAX_LINES_SCAN lines of the requested window (so the
+                    # window is [start_line, start_line + MAX_LINES_SCAN - 1],
+                    # not the tail of the range). Default mode is unaffected.
+                    if start_line is not None and retained >= MAX_LINES_SCAN:
+                        continue
                     recent_lines.append((i, raw_line.rstrip("\n")))
+                    if start_line is not None:
+                        retained += 1
         except FileNotFoundError:
             return f"Log file not found: {filename}"
         except IsADirectoryError:
             return f"Not a file: {filename}"
         except OSError as e:
             return f"Error reading file: {e}"
+
+        # Beyond-EOF check (P-B5): distinct message, not the no-match one.
+        if start_line is not None and start_line > total_lines:
+            return (
+                f"Error: start_line {start_line} is beyond the end of "
+                f"{filename} ({total_lines} lines)"
+            )
 
         scanned = len(recent_lines)  # ≤ MAX_LINES_SCAN by deque maxlen
 
@@ -615,15 +666,43 @@ def create_system_log_tools(
                 results.append(block_text)
 
         if not results:
-            return (
+            if start_line is None:
+                return (
+                    f"No matches found for pattern '{pattern}'"
+                    f" in {filename} (scanned {scanned} lines)"
+                )
+            # Explicit mode: attributable negative (P-B6).
+            first = start_line
+            last = start_line + scanned - 1
+            msg = (
                 f"No matches found for pattern '{pattern}'"
-                f" in {filename} (scanned {scanned} lines)"
+                f" in {filename} (scanned {scanned} lines"
+                f" | window {first}-{last} of {total_lines} lines"
             )
+            if total_lines > start_line + scanned - 1:
+                msg += (
+                    f" | NOT SEARCHED: lines {last + 1}-{total_lines}"
+                    f" (re-run with start_line={last + 1})"
+                )
+            msg += ")"
+            return msg
 
         header = (
             f"File: {filename} | Pattern: {pattern}"
-            f" | {match_count} match(es) | scanned {scanned} lines\n"
+            f" | {match_count} match(es) | scanned {scanned} lines"
         )
+        if start_line is not None:
+            first = start_line
+            last = start_line + scanned - 1
+            header += f" | window {first}-{last} of {total_lines} lines"
+            if total_lines > start_line + scanned - 1:
+                header += (
+                    f" | NOT SEARCHED: lines {last + 1}-{total_lines}"
+                    f" (re-run with start_line={last + 1})"
+                )
+            if match_count >= limit:
+                header += f" | match cap {limit} reached — the window may contain more matches"
+        header += "\n"
         return header + "\n".join(results)
 
     @register_tool_category("system-log")
