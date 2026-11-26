@@ -228,6 +228,16 @@ SPAWN_STAMP_WINDOW_SECONDS: int = 60
 #:
 #: Deliberately NOT a tool argument — the threshold moves by editing
 #: this constant, never by widening the tool schema.
+#:
+#: LIVENESS RULE (binding) — for a never-started instance, liveness is
+#: read from TASK + CHECKPOINT state ONLY: never from
+#: ``instances.last_activity_at`` and never from any idle-based
+#: freshness. A nudge restamps ``last_activity_at``, so an idle-based
+#: view would read a never-started instance as FRESH and hide the
+#: wedge. That is why this detector's age comes from ``created_at``
+#: exactly, and why its verdict legs are the TASK row
+#: (``status='pending' AND started_at IS NULL``) and the CHECKPOINT
+#: table (zero rows for the thread).
 NEVER_STARTED_MIN_AGE_SECONDS: int = 45 * 60
 #: The maximum number of checkpoint messages ``instance_get`` returns.
 MAX_LAST_MESSAGES = 20

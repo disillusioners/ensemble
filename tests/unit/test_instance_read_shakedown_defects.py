@@ -2456,3 +2456,48 @@ class TestNeverStartedRunningDetector:
         detector = self._detector(payload)
         assert detector["count"] == 0
         assert detector["evidence_legs"] == "degraded"
+
+    async def test_nudged_instance_with_recent_last_activity_at_is_still_flagged(
+        self, fleet_db
+    ):
+        """(f) a NUDGED instance (recent ``last_activity_at``) is still flagged.
+
+        The binding liveness rule: for a never-started instance, liveness
+        is read from TASK + CHECKPOINT state ONLY — never from
+        ``instances.last_activity_at`` nor from any idle-based freshness.
+        A nudge restamps ``last_activity_at``, so every idle-based view
+        reads a never-started instance as FRESH; that must not hide the
+        wedge.
+
+        The fixture: ``status='running'``, ZERO checkpoint rows, a pending
+        task with ``started_at IS NULL``, ``created_at`` older than the
+        threshold, and ``last_activity_at`` set to NOW. The sibling
+        detector's verdict makes the fixture non-vacuous — the
+        idle-based ``stale-running`` view must NOT flag the nudged row
+        (so the nudge really did make it read as fresh), while
+        ``never-started-running`` still flags it.
+        """
+        nudged = self._wedge(
+            "nsr-nudge",
+            last_activity_at=datetime.now(timezone.utc),
+        )
+        _insert_instances(fleet_db, [nudged])
+        with Session(fleet_db) as session:
+            session.add(self._pending_task("nsr-nudge"))
+            session.commit()
+        manager = RepoBackedManager(fleet_db)
+
+        payload = await self._health(manager)
+
+        # The idle-based sibling reads the nudged row as FRESH ...
+        stale = next(
+            d for d in payload["detectors"] if d["detector"] == "stale-running"
+        )
+        assert "nsr-nudge" not in {row["instance_id"] for row in stale["instances"]}
+        # ... but the TASK + CHECKPOINT detector still flags the wedge.
+        assert self._flagged_ids(payload) == {"nsr-nudge"}
+        row = self._detector(payload)["instances"][0]
+        assert row["instance_id"] == "nsr-nudge"
+        assert row["pending_task_id"] is not None
+        # The age still comes from created_at — the nudge must not shorten it.
+        assert row["age_minutes"] >= ir.NEVER_STARTED_MIN_AGE_SECONDS / 60
