@@ -5,6 +5,8 @@ import json
 import logging
 import threading
 import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -377,6 +379,66 @@ WATCHDOG_NOTICE_METADATA_KEYS: tuple[str, ...] = (
 #: boundary the eligible-PENDING sweep uses to re-notify the worker pool
 #: and the same one the job-finalization gate's orphan rule uses.
 P_C_RECENCY_BOUND_SECONDS: int = DEFAULT_MIN_PENDING_AGE_SECONDS
+
+
+#: ``P-C-RECENCY-ROOT-ONLY`` — the call-site value of the recency switch.
+#: The helper's ``apply_recency`` parameter is resolved from this ContextVar
+#: when the call site does not pass it explicitly. Two pre-existing L2N
+#: spies (``tests/unit/services/test_child_reports.py``) pin the 2-argument
+#: helper call signature, so the call sites set the True/False value via
+#: ``_recency_call_site`` instead of a third argument. A ContextVar (not a
+#: service attribute) is required because the chain runs on
+#: ``asyncio.to_thread`` workers — a shared attribute would race.
+_COMPONENT_C_APPLY_RECENCY: ContextVar[bool] = ContextVar(
+    "component_c_apply_recency", default=True
+)
+
+
+@contextmanager
+def _recency_call_site(apply_recency: bool):
+    """Set the recency switch for ONE helper call at a guard call site."""
+    token = _COMPONENT_C_APPLY_RECENCY.set(apply_recency)
+    try:
+        yield
+    finally:
+        _COMPONENT_C_APPLY_RECENCY.reset(token)
+
+
+def _watchdog_notice_exists_expression():
+    """``P-C-NOTICES-EXCLUDED`` — ONE portable ORM expression (no DB access).
+
+    Shared by the pending-task seam and the dual-dialect compile pin
+    (``PC-10``): SQLAlchemy dialect compilers are pure, so the SAME
+    expression renders ``->>`` on PostgreSQL and ``JSON_EXTRACT`` on
+    SQLite. NO dialect branch, NO raw ``?`` operator, NO ``text()``
+    containing ``?`` (SQLite reads ``?`` as a bind placeholder).
+    """
+    return or_(
+        MessageQueue.source.in_(WATCHDOG_NOTICE_SOURCES),
+        *(
+            MessageQueue.message_metadata[key].as_string().is_not(None)
+            for key in WATCHDOG_NOTICE_METADATA_KEYS
+        ),
+    )
+
+
+def _is_watchdog_notice_row(row: MessageQueue) -> bool:
+    """``P-C-OWN-QUEUE-NOTICES-EXCLUDED`` — the same two-layer discriminator.
+
+    Applied at the ROOT ladder's own-queue call site ONLY (the NON-ROOT
+    ladder has no own-queue leg). The shared predicate
+    ``finalizer_counts_as_pending`` is NOT modified globally: this is a
+    Python-side filter against the pinned discriminator set (the house
+    precedent in ``waiting_children_watchdog.py``). A metadata key whose
+    JSON value is ``null`` reads as ABSENT here, matching the ORM form's
+    ``IS NOT NULL`` on both backends. The four non-watchdog system wakes
+    (``system:resume_wake`` / ``system:wedge-resolve`` /
+    ``system:memoir-proposal`` / ``system:injection_drain``) still count.
+    """
+    if row.source in WATCHDOG_NOTICE_SOURCES:
+        return True
+    metadata = row.message_metadata or {}
+    return any(metadata.get(key) is not None for key in WATCHDOG_NOTICE_METADATA_KEYS)
 
 
 # ── Terminal-row strand (9f0ed4f5 family, 2026-10-31) ──────────────
@@ -3907,7 +3969,13 @@ Provide a concise summary:"""
             & no_tasks
         )
 
-    def _count_actionable_pending_tasks(self, session: Session, instance_id: str) -> int:
+    def _count_actionable_pending_tasks(
+        self,
+        session: Session,
+        instance_id: str,
+        *,
+        apply_recency: bool | None = None,
+    ) -> int:
         """Count PENDING tasks for an instance that will actually run a turn.
         Used by both completion guards (root + non-root) to decide whether
         to defer completion. A PENDING ``process_report`` task whose report
@@ -3946,6 +4014,15 @@ Provide a concise summary:"""
         Args:
             session: An open (WriteGuard)Session.
             instance_id: The instance whose pending tasks to count.
+            apply_recency: ``P-C-RECENCY-ROOT-ONLY`` — the DEAD-by-age
+                conjunct is applied at the ROOT guard call site ONLY
+                (``True``). The NON-ROOT ladder passes ``False``: it has
+                no own-queue backstop, so a recency exclusion there
+                would let a child report to its parent prematurely
+                (incident ``777eff96``). The NOTICES-EXCLUDED conjunct
+                is applied at BOTH call sites (it is unconditional).
+                The accepted residual is a stale task on the non-root
+                path still deferring — a delay, never a premature report.
 
         Returns:
             Count of PENDING tasks that will run a real graph turn.
@@ -3959,25 +4036,13 @@ Provide a concise summary:"""
         # P-C-NOTICES-EXCLUDED — the watchdog's OWN notice. The correlated
         # EXISTS joins ``task.message_id`` → ``message_queue.message_id``
         # (the watchdog's enqueue path writes BOTH rows with the SAME
-        # message id). The metadata layer uses the SQLAlchemy JSON
-        # indexed access so it compiles to a portable key lookup on BOTH
-        # backends (SQLite ``json_extract`` / PostgreSQL ``->>``) — the
-        # PostgreSQL-only jsonb ``?`` operator of the plan's canonical
-        # string does not exist on SQLite.
+        # message id). The ONE portable expression is shared with the
+        # dual-dialect compile pin (PC-10): PostgreSQL ``->>``, SQLite
+        # ``JSON_EXTRACT`` — no dialect branch, no raw ``?`` operator.
         watchdog_notice_exists = (
             select(MessageQueue.message_id)
             .where(MessageQueue.message_id == Task.message_id)
-            .where(
-                or_(
-                    MessageQueue.source.in_(WATCHDOG_NOTICE_SOURCES),
-                    *(
-                        MessageQueue.message_metadata[key]
-                        .as_string()
-                        .isnot(None)
-                        for key in WATCHDOG_NOTICE_METADATA_KEYS
-                    ),
-                )
-            )
+            .where(_watchdog_notice_exists_expression())
             .exists()
         )
         # P-C-RECENCY — the DEAD-by-age conjunct, mirroring the repo's own
@@ -3990,14 +4055,24 @@ Provide a concise summary:"""
             Task.created_at
             < (now_utc_naive() - timedelta(seconds=P_C_RECENCY_BOUND_SECONDS)),
         )
+        # P-C-COUNT — the NOTICES-EXCLUDED conjunct is UNCONDITIONAL (both
+        # call sites); the RECENCY conjunct is call-site-gated by
+        # ``apply_recency`` (P-C-RECENCY-ROOT-ONLY). The pre-existing
+        # INJECTED-report exclusion is UNCHANGED.
+        count_predicates = [
+            Task.instance_id == instance_id,
+            Task.status == TaskStatus.PENDING.value,
+            ~injected_report_exists,
+            ~watchdog_notice_exists,
+        ]
+        if apply_recency is None:
+            apply_recency = _COMPONENT_C_APPLY_RECENCY.get()
+        if apply_recency:
+            count_predicates.append(~dead_by_recency)
         return session.exec(
             select(func.count())
             .select_from(Task)
-            .where(Task.instance_id == instance_id)
-            .where(Task.status == TaskStatus.PENDING.value)
-            .where(~injected_report_exists)
-            .where(~watchdog_notice_exists)
-            .where(~dead_by_recency)
+            .where(*count_predicates)
         ).scalar_one()
 
     def _process_child_completion_db_sync(
@@ -4339,7 +4414,16 @@ Provide a concise summary:"""
                 # would be premature and the idempotency guard would later
                 # drop the real final completion. Defer until the queued
                 # turn drains. See the non-root guard for the full rationale.
-                pending_tasks = self._count_actionable_pending_tasks(session, instance_id)
+                # P-C-RECENCY-ROOT-ONLY: the ROOT call site is the ONLY
+                # one that applies the DEAD-by-age conjunct (it has the
+                # own-queue backstop); the NON-ROOT call site passes
+                # False. The value travels via a ContextVar so the two
+                # pre-existing 2-argument spies in test_child_reports.py
+                # keep working.
+                with _recency_call_site(True):
+                    pending_tasks = self._count_actionable_pending_tasks(
+                        session, instance_id
+                    )
                 if pending_tasks > 0:
                     logger.info(
                         f"Instance {instance_id[:8]}... completed message "
@@ -4662,10 +4746,17 @@ Provide a concise summary:"""
                 # any future task-less row producer. Refinement 2 (unknown
                 # task-less READY rows count conservatively with a WARNING)
                 # is untouched and remains the live hardening.
+                # P-C-OWN-QUEUE-NOTICES-EXCLUDED (leader ruling D32): the
+                # watchdog's own notice is excluded from the ROOT's
+                # own-queue count by the SAME two-layer discriminator as
+                # the pending-task seam. The shared predicate
+                # ``finalizer_counts_as_pending`` is NOT modified
+                # globally. Non-watchdog system wakes still count.
                 pending_count = sum(
                     1
                     for _row in _candidate_rows
                     if finalizer_counts_as_pending(_row, self._manager.engine)
+                    and not _is_watchdog_notice_row(_row)
                 )
                 del _candidate_rows  # scope hygiene
 
@@ -5289,7 +5380,15 @@ Provide a concise summary:"""
             # EXCLUDED by ``_count_actionable_pending_tasks`` — counting
             # it would defer completion forever because the skipped task
             # never produces a turn to re-evaluate completion.
-            pending_tasks = self._count_actionable_pending_tasks(session, instance_id)
+            # P-C-RECENCY-ROOT-ONLY: the NON-ROOT call site NEVER applies
+            # the DEAD-by-age conjunct — this ladder has no own-queue
+            # backstop, so recency here could report the child to its
+            # parent prematurely (incident 777eff96). NOTICES-EXCLUDED
+            # still applies (it is unconditional in the shared helper).
+            with _recency_call_site(False):
+                pending_tasks = self._count_actionable_pending_tasks(
+                    session, instance_id
+                )
             if active_children > 0 or pending_tasks > 0:
                 # The just-completed instance (e.g., Wanderer / a tester)
                 # still has non-terminal children OR queued turns of its

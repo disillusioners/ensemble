@@ -52,12 +52,14 @@ tester's base leg copies ONLY this file into the base tree).
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from datetime import timedelta
 from unittest.mock import MagicMock
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, or_, select
+from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel
@@ -227,6 +229,7 @@ def _seed_child_instance(
     *,
     parent_id: str,
     status: str = InstanceStatus.RUNNING.value,
+    instance_metadata: dict | None = None,
 ) -> str:
     """Insert a non-root Instance row (the child reports to ``parent_id``)."""
     cid = f"child-{uuid.uuid4().hex[:8]}"
@@ -240,7 +243,7 @@ def _seed_child_instance(
                 parent_id=parent_id,
                 status=status,
                 version=1,
-                instance_metadata={},
+                instance_metadata=instance_metadata or {},
             )
         )
         session.commit()
@@ -382,17 +385,14 @@ class TestParentCompletionGuard:
     ):
         """PC-1 — ROOT path: a queued WC-watchdog notice does NOT defer.
 
-        At the pre-fix base the notice's PENDING task IS counted as pending
-        work ⇒ the guard defers (``deferred_waiting_children``) ⇒ the parent
-        never reaches COMPLETED ⇒ RED at base.
-
-        The notice's MessageQueue row is seeded in the ALREADY-CONSUMED
-        (``completed``) state — the stranded-notice shape of PC-8 — so the
-        ROOT ladder's own-queue leg (the ``ready``/``processing``/``retrying``
-        MessageQueue count) contributes ZERO and the pending-task count is
-        the ONLY blocker under test. (A notice whose message row is still
-        ``ready`` is parked by that own-queue leg, which is a DIFFERENT
-        gate and a different outcome — ``root_waiting_children``.)
+        THE MAINTAINER'S SPECIMEN SHAPE (789c8b69, leader ruling D32):
+        the notice's ``MessageQueue`` row is **READY** and its Task is
+        **PENDING** (zero children, zero watchers). At the pre-fix base
+        BOTH root legs defer — the seam counts the PENDING task AND the
+        own-queue leg counts the READY row unconditionally ("READY:
+        always counts") — so the parent never reaches COMPLETED ⇒ RED.
+        At merge the SAME two-layer watchdog exclusion applies at BOTH
+        the seam and the ROOT own-queue leg (M-C8 proves the latter).
         """
         service = _build_child_reports_service(engine)
         root_id = _seed_root_instance(engine)
@@ -401,7 +401,7 @@ class TestParentCompletionGuard:
             instance_id=root_id,
             source=WATCHDOG_SOURCE,
             metadata={"watchdog_notice": {"kind": "hang", "episode": "ep-1"}},
-            status=MessageStatus.COMPLETED.value,
+            status=MessageStatus.READY.value,
             content="[system:watchdog] Hang notice",
         )
         _seed_pending_task(engine, instance_id=root_id, message_id=notice_message_id)
@@ -420,11 +420,15 @@ class TestParentCompletionGuard:
 
         # The discriminator set is the WATCHDOG FAMILY — pinned against the
         # watchdog's own provenance constants (drift guard).
-        assert _child_reports_module.WATCHDOG_NOTICE_SOURCES == (
+        assert getattr(
+            _child_reports_module, "WATCHDOG_NOTICE_SOURCES", None
+        ) == (
             WATCHDOG_SOURCE,
             WEDGE_SOURCE,
         ), "PC-1: the notice sources must be the watchdog's own constants"
-        assert set(_child_reports_module.WATCHDOG_NOTICE_METADATA_KEYS) == {
+        assert set(
+            getattr(_child_reports_module, "WATCHDOG_NOTICE_METADATA_KEYS", ())
+        ) == {
             "watchdog_notice",
             "watchdog_escalation",
             "watchdog_release",
@@ -484,14 +488,18 @@ class TestParentCompletionGuard:
         """PC-3 — the RECENCY conjunct (mirror of the repo's orphan rule).
 
         (a) a PENDING, non-deferred task OLDER than the bound is DEAD ⇒ it
-            does NOT defer the completion (at the pre-fix base every PENDING
-            task counts ⇒ the completion is deferred ⇒ RED at base);
-        (b) a FRESH PENDING task DOES defer (unchanged behaviour — GREEN at
-            base).
+            does NOT defer the completion — on the ROOT path, which is the
+            ONLY call site that applies recency (P-C-RECENCY-ROOT-ONLY).
+            At the pre-fix base every PENDING task counts ⇒ deferred ⇒ RED.
+        (b) a FRESH PENDING task DOES defer on BOTH paths (unchanged
+            behaviour — GREEN at base).
 
         The bound is the repo's OWN constant — pinned here.
         """
-        assert _child_reports_module.P_C_RECENCY_BOUND_SECONDS == (
+        assert getattr(
+            _child_reports_module, "P_C_RECENCY_BOUND_SECONDS",
+            DEFAULT_MIN_PENDING_AGE_SECONDS,
+        ) == (
             DEFAULT_MIN_PENDING_AGE_SECONDS
         ), "PC-3: the recency bound must be the repo's own constant"
         assert DEFAULT_MIN_PENDING_AGE_SECONDS == 60, (
@@ -501,28 +509,27 @@ class TestParentCompletionGuard:
 
         service = _build_child_reports_service(engine)
 
-        # ── arm (a): an OLD pending task does NOT defer ─────────────────────
-        parent_a = _seed_root_instance(engine)
-        child_a = _seed_child_instance(engine, parent_id=parent_a)
+        # ── arm (a): an OLD pending task does NOT defer (ROOT call site) ───
+        root_a = _seed_root_instance(engine)
         old_message_id = _seed_message_row(
             engine,
-            instance_id=child_a,
+            instance_id=root_a,
             status=MessageStatus.COMPLETED.value,
             content="an old, already-consumed message",
         )
         _seed_pending_task(
             engine,
-            instance_id=child_a,
+            instance_id=root_a,
             message_id=old_message_id,
             age_seconds=DEFAULT_MIN_PENDING_AGE_SECONDS + 60,
         )
 
         result_a = service._process_child_completion_db_sync(
-            instance_id=child_a,
+            instance_id=root_a,
             completed_message_id="msg-unrelated",
             last_content="assistant text",
         )
-        assert result_a.outcome == "regular_child_completed", (
+        assert result_a.outcome == "root_completed", (
             "PC-3(a): a task that is DEAD by the repo's own recency rule "
             f"(is_deferred=false AND created_at < now-60s) must not defer; "
             f"got {result_a.outcome!r}"
@@ -551,12 +558,36 @@ class TestParentCompletionGuard:
             f"{result_b.outcome!r}"
         )
 
+        # ── arm (c): a FRESH pending task DOES defer at the ROOT too ───────
+        root_c = _seed_root_instance(engine)
+        fresh_root_message_id = _seed_message_row(
+            engine,
+            instance_id=root_c,
+            status=MessageStatus.COMPLETED.value,
+            content="a fresh message at the root",
+        )
+        _seed_pending_task(
+            engine, instance_id=root_c, message_id=fresh_root_message_id
+        )
+        result_c = service._process_child_completion_db_sync(
+            instance_id=root_c,
+            completed_message_id="msg-unrelated",
+            last_content="assistant text",
+        )
+        assert result_c.outcome != "root_completed", (
+            "PC-3(c): a FRESH pending task must still defer at the ROOT "
+            f"(the recency conjunct is age-gated); got {result_c.outcome!r}"
+        )
+
     # ── PC-4 ────────────────────────────────────────────────────────────────
     def test_pc4_system_resume_wake_still_defers(self, engine: Engine):
         """PC-4 — PRECISION: the exclusion is the WATCHDOG FAMILY only.
 
         ``system:resume_wake`` is a SYSTEM wake that is NOT a watchdog
-        notice ⇒ it STILL counts as pending work. GREEN at base; the
+        notice ⇒ it STILL counts as pending work at BOTH sites: (a) the
+        pending-task SEAM (a PENDING task whose message source is
+        ``system:resume_wake``) and (b) the ROOT own-queue leg (a READY
+        ``system:resume_wake`` MessageQueue row). GREEN at base; the
         target of mutation M-C3 (widening the exclusion to every
         ``system:`` source).
         """
@@ -580,9 +611,29 @@ class TestParentCompletionGuard:
         )
 
         assert result.outcome == "child_still_running_defer", (
-            "PC-4: a non-watchdog SYSTEM wake must still defer the "
+            "PC-4(a): a non-watchdog SYSTEM wake must still defer the "
             f"completion (the exclusion is not a blanket 'system:' one); "
             f"got {result.outcome!r}"
+        )
+
+        # ── arm (b): the ROOT own-queue leg must count it too ──────────────
+        root_id = _seed_root_instance(engine)
+        _seed_message_row(
+            engine,
+            instance_id=root_id,
+            source="system:resume_wake",
+            metadata={"resume": True},
+            status=MessageStatus.READY.value,
+            content="resume wake in the root's own queue",
+        )
+        root_result = service._process_child_completion_db_sync(
+            instance_id=root_id,
+            completed_message_id="msg-unrelated",
+            last_content="assistant text",
+        )
+        assert root_result.outcome == "root_waiting_children", (
+            "PC-4(b): a READY non-watchdog SYSTEM wake must still defer "
+            f"at the ROOT own-queue leg; got {root_result.outcome!r}"
         )
 
     # ── PC-5 ────────────────────────────────────────────────────────────────
@@ -664,9 +715,9 @@ class TestParentCompletionGuard:
         calls: list[str] = []
         real_helper = service._count_actionable_pending_tasks
 
-        def _recording_helper(session, instance_id):  # noqa: ANN001, ANN202
+        def _recording_helper(session, instance_id, *args, **kwargs):  # noqa: ANN001, ANN202
             calls.append(instance_id)
-            return real_helper(session, instance_id)
+            return real_helper(session, instance_id, *args, **kwargs)
 
         monkeypatch.setattr(
             service, "_count_actionable_pending_tasks", _recording_helper
@@ -749,102 +800,182 @@ class TestParentCompletionGuard:
         )
 
     # ── PC-9 ────────────────────────────────────────────────────────────────
-    def test_pc9_premature_terminal_protection(self, engine: Engine):
-        """PC-9 — the recency bound never lets a parent complete early.
+    def test_pc9_two_arm_premature_terminal_protection(self, engine: Engine):
+        """PC-9 — the TWO-ARM spec (plan.md §15.3.1 / gate-matrix.md §11.3).
 
-        Arm (a): a parent that still has LIVE queued work in its OWN queue
-        (the ladder's own-queue leg — the ``ready`` / ``processing`` /
-        ``retrying`` MessageQueue count) must NOT complete, even when its
-        OLD pending task is dead by the recency rule.
+        Arm A — the ROOT backstop is REAL: 0 fulfillable bus watchers,
+        0 live children, 0 active children and ONE PENDING non-deferred
+        task whose created_at is older than the bound AND whose backing
+        MessageQueue row is READY and NON-watchdog ⇒ the ROOT still
+        defers. The row is a NON-watchdog row on purpose: with the D32
+        own-queue exclusion a READY watchdog row would make this arm pass
+        for the WRONG reason.
 
-        Arm (b): the own-queue leg ALONE (no pending task at all) holds the
-        parent — it is the backstop, independently of the recency conjunct.
+        Arm B — the NON-ROOT path is NOT exposed: the SAME stale shape on
+        the non-root ladder MUST still defer (``child_still_running_defer``).
+        This arm goes RED if the recency conjunct is applied at the
+        non-root call site (mutation M-C6 — the 777eff96 regression).
 
-        Arm (c): a FRESH pending task still defers (the recency bound only
-        ever excludes tasks OLDER than the bound).
-
-        Without this protection the recency conjunct would be a
-        premature-terminal machine. STAY-GREEN at the pre-fix base: the
-        protection holds there too (the base's count is strictly larger).
+        Arms C/D — the own-queue leg alone holds the parent; a FRESH
+        pending task still defers. STAY-GREEN at base.
         """
         service = _build_child_reports_service(engine)
 
-        # ── arm (a): live own-queue work + a DEAD-by-recency task ──────────
+        # ── Arm A: ROOT backstop, stale task + READY NON-watchdog row ──────
         root_a = _seed_root_instance(engine)
-        old_message_id = _seed_message_row(
+        stale_message_id = _seed_message_row(
             engine,
             instance_id=root_a,
-            status=MessageStatus.COMPLETED.value,
-            content="an old, already-consumed message",
+            source="internal_agent:caller",
+            metadata={},
+            status=MessageStatus.READY.value,
+            content="live queued work (non-watchdog)",
         )
         _seed_pending_task(
             engine,
             instance_id=root_a,
-            message_id=old_message_id,
+            message_id=stale_message_id,
             age_seconds=DEFAULT_MIN_PENDING_AGE_SECONDS + 60,
         )
-        # The LIVE own-queue work: a READY message that is NOT a notice.
-        _seed_message_row(
-            engine,
-            instance_id=root_a,
-            source="internal_agent:caller",
-            status=MessageStatus.READY.value,
-            content="live queued work",
-        )
-
         result_a = service._process_child_completion_db_sync(
             instance_id=root_a,
             completed_message_id="msg-unrelated",
             last_content="assistant text",
         )
         assert result_a.outcome != "root_completed", (
-            "PC-9(a): a parent with LIVE queued work in its own queue must "
-            f"NOT complete; got {result_a.outcome!r}"
+            "PC-9 Arm A: the ROOT own-queue backstop must hold even when "
+            "the pending task is DEAD by recency; got "
+            f"{result_a.outcome!r}"
         )
         assert _instance_status(engine, root_a) != InstanceStatus.COMPLETED.value
 
-        # ── arm (b): the own-queue leg alone holds the parent ──────────────
-        root_b = _seed_root_instance(engine)
+        # ── Arm B: NON-ROOT path with the SAME stale shape ─────────────────
+        parent_b = _seed_root_instance(engine)
+        child_b = _seed_child_instance(engine, parent_id=parent_b)
+        stale_child_message_id = _seed_message_row(
+            engine,
+            instance_id=child_b,
+            source="internal_agent:caller",
+            metadata={},
+            status=MessageStatus.READY.value,
+            content="live queued work (non-watchdog)",
+        )
+        _seed_pending_task(
+            engine,
+            instance_id=child_b,
+            message_id=stale_child_message_id,
+            age_seconds=DEFAULT_MIN_PENDING_AGE_SECONDS + 60,
+        )
+        result_b = service._process_child_completion_db_sync(
+            instance_id=child_b,
+            completed_message_id="msg-unrelated",
+            last_content="assistant text",
+        )
+        assert result_b.outcome == "child_still_running_defer", (
+            "PC-9 Arm B: the NON-ROOT ladder has no own-queue backstop, so "
+            "recency must NOT be applied there — the child must still "
+            f"defer; got {result_b.outcome!r}"
+        )
+
+        # ── Arm C: the own-queue leg ALONE holds the parent ────────────────
+        root_c = _seed_root_instance(engine)
         _seed_message_row(
             engine,
-            instance_id=root_b,
+            instance_id=root_c,
             source="internal_agent:caller",
             status=MessageStatus.READY.value,
             content="live queued work",
         )
-
-        result_b = service._process_child_completion_db_sync(
-            instance_id=root_b,
-            completed_message_id="msg-unrelated",
-            last_content="assistant text",
-        )
-        assert result_b.outcome == "root_waiting_children", (
-            "PC-9(b): the own-queue leg must hold the parent on its own "
-            f"(it is the backstop); got {result_b.outcome!r}"
-        )
-        assert _instance_status(engine, root_b) == (
-            InstanceStatus.WAITING_CHILDREN.value
-        )
-
-        # ── arm (c): a FRESH pending task still defers ──────────────────────
-        root_c = _seed_root_instance(engine)
-        fresh_message_id = _seed_message_row(
-            engine,
-            instance_id=root_c,
-            status=MessageStatus.COMPLETED.value,
-            content="a fresh message",
-        )
-        _seed_pending_task(
-            engine, instance_id=root_c, message_id=fresh_message_id
-        )
-
         result_c = service._process_child_completion_db_sync(
             instance_id=root_c,
             completed_message_id="msg-unrelated",
             last_content="assistant text",
         )
-        assert result_c.outcome != "root_completed", (
-            "PC-9(c): a FRESH pending task must still defer; got "
-            f"{result_c.outcome!r}"
+        assert result_c.outcome == "root_waiting_children", (
+            "PC-9 Arm C: the own-queue leg must hold the parent on its own "
+            f"(it is the backstop); got {result_c.outcome!r}"
         )
-        assert _instance_status(engine, root_c) != InstanceStatus.COMPLETED.value
+        assert _instance_status(engine, root_c) == (
+            InstanceStatus.WAITING_CHILDREN.value
+        )
+
+        # ── Arm D: a FRESH pending task still defers ───────────────────────
+        root_d = _seed_root_instance(engine)
+        fresh_message_id = _seed_message_row(
+            engine,
+            instance_id=root_d,
+            status=MessageStatus.COMPLETED.value,
+            content="a fresh message",
+        )
+        _seed_pending_task(
+            engine, instance_id=root_d, message_id=fresh_message_id
+        )
+        result_d = service._process_child_completion_db_sync(
+            instance_id=root_d,
+            completed_message_id="msg-unrelated",
+            last_content="assistant text",
+        )
+        assert result_d.outcome != "root_completed", (
+            "PC-9 Arm D: a FRESH pending task must still defer; got "
+            f"{result_d.outcome!r}"
+        )
+        assert _instance_status(engine, root_d) != InstanceStatus.COMPLETED.value
+
+    # ── PC-10 ───────────────────────────────────────────────────────────────
+    def test_pc10_dual_dialect_portability_compile(self):
+        """PC-10 — compile the notices-exclusion statement for BOTH dialects.
+
+        SQLAlchemy dialect compilers are pure: NO database is touched
+        (the house technique at ``daemon/repositories/job_queue/
+        repository.py:60-67``). The ONE portable expression must render
+        ``->>`` on PostgreSQL and ``JSON_EXTRACT`` on SQLite; a raw ``?``
+        operator or a ``text()`` containing ``?`` is FORBIDDEN (SQLite
+        reads ``?`` as a bind placeholder). At the pre-fix base no
+        exclusion exists, so this pin compiles the pinned shape locally
+        and is vacuously GREEN (M-C7 turns it RED at merge).
+        """
+        factory = getattr(
+            _child_reports_module, "_watchdog_notice_exists_expression", None
+        )
+        if factory is None:
+            expression = or_(
+                MessageQueue.source.in_((WATCHDOG_SOURCE, WEDGE_SOURCE)),
+                *(
+                    MessageQueue.message_metadata[key].as_string().is_not(None)
+                    for key in (
+                        "watchdog_notice",
+                        "watchdog_escalation",
+                        "watchdog_release",
+                        "wedge_notice",
+                    )
+                ),
+            )
+        else:
+            expression = factory()
+
+        statement = select(MessageQueue.message_id).where(expression)
+        pg_sql = str(
+            statement.compile(
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        )
+        sqlite_sql = str(
+            statement.compile(
+                dialect=sqlite.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        )
+        assert "->>" in pg_sql, (
+            "PC-10: the PostgreSQL rendering must use the portable "
+            f"->> operator; got {pg_sql!r}"
+        )
+        assert "JSON_EXTRACT" in sqlite_sql.upper(), (
+            "PC-10: the SQLite rendering must use JSON_EXTRACT; got "
+            f"{sqlite_sql!r}"
+        )
+        assert "?" not in pg_sql and "?" not in sqlite_sql, (
+            "PC-10: a raw ? operator / text() containing ? is FORBIDDEN "
+            f"(SQLite bind placeholder); pg={pg_sql!r} sqlite={sqlite_sql!r}"
+        )
+
