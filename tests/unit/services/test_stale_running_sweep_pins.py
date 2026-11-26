@@ -310,6 +310,7 @@ def _insert_message(
     completed_at: datetime | None = None,
     message_id: str = "msg-srs-1",
     content: str = "scheduled mission",
+    source: str = "api",
 ) -> None:
     completed_iso = (
         completed_at.isoformat() if completed_at is not None else None
@@ -326,7 +327,7 @@ def _insert_message(
                      status, priority, retry_count, max_retries,
                      enqueued_at, completed_at, metadata)
                 VALUES
-                    (:message_id, :instance_id, :content, 'agent', 'api',
+                    (:message_id, :instance_id, :content, 'agent', :source,
                      :status, 1, 0, 3, :enqueued_at, :completed_at, :metadata)
                 """
             ),
@@ -334,6 +335,7 @@ def _insert_message(
                 "message_id": message_id,
                 "instance_id": instance_id,
                 "content": content,
+                "source": source,
                 "status": status,
                 "enqueued_at": enqueued_iso,
                 "completed_at": completed_iso,
@@ -422,6 +424,40 @@ def _seed_shape_b(
             message_id="msg-shape-b",
         )
     return instance_id
+
+
+def _seed_delivered_prior_report(
+    engine,
+    *,
+    recipient_id: str,
+    child_id: str,
+    anchor: str = "anchor-A",
+    age: timedelta = timedelta(hours=4),
+) -> None:
+    """THE REVIVE-WEDGE PRECONDITION — the child's report from the
+    PREVIOUS episode was already DELIVERED: the per-child
+    ``internal_report:{child}:{anchor}`` marker row, status ``completed``
+    (the same shape the sibling rider pins seed, with the DELIVERED
+    status instead of the outstanding one).
+
+    At BASE the mint-site guard is the blanket per-child LIFETIME prefix
+    (``COMPLETED`` included): the DELIVERED prior report blocks the new
+    turn's mint and the early return that follows SKIPS the terminal CAS
+    — the victim stays ``running`` forever and the sweep's drive has NO
+    effect (RED). At MERGE the two-arm guard does not block on a
+    DELIVERED prior report (``completed`` is not in ARM B) and the
+    terminalization is decoupled from the mint, so the drive terminalizes
+    the victim (GREEN).
+    """
+    _insert_message(
+        engine,
+        instance_id=recipient_id,
+        status="completed",
+        message_id=f"msg-prior-report-{anchor}",
+        content="prior report from the previous episode, already delivered",
+        source=f"internal_report:{child_id}:{anchor}",
+        completed_at=datetime.now(timezone.utc) - age,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -812,7 +848,25 @@ class TestReviveWedgeDriveOutcome:
 
         caplog.set_level(logging.WARNING)
         engine = srs_harness.engine
-        _seed_shape_b(engine)
+        # THE REVIVE-WEDGE PRECONDITION — the fixture that discriminates
+        # base from merge. The victim is a CHILD whose report from the
+        # PREVIOUS episode was already DELIVERED (the per-child
+        # ``internal_report:{child}:%`` marker the base guard keys on).
+        # At BASE that DELIVERED prior report blocks the new turn's mint
+        # and the early return SKIPS the terminal CAS, so the drive has
+        # NO effect and the victim stays ``running`` (RED). At MERGE the
+        # drive terminalizes the victim (GREEN).
+        _insert_instance(
+            engine, "the-parent",
+            status=InstanceStatus.IDLE.value,
+            parent_id=None,
+            agent_id="leader",
+            last_activity_at=now_utc_naive(),
+        )
+        _seed_shape_b(engine, instance_id=CHILD, parent_id="the-parent")
+        _seed_delivered_prior_report(
+            engine, recipient_id="the-parent", child_id=CHILD,
+        )
         sweep = _make_sweep(srs_harness)
         assert sweep.census_stale_running() == 1
         with _patch_drive_seams():
@@ -820,7 +874,7 @@ class TestReviveWedgeDriveOutcome:
         assert result.healed == 1, result
         assert result.drive_no_effect == 0, result
         assert result.errors == 0, result
-        row = _get_instance_row(engine, ROOT)
+        row = _get_instance_row(engine, CHILD)
         assert row.status == InstanceStatus.COMPLETED.value
         # NIT-6 — the typed reason is persisted onto the row.
         assert (row.instance_metadata or {}).get(
@@ -833,7 +887,7 @@ class TestReviveWedgeDriveOutcome:
         ]
         assert len(shape_b_lines) == 1, shape_b_lines
         assert shape_b_lines[0].startswith(
-            f"stale_running_sweep|shape-b: instance={ROOT} "
+            f"stale_running_sweep|shape-b: instance={CHILD} "
         ), shape_b_lines[0]
         assert "transitioned=completed" in shape_b_lines[0]
         assert "reason=finalize_gap_steady_state" in shape_b_lines[0]

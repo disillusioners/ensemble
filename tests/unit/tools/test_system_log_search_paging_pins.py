@@ -133,6 +133,15 @@ class TestSystemLogSearchStartLinePaging:
         search = _search(tools)
         out = search.invoke({"pattern": "revive", "filename": "ensemble.log", "start_line": 1, "limit": 1})
         assert "match cap 1 reached" in out
+        # B-M8 HARDENING (2026-11-26): the cap must be ENFORCED, not merely
+        # ANNOUNCED. A mutation that removes the scan-loop break
+        # (``if match_count >= limit and after_remaining == 0: break``)
+        # renders ALL TEN matches and the header reads ``10 match(es)`` —
+        # the announcement line above cannot see that. These two assertions
+        # pin the RENDERED match count (one ``>>>`` marker) and the REPORTED
+        # count (never above ``limit``).
+        assert out.count(">>>") == 1, out
+        assert "1 match(es)" in out, out
 
     def test_explicit_window_starts_at_start_line_and_excludes_earlier_lines(self, log_dir, tools, monkeypatch):
         import daemon.tools.system_log_tools as m
