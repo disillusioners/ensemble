@@ -47,28 +47,74 @@
 # ============================================================================
 set -euo pipefail
 
-SNAP_ROOT="/home/nea/.install-snapshots"
-SRC="/home/nea/agents-ensemble"
-RETAIN="${RETAIN:-96}"              # 48h target at 30-min cadence
-MIN_FREE_MB="${MIN_FREE_MB:-5120}"  # never fill the host while protecting it
+# Paths are overridable so the guardrails can be drilled on FAKES; the
+# production defaults below are the only ones the deployed unit ever uses.
+SNAP_ROOT="${ENSEMBLE_SNAPSHOT_ROOT:-/home/nea/.install-snapshots}"
+SRC="${ENSEMBLE_SNAPSHOT_SRC:-/home/nea/agents-ensemble}"
+ALERT_DIR="${ENSEMBLE_SNAPSHOT_ALERT_DIR:-/home/nea/.ensemble-alerts}"
+RETAIN="${RETAIN:-48}"              # 24h target at 30-min cadence (plan floor); was 96 (=48h)
+MIN_FREE_MB="${MIN_FREE_MB:-1024}"  # free-space floor; a skip is ALERT-ONLY, never fatal
 TAG="ensemble-install-snapshot"
+PROD_SNAP_ROOT="/home/nea/.install-snapshots"
 
-[ "$(id -u)" -eq 0 ] || { echo "$TAG: must run as root" >&2; exit 1; }
+# Root is required for the production snapshot root (it holds .env secrets).
+# A DRILLED, non-root run is permitted ONLY when the snapshot root has been
+# redirected away from the production path: the production root can never be
+# written by a non-root process.
+if [ "$(id -u)" -ne 0 ]; then
+    if [ "${ENSEMBLE_SNAPSHOT_ALLOW_NONROOT:-0}" != "1" ] || [ "$SNAP_ROOT" = "$PROD_SNAP_ROOT" ]; then
+        echo "$TAG: must run as root" >&2; exit 1
+    fi
+fi
 
 mkdir -p "$SNAP_ROOT"
-chmod 700 "$SNAP_ROOT"
-chown root:root "$SNAP_ROOT"
+if [ "$(id -u)" -eq 0 ]; then
+    chmod 700 "$SNAP_ROOT"
+    chown root:root "$SNAP_ROOT"
+fi
 
 # Serialize overlapping runs (30-min timer + manual/first runs)
 exec 9>"$SNAP_ROOT/.lock"
 flock -n 9 || { echo "$TAG: previous run still active, skipping" >&2; exit 0; }
 
-# Disk floor guard
+# ── Multi-channel alert ─────────────────────────────────────────────────────
+# A skip must never be silent and must never take the unit down: this backstop
+# exists precisely for the moment the disk is tight, so a failed unit (a skip
+# nobody notices) is the wrong failure shape. Channels, loudest-first:
+#   1) console broadcast (wall) — reaches a human who is not reading the journal
+#   2) journal emerg (systemd-cat) — survives daemon.* filtering; `journalctl -p emerg`
+#   3) journal daemon.crit (logger) — house pattern (the treecheck tree-loss bar)
+#   4) durable marker file — machine-readable for a patrol; survives journal rotation
+#   5) stdout — lands in the unit's own journal and in `systemctl status`
+emit_alert() {
+    _headline="$1"; _detail="$2"
+    _ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    _msg="${_headline}: ${_detail}"
+    printf '%s\n' "$_msg" | wall 2>/dev/null || true
+    systemd-cat -t "$TAG" -p emerg "$_msg" 2>/dev/null || true
+    logger -t "$TAG" -p daemon.crit "$_msg" 2>/dev/null || true
+    _count=1
+    if [ -f "$ALERT_DIR/install-snapshot-skip.count" ]; then
+        _count="$(( $(cat "$ALERT_DIR/install-snapshot-skip.count" 2>/dev/null || echo 0) + 1 ))"
+    fi
+    mkdir -p "$ALERT_DIR" 2>/dev/null || true
+    chmod 0755 "$ALERT_DIR" 2>/dev/null || true
+    printf '%s\n' "$_count" > "$ALERT_DIR/install-snapshot-skip.count" 2>/dev/null || true
+    chmod 0644 "$ALERT_DIR/install-snapshot-skip.count" 2>/dev/null || true
+    printf '{"ts":"%s","tag":"%s","event":"snapshot_skipped","severity":"crit","free_mb":%s,"floor_mb":%s,"retain":%s,"snap_root":"%s","consecutive_skips":%s,"unit_state":"green","action":"reclaim disk space, or raise MIN_FREE_MB deliberately"}\n' \
+        "$_ts" "$TAG" "${free_mb:-unknown}" "$MIN_FREE_MB" "$RETAIN" "$SNAP_ROOT" "$_count" \
+        > "$ALERT_DIR/install-snapshot-skip.json" 2>/dev/null || true
+    chmod 0644 "$ALERT_DIR/install-snapshot-skip.json" 2>/dev/null || true
+    echo "$TAG: ALERT — $_msg"
+}
+
+# Disk floor guard — ALERT-ONLY. Under the floor this run writes no snapshot,
+# deletes NOTHING, leaves the unit green (exit 0) and raises the alert.
 free_mb="$(df -Pm "$SNAP_ROOT" | awk 'NR==2 {print $4}')"
 if [ "$free_mb" -lt "$MIN_FREE_MB" ]; then
-    logger -t "$TAG" -p daemon.crit \
-        "SNAPSHOT SKIPPED: only ${free_mb}MB free (<${MIN_FREE_MB}MB floor) under ${SNAP_ROOT} — investigate"
-    exit 1
+    emit_alert "SNAPSHOT SKIPPED (alert-only — protection stays armed)" \
+        "only ${free_mb}MB free (<${MIN_FREE_MB}MB floor) under ${SNAP_ROOT}; no snapshot written, nothing deleted, unit stays green; marker ${ALERT_DIR}/install-snapshot-skip.json"
+    exit 0
 fi
 
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -90,6 +136,12 @@ else
 fi
 
 mv "$tmp" "$dest"   # atomic publish (same-filesystem rename)
+
+# Recovery: the backstop is armed again — clear any standing skip alert.
+if [ -f "$ALERT_DIR/install-snapshot-skip.json" ]; then
+    rm -f "$ALERT_DIR/install-snapshot-skip.json" "$ALERT_DIR/install-snapshot-skip.count"
+    logger -t "$TAG" -p daemon.info "snapshot skip alert CLEARED — snap-$stamp ok (free_mb=${free_mb})"
+fi
 
 # Retention prune — keep newest RETAIN snapshots only
 ls -1d "$SNAP_ROOT"/snap-* 2>/dev/null | sort | head -n -"$RETAIN" | while read -r old; do

@@ -5958,3 +5958,21 @@ frozen): move comment lines 7516-7521 ABOVE the `journal_history_append` line (o
 trailing `\` — is WRONG). Evidence + the ledger correction: `RESULTS/2026-11-25-promote-handback-full-house-gates.md`
 and `.agents/shared/planning/promote-handback-false-halt/refresh-conflict-ledger-2026-11-25.md` §11.
 <!-- promote-handback-false-halt-landing-gate-20261125-end -->
+
+<!-- install-snapshot-guardrails-pack-registration-20261126-begin -->
+## INSTALL-SNAPSHOT GUARDRAILS — pack registration (2026-11-26; lane `feature/snapshot-guardrails`)
+
+> Registration of the guardrail pack for the Layer-3 install-tree snapshot backstop
+> (`scripts/protection/ensemble-install-snapshot.sh`). The change it pins: **RETAIN 96 → 48**
+> (48 h → the plan's 24 h floor) and the **under-floor skip becomes ALERT-ONLY** (`exit 1` →
+> `exit 0`) with a five-channel alert, after the 2026-11-26 disk exhaustion showed the
+> backstop disarming itself (`SNAPSHOT SKIPPED: only 786MB free (<5120MB floor)`,
+> journal 08:00:01Z). The repo source is changed; the LIVE host copy is intentionally NOT
+> edited and still runs the old values until the branch is promoted and the file redeployed
+> per `scripts/protection/README.md`.
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `install_snapshot_guardrails_unit_test` (NEW 2026-11-26) | `cd $WT && timeout 300 bash test/packs/install_snapshot_guardrails_unit_test.sh` (self-cap **240 s** via `INSTALL_SNAPSHOT_GUARDRAILS_BUDGET_S`; hermetic `mktemp -d` fixture; `logger`/`systemd-cat`/`wall` stubbed on PATH so every alert channel is assertable; **no** live install tree, **no** live snapshot root, **no** production alert dir, no PG, no daemon import) | `scripts/protection/ensemble-install-snapshot.sh` — **24 assertions / 6 legs**. **L1** an under-floor skip exits **0** (the unit is NOT taken down). **L2** the skip deletes NOTHING (3 pre-seeded snapshots survive), writes no snapshot, leaves no `.incoming-*` staging dir. **L3** the alert fires on **all five** channels — console `wall`, journal `emerg` (`systemd-cat`), journal `daemon.crit` (`logger`), durable marker JSON (+ fields `event`/`severity`/`unit_state`/`floor_mb`), stdout `ALERT` line — and the marker counter increments on a repeated skip. **L4** happy path publishes a snapshot, prunes to exactly `RETAIN`, and CLEARS a standing skip alert (the alert is not sticky). **L5** value pins: `RETAIN=48`, `MIN_FREE_MB=1024`, the floor-skip block exits 0, and the old fatal `exit 1` shape is gone. **L6** the non-root drill escape is REFUSED for the production snapshot root (the root that holds `.env` secrets can never be written by a non-root process). | 2026-11-26 | ✅ PASS **24/24**, wall ~8 s, no fixture residue. **MUTATION-PROVEN 5/5 (each leg RED with the EXPECTED assertion failing, then sha256-verified byte-identical restore, then GREEN):** M1 revert the skip to `exit 1` → L1+L5 RED · M2 drop the `emerg` channel → L3 RED · M3 put `RETAIN` back to 96 → L5 RED · M4 drop the alert-clear block → L4 RED · M5 make the skip delete the oldest snapshot → L2 RED. Final state GREEN on the restored tree. Branch `feature/snapshot-guardrails` (repo change rides the next release; the deployed host copy is NOT edited). |
+
+<!-- install-snapshot-guardrails-pack-registration-20261126-end -->
