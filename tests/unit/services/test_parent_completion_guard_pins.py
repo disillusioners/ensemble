@@ -979,3 +979,79 @@ class TestParentCompletionGuard:
             f"(SQLite bind placeholder); pg={pg_sql!r} sqlite={sqlite_sql!r}"
         )
 
+    # ── C5 / advisory A1 ───────────────────────────────────────────────────
+    def test_c5_tool_invocation_lane_suppression_is_logged_and_counted(
+        self, engine: Engine, caplog: pytest.LogCaptureFixture
+    ):
+        """C5/A1 — a tool-lane suppressed mint is LOUDLY logged AND counted.
+
+        The tool-invocation lane returns before the shared suppress
+        branch (which carries the record emit + the locked counter bump).
+        With an ARM-B-suppress fixture (an OUTSTANDING internal_report row
+        with a DIFFERENT anchor than the incoming one ⇒ ``loss=1``) the
+        lane must emit exactly ONE ``arm-b-suppress`` record and advance
+        ``_ARM_B_SUPPRESS_LOSS_TOTAL`` by exactly one.
+
+        At the pre-fix base (no Component-A observability at all) the
+        pin is vacuously GREEN: it only pins the lane outcome.
+        """
+        service = _build_child_reports_service(engine)
+        parent_id = _seed_root_instance(engine)
+        child_id = _seed_child_instance(
+            engine,
+            parent_id=parent_id,
+            instance_metadata={"invoked_as_tool": True},
+        )
+        incoming_anchor = "msg-incoming-anchor"
+        _seed_message_row(
+            engine,
+            instance_id=child_id,
+            source=f"internal_report:{child_id}:older-anchor",
+            status=MessageStatus.READY.value,
+            content="an outstanding report with a different anchor",
+        )
+
+        if not hasattr(_child_reports_module, "_emit_mint_suppression_record"):
+            # Base tree predates Component A — nothing to pin here.
+            result = service._process_child_completion_db_sync(
+                instance_id=child_id,
+                completed_message_id=incoming_anchor,
+                last_content="assistant text",
+            )
+            assert result.outcome in ("idempotency_skip", "tool_invocation_completed")
+            return
+
+        before = _child_reports_module._ARM_B_SUPPRESS_LOSS_TOTAL
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.services.child_reports"
+        ):
+            result = service._process_child_completion_db_sync(
+                instance_id=child_id,
+                completed_message_id=incoming_anchor,
+                last_content="assistant text",
+            )
+
+        assert result.outcome == "tool_invocation_completed", (
+            "C5/A1: the lane's outcome value must be UNCHANGED; got "
+            f"{result.outcome!r}"
+        )
+        records = [
+            record
+            for record in caplog.records
+            if record.name == "daemon.services.child_reports"
+            and "child_reports|arm-b-suppress:" in record.getMessage()
+        ]
+        assert len(records) == 1, (
+            "C5/A1: exactly ONE ARM-B suppression record must be emitted "
+            f"on the tool-invocation lane; records={[r.getMessage() for r in records]!r}"
+        )
+        message = records[0].getMessage()
+        assert child_id in message and "loss=1" in message, (
+            "C5/A1: the record must carry the same fields as the shared "
+            f"suppress branch; got {message!r}"
+        )
+        after = _child_reports_module._ARM_B_SUPPRESS_LOSS_TOTAL
+        assert after - before == 1, (
+            "C5/A1: the locked R-K2 loss counter must advance by exactly "
+            f"one on this lane; before={before} after={after}"
+        )

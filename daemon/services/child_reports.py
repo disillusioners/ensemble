@@ -239,6 +239,44 @@ def _emit_mint_suppression_record(
     )
 
 
+def _emit_tool_lane_suppression_record(
+    instance_id: str,
+    completed_message_id: str | None,
+    *,
+    classification: str | None,
+    blocking_source: str | None,
+    blocking_message_id: str | None,
+    blocking_status: str | None,
+) -> None:
+    """C5/A1 — the tool-invocation lane's suppressed-mint observability.
+
+    The tool-invocation lane returns BEFORE the shared suppress branch
+    (which carries the record emit + the locked counter bump), so a
+    suppression on that lane used to be SILENT — violating the leader
+    ruling "ARM-B suppressions are loudly logged AND counted". This
+    mirrors the SAME emit (same fields, same ``_ARM_B_SUPPRESS_LOCK``
+    discipline) at BOTH exits of that lane; the lane's outcome value,
+    log lines and control flow are UNCHANGED. Called only when
+    ``suppress_mint`` is True, so exactly ONE record is emitted per
+    actual suppression on that lane.
+    """
+    try:
+        _emit_mint_suppression_record(
+            instance_id,
+            completed_message_id,
+            classification=classification or "ARM_A",
+            blocking_source=blocking_source,
+            blocking_message_id=blocking_message_id,
+            blocking_status=blocking_status,
+        )
+    except Exception as emit_exc:  # noqa: BLE001 — observability is best-effort
+        logger.debug(
+            "child_reports|suppress-record: tool-lane emit failed for "
+            "child %s... (non-fatal, outcome unchanged): %r",
+            instance_id[:8], emit_exc,
+        )
+
+
 def _emit_retrying_obligation_info(
     session, instance_id: str, completed_message_id: str,
 ) -> None:
@@ -5282,6 +5320,14 @@ Provide a concise summary:"""
                         f"{{paused,completed,error}}); skipping "
                         f"completion side effects (TOCTOU defense)"
                     )
+                    if suppress_mint:
+                        _emit_tool_lane_suppression_record(
+                            instance_id, completed_message_id,
+                            classification=_suppress_class,
+                            blocking_source=_suppress_block_source,
+                            blocking_message_id=_suppress_block_message_id,
+                            blocking_status=_suppress_block_status,
+                        )
                     return _ChildCompletionDbResult(
                         outcome="idempotency_skip",
                         instance_id=instance_id,
@@ -5290,6 +5336,14 @@ Provide a concise summary:"""
                     )
 
                 # Post-commit side effects are dispatched by the async caller.
+                if suppress_mint:
+                    _emit_tool_lane_suppression_record(
+                        instance_id, completed_message_id,
+                        classification=_suppress_class,
+                        blocking_source=_suppress_block_source,
+                        blocking_message_id=_suppress_block_message_id,
+                        blocking_status=_suppress_block_status,
+                    )
                 return _ChildCompletionDbResult(
                     outcome="tool_invocation_completed",
                     instance_id=instance_id,
