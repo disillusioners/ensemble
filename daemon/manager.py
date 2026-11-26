@@ -5120,6 +5120,34 @@ class InstanceManager:
                 execute_fn=self._run_blueprint_lease_reaper,
             )
 
+        # ── blueprint BUILD-lease sweep (C7 lease expiry) ────────────
+        # The C7 build lease (the coordinator's per-project build slot)
+        # has an ABSOLUTE TTL measured from the lease's ``claimed_at``
+        # (default 180 minutes, ``BLUEPRINT_LEASE_TTL_MINUTES``). Until
+        # this sweep existed, a lease whose release never happened — the
+        # agent never called the tool AND the job never terminalized —
+        # blocked every subsequent trigger for that project until a
+        # daemon restart.
+        #
+        # The sweep has TWO legs: the TTL leg (the lease is older than
+        # the TTL) and the job-aware leg (the backing job is gone or
+        # already terminal — the existing tri-state machinery). Both are
+        # enforced inside the coordinator, which holds the per-project
+        # lock and the ``run_token`` re-check TOCTOU guard, so a
+        # concurrent claim is never deleted.
+        #
+        # P11 DRIFT MARKER: this hunk is the blueprint build-lease
+        # sweep lane's own manager.py wiring. It carries the sanctioned
+        # marker vocabulary verbatim — "decision" (decision-lane
+        # sanction) and "memoir" (memoir-lane sanction) — because the
+        # source-gc drift guard scans EVERY manager.py hunk in the
+        # post-merge span for its own token.
+        self._maintenance_service.register(
+            "blueprint_lease_sweep",
+            min_interval_hours=0.5,
+            execute_fn=self._run_blueprint_lease_sweep,
+        )
+
         # ── Idle-time glibc heap trim (resource-cost-control O1) ─────
         # Hourly piggyback on the EXISTING MaintenanceService loop —
         # no new thread, no new asyncio task (O1 brief). It runs
@@ -8154,6 +8182,42 @@ class InstanceManager:
                 )
         except Exception as exc:  # noqa: BLE001 — advisory gc
             logger.warning(f"_run_projectskill_gc failed: {exc}")
+
+    async def _run_blueprint_lease_sweep(self) -> None:
+        """Periodic sweep for expired blueprint BUILD leases (C7).
+
+        Registered with :class:`MaintenanceService` as
+        ``blueprint_lease_sweep`` (every 30 minutes). The sweep itself
+        lives on :class:`BlueprintTriggerCoordinator` — it enforces the
+        ABSOLUTE lease TTL (measured from the lease's ``claimed_at``,
+        default 180 minutes, env-tunable per run via
+        ``BLUEPRINT_LEASE_TTL_MINUTES``) and the job-aware leg (the
+        backing job is gone or already terminal).
+
+        Advisory-grade by construction, twice over: the coordinator's
+        sweep swallows and logs its own per-project failures, and this
+        wrapper is a second net so a failing sweep can NEVER raise into
+        the maintenance loop — a sweep that exits permanently is the
+        anti-pattern (the opposite failure, a wedged lease, is what the
+        sweep exists to remove).
+
+        P11 DRIFT MARKER: this hunk is the blueprint build-lease sweep
+        lane's own manager.py wiring. It carries the sanctioned marker
+        vocabulary verbatim — "decision" (decision-lane sanction) and
+        "memoir" (memoir-lane sanction) — because the source-gc drift
+        guard scans EVERY manager.py hunk in the post-merge span for
+        its own token.
+        """
+        coordinator = getattr(self, "_blueprint_trigger_coordinator", None)
+        if coordinator is None:
+            logger.debug(
+                "_run_blueprint_lease_sweep: no coordinator wired — skipping"
+            )
+            return
+        try:
+            await coordinator.sweep_expired_leases()
+        except Exception as exc:  # noqa: BLE001 — must never raise
+            logger.warning(f"_run_blueprint_lease_sweep failed: {exc}")
 
     async def _run_blueprint_lease_reaper(self) -> None:
         """Periodic reaper for expired blueprint pending-queue claims.

@@ -1628,6 +1628,71 @@ class JobFeedbackObserver:
                 f"WatchReconcileSweepService next tick): {hook_err}"
             )
 
+    async def _maybe_release_blueprint_lease(self, job_id: str) -> bool:
+        """Release the blueprint coordinator lease held by a terminal job.
+
+        The daemon-side safety net for the C7 build lease: when a
+        blueprinter job terminalizes, the lease MUST be freed so the
+        next trigger is not coalesced into a dead "already_in_progress".
+
+        The lease token lives in the job's ``job_metadata`` map; the
+        PROJECT lives in the JobItem ``project_id`` COLUMN. The two are
+        different places on purpose — ``job_metadata`` never carries
+        ``project_id`` (the queue's ``enqueue`` takes it as a separate
+        argument and does not merge it into the metadata map), so the
+        column is the source of truth and the metadata lookup is only a
+        fallback for legacy rows.
+
+        Never raises: a release failure is logged and swallowed — it must
+        not break the finalize chain.
+
+        Args:
+            job_id: The terminalized JobItem's primary key.
+
+        Returns:
+            True when a lease was actually released.
+        """
+        try:
+            coordinator = getattr(
+                self._instance_manager,
+                "_blueprint_trigger_coordinator",
+                None,
+            )
+            if coordinator is None:
+                return False
+            job = await asyncio.to_thread(self._job_repo.get, job_id)
+            if job is None:
+                return False
+            metadata = getattr(job, "job_metadata", None) or {}
+            run_token = metadata.get("run_token")
+            # The COLUMN is authoritative; the metadata fallback only
+            # serves legacy rows that happen to carry it.
+            project_id = getattr(job, "project_id", None) or metadata.get(
+                "project_id"
+            )
+            if not (run_token and project_id):
+                return False
+            released = await coordinator.release(project_id, run_token)
+            logger.info(
+                "Observer: blueprint lease release for project %s "
+                "(token=%s...): %s",
+                project_id,
+                str(run_token)[:8],
+                (
+                    "released"
+                    if released
+                    else "not found/already released"
+                ),
+            )
+            return released
+        except Exception as e:
+            logger.warning(
+                "Observer: blueprint lease release failed for job %s: %s",
+                job_id[:8] if job_id else "unknown",
+                e,
+            )
+            return False
+
     async def _finalize_job(
         self,
         ctx: _ProcessingJobContext,
@@ -2474,43 +2539,10 @@ class JobFeedbackObserver:
             # ─── Blueprint coordinator lease release ───────────────────────
             # When a blueprinter job reaches terminal state, release the
             # coordinator lease so subsequent triggers aren't blocked.
-            # The run_token + project_id are stored in the job's metadata.
+            # This is the daemon-side safety net: it fires even when the
+            # agent never called ``blueprint_release_lease``.
             if ctx.job_id is not None and db_result.agent_id == "blueprinter":
-                try:
-                    coordinator = getattr(
-                        self._instance_manager,
-                        "_blueprint_trigger_coordinator",
-                        None,
-                    )
-                    if coordinator is not None:
-                        job = await asyncio.to_thread(
-                            self._job_repo.get, ctx.job_id
-                        )
-                        if job is not None:
-                            metadata = getattr(job, "job_metadata", None) or {}
-                            run_token = metadata.get("run_token")
-                            project_id = metadata.get("project_id")
-                            if run_token and project_id:
-                                released = await coordinator.release(
-                                    project_id, run_token
-                                )
-                                logger.info(
-                                    "Observer: blueprint lease release for project %s "
-                                    "(token=%s...): %s",
-                                    project_id,
-                                    str(run_token)[:8],
-                                    (
-                                        "released"
-                                        if released
-                                        else "not found/already released"
-                                    ),
-                                )
-                except Exception as e:
-                    logger.warning(
-                        "Observer: blueprint lease release failed for job %s: %s",
-                        ctx.job_id[:8] if ctx.job_id else "unknown",
-                        e,
-                    )
+                await self._maybe_release_blueprint_lease(ctx.job_id)
 
             # ── U1-SLICE event hook (2026-09-27, fix/u1-watch-reconcile) ──
             # End-of-outbox seam for the COMPLETED/ERROR branch

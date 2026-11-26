@@ -297,6 +297,16 @@ JOB_IDLE_POLICIES: dict[str, str] = {
     # Dispatch-only: it enqueues rebuild work into the NORMAL worker
     # queue (the same path a user-dispatched job takes).
     "blueprint_daily_scan": IdlePolicy.UN_GATED,
+    # Blueprint BUILD-lease sweep (C7 lease expiry). UN_GATED on
+    # purpose: this sweep exists to free a WEDGED build slot, and a
+    # wedged slot blocks EVERY subsequent blueprint trigger for that
+    # project — exactly the condition an idle gate starves on (a busy
+    # nest keeps the gate unsatisfiable). Its write set is one
+    # project-metadata row per released lease, and it only touches
+    # leases that are ALREADY past the absolute TTL — the same
+    # condition the claim-time check enforces — so gating it buys no
+    # extra safety, only starvation.
+    "blueprint_lease_sweep": IdlePolicy.UN_GATED,
     # ── in-process only — no DB, no contention ───────────────────
     # glibc heap trim (returns free pages to the OS).
     "malloc_trim": IdlePolicy.UN_GATED,

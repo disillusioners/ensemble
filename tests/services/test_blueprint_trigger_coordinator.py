@@ -10,8 +10,12 @@ enqueuing must funnel through:
   (or whose ``_job_queue_service`` is unset — the test default).
 
 The lease model is simple: claim on ``try_claim``, release on
-completion, reconcile on startup. There is no TTL, no heartbeat,
-and no periodic sweep.
+completion, reconcile on startup. There is no heartbeat; expiry is
+ABSOLUTE and measured from the lease's ``claimed_at`` field (default
+180 minutes, env ``BLUEPRINT_LEASE_TTL_MINUTES``) — an expired lease
+is treated as absent by ``try_claim`` and released by the periodic
+``sweep_expired_leases`` pass. The lease dict shape is unchanged
+(``{run_token, job_id, mode, claimed_at}`` — no heartbeat field).
 """
 
 from __future__ import annotations

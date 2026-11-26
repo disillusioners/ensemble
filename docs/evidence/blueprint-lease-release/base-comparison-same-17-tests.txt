@@ -1,0 +1,1440 @@
+FFFssFFFF................F...FF....................FF.F.F.....F.....FF   [100%]
+=================================== FAILURES ===================================
+_ TestSite1InlineMirrorFinalize.test_hook_fires_settled_and_dual_fire_is_deduped _
+
+self = <tests.job_queue.test_event_driven_completion.TestSite1InlineMirrorFinalize object at 0x7869c3f34e10>
+engine = Engine(sqlite:///:memory:)
+task_repo = <daemon.repositories.task.repository.TaskRepository object at 0x7869c3f1f620>
+job_repo = <daemon.repositories.job_queue.repository.JobRepository object at 0x7869c3f1f770>
+watcher_repo = <daemon.repositories.job_queue.watcher_repository.JobWatcherRepository object at 0x7869c3f1f8c0>
+enqueue_mock = <MagicMock name='instance_manager' id='132395654313168'>
+service = <daemon.services.job_queue_service.JobQueueService object at 0x7869c0be9400>
+
+    @pytest.mark.asyncio
+    async def test_hook_fires_settled_and_dual_fire_is_deduped(
+        self, engine, task_repo, job_repo, watcher_repo, enqueue_mock, service
+    ):
+        """on_success: the per-kind task-terminal notify AND the new
+        post-commit mirror hook both fire for the same work_id — the CAS
+        claim dedups to exactly ONE delivery; the mirror JobItem lands
+        ``done``; the canonical 'settled' source string is on the wire."""
+        instance_id = _seed_instance(engine, f"inst-{uuid4().hex[:8]}")
+        work_id = str(uuid4())
+        _seed_task(engine, work_id, instance_id, TaskStatus.RUNNING.value)
+        _seed_mirror_job(engine, work_id, instance_id, admission_state="active")
+        _seed_watcher(watcher_repo, work_id)
+    
+        # instance_manager reach: on_success reads _job_queue_service
+        # (the hook) and _instance_repository (W6 anchor clear).
+        manager = _make_manager(service, task_repo)
+        tp = _build_task_processor(
+            task_repo, service._work_resolver, watcher_repo, manager
+        )
+    
+        callbacks = tp._build_callbacks(
+            Session(engine).get(Task, _task_pk(engine, work_id))
+        )
+>       await callbacks.on_success(MagicMock(name="ProcessingResult"))
+
+tests/job_queue/test_event_driven_completion.py:287: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+daemon/services/task_processor.py:1110: in on_success
+    completed_task = await asyncio.to_thread(
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/threads.py:26: in to_thread
+    return await loop.run_in_executor(None, func_call)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py:86: in run
+    result = ctx.run(self.task)
+             ^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py:73: in run
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+daemon/repositories/task/repository.py:4420: in complete_task
+    result_json = json.dumps(result)
+                  ^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/json/__init__.py:235: in dumps
+    return _default_encoder.encode(obj)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/json/encoder.py:202: in encode
+    chunks = self.iterencode(o, _one_shot=True)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/json/encoder.py:263: in iterencode
+    return _iterencode(o, 0)
+           ^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.encoder.JSONEncoder object at 0x7869cae77380>
+o = <MagicMock name='ProcessingResult.result_content' id='132395600619776'>
+
+    def default(self, o):
+        """Implement this method in a subclass such that it returns
+        a serializable object for ``o``, or calls the base implementation
+        (to raise a ``TypeError``).
+    
+        For example, to support arbitrary iterators, you could
+        implement default like this::
+    
+            def default(self, o):
+                try:
+                    iterable = iter(o)
+                except TypeError:
+                    pass
+                else:
+                    return list(iterable)
+                # Let the base class default method raise the TypeError
+                return super().default(o)
+    
+        """
+>       raise TypeError(f'Object of type {o.__class__.__name__} '
+                        f'is not JSON serializable')
+E       TypeError: Object of type MagicMock is not JSON serializable
+E       when serializing dict item 'content'
+
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/json/encoder.py:182: TypeError
+_ TestSite1InlineMirrorFinalize.test_pre_terminal_task_completes_on_success_fully _
+
+self = <tests.job_queue.test_event_driven_completion.TestSite1InlineMirrorFinalize object at 0x7869c3f351d0>
+engine = Engine(sqlite:///:memory:)
+task_repo = <daemon.repositories.task.repository.TaskRepository object at 0x7869c145afd0>
+job_repo = <daemon.repositories.job_queue.repository.JobRepository object at 0x7869c145a850>
+watcher_repo = <daemon.repositories.job_queue.watcher_repository.JobWatcherRepository object at 0x7869c145b750>
+enqueue_mock = <MagicMock name='instance_manager' id='132395518823120'>
+service = <daemon.services.job_queue_service.JobQueueService object at 0x7869c145bc50>
+instance_repo = <daemon.repositories.instance.repository.SQLModelInstanceRepository object at 0x7869c145b9d0>
+
+    @pytest.mark.asyncio
+    async def test_pre_terminal_task_completes_on_success_fully(
+        self, engine, task_repo, job_repo, watcher_repo, enqueue_mock,
+        service, instance_repo,
+    ):
+        """CRITICAL regression (merge-blocker round 2026-09-20): a Task
+        that is ALREADY terminal when ``on_success`` runs (the designed-
+        for concurrent-finalizer race — ``complete_task`` → None) must
+        NOT raise ``UnboundLocalError`` from the mirror hook's binding.
+        ``on_success`` must run to completion INCLUDING the W6
+        usage-limit anchor clear that follows the hook."""
+        from daemon.services.usage_limit_schedule import (
+            USAGE_LIMIT_FIRST_SEEN_METADATA_KEY,
+        )
+        instance_id = _seed_instance(engine, f"inst-{uuid4().hex[:8]}")
+        # Pre-seed the W6 episode anchor — its CLEAR is the tail work
+        # the UnboundLocalError used to abort.
+        with Session(engine) as s:
+            inst = s.get(Instance, instance_id)
+            inst.instance_metadata = {
+                USAGE_LIMIT_FIRST_SEEN_METADATA_KEY: datetime.now(
+                    timezone.utc
+                ).isoformat()
+            }
+            s.add(inst)
+            s.commit()
+    
+        work_id = str(uuid4())
+        # ALREADY terminal: complete_task will return None and the
+        # finalize block is skipped entirely.
+        _seed_task(engine, work_id, instance_id, TaskStatus.COMPLETED.value)
+        _seed_mirror_job(engine, work_id, instance_id, admission_state="active")
+        _seed_watcher(watcher_repo, work_id)
+    
+        manager = _make_manager(service, task_repo, instance_repo)
+        tp = _build_task_processor(
+            task_repo, service._work_resolver, watcher_repo, manager
+        )
+    
+        callbacks = tp._build_callbacks(
+            Session(engine).get(Task, _task_pk(engine, work_id))
+        )
+        # MUST NOT raise (pre-fix: UnboundLocalError: finalized_mirror).
+>       await callbacks.on_success(MagicMock(name="ProcessingResult"))
+
+tests/job_queue/test_event_driven_completion.py:346: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+daemon/services/task_processor.py:1110: in on_success
+    completed_task = await asyncio.to_thread(
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/threads.py:26: in to_thread
+    return await loop.run_in_executor(None, func_call)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py:86: in run
+    result = ctx.run(self.task)
+             ^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py:73: in run
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+daemon/repositories/task/repository.py:4420: in complete_task
+    result_json = json.dumps(result)
+                  ^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/json/__init__.py:235: in dumps
+    return _default_encoder.encode(obj)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/json/encoder.py:202: in encode
+    chunks = self.iterencode(o, _one_shot=True)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/json/encoder.py:263: in iterencode
+    return _iterencode(o, 0)
+           ^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.encoder.JSONEncoder object at 0x7869cae77380>
+o = <MagicMock name='ProcessingResult.result_content' id='132395518824464'>
+
+    def default(self, o):
+        """Implement this method in a subclass such that it returns
+        a serializable object for ``o``, or calls the base implementation
+        (to raise a ``TypeError``).
+    
+        For example, to support arbitrary iterators, you could
+        implement default like this::
+    
+            def default(self, o):
+                try:
+                    iterable = iter(o)
+                except TypeError:
+                    pass
+                else:
+                    return list(iterable)
+                # Let the base class default method raise the TypeError
+                return super().default(o)
+    
+        """
+>       raise TypeError(f'Object of type {o.__class__.__name__} '
+                        f'is not JSON serializable')
+E       TypeError: Object of type MagicMock is not JSON serializable
+E       when serializing dict item 'content'
+
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/json/encoder.py:182: TypeError
+__ TestSite1InlineMirrorFinalize.test_hook_skips_when_finalize_races_to_none ___
+
+self = <tests.job_queue.test_event_driven_completion.TestSite1InlineMirrorFinalize object at 0x7869c15649d0>
+engine = Engine(sqlite:///:memory:)
+task_repo = <daemon.repositories.task.repository.TaskRepository object at 0x7869bbdf4190>
+job_repo = <daemon.repositories.job_queue.repository.JobRepository object at 0x7869bbdf5a90>
+watcher_repo = <daemon.repositories.job_queue.watcher_repository.JobWatcherRepository object at 0x7869bbdf4b90>
+enqueue_mock = <MagicMock name='instance_manager' id='132395518830848'>
+service = <daemon.services.job_queue_service.JobQueueService object at 0x7869bbdf5f90>
+
+    @pytest.mark.asyncio
+    async def test_hook_skips_when_finalize_races_to_none(
+        self, engine, task_repo, job_repo, watcher_repo, enqueue_mock, service
+    ):
+        """Phantom-event guard: when the mirror write returns None
+        (race-loss / task-kind), the hook must NOT notify."""
+        instance_id = _seed_instance(engine, f"inst-{uuid4().hex[:8]}")
+        work_id = str(uuid4())
+        # TASK-kind JobItem: finalize_mirror_job_at_completion returns
+        # None for task rows (the row IS its own mission).
+        _seed_task(engine, work_id, instance_id, TaskStatus.RUNNING.value)
+        with Session(engine) as s:
+            s.add(JobItem(
+                job_id=work_id,
+                agent_id="developer",
+                agent_dir="agents/developer",
+                message="task work",
+                source="agent:test",
+                instance_id=instance_id,
+                admission_state="active",
+                job_type="task",
+            ))
+            s.commit()
+        _seed_watcher(watcher_repo, work_id)
+    
+        # instance_manager reach: on_success reads _job_queue_service
+        # (the hook) and _instance_repository (W6 anchor clear).
+        manager = _make_manager(service, task_repo)
+        tp = _build_task_processor(
+            task_repo, service._work_resolver, watcher_repo, manager
+        )
+    
+        callbacks = tp._build_callbacks(
+            Session(engine).get(Task, _task_pk(engine, work_id))
+        )
+>       await callbacks.on_success(MagicMock(name="ProcessingResult"))
+
+tests/job_queue/test_event_driven_completion.py:395: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+daemon/services/task_processor.py:1110: in on_success
+    completed_task = await asyncio.to_thread(
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/threads.py:26: in to_thread
+    return await loop.run_in_executor(None, func_call)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py:86: in run
+    result = ctx.run(self.task)
+             ^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py:73: in run
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+daemon/repositories/task/repository.py:4420: in complete_task
+    result_json = json.dumps(result)
+                  ^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/json/__init__.py:235: in dumps
+    return _default_encoder.encode(obj)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/json/encoder.py:202: in encode
+    chunks = self.iterencode(o, _one_shot=True)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/json/encoder.py:263: in iterencode
+    return _iterencode(o, 0)
+           ^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.encoder.JSONEncoder object at 0x7869cae77380>
+o = <MagicMock name='ProcessingResult.result_content' id='132395518825136'>
+
+    def default(self, o):
+        """Implement this method in a subclass such that it returns
+        a serializable object for ``o``, or calls the base implementation
+        (to raise a ``TypeError``).
+    
+        For example, to support arbitrary iterators, you could
+        implement default like this::
+    
+            def default(self, o):
+                try:
+                    iterable = iter(o)
+                except TypeError:
+                    pass
+                else:
+                    return list(iterable)
+                # Let the base class default method raise the TypeError
+                return super().default(o)
+    
+        """
+>       raise TypeError(f'Object of type {o.__class__.__name__} '
+                        f'is not JSON serializable')
+E       TypeError: Object of type MagicMock is not JSON serializable
+E       when serializing dict item 'content'
+
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/json/encoder.py:182: TypeError
+_ TestJobFeedbackObserverWaitingForGuard.test_completed_with_no_waiting_runs_normal_path _
+
+self = <AsyncMock name='mock.notify_watchers' id='132395588913872'>
+
+    def assert_called_once(self):
+        """assert that the mock was called only once.
+        """
+        if not self.call_count == 1:
+            msg = ("Expected '%s' to have been called once. Called %s times.%s"
+                   % (self._mock_name or 'mock',
+                      self.call_count,
+                      self._calls_repr()))
+>           raise AssertionError(msg)
+E           AssertionError: Expected 'notify_watchers' to have been called once. Called 0 times.
+
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/unittest/mock.py:965: AssertionError
+
+During handling of the above exception, another exception occurred:
+
+self = <tests.job_queue.test_in_progress_guard.TestJobFeedbackObserverWaitingForGuard object at 0x7869c1564b00>
+
+    @pytest.mark.asyncio
+    async def test_completed_with_no_waiting_runs_normal_path(self):
+        """Test B: waiting_for == 0 → normal completion path, notify 'completed'."""
+        mock_job = make_mock_job(status="processing")
+        observer, mock_jqs, mock_jrepo, _ = self._make_observer(
+            mock_job, waiting_for=0
+        )
+    
+        event = {
+            "event_type": "instance_lifecycle",
+            "data": {
+                "instance_id": "instance-456",
+                "status": "completed",
+                "error": None,
+            },
+        }
+        await observer._process_event(event)
+    
+        # Normal completion path: _finalize_job_db_sync was called.
+        sync_mock = observer._finalize_job_db_sync
+        sync_mock.assert_called_once()
+        args = sync_mock.call_args.args
+        assert args[2] == InstanceStatus.COMPLETED.value
+        assert args[0] == mock_job.job_id
+    
+        # notify_watchers was called with "completed" (terminal), not in_progress.
+>       mock_jqs.notify_watchers.assert_called_once()
+E       AssertionError: Expected 'notify_watchers' to have been called once. Called 0 times.
+
+tests/job_queue/test_in_progress_guard.py:426: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    daemon.services.job_feedback_observer:job_feedback_observer.py:2622 Failed to finalize job job-1234... status=completed: make_fake_sync.<locals>.fake_sync() takes 5 positional arguments but 6 were given
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-blueprint-lease-release/daemon/services/job_feedback_observer.py", line 1839, in _finalize_job
+    db_result = await asyncio.to_thread(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<7 lines>...
+    )
+    ^
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/threads.py", line 26, in to_thread
+    return await loop.run_in_executor(None, func_call)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py", line 86, in run
+    result = ctx.run(self.task)
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py", line 73, in run
+    return fn(*args, **kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/unittest/mock.py", line 1176, in __call__
+    return self._mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/unittest/mock.py", line 1180, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/unittest/mock.py", line 1247, in _execute_mock_call
+    result = effect(*args, **kwargs)
+TypeError: make_fake_sync.<locals>.fake_sync() takes 5 positional arguments but 6 were given
+_ TestJobFeedbackObserverWaitingForGuard.test_waiting_for_none_treated_as_zero _
+
+self = <tests.job_queue.test_in_progress_guard.TestJobFeedbackObserverWaitingForGuard object at 0x7869c1564c30>
+
+    @pytest.mark.asyncio
+    async def test_waiting_for_none_treated_as_zero(self):
+        """If waiting_for attribute is missing/None → treat as 0, run normal path."""
+        mock_job = make_mock_job(status="processing")
+        observer, mock_jqs, mock_jrepo, mock_im = self._make_observer(
+            mock_job, waiting_for=0
+        )
+        # Force getattr to return None
+        mock_im._instance_repository.get.return_value.waiting_for = None
+    
+        event = {
+            "event_type": "instance_lifecycle",
+            "data": {
+                "instance_id": "instance-456",
+                "status": "completed",
+                "error": None,
+            },
+        }
+        await observer._process_event(event)
+    
+        # Normal path runs because wf=0
+        sync_mock = observer._finalize_job_db_sync
+        sync_mock.assert_called_once()
+>       assert mock_jqs.notify_watchers.call_args.args[1] == "completed"
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: 'NoneType' object has no attribute 'args'
+
+tests/job_queue/test_in_progress_guard.py:454: AttributeError
+------------------------------ Captured log call -------------------------------
+ERROR    daemon.services.job_feedback_observer:job_feedback_observer.py:2622 Failed to finalize job job-1234... status=completed: make_fake_sync.<locals>.fake_sync() takes 5 positional arguments but 6 were given
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-blueprint-lease-release/daemon/services/job_feedback_observer.py", line 1839, in _finalize_job
+    db_result = await asyncio.to_thread(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<7 lines>...
+    )
+    ^
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/threads.py", line 26, in to_thread
+    return await loop.run_in_executor(None, func_call)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py", line 86, in run
+    result = ctx.run(self.task)
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py", line 73, in run
+    return fn(*args, **kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/unittest/mock.py", line 1176, in __call__
+    return self._mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/unittest/mock.py", line 1180, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/unittest/mock.py", line 1247, in _execute_mock_call
+    result = effect(*args, **kwargs)
+TypeError: make_fake_sync.<locals>.fake_sync() takes 5 positional arguments but 6 were given
+_ TestLifecycleEventCallSites.test_terminate_instance_publishes_lifecycle_event _
+
+self = <AsyncMock name='mock.terminate_instance' id='132395514384736'>
+args = ('test-instance',), kwargs = {'terminal_reason': 'aborted'}
+expected = call('test-instance', terminal_reason='aborted')
+actual = call('test-instance', terminal_reason='aborted', audit_sink=None)
+_error_message = <function NonCallableMock.assert_called_with.<locals>._error_message at 0x7869bb9d6fb0>
+cause = None
+
+    def assert_called_with(self, /, *args, **kwargs):
+        """assert that the last call was made with the specified arguments.
+    
+        Raises an AssertionError if the args and keyword args passed in are
+        different to the last call to the mock."""
+        if self.call_args is None:
+            expected = self._format_mock_call_signature(args, kwargs)
+            actual = 'not called.'
+            error_message = ('expected call not found.\nExpected: %s\n  Actual: %s'
+                    % (expected, actual))
+            raise AssertionError(error_message)
+    
+        def _error_message():
+            msg = self._format_mock_failure_message(args, kwargs)
+            return msg
+        expected = self._call_matcher(_Call((args, kwargs), two=True))
+        actual = self._call_matcher(self.call_args)
+        if actual != expected:
+            cause = expected if isinstance(expected, Exception) else None
+>           raise AssertionError(_error_message()) from cause
+E           AssertionError: expected call not found.
+E           Expected: terminate_instance('test-instance', terminal_reason='aborted')
+E             Actual: terminate_instance('test-instance', terminal_reason='aborted', audit_sink=None)
+
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/unittest/mock.py:986: AssertionError
+
+During handling of the above exception, another exception occurred:
+
+self = <AsyncMock name='mock.terminate_instance' id='132395514384736'>
+args = ('test-instance',), kwargs = {'terminal_reason': 'aborted'}
+
+    def assert_called_once_with(self, /, *args, **kwargs):
+        """assert that the mock was called exactly once and that that call was
+        with the specified arguments."""
+        if not self.call_count == 1:
+            msg = ("Expected '%s' to be called once. Called %s times.%s"
+                   % (self._mock_name or 'mock',
+                      self.call_count,
+                      self._calls_repr()))
+            raise AssertionError(msg)
+>       return self.assert_called_with(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AssertionError: expected call not found.
+E       Expected: terminate_instance('test-instance', terminal_reason='aborted')
+E         Actual: terminate_instance('test-instance', terminal_reason='aborted', audit_sink=None)
+E       
+E       pytest introspection follows:
+E       
+E       Kwargs:
+E       assert {'audit_sink'...n': 'aborted'} == {'terminal_reason': 'aborted'}
+E         
+E         Omitting 1 identical items, use -vv to show
+E         Left contains 1 more item:
+E         {'audit_sink': None}
+E         Use -v to get more diff
+
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/unittest/mock.py:998: AssertionError
+
+During handling of the above exception, another exception occurred:
+
+self = <tests.job_queue.test_instance_lifecycle_events.TestLifecycleEventCallSites object at 0x7869c3f37d90>
+
+    @pytest.mark.asyncio
+    async def test_terminate_instance_publishes_lifecycle_event(self):
+        """terminate_instance calls _publish_instance_lifecycle_event."""
+        from daemon.manager import InstanceManager
+        from daemon.services.instance_lifecycle import InstanceLifecycleService
+        from unittest.mock import AsyncMock
+    
+        # Create minimal mock setup
+        mock_config = MagicMock()
+        mock_config.persistence.db_path = ":memory:"
+        mock_config.llm.base_url = "http://localhost"
+        mock_config.llm.api_key = "test"
+        mock_config.llm.model = "test"
+        mock_config.llm.temperature = 0.7
+        mock_config.llm.request_timeout = 60
+        mock_config.compaction.enabled = False
+        mock_config.queue.discard_on_startup = False
+        mock_config.limits.max_children_per_instance = 5
+        mock_config.limits.llm_concurrency = 5
+        mock_config.limits.graph_recursion_limit = 50
+    
+        with patch.object(InstanceManager, '__init__', lambda self, config: None):
+            manager = InstanceManager.__new__(InstanceManager)
+            manager.config = mock_config
+    
+            # Setup mocks for lifecycle service
+            manager._lifecycle_service = MagicMock()
+            manager._lifecycle_service.terminate_instance = AsyncMock(return_value=True)
+    
+            # Call terminate
+            result = await manager.terminate_instance("test-instance")
+    
+            # Verify: termination succeeded
+            assert result is True
+    
+            # Verify: lifecycle service's terminate_instance was called
+            # Phase 2 (TD-3/TD-4): the manager facade now passes
+            # ``terminal_reason`` through to the lifecycle service so
+            # the watchover 3-strike discriminator reaches the JobItem
+            # column. The default is ``"aborted"`` for all existing
+            # call sites that don't override.
+>           manager._lifecycle_service.terminate_instance.assert_called_once_with(
+                "test-instance", terminal_reason="aborted"
+            )
+E           AssertionError: expected call not found.
+E           Expected: terminate_instance('test-instance', terminal_reason='aborted')
+E             Actual: terminate_instance('test-instance', terminal_reason='aborted', audit_sink=None)
+E           
+E           pytest introspection follows:
+E           
+E           Kwargs:
+E           assert {'audit_sink'...n': 'aborted'} == {'terminal_reason': 'aborted'}
+E             
+E             Omitting 1 identical items, use -vv to show
+E             Left contains 1 more item:
+E             {'audit_sink': None}
+E             Use -v to get more diff
+
+tests/job_queue/test_instance_lifecycle_events.py:291: AssertionError
+______ TestJobAnswerRegistration.test_create_job_tools_returns_job_answer ______
+
+self = <tests.job_queue.test_job_answer_tool.TestJobAnswerRegistration object at 0x7869c168de50>
+
+    def test_create_job_tools_returns_job_answer(self):
+        """``create_job_tools`` returns the ``job_answer`` tool as the
+        LAST entry (positional-index trap)."""
+        job_service = AsyncMock()
+        queue_mgmt_service = AsyncMock()
+        dead_letter_service = MagicMock()
+        manager = MagicMock()
+    
+        tools = create_job_tools(
+            job_service=job_service,
+            queue_mgmt_service=queue_mgmt_service,
+            dead_letter_service=dead_letter_service,
+            manager=manager,
+        )
+    
+        # Order-pin landmine (tidier #2 — Medium, 2026-09-22): ``job_answer``
+        # is the LAST entry in the returned list. Pin that + the three
+        # witnesses ([16] = job_inject, [17] = watch_job, [20] =
+        # watch_jobs) so a future insertion (the docstring on
+        # ``create_job_tools`` explicitly forbids this) cannot silently
+        # shift either the new tool or the three witnesses.
+        # ``tools[-1]`` is the ONLY place this positional index is
+        # acceptable — every other test in this file uses the
+        # name-based ``next(t for t in tools if t.name == ...)``
+        # lookup so the append-at-END contract does not have to hold
+        # for them.
+        last = tools[-1]
+>       assert last.name == "job_answer", (
+            f"Last tool in create_job_tools() should be 'job_answer', "
+            f"got {last.name!r}"
+        )
+E       AssertionError: Last tool in create_job_tools() should be 'job_answer', got 'job_resume'
+E       assert 'job_resume' == 'job_answer'
+E         
+E         - job_answer
+E         + job_resume
+
+tests/job_queue/test_job_answer_tool.py:1016: AssertionError
+_______________ TestJoberWatchIntegration.test_tool_registration _______________
+
+self = <tests.job_queue.test_jober_watch_integration.TestJoberWatchIntegration object at 0x7869c162d910>
+
+    def test_tool_registration(self):
+        """Task 4 & 5: Verify all 21 tools are registered correctly (12 original + 4 watch tools + job_continue + 4 Ari orchestrator tools)."""
+        job_service = AsyncMock()
+        job_service.use_virtual_job_resolver = False
+        queue_mgmt_service = AsyncMock()
+        dead_letter_service = MagicMock()
+        watcher_repo = MagicMock()
+    
+        tools = create_job_tools(
+            job_service=job_service,
+            queue_mgmt_service=queue_mgmt_service,
+            dead_letter_service=dead_letter_service,
+            current_instance_id="test-instance",
+            agent_id="jober",
+            watcher_repo=watcher_repo
+        )
+    
+        # Task 4: Should have 22 tools (12 original + 4 watch tools + job_continue + 4 Ari orchestrator tools + job_answer)
+>       assert len(tools) == 22
+E       assert 24 == 22
+E        +  where 24 = len([StructuredTool(name='job_create', description='Submit a new job to the queue. Use tool_help("job_create") for details...ls.pydantic.job_delete'>, extras={}, coroutine=<function create_job_tools.<locals>.job_delete at 0x7869bac5bd70>), ...])
+
+tests/job_queue/test_jober_watch_integration.py:686: AssertionError
+___________ TestJoberWatchIntegration.test_ensure_dev_sh_still_works ___________
+
+self = <tests.job_queue.test_jober_watch_integration.TestJoberWatchIntegration object at 0x7869c15efd10>
+
+    def test_ensure_dev_sh_still_works(self):
+        """ensure.md requirement: dev.sh should be runnable.
+    
+        Skip when port 8079 is already in use (e.g., the dev daemon is
+        already running locally) — dev.sh tries to bind to 8079 and
+        will exit immediately with ``[Errno 48] Address already in use``
+        in that case, which is not a real regression.
+        """
+        import os
+        import signal
+        import socket
+        import subprocess
+    
+        def _port_in_use(port: int) -> bool:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                return s.connect_ex(("127.0.0.1", port)) == 0
+    
+        if _port_in_use(8079):
+            pytest.skip(
+                "port 8079 is already in use (dev daemon is running); "
+                "cannot exercise dev.sh startup in this environment"
+            )
+    
+        proc: subprocess.Popen | None = None
+        project_root = "/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble"
+    
+        def _kill_process_group() -> None:
+            """Tear down dev.sh + any grandchildren (uvicorn worker, reloader)."""
+            nonlocal proc
+            if proc is None or proc.poll() is not None:
+                return
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                return
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+    
+        def _sweep_port_8079() -> None:
+            """Belt-and-braces: kill anything still bound to the dev port."""
+            try:
+                result = subprocess.run(
+                    ["lsof", "-ti:8079"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                return
+            for pid_str in result.stdout.split():
+                pid = pid_str.strip()
+                if not pid.isdigit():
+                    continue
+                try:
+                    os.kill(int(pid), signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    continue
+    
+        try:
+            # Run dev.sh in its own session/process group so we can kill the
+            # entire tree (bash + uvicorn + reloader worker) on exit. The
+            # external `timeout` only kills the direct child, leaking uvicorn.
+>           proc = subprocess.Popen(
+                ["bash", "./dev.sh"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                cwd=project_root,
+                start_new_session=True,
+            )
+
+tests/job_queue/test_jober_watch_integration.py:878: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/subprocess.py:1039: in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <Popen: returncode: 255 args: ['bash', './dev.sh']>
+args = ['bash', './dev.sh'], executable = b'bash', preexec_fn = None
+close_fds = True, pass_fds = ()
+cwd = '/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble'
+env = None, startupinfo = None, creationflags = 0, shell = False, p2cread = -1
+p2cwrite = -1, c2pread = 16, c2pwrite = 17, errread = 18, errwrite = 19
+restore_signals = True, gid = None, gids = None, uid = None, umask = -1
+start_new_session = True, process_group = -1
+
+    def _execute_child(self, args, executable, preexec_fn, close_fds,
+                       pass_fds, cwd, env,
+                       startupinfo, creationflags, shell,
+                       p2cread, p2cwrite,
+                       c2pread, c2pwrite,
+                       errread, errwrite,
+                       restore_signals,
+                       gid, gids, uid, umask,
+                       start_new_session, process_group):
+        """Execute program (POSIX version)"""
+    
+        if isinstance(args, (str, bytes)):
+            args = [args]
+        elif isinstance(args, os.PathLike):
+            if shell:
+                raise TypeError('path-like args is not allowed when '
+                                'shell is true')
+            args = [args]
+        else:
+            args = list(args)
+    
+        if shell:
+            # On Android the default shell is at '/system/bin/sh'.
+            unix_shell = ('/system/bin/sh' if
+                      hasattr(sys, 'getandroidapilevel') else '/bin/sh')
+            args = [unix_shell, "-c"] + args
+            if executable:
+                args[0] = executable
+    
+        if executable is None:
+            executable = args[0]
+    
+        sys.audit("subprocess.Popen", executable, args, cwd, env)
+    
+        if (_USE_POSIX_SPAWN
+                and os.path.dirname(executable)
+                and preexec_fn is None
+                and (not close_fds or _HAVE_POSIX_SPAWN_CLOSEFROM)
+                and not pass_fds
+                and cwd is None
+                and (p2cread == -1 or p2cread > 2)
+                and (c2pwrite == -1 or c2pwrite > 2)
+                and (errwrite == -1 or errwrite > 2)
+                and not start_new_session
+                and process_group == -1
+                and gid is None
+                and gids is None
+                and uid is None
+                and umask < 0):
+            self._posix_spawn(args, executable, env, restore_signals, close_fds,
+                              p2cread, p2cwrite,
+                              c2pread, c2pwrite,
+                              errread, errwrite)
+            return
+    
+        orig_executable = executable
+    
+        # For transferring possible exec failure from child to parent.
+        # Data format: "exception name:hex errno:description"
+        # Pickle is not used; it is complex and involves memory allocation.
+        errpipe_read, errpipe_write = os.pipe()
+        # errpipe_write must not be in the standard io 0, 1, or 2 fd range.
+        low_fds_to_close = []
+        while errpipe_write < 3:
+            low_fds_to_close.append(errpipe_write)
+            errpipe_write = os.dup(errpipe_write)
+        for low_fd in low_fds_to_close:
+            os.close(low_fd)
+        try:
+            try:
+                # We must avoid complex work that could involve
+                # malloc or free in the child process to avoid
+                # potential deadlocks, thus we do all this here.
+                # and pass it to fork_exec()
+    
+                if env is not None:
+                    env_list = []
+                    for k, v in env.items():
+                        k = os.fsencode(k)
+                        if b'=' in k:
+                            raise ValueError("illegal environment variable name")
+                        env_list.append(k + b'=' + os.fsencode(v))
+                else:
+                    env_list = None  # Use execv instead of execve.
+                executable = os.fsencode(executable)
+                if os.path.dirname(executable):
+                    executable_list = (executable,)
+                else:
+                    # This matches the behavior of os._execvpe().
+                    executable_list = tuple(
+                        os.path.join(os.fsencode(dir), executable)
+                        for dir in os.get_exec_path(env))
+                fds_to_keep = set(pass_fds)
+                fds_to_keep.add(errpipe_write)
+                self.pid = _fork_exec(
+                        args, executable_list,
+                        close_fds, tuple(sorted(map(int, fds_to_keep))),
+                        cwd, env_list,
+                        p2cread, p2cwrite, c2pread, c2pwrite,
+                        errread, errwrite,
+                        errpipe_read, errpipe_write,
+                        restore_signals, start_new_session,
+                        process_group, gid, gids, uid, umask,
+                        preexec_fn)
+                self._child_created = True
+            finally:
+                # be sure the FD is closed no matter what
+                os.close(errpipe_write)
+    
+            self._close_pipe_fds(p2cread, p2cwrite,
+                                 c2pread, c2pwrite,
+                                 errread, errwrite)
+    
+            # Wait for exec to fail or succeed; possibly raising an
+            # exception (limited in size)
+            errpipe_data = bytearray()
+            while True:
+                part = os.read(errpipe_read, 50000)
+                errpipe_data += part
+                if not part or len(errpipe_data) > 50000:
+                    break
+        finally:
+            # be sure the FD is closed no matter what
+            os.close(errpipe_read)
+    
+        if errpipe_data:
+            try:
+                pid, sts = os.waitpid(self.pid, 0)
+                if pid == self.pid:
+                    self._handle_exitstatus(sts)
+                else:
+                    self.returncode = sys.maxsize
+            except ChildProcessError:
+                pass
+    
+            try:
+                exception_name, hex_errno, err_msg = (
+                        errpipe_data.split(b':', 2))
+                # The encoding here should match the encoding
+                # written in by the subprocess implementations
+                # like _posixsubprocess
+                err_msg = err_msg.decode()
+            except ValueError:
+                exception_name = b'SubprocessError'
+                hex_errno = b'0'
+                err_msg = 'Bad exception data from child: {!r}'.format(
+                              bytes(errpipe_data))
+            child_exception_type = getattr(
+                    builtins, exception_name.decode('ascii'),
+                    SubprocessError)
+            if issubclass(child_exception_type, OSError) and hex_errno:
+                errno_num = int(hex_errno, 16)
+                if err_msg == "noexec:chdir":
+                    err_msg = ""
+                    # The error must be from chdir(cwd).
+                    err_filename = cwd
+                elif err_msg == "noexec":
+                    err_msg = ""
+                    err_filename = None
+                else:
+                    err_filename = orig_executable
+                if errno_num != 0:
+                    err_msg = os.strerror(errno_num)
+                if err_filename is not None:
+>                   raise child_exception_type(errno_num, err_msg, err_filename)
+E                   FileNotFoundError: [Errno 2] No such file or directory: '/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble'
+
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/subprocess.py:1990: FileNotFoundError
+
+During handling of the above exception, another exception occurred:
+
+self = <tests.job_queue.test_jober_watch_integration.TestJoberWatchIntegration object at 0x7869c15efd10>
+
+    def test_ensure_dev_sh_still_works(self):
+        """ensure.md requirement: dev.sh should be runnable.
+    
+        Skip when port 8079 is already in use (e.g., the dev daemon is
+        already running locally) — dev.sh tries to bind to 8079 and
+        will exit immediately with ``[Errno 48] Address already in use``
+        in that case, which is not a real regression.
+        """
+        import os
+        import signal
+        import socket
+        import subprocess
+    
+        def _port_in_use(port: int) -> bool:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                return s.connect_ex(("127.0.0.1", port)) == 0
+    
+        if _port_in_use(8079):
+            pytest.skip(
+                "port 8079 is already in use (dev daemon is running); "
+                "cannot exercise dev.sh startup in this environment"
+            )
+    
+        proc: subprocess.Popen | None = None
+        project_root = "/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble"
+    
+        def _kill_process_group() -> None:
+            """Tear down dev.sh + any grandchildren (uvicorn worker, reloader)."""
+            nonlocal proc
+            if proc is None or proc.poll() is not None:
+                return
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                return
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+    
+        def _sweep_port_8079() -> None:
+            """Belt-and-braces: kill anything still bound to the dev port."""
+            try:
+                result = subprocess.run(
+                    ["lsof", "-ti:8079"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                return
+            for pid_str in result.stdout.split():
+                pid = pid_str.strip()
+                if not pid.isdigit():
+                    continue
+                try:
+                    os.kill(int(pid), signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    continue
+    
+        try:
+            # Run dev.sh in its own session/process group so we can kill the
+            # entire tree (bash + uvicorn + reloader worker) on exit. The
+            # external `timeout` only kills the direct child, leaking uvicorn.
+            proc = subprocess.Popen(
+                ["bash", "./dev.sh"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                cwd=project_root,
+                start_new_session=True,
+            )
+            try:
+                stdout, stderr = proc.communicate(timeout=12)
+            except subprocess.TimeoutExpired as first_timeout:
+                # Kill the process group, then collect output with a bounded wait.
+                # An unbounded communicate() can hang if a reload child retains the
+                # inherited stdout/stderr pipes after the group leader exits.
+                _kill_process_group()
+                try:
+                    stdout, stderr = proc.communicate(timeout=5)
+                except subprocess.TimeoutExpired as second_timeout:
+                    stdout = second_timeout.output or first_timeout.output or ""
+                    stderr = second_timeout.stderr or first_timeout.stderr or ""
+                    if proc.stdout is not None:
+                        proc.stdout.close()
+                    if proc.stderr is not None:
+                        proc.stderr.close()
+                    _kill_process_group()
+                    if isinstance(stdout, bytes):
+                        stdout = stdout.decode(errors="replace")
+                    if isinstance(stderr, bytes):
+                        stderr = stderr.decode(errors="replace")
+    
+            # PASS criteria: dev.sh is runnable. It either exited cleanly (0),
+            # was terminated by the legacy external `timeout` (124), or was
+            # killed by us on purpose (negative rc = signal N). What we must
+            # NOT see is an immediate Python/import crash.
+            assert "Starting Ensemble Daemon" in stdout, (
+                f"dev.sh did not produce expected startup banner. stdout:\n{stdout}\n"
+                f"stderr:\n{stderr}"
+            )
+            assert proc.returncode in [0, 124] or proc.returncode < 0, (
+                f"dev.sh crashed unexpectedly (returncode={proc.returncode}). "
+                f"stderr:\n{stderr}"
+            )
+            print(f"dev.sh ran successfully (returncode={proc.returncode})")
+        except Exception as e:
+>           pytest.fail(f"dev.sh failed to run: {e}")
+E           Failed: dev.sh failed to run: [Errno 2] No such file or directory: '/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble'
+
+tests/job_queue/test_jober_watch_integration.py:922: Failed
+____________ TestJobWatcherRepository.test_add_watch_creates_record ____________
+
+self = <tests.job_queue.test_jober_watch_integration.TestJobWatcherRepository object at 0x7869c168fed0>
+watcher_repo = <daemon.repositories.job_queue.watcher_repository.JobWatcherRepository object at 0x7869bba42990>
+
+    def test_add_watch_creates_record(self, watcher_repo):
+        """Add watch creates a new record."""
+        watch = watcher_repo.add_watch("job-123", "instance-456")
+        assert watch.job_id == "job-123"
+        assert watch.instance_id == "instance-456"
+        # Default includes ALL watchable events (terminal + in_progress progress updates)
+>       assert watch.watch_events == ["completed", "failed", "cancelled", "dead_letter", "in_progress"]
+E       AssertionError: assert ['completed',...rogress', ...] == ['completed',...'in_progress']
+E         
+E         At index 1 diff: 'settled' != 'failed'
+E         Left contains 5 more items, first extra item: 'in_progress'
+E         Use -v to get more diff
+
+tests/job_queue/test_jober_watch_integration.py:944: AssertionError
+_ TestN8HotPathPin.test_mirror_work_id_renders_settled_via_primary_event_path __
+
+self = <tests.job_queue.test_n8_hot_path_pin.TestN8HotPathPin object at 0x7869c3f35bd0>
+
+    @pytest.mark.asyncio
+    async def test_mirror_work_id_renders_settled_via_primary_event_path(
+        self,
+    ) -> None:
+        """A mirror JobItem (job_type=message, terminal_reason=completed)
+        settling via the observer's PRIMARY event path fires
+        ``notify_watchers`` with ``status="settled"`` (the
+        per-kind-token), NOT ``status="completed"``.
+    
+        Failure mode the pin catches (the pre-fix bug): the
+        observer's post-commit outbox at the COMPLETED branch
+        hardcoded ``"completed"`` — the mirror's wire text said
+        ``completed ✓`` (the WRONG speaker under the per-kind
+        vocabulary; the mirror's transport-receipt terminal is
+        ``settled``, disjoint from work-outcome ``completed``).
+        """
+        instance_id = f"inst-n8-{uuid.uuid4().hex[:8]}"
+        mirror_jid = f"job-n8-mirror-{uuid.uuid4().hex[:8]}"
+    
+        observer, mock_jqs, _ = _build_observer_for_hot_path(
+            instance_id=instance_id,
+            mirror_work_id=mirror_jid,
+            task_work_ids=[],
+            job_id_for_instance=mirror_jid,
+        )
+    
+        # Drive the REAL handler: ``_process_event`` for an
+        # instance_lifecycle COMPLETED event. The flow goes
+        # ``_process_event`` → ``_finalize_job`` → post-commit
+        # outbox → ``notify_watchers``. The sync DB write is the
+        # only step bypassed (mocked to return a fake result so the
+        # rest of the production code runs).
+        event = {
+            "event_type": "instance_lifecycle",
+            "data": {
+                "instance_id": instance_id,
+                "status": "completed",
+                "error": None,
+            },
+        }
+        await observer._process_event(event)
+    
+        # The post-commit outbox must have fired notify_watchers for
+        # the mirror work_id. Inspect the call args — the per-kind
+        # token is the second positional arg.
+        notify_calls = mock_jqs.notify_watchers.await_args_list
+>       assert len(notify_calls) >= 1, (
+            "post-commit outbox must fire notify_watchers for the "
+            "mirror work_id; got zero calls. The event flow "
+            "(_process_event -> _finalize_job -> post-commit outbox) "
+            "is the PRIMARY event path; a zero-call here means the "
+            "flow didn't reach the outbox (mock surface miss)."
+        )
+E       AssertionError: post-commit outbox must fire notify_watchers for the mirror work_id; got zero calls. The event flow (_process_event -> _finalize_job -> post-commit outbox) is the PRIMARY event path; a zero-call here means the flow didn't reach the outbox (mock surface miss).
+E       assert 0 >= 1
+E        +  where 0 = len([])
+
+tests/job_queue/test_n8_hot_path_pin.py:346: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    daemon.services.job_feedback_observer:job_feedback_observer.py:2622 Failed to finalize job job-n8-m... status=completed: _build_observer_for_hot_path.<locals>._fake_sync() takes 5 positional arguments but 6 were given
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-blueprint-lease-release/daemon/services/job_feedback_observer.py", line 1827, in _finalize_job
+    db_result = await asyncio.to_thread(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<7 lines>...
+    )
+    ^
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/threads.py", line 26, in to_thread
+    return await loop.run_in_executor(None, func_call)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py", line 86, in run
+    result = ctx.run(self.task)
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py", line 73, in run
+    return fn(*args, **kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/unittest/mock.py", line 1176, in __call__
+    return self._mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/unittest/mock.py", line 1180, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/unittest/mock.py", line 1247, in _execute_mock_call
+    result = effect(*args, **kwargs)
+TypeError: _build_observer_for_hot_path.<locals>._fake_sync() takes 5 positional arguments but 6 were given
+______ TestRunningZombieReArmWiring.test_pre_stamp_hold_schedules_a_heal _______
+
+self = <AsyncMock name='mock._mission_strand_healer.heal_running_zombie' id='132395514388768'>
+args = ('root-zombie',), kwargs = {}
+msg = 'Expected heal_running_zombie to have been awaited once. Awaited 0 times.'
+
+    def assert_awaited_once_with(self, /, *args, **kwargs):
+        """
+        Assert that the mock was awaited exactly once and with the specified
+        arguments.
+        """
+        if not self.await_count == 1:
+            msg = (f"Expected {self._mock_name or 'mock'} to have been awaited once."
+                   f" Awaited {self.await_count} times.")
+>           raise AssertionError(msg)
+E           AssertionError: Expected heal_running_zombie to have been awaited once. Awaited 0 times.
+
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/unittest/mock.py:2404: AssertionError
+
+During handling of the above exception, another exception occurred:
+
+self = <tests.job_queue.test_running_zombie_sweep.TestRunningZombieReArmWiring object at 0x7869c168ed50>
+zombie_harness = <class 'tests.job_queue.test_running_zombie_sweep.ZombieHarness'>
+
+    @pytest.mark.asyncio
+    async def test_pre_stamp_hold_schedules_a_heal(self, zombie_harness):
+        """The hold fires ⇒ a heal is scheduled (the lane is chosen by
+        the root's posture: ``running`` ⇒ the running-zombie lane)."""
+        healer = MagicMock()
+        healer.heal_running_zombie = AsyncMock(
+            return_value={"healed": False, "reason": "unit-mock"}
+        )
+        healer.heal_instance = AsyncMock(
+            return_value={"healed": False, "reason": "unit-mock"}
+        )
+        zombie_harness.manager._mission_strand_healer = healer
+        # A recently-active member ⇒ the guard holds the mission ⇒
+        # the pre-stamp hold fires.
+        _seed_incident_tree(
+            zombie_harness.engine,
+            member_activity_age=timedelta(minutes=30),
+        )
+        with _patch_drive_seams():
+            await zombie_harness.service\
+                ._process_child_completion_and_notify_parent(
+                    ROOT, "msg-incident-1",
+                )
+        for _ in range(3):
+            await asyncio.sleep(0)
+>       healer.heal_running_zombie.assert_awaited_once_with(ROOT)
+E       AssertionError: Expected heal_running_zombie to have been awaited once. Awaited 0 times.
+
+tests/job_queue/test_running_zombie_sweep.py:1688: AssertionError
+_____ TestTerminalWriteCensus.test_every_terminal_write_site_is_classified _____
+
+self = <tests.job_queue.test_terminal_write_census.TestTerminalWriteCensus object at 0x7869c1458f50>
+
+    def test_every_terminal_write_site_is_classified(self):
+        """Walker is the source of truth; the fixture is the allow-list.
+    
+        A discovered site absent from ``TERMINAL_WRITE_CENSUS`` fails
+        with its file:line + shape and the THREE remediations.
+        """
+>       _assert_sites_classified(discover_terminal_write_sites())
+
+tests/job_queue/test_terminal_write_census.py:646: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+sites = [DiscoveredSite(file='daemon/manager.py', line=12575, shape='_process_child_completion_and_notify_parent', function='_...ile='daemon/repositories/job_queue/repository.py', line=4240, shape='atomic_transition', function='complete_job'), ...]
+
+    def _assert_sites_classified(sites: list[DiscoveredSite]) -> None:
+        """The census assertion — shared by the green gate and the RED
+        simulation so the failure message cannot drift from the gate."""
+        missing = [site for site in sites if _entry_for(site) is None]
+>       assert not missing, (
+            "UNLISTED TERMINAL-WRITE SITE(S) discovered in daemon/ — "
+            "the notify contract (Shape (b) §3) requires one of:\n"
+            "  1. HOOK it: fire `await job_queue_service.notify_watchers("
+            "job_id, <canonical token>)` post-commit at the service/"
+            "processor caller (pattern exemplar: "
+            "job_recovery_service._fail_orphaned_job);\n"
+            "  2. CLASSIFY it hooked: add a TERMINAL_WRITE_CENSUS entry "
+            "with classification='hooked' and hooked_at=<file>:<line> of "
+            "the notify call;\n"
+            "  3. CLASSIFY it exempt: add an entry with "
+            "classification='exempt' and the reason as the on-call "
+            "breadcrumb.\n"
+            + "\n".join(
+                f"  - {s.file}:{s.line} shape={s.shape} "
+                f"function={s.function}"
+                for s in missing
+            )
+        )
+E       AssertionError: UNLISTED TERMINAL-WRITE SITE(S) discovered in daemon/ — the notify contract (Shape (b) §3) requires one of:
+E           1. HOOK it: fire `await job_queue_service.notify_watchers(job_id, <canonical token>)` post-commit at the service/processor caller (pattern exemplar: job_recovery_service._fail_orphaned_job);
+E           2. CLASSIFY it hooked: add a TERMINAL_WRITE_CENSUS entry with classification='hooked' and hooked_at=<file>:<line> of the notify call;
+E           3. CLASSIFY it exempt: add an entry with classification='exempt' and the reason as the on-call breadcrumb.
+E           - daemon/manager.py:9044 shape=_process_child_completion_and_notify_parent function=_on_stale_task_permanent_failure
+E           - daemon/repositories/prompt_version/repository.py:1697 shape=atomic_transition function=submit_for_approval
+E           - daemon/repositories/prompt_version/repository.py:1731 shape=atomic_transition function=approve
+E           - daemon/repositories/prompt_version/repository.py:1765 shape=atomic_transition function=reject
+E           - daemon/repositories/prompt_version/repository.py:1920 shape=atomic_transition function=approve_assent
+E           - daemon/repositories/prompt_version/repository.py:1959 shape=atomic_transition function=reject_assent
+E           - daemon/services/job_processor.py:843 shape=atomic_transition function=_terminally_refuse_skill_evolution_job
+E           - daemon/services/job_recovery_service.py:5270 shape=force_finalize_orphan function=_pattern_h_zombie_active_close
+E           - daemon/services/prompt_version_service.py:1214 shape=atomic_transition function=retract
+E           - daemon/services/prompt_version_service.py:1291 shape=atomic_transition function=atomic_transition
+E           - daemon/services/prompt_version_service.py:1200 shape=atomic_transition function=retract
+E           - daemon/services/stale_running_sweep.py:1207 shape=_process_child_completion_and_notify_parent function=_drive
+E       assert not [DiscoveredSite(file='daemon/manager.py', line=9044, shape='_process_child_completion_and_notify_parent', function='_o...aemon/repositories/prompt_version/repository.py', line=1959, shape='atomic_transition', function='reject_assent'), ...]
+
+tests/job_queue/test_terminal_write_census.py:574: AssertionError
+____ TestTerminalWriteCensus.test_hooked_entries_point_at_live_notify_calls ____
+
+self = <tests.job_queue.test_terminal_write_census.TestTerminalWriteCensus object at 0x7869c1566b10>
+
+    def test_hooked_entries_point_at_live_notify_calls(self):
+        """Anti-rot: every ``hooked`` entry's ``hooked_at`` must point at
+        a real ``notify_watchers`` call within ±5 lines."""
+        stale = []
+        for entry in TERMINAL_WRITE_CENSUS:
+            if entry.classification != "hooked":
+                continue
+            assert ":" in entry.hooked_at, (
+                f"hooked entry {entry.file} {entry.site} ({entry.anchor}) "
+                f"is missing hooked_at"
+            )
+            path, _, line = entry.hooked_at.rpartition(":")
+            if not _notify_near(path, int(line)):
+                stale.append(entry.hooked_at)
+>       assert not stale, (
+            f"hooked_at entries no longer point at a notify_watchers "
+            f"call (±5 lines) — the hook moved; update the census "
+            f"fixture: {stale}"
+        )
+E       AssertionError: hooked_at entries no longer point at a notify_watchers call (±5 lines) — the hook moved; update the census fixture: ['daemon/services/task_processor.py:1087', 'daemon/services/task_processor.py:1087', 'daemon/services/job_recovery_service.py:894', 'daemon/services/job_recovery_service.py:894', 'daemon/services/child_reports.py:3941', 'daemon/services/child_reports.py:3941', 'daemon/services/child_reports.py:3941', 'daemon/services/child_reports.py:3941', 'daemon/services/job_recovery_service.py:1294', 'daemon/services/job_queue_service.py:1296', 'daemon/services/job_queue_service.py:1296', 'daemon/services/job_queue_service.py:1362', 'daemon/services/job_recovery_service.py:3925', 'daemon/services/job_recovery_service.py:766', 'daemon/services/job_recovery_service.py:766', 'daemon/services/job_queue_service.py:3967', 'daemon/services/job_queue_service.py:1175', 'daemon/services/job_feedback_observer.py:2071', 'daemon/services/job_recovery_service.py:766', 'daemon/services/job_recovery_service.py:4112', 'daemon/services/job_recovery_service.py:4261', 'daemon/services/child_reports.py:5457', 'daemon/services/child_reports.py:5457']
+E       assert not ['daemon/services/task_processor.py:1087', 'daemon/services/task_processor.py:1087', 'daemon/services/job_recovery_ser...es/job_recovery_service.py:894', 'daemon/services/child_reports.py:3941', 'daemon/services/child_reports.py:3941', ...]
+
+tests/job_queue/test_terminal_write_census.py:707: AssertionError
+________________ TestSequentialAddWatch.test_first_call_inserts ________________
+
+self = <tests.job_queue.test_watcher_repository_concurrent.TestSequentialAddWatch object at 0x7869c1459810>
+watcher_repo = <daemon.repositories.job_queue.watcher_repository.JobWatcherRepository object at 0x7869bac799a0>
+
+    def test_first_call_inserts(self, watcher_repo):
+        watch = watcher_repo.add_watch("job-seq-1", "instance-seq-1")
+        assert watch.job_id == "job-seq-1"
+        assert watch.instance_id == "instance-seq-1"
+        # Default events are all watchable events (terminal + in_progress).
+>       assert watch.watch_events == [
+            "completed",
+            "failed",
+            "cancelled",
+            "dead_letter",
+            "in_progress",
+        ]
+E       AssertionError: assert ['completed',...rogress', ...] == ['completed',...'in_progress']
+E         
+E         At index 1 diff: 'settled' != 'failed'
+E         Left contains 5 more items, first extra item: 'in_progress'
+E         Use -v to get more diff
+
+tests/job_queue/test_watcher_repository_concurrent.py:158: AssertionError
+___ TestConcurrentAddWatch.test_concurrent_threads_default_events_single_row ___
+
+self = <tests.job_queue.test_watcher_repository_concurrent.TestConcurrentAddWatch object at 0x7869c1567360>
+watcher_repo = <daemon.repositories.job_queue.watcher_repository.JobWatcherRepository object at 0x7869c14b4730>
+shared_sqlite_engine = Engine(sqlite:////tmp/pytest-of-nea/pytest-4176/test_concurrent_threads_defaul0/job_watchers.db)
+
+    def test_concurrent_threads_default_events_single_row(
+        self, watcher_repo, shared_sqlite_engine
+    ):
+        """Concurrent calls with no event list (default) collapse to one
+        row, and the row keeps the default ALL_WATCHABLE_EVENTS list."""
+        n_threads = 5
+        job_id = "job-default"
+        instance_id = "instance-default"
+        barrier = threading.Barrier(n_threads)
+    
+        def worker() -> None:
+            barrier.wait()
+            watcher_repo.add_watch(job_id, instance_id)
+    
+        with ThreadPoolExecutor(max_workers=n_threads) as pool:
+            list(pool.map(lambda _: worker(), range(n_threads)))
+    
+        assert _row_count(shared_sqlite_engine, job_id, instance_id) == 1
+        with Session(shared_sqlite_engine) as session:
+            watch = session.exec(
+                select(JobWatcher).where(
+                    JobWatcher.job_id == job_id,
+                    JobWatcher.instance_id == instance_id,
+                )
+            ).one()
+>       assert watch.watch_events == [
+            "completed",
+            "failed",
+            "cancelled",
+            "dead_letter",
+            "in_progress",
+        ]
+E       AssertionError: assert ['completed',...rogress', ...] == ['completed',...'in_progress']
+E         
+E         At index 1 diff: 'settled' != 'failed'
+E         Left contains 5 more items, first extra item: 'in_progress'
+E         Use -v to get more diff
+
+tests/job_queue/test_watcher_repository_concurrent.py:315: AssertionError
+_ TestA1CounterBlockVisibility.test_counter_block_logs_when_examined_gt_zero_even_reconciled_0 _
+
+self = <tests.job_queue.test_zombie_active_close_amendments.TestA1CounterBlockVisibility object at 0x7869c168ee90>
+j_engine = Engine(sqlite:///:memory:), j_bus = <MagicMock id='132395509594304'>
+caplog = <_pytest.logging.LogCaptureFixture object at 0x7869bb51a120>
+
+    async def test_counter_block_logs_when_examined_gt_zero_even_reconciled_0(
+        self, j_engine, j_bus, caplog
+    ):
+        """A1: a held-only cycle (examined=1, finalized=0) MUST
+        surface the (h) block — the api loop's A1 log path keys on
+        ``examined > 0``, NOT ``reconciled > 0`` (static pin — the
+        consumer block reads zombie_stats.examined before logging)."""
+        assert re.search(
+            r"zombie_stats\s*=\s*stats\.get\(\"zombie_close\"\)", _API_SRC
+        ), "the loop must consume the (h) counter block"
+        assert (
+            re.search(
+                r"if zombie_stats\.get\(\"examined\", 0\) > 0:", _API_SRC
+            )
+            is not None
+        ), (
+            "the (h) log gate must key on examined>0 alone (A1) — "
+            "colon-terminated, no appended conjunct"
+        )
+        # Tidier fold: the forbidden form is BROADENED to any
+        # `and`-conjunct following the gate predicate on the same
+        # logical line — the narrow `and\s+reconciled` form missed
+        # the token-between shape (e.g. an intermediary
+        # `zombie_stats.get("reconciled", ...)` conjunct).
+        assert (
+            re.search(
+                r"examined\", 0\) > 0\s+and\b[^\n]*reconciled",
+                _API_SRC,
+            )
+            is None
+        ), "the examined>0 gate must NOT be conjointed with reconciled"
+        # Behavioral half: a held candidate produces examined=1,
+        # finalized=0 in the stats dict (the input the loop gates on).
+        ref = insert_zombie_fixture(
+            j_engine, verdict="completed", age_hours=3.0
+        )
+        # live sibling ⇒ hold
+        with j_engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO instances (instance_id, agent_id, "
+                    "agent_dir, status, project_id, created_at, "
+                    "updated_at, version, parent_id, last_activity_at) "
+                    "VALUES (:s, 'worker', 'agents/worker', 'running', "
+                    "'test-project', :n, :n, 1, :p, :a)"
+                ),
+                {
+                    "s": f"inst-j-sib-{uuid.uuid4().hex[:6]}",
+                    "n": "2026-10-30 00:00:00",
+                    "p": ref["instance_id"],
+                    "a": "2026-10-31 00:00:00",
+                },
+            )
+        service = make_recovery_service(j_engine)
+        stats = await (
+            service.reconcile_drift_states(
+                min_pending_age_seconds=0, min_orphan_age_seconds=60
+            )
+        )
+        zc = stats.get("zombie_close") or {}
+>       assert zc.get("examined", 0) == 1, zc
+E       AssertionError: {'age_qualified': 0, 'error_skips': 0, 'examined': 0, 'finalized': 0, ...}
+E       assert 0 == 1
+E        +  where 0 = <built-in method get of dict object at 0x7869bb52f480>('examined', 0)
+E        +    where <built-in method get of dict object at 0x7869bb52f480> = {'age_qualified': 0, 'error_skips': 0, 'examined': 0, 'finalized': 0, ...}.get
+
+tests/job_queue/test_zombie_active_close_amendments.py:148: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  daemon.services.job_recovery_service:job_recovery_service.py:3146 reconcile_drift_states: Pattern (f2) mission-live guard opened the finalize door for job job-zc-c... (error=False, timed_out=True): mission-tree backstop fires: non-terminal members present AND freshest tree-member last_activity_at (root excluded) is 2265153s old (>21600s threshold) — zombie-break, at-least-once terminal delivery takes precedence
+WARNING  daemon.services.job_recovery_service:job_recovery_service.py:3170 reconcile_drift_states: Pattern (f2) finalized orphan ACTIVE JobItem job-zc-c... (task 1, instance inst-zc-...) to DONE — Task was COMPLETED but the JobItem never transitioned. Watchers fired/cancelled.
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-blueprint-lease-release/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+tests/job_queue/test_zombie_active_close_amendments.py: 12 warnings
+  /home/nea/ensemble-src-wt-blueprint-lease-release/.venv/lib/python3.14/site-packages/sqlalchemy/engine/default.py:952: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/job_queue/test_event_driven_completion.py::TestSite1InlineMirrorFinalize::test_hook_fires_settled_and_dual_fire_is_deduped
+FAILED tests/job_queue/test_event_driven_completion.py::TestSite1InlineMirrorFinalize::test_pre_terminal_task_completes_on_success_fully
+FAILED tests/job_queue/test_event_driven_completion.py::TestSite1InlineMirrorFinalize::test_hook_skips_when_finalize_races_to_none
+FAILED tests/job_queue/test_in_progress_guard.py::TestJobFeedbackObserverWaitingForGuard::test_completed_with_no_waiting_runs_normal_path
+FAILED tests/job_queue/test_in_progress_guard.py::TestJobFeedbackObserverWaitingForGuard::test_waiting_for_none_treated_as_zero
+FAILED tests/job_queue/test_instance_lifecycle_events.py::TestLifecycleEventCallSites::test_terminate_instance_publishes_lifecycle_event
+FAILED tests/job_queue/test_job_answer_tool.py::TestJobAnswerRegistration::test_create_job_tools_returns_job_answer
+FAILED tests/job_queue/test_jober_watch_integration.py::TestJoberWatchIntegration::test_tool_registration
+FAILED tests/job_queue/test_jober_watch_integration.py::TestJoberWatchIntegration::test_ensure_dev_sh_still_works
+FAILED tests/job_queue/test_jober_watch_integration.py::TestJobWatcherRepository::test_add_watch_creates_record
+FAILED tests/job_queue/test_n8_hot_path_pin.py::TestN8HotPathPin::test_mirror_work_id_renders_settled_via_primary_event_path
+FAILED tests/job_queue/test_running_zombie_sweep.py::TestRunningZombieReArmWiring::test_pre_stamp_hold_schedules_a_heal
+FAILED tests/job_queue/test_terminal_write_census.py::TestTerminalWriteCensus::test_every_terminal_write_site_is_classified
+FAILED tests/job_queue/test_terminal_write_census.py::TestTerminalWriteCensus::test_hooked_entries_point_at_live_notify_calls
+FAILED tests/job_queue/test_watcher_repository_concurrent.py::TestSequentialAddWatch::test_first_call_inserts
+FAILED tests/job_queue/test_watcher_repository_concurrent.py::TestConcurrentAddWatch::test_concurrent_threads_default_events_single_row
+FAILED tests/job_queue/test_zombie_active_close_amendments.py::TestA1CounterBlockVisibility::test_counter_block_logs_when_examined_gt_zero_even_reconciled_0
+17 failed, 51 passed, 2 skipped, 13 warnings in 29.58s
