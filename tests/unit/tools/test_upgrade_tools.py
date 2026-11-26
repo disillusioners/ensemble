@@ -4046,6 +4046,19 @@ class TestRefusalTaxonomy:
         "no-staged-install",
         "journal-unavailable",
         "layout-divergence",
+        # promote-db-preflight-validation (2026-11-26): the EIGHT-token
+        # backup-artifact validation family — all eight are DOCUMENTED in
+        # system_upgrade._full_doc_ (as reason=<token>) and emitted by the
+        # arm preflight; the two mode tokens are refused at dry-run time too
+        # (before any nonce is minted).
+        "db-preflight-registry-unavailable",
+        "db-preflight-no-backup",
+        "db-preflight-artifact-broken",
+        "db-preflight-artifact-empty",
+        "db-preflight-artifact-stale",
+        "db-preflight-journal-torn",
+        "db-preflight-full-dump-unavailable",
+        "db-preflight-mode-unknown",
     }
     RESTART_TOKENS = {
         "unknown-mode",

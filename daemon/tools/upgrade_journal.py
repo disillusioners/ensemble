@@ -48,6 +48,10 @@ the P2.1 fields keeps working because its own fields are never removed):
 * ``pending_op``      — null | D-FA1.1 record (ONE op at a time).
 * ``pending_restart`` — null | "<run_id>" (phase2-plan D2 restart marker).
 * ``pending_actions`` — {} | {"<run_id>": {nonce record}} (D-FA3.3).
+* ``pending_wakes``   — {} | {"<run_id>": {wake record}} (ADR-039 post-restart arm-notify).
+* ``restart_audits``  — {} | {"<run_id>": {audit record}} (agent-restart §6.2, capped 50).
+* ``restart_window``  — {"events": [...]} (agent-restart sliding budget list).
+* ``db_preflight``    — null | {lane, artifact, bytes, finished_at, fingerprint_sha256, last_checked_at, verdict} (promote-db-preflight-validation D3 — the REMEMBERED backup-artifact identity; ONE compact current-value object, never a history).
 
 Terminal-class alert emission (P2.3 B3/T8a): a module-level sink registry
 (:func:`register_alert_sink` — default no-op, last-wins; the daemon boots
@@ -805,6 +809,14 @@ def ensure_extensions(install_dir: Path) -> dict[str, Any]:
         changed = True
     if "restart_window" not in data:
         data["restart_window"] = {"events": []}
+        changed = True
+    if "db_preflight" not in data:
+        # promote-db-preflight-validation (D3): the REMEMBERED backup-artifact
+        # identity — the SEVENTH extension key. Seeded as the ``None``
+        # placeholder (the ``pending_op``/``pending_restart`` shape), NOT the
+        # ``pending_wakes`` ``{}`` shape: the written value is the ONE
+        # compact object (:func:`record_db_preflight`).
+        data["db_preflight"] = None
         changed = True
     if changed:
         journal_write(install_dir, data)
@@ -1623,6 +1635,14 @@ class PendingOp:
     # shell lane MUST NOT write pending_op — D-P2.2).
     owner_pid_kind: str = ""
     owner_payload_pid: int = 0
+    # promote-db-preflight-validation (C2): the D6 opt-in value as passed on
+    # the tool call ("full-dump" | "validation-only" | None = absent ⇒
+    # validation-only). BOUND INTO THE OP so the journal ties the mode to
+    # the human's confirmation. It is a TOOL-CALL PARAMETER ONLY: it is NOT
+    # in EXECUTOR_ENV_ALLOWLIST / EXECUTOR_ENV_PREFIXES, NOT an argv flag
+    # and NOT in _verified_arm_extras — it never crosses the executor
+    # boundary (promote.sh has no case arm for it and needs none).
+    db_preflight: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -1850,6 +1870,38 @@ def arm_pending_wake(install_dir: Path, wake: PendingWake) -> None:
         )
     pending[wake.run_id] = payload
     data["pending_wakes"] = pending
+    journal_write(install_dir, data)
+
+
+def record_db_preflight(install_dir: Path, record: dict[str, Any]) -> None:
+    """Write the ``db_preflight`` record — the REMEMBERED backup-artifact
+    identity (promote-db-preflight-validation, D3) — under the journal's
+    existing atomic envelope, modelled on :func:`arm_pending_wake`.
+
+    ONE compact object (a current-value slot, never a history) whose shape
+    is::
+
+        {"lane": "pgdumpall", "artifact": "<name>", "bytes": <int>,
+         "finished_at": "<ISO-8601 Z>", "fingerprint_sha256": "<sha256>",
+         "last_checked_at": "<ISO-8601 Z>", "verdict": "validated" | "skipped"}
+
+    Must be called INSIDE the caller-acquired journal lock at the arm site
+    (:func:`daemon.tools.upgrade_tools.system_upgrade`, the backup-artifact
+    check); ``journal_write`` itself has no internal lock (architecture
+    delta #3 — atomicity is BY the caller's lock, not the journal's).
+
+    Written ONLY on a ``validated``/``skipped`` verdict — NEVER on a
+    refusal: the shape has no ``refused`` verdict, and on a refusal the
+    journal ``db_preflight_refused`` row is the truth.
+
+    The helper itself refuses nothing and NEVER writes over a torn journal:
+    a torn/absent/unparseable ``state.json`` raises :class:`JournalTorn`
+    out of :func:`ensure_extensions` — the CALLER maps that to the
+    ``db-preflight-journal-torn`` verdict (RACE-WINDOW-ONLY: an arm-entry
+    torn journal is refused earlier, pre-lock, as ``journal-unavailable``).
+    """
+    data = ensure_extensions(install_dir)
+    data["db_preflight"] = record
     journal_write(install_dir, data)
 
 
