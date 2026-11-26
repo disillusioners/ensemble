@@ -5,6 +5,21 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added — `ens_system_log_search` gains optional `start_line` (1-based) to anchor the search window at an earlier line; default path remains byte-identical, window bounded at MAX_LINES_SCAN (50 000), no SQL/migration.
+
+### Fixed — revive-wedge terminalization: a revived child that already delivered a report can terminalize again (Component A; staged, NO promote)
+
+- Root cause: v0.31.52 widened the report-mint guard in `daemon/services/child_reports.py` from anchor-exact to a per-child LIFETIME PREFIX. The guard early-returned `idempotency_skip` BEFORE the terminal status flip, so a revived child that had already delivered a report could never terminalize and stayed `status='running'` forever — LIVE and FLEET-WIDE. The narrow replaces that with a TWO-ARM guard: ARM A suppresses a same-anchor duplicate (including a prior COMPLETED report), and ARM B suppresses only while an OUTSTANDING obligation exists in `ready`/`processing`. Policy, stated plainly: **at most one OUTSTANDING obligation per child; a delivered prior report no longer blocks a new turn.**
+- Terminalization is DECOUPLED from the mint: on suppression the code sets `suppress_mint` and continues to the guarded terminal CAS instead of returning early, still returning `idempotency_skip`; the B4 cycle-2 re-mint (gated on the row now being COMPLETED) can therefore fire. The dead-code twin guard is kept in lockstep with the live one. The Shape-B stale-running sweep file is NOT modified — its existing drive now TERMINALIZES the victim, so the victim leaves the candidate set after one tick and the 2–7 s per-victim checkpoint read is paid once per victim, not eliminated. A revived child's new turn now produces a second report row that the parent receives: this is the intended behavior change, not a leak. No new table, column, index or migration; no lifecycle action in this lane.
+- Residual R-K2 is DISCLOSED, not hidden: an ARM-B suppression drops the newer turn's report. The loss is now observable and countable (below) rather than silent. INTERIM posture until this release is LIVE: cold-spawn all follow-ups; do NOT reuse/revive a completed instance. This posture lifts when the release promotes; staging alone does not lift it. STAGED ONLY — the Emperor's ceremony owns the flip.
+
+### Added — R-K2 observability records for the mint guard (Component A)
+
+- Every ACTUAL ARM-B suppression emits one loud `child_reports|arm-b-suppress` record carrying the child, BOTH anchors and the outstanding marker id plus `loss`/`total`; the defer path emits nothing. The module-level `_ARM_B_SUPPRESS_LOSS_TOTAL` counter increments by one ONLY when `loss=1` — the R-K2 content loss where the newer turn's report was actually dropped; a same-obligation no-op is `loss=0` / +0. The running total rides in every such line and resets on daemon restart.
+- Also shipped: an ARM-A-only suppression emits one `child_reports|arm-a-suppress` WARNING (child + both anchors + the matched marker id + status), and a mint that proceeds while an older obligation for the child is in `retrying` emits one INFO `child_reports|retrying-obligation` record — `retrying` is deliberately NOT a blocking status.
+
 ## [v0.31.54] — 2026-11-25
 
 ### Fixed — Dump-lane probe advisories R1/R2/R3 + curator filing (commission dump-health-nits-v03154)
