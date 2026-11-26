@@ -33,9 +33,13 @@ NAMED MUTATION LEGS (each must turn this file RED):
 * **M-G2** — revert to a shared ``:memory:`` with ``NullPool`` (every
   connection gets its OWN database) →
   :func:`test_g_pin_database_is_shared_across_connections` goes RED.
-* **M-G3** — serialize the production fan-out with a lock (the masking
-  anti-pattern) → :func:`test_g_pin_production_fanout_is_not_serialized`
-  goes RED.
+* **M-G3** — serialize the production resolve with a lock (the masking
+  anti-pattern) OR revert the F2 atomic-CAS routing (re-introduce the
+  ``asyncio.gather`` triple) →
+  :func:`test_g_pin_production_fanout_is_not_serialized`
+  goes RED. (Re-pinned 2026-11-26: F2 replaced the three-way
+  ``asyncio.gather`` fan-out with the CAS single-transaction path by
+  mandate; the pin now asserts the atomic routing + lock-freeness.)
 * **M-G4** — delete the ">= 3 consecutive FULL-FILE-SET greens"
   acceptance helper → :func:`test_g_pin_acceptance_helper_requires_three_full_file_set_greens`
   goes RED (import error).
@@ -103,30 +107,51 @@ def test_g_pin_database_is_shared_across_connections(engine):
 
 
 def test_g_pin_production_fanout_is_not_serialized():
-    """M-G3 — the production resolve fan-out must stay CONCURRENT.
+    """M-G3 — the production resolve must stay lock-free AND atomic.
 
-    A lock around the fan-out would MASK the race instead of fixing it
+    A lock around the resolve would MASK the race instead of fixing it
     (DS-21/DS-29: "a lock would mask the defect, not fix it"). The
-    fan-out must keep fanning out via ``asyncio.to_thread`` and must
-    not be wrapped in a lock/semaphore.
+    original pin asserted the three-way ``asyncio.gather`` fan-out —
+    F2 (2026-11-26) SUPERSEDED that mechanism by mandate: the three
+    independent gather transactions were the defect (a mid-flight
+    failure left the pair half-resolved), so ``check_ab_test_resolution``
+    now routes its resolution through the CAS-guarded single-
+    transaction path (``_atomic_resolve_triple`` →
+    ``SkillABTestRepository.resolve_atomic``), exactly like the
+    sanctioned resolver. This pin now asserts BOTH halves of the new
+    invariant: the atomic CAS routing is present, and no
+    lock/semaphore wraps it.
     """
     from daemon.services.skill_evolution_service import SkillEvolutionService
 
     source = inspect.getsource(SkillEvolutionService.check_ab_test_resolution)
+    helper = inspect.getsource(
+        SkillEvolutionService._atomic_resolve_triple
+    )
 
-    assert "asyncio.gather" in source, (
-        "the A/B resolve fan-out no longer uses asyncio.gather"
+    assert "_atomic_resolve_triple" in source, (
+        "check_ab_test_resolution no longer routes its resolution "
+        "through the atomic CAS helper"
     )
-    assert source.count("asyncio.to_thread") >= 3, (
-        "the A/B resolve fan-out must fan out at least three operations "
-        "concurrently (deactivate + resolve + update)"
+    assert "self._skill_repo.deactivate" not in source and (
+        "self._ab_test_repo.resolve," not in source
+    ) and "self._skill_repo.update" not in source, (
+        "check_ab_test_resolution resumed mutating the pair directly "
+        "(deactivate/resolve/update fan-out — the F2 defect shape); "
+        "the terminal mutations belong ONLY to the atomic CAS path"
     )
-    assert not re.search(r"\b(?:threading|asyncio)\.(?:RLock|Lock|Semaphore)\b", source), (
-        "the A/B resolve fan-out is wrapped in a lock/semaphore — that "
+    assert "resolve_atomic" in helper, (
+        "the atomic resolve helper no longer calls "
+        "SkillABTestRepository.resolve_atomic — the CAS + "
+        "single-transaction guarantee is gone"
+    )
+    combined = source + helper
+    assert not re.search(r"\b(?:threading|asyncio)\.(?:RLock|Lock|Semaphore)\b", combined), (
+        "the A/B resolve is wrapped in a lock/semaphore — that "
         "MASKS the shared-connection race instead of fixing it"
     )
-    assert not re.search(r"\b(?:Lock|Semaphore)\(", source), (
-        "the A/B resolve fan-out constructs a lock/semaphore — that "
+    assert not re.search(r"\b(?:Lock|Semaphore)\(", combined), (
+        "the A/B resolve constructs a lock/semaphore — that "
         "MASKS the shared-connection race instead of fixing it"
     )
 

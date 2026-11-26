@@ -1749,6 +1749,46 @@ class SkillEvolutionService:
     # Public API: A/B test resolution
     # --------------------------------------------------------
 
+    async def _atomic_resolve_triple(
+        self,
+        ab_test_group: str,
+        winner_id: str,
+        loser_id: str,
+    ) -> bool:
+        """F2 (2026-11-26): the ONE commit path for a resolution.
+
+        ``check_ab_test_resolution``'s three terminal branches (forced
+        winner / threshold met / force-resolved at max extensions)
+        used to run the ``{deactivate(loser), resolve(pair),
+        update(winner)}`` triple as three independent
+        ``asyncio.gather`` transactions — a mid-flight failure left the
+        pair HALF resolved, exactly the defect the sanctioned resolver
+        already fixed by routing through
+        :meth:`SkillABTestRepository.resolve_atomic`. All three now
+        share the same CAS-guarded single-transaction path (one
+        Session, one commit; loser ``is_active=False`` + winner
+        ``is_active=True`` + group cleared, atomically).
+
+        Returns:
+            ``True`` when this caller won the CAS (mutations
+            committed); ``False`` when the pair was resolved
+            concurrently — ZERO mutations applied (logged at WARNING).
+        """
+        cas_won = await asyncio.to_thread(
+            self._ab_test_repo.resolve_atomic,
+            ab_test_group,
+            winner_id,
+            loser_id,
+        )
+        if not cas_won:
+            logger.warning(
+                "[SkillEvolution] A/B test %s: atomic resolve CAS LOST "
+                "(pair already resolved concurrently) — no mutation "
+                "performed",
+                ab_test_group,
+            )
+        return cas_won
+
     async def check_ab_test_resolution(
         self,
         ab_test_group: str,
@@ -1761,7 +1801,8 @@ class SkillEvolutionService:
         0. **Forced winner** (``winner_id`` argument is set) →
            validate the ID against the two persisted variants,
            then run the same side effects as Path 2 / Path 3
-           (deactivate loser / resolve ab_test / promote winner).
+           (deactivate loser / resolve ab_test / promote winner —
+           F2: via the ONE atomic CAS path, ``_atomic_resolve_triple``).
            ``reason='forced_winner'``. Skips the threshold /
            extension evaluation — the caller has explicit
            authority to pick — but NOT the sample-size floor:
@@ -1950,21 +1991,17 @@ class SkillEvolutionService:
                 f"[SkillEvolution] A/B test {ab_test_group}: forced "
                 f"winner={winner_id} (loser={loser_id})"
             )
-            await asyncio.gather(
-                asyncio.to_thread(
-                    self._skill_repo.deactivate, loser_id,
-                ),
-                asyncio.to_thread(
-                    self._ab_test_repo.resolve,
-                    ab_test_group, winner_id,
-                ),
-                asyncio.to_thread(
-                    self._skill_repo.update,
-                    winner_id,
-                    ab_test_group=None,
-                    status="active",
-                ),
+            cas_won = await self._atomic_resolve_triple(
+                ab_test_group, winner_id, loser_id,
             )
+            if not cas_won:
+                return {
+                    "resolved": False,
+                    "winner_id": None,
+                    "loser_id": None,
+                    "reason": "cas_lost",
+                    "extension_count": extension_count,
+                }
             return {
                 "resolved": True,
                 "winner_id": winner_id,
@@ -2017,16 +2054,17 @@ class SkillEvolutionService:
                     f"ab_test_group {ab_test_group!r} is already resolved"
                 )
             winner_id, loser_id = _pick_winner()
-            await asyncio.gather(
-                asyncio.to_thread(self._skill_repo.deactivate, loser_id),
-                asyncio.to_thread(self._ab_test_repo.resolve, ab_test_group, winner_id),
-                asyncio.to_thread(
-                    self._skill_repo.update,
-                    winner_id,
-                    ab_test_group=None,
-                    status="active",
-                ),
+            cas_won = await self._atomic_resolve_triple(
+                ab_test_group, winner_id, loser_id,
             )
+            if not cas_won:
+                return {
+                    "resolved": False,
+                    "winner_id": None,
+                    "loser_id": None,
+                    "reason": "cas_lost",
+                    "extension_count": extension_count,
+                }
             return {
                 "resolved": True,
                 "winner_id": winner_id,
@@ -2056,16 +2094,17 @@ class SkillEvolutionService:
                 f"({max_ext}) reached, force-resolving by raw completion_rate "
                 f"(difference={difference:.3f} < threshold={min_diff})"
             )
-            await asyncio.gather(
-                asyncio.to_thread(self._skill_repo.deactivate, loser_id),
-                asyncio.to_thread(self._ab_test_repo.resolve, ab_test_group, winner_id),
-                asyncio.to_thread(
-                    self._skill_repo.update,
-                    winner_id,
-                    ab_test_group=None,
-                    status="active",
-                ),
+            cas_won = await self._atomic_resolve_triple(
+                ab_test_group, winner_id, loser_id,
             )
+            if not cas_won:
+                return {
+                    "resolved": False,
+                    "winner_id": None,
+                    "loser_id": None,
+                    "reason": "cas_lost",
+                    "extension_count": extension_count,
+                }
             return {
                 "resolved": True,
                 "winner_id": winner_id,

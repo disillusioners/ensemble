@@ -793,6 +793,9 @@ def _make_evolution_service(
     svc._ab_test_repo = MagicMock()
     svc._ab_test_repo.get_by_group = MagicMock(return_value=ab_test_row)
     svc._ab_test_repo.resolve = MagicMock()
+    # F2 (2026-11-26): the resolution side effect is now the atomic CAS
+    # path; the mock returns truthy (CAS won) by default.
+    svc._ab_test_repo.resolve_atomic = MagicMock(return_value=True)
     svc._skill_repo = MagicMock()
     svc._skill_repo.deactivate = MagicMock()
     svc._skill_repo.update = MagicMock()
@@ -832,19 +835,32 @@ class TestForcedABResolveGuard:
         with pytest.raises(ValueError, match="Forced A/B resolve refused"):
             await svc.check_ab_test_resolution(self.A_GROUP, winner_id="skill-new")
         svc._skill_repo.deactivate.assert_not_called()
-        svc._ab_test_repo.resolve.assert_not_called()
+        svc._ab_test_repo.resolve_atomic.assert_not_called()
         svc._skill_repo.update.assert_not_called()
 
     async def test_forced_resolve_at_sample_size_admitted(self):
-        """The operator-authority contract survives at/above sample size."""
+        """The operator-authority contract survives at/above sample size.
+
+        F2 (2026-11-26) re-pin: the three terminal mutations used to run
+        as three independent ``asyncio.gather`` transactions
+        (``deactivate`` + ``resolve`` + ``update``). They now run inside
+        ONE CAS-guarded single transaction —
+        ``SkillABTestRepository.resolve_atomic`` — so the SIDE-EFFECT
+        assertion targets the atomic call, and the per-mutation repo
+        mocks stay UNTOUCHED (the mutations happen inside the repo's own
+        session, not through these service-level collaborators).
+        """
         svc = _make_evolution_service(self._row(10), self._stats())
         result = await svc.check_ab_test_resolution(self.A_GROUP, winner_id="skill-new")
         assert result["resolved"] is True
         assert result["reason"] == "forced_winner"
         assert result["winner_id"] == "skill-new"
         assert result["loser_id"] == "skill-old"
-        svc._skill_repo.deactivate.assert_called_once()
-        svc._ab_test_repo.resolve.assert_called_once()
+        svc._ab_test_repo.resolve_atomic.assert_called_once_with(
+            self.A_GROUP, "skill-new", "skill-old"
+        )
+        svc._skill_repo.deactivate.assert_not_called()
+        svc._skill_repo.update.assert_not_called()
 
     async def test_unforced_resolve_below_sample_size_still_waits(self):
         """The normal decision tree is untouched (needs_more_data)."""

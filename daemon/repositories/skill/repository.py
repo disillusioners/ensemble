@@ -2356,7 +2356,9 @@ class SkillABTestRepository:
         2. the loser skill (``is_active=False``, ``status='inactive'``,
            ``ab_test_group`` RETAINED),
         3. the winner skill (``ab_test_group`` cleared,
-           ``status='active'``) —
+           ``status='active'``, ``is_active=True`` — F2: the winner is
+           explicitly RE-SERVABLE; the loser write deactivates so the
+           winner write must re-activate) —
 
         are applied inside ONE session / ONE transaction. The pair
         row is claimed with a compare-and-set UPDATE whose predicate
@@ -2437,6 +2439,15 @@ class SkillABTestRepository:
             else:
                 winner.ab_test_group = None
                 winner.status = "active"
+                # F2 (2026-11-26): the winner write MUST also restore
+                # servability. The loser write below sets
+                # ``is_active=False``; the winner side historically
+                # wrote ONLY ``ab_test_group``/``status`` — leaving the
+                # crowned variant ``is_active`` as-is (``False`` for a
+                # challenger that entered the pair via the deactivate-
+                # heavy promotion flow) and the resolution terminal
+                # state asymmetric. Same transaction, same commit.
+                winner.is_active = True
                 winner.updated_at = now
 
             session.commit()
