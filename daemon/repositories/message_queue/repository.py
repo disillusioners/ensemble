@@ -26,48 +26,66 @@ from sqlmodel import Session, select, col
 
 from daemon.constants import TERMINAL_INSTANCE_STATUSES
 
-def _receipt_preserve_arms_sql(engine: Engine) -> tuple[str, str]:
-    """F3 receipt arms, gated on their backing tables being present.
+class BootWipePredicateError(RuntimeError):
+    """The boot-wipe preserve predicate could not be evaluated.
 
-    Production (SQLModel ``create_all`` / migrations) always carries both
-    ``job_queue_items`` and ``event``. Minimal SQLite harnesses (and any
-    legacy deployment whose schema predates them) may not — an
-    unconditional join would turn the boot wipe into a hard
-    ``OperationalError`` and wedge the boot (the very defect this lane
-    exists to prevent). Degrade LOUDLY to the legacy predicate when a
-    table is absent; the FP1/Event preserve arms are simply unavailable
-    in that shape.
+    A DELETE whose predicate cannot be parsed or evaluated must fail
+    closed: no row is deleted, and the failure is logged at ERROR.
     """
-    # Raw dialect SQL — NO ``sqlalchemy.inspect`` import: some hermetic
-    # harnesses stub the sqlalchemy namespace module, and a lazy import
-    # under that stub would break the boot wipe (the exact wedge class
-    # this lane exists to prevent).
+
+
+def _receipt_preserve_arms_sql(engine: Engine) -> tuple[str, str]:
+    """FP1 / Event preserve arms, expressed over the ``task`` alias.
+
+    THIS IS THE SHARED PREDICATE SOURCE for the boot wipe. Both the
+    task-side ``TaskRepository.clear_all`` and the message-side
+    capture/DELETE re-check build their keep-set from
+    :func:`boot_wipe_preserve_predicate_sql`, which consumes these arms.
+    A table genuinely absent in a legacy schema still degrades to the
+    legacy predicate (with a warning) — that is the fallback's legitimate
+    case. An EVALUATION failure (bad SQL, dead connection, syntax error)
+    is different: it raises :class:`BootWipePredicateError` so no DELETE
+    can run with an unevaluable predicate.
+
+    The probe uses ``text()`` with bound parameters, NOT
+    ``exec_driver_sql``: raw driver SQL sends ``:tname`` literally on
+    psycopg (paramstyle=pyformat), producing
+    ``psycopg.errors.SyntaxError: syntax error at or near ":"`` on EVERY
+    boot. ``text()`` compiles to ``%(tname)s`` on psycopg and ``?`` on
+    sqlite, so the narrow predicate actually evaluates on both dialects.
+    """
     try:
         dialect_name = getattr(getattr(engine, "dialect", None), "name", "")
         if dialect_name == "sqlite":
-            probe_sql = (
+            probe = text(
                 "SELECT 1 FROM sqlite_master "
                 "WHERE type = 'table' AND name = :tname LIMIT 1"
             )
         else:
-            probe_sql = (
+            probe = text(
                 "SELECT 1 FROM information_schema.tables "
                 "WHERE table_name = :tname LIMIT 1"
             )
         with engine.connect() as probe_conn:
-            has_jobs = probe_conn.exec_driver_sql(
-                probe_sql, {"tname": "job_queue_items"}
-            ).first() is not None
-            has_events = probe_conn.exec_driver_sql(
-                probe_sql, {"tname": "event"}
-            ).first() is not None
-    except Exception as inspect_err:  # noqa: BLE001 — never wedge the wipe
-        logger.warning(
-            "JOURNAL: receipt-arm table probe failed (%s) — the mq wipe "
-            "degrades to the legacy running/paused predicate",
+            has_jobs = (
+                probe_conn.execute(probe, {"tname": "job_queue_items"}).first()
+                is not None
+            )
+            has_events = (
+                probe_conn.execute(probe, {"tname": "event"}).first() is not None
+            )
+    except Exception as inspect_err:  # noqa: BLE001 — re-raised fail-closed
+        logger.error(
+            "JOURNAL: boot-wipe receipt-arm table probe failed (%s) — "
+            "FAIL-CLOSED: no boot-wipe DELETE may run with an "
+            "unevaluable preserve predicate",
             inspect_err,
+            exc_info=True,
         )
-        return ("", "")
+        raise BootWipePredicateError(
+            "boot-wipe preserve predicate probe failed: "
+            f"{inspect_err!r}"
+        ) from inspect_err
     if not has_jobs:
         logger.warning(
             "JOURNAL: job_queue_items table absent — the MQ wipe's FP1 "
@@ -79,27 +97,91 @@ def _receipt_preserve_arms_sql(engine: Engine) -> tuple[str, str]:
             "receipt arm is unavailable (legacy predicate in force)"
         )
     fp1_arm = (
-        " OR EXISTS ("
+        "EXISTS ("
         "SELECT 1 FROM job_queue_items jqi "
-        "JOIN task t_fp1 ON t_fp1.work_id = jqi.job_id "
-        "WHERE t_fp1.message_id = message_queue.message_id "
+        "WHERE jqi.job_id = task.work_id "
         f"AND jqi.admission_state IN {active_admission_states_sql()} "
         "AND jqi.deleted_at IS NULL"
         ")"
     ) if has_jobs else ""
     event_arm = (
-        " OR EXISTS ("
-        "SELECT 1 FROM task t_ev "
-        "WHERE t_ev.message_id = message_queue.message_id "
-        "AND t_ev.status = 'pending' "
-        "AND EXISTS ("
+        "task.status = 'pending' AND EXISTS ("
         "SELECT 1 FROM event e "
-        "WHERE e.message_id = t_ev.message_id "
+        "WHERE e.message_id = task.message_id "
         "AND e.kind = 'message_received'"
-        ")"
         ")"
     ) if has_events else ""
     return (fp1_arm, event_arm)
+
+
+def boot_wipe_preserve_predicate_sql(
+    engine: Engine, *, arm3_active: bool
+) -> str:
+    """Single source of truth: SQL boolean over alias ``task``, TRUE for
+    every task row the boot wipe must PRESERVE.
+
+    Arms (same set on BOTH sides of the wipe):
+      1. task status running/paused;
+      2. FP1 — task anchors a non-terminal JobItem;
+      3. Event receipt — PENDING task whose message has a surviving
+         ``message_received`` Event;
+      4. F-1 arm 3 — terminal task stamped ``auto_continued_at`` whose
+         owning instance is still non-terminal (kill-switch gated).
+
+    The task wipe deletes ``NOT (this predicate)``; the message wipe
+    deletes messages whose task does not satisfy ``this predicate``.
+    """
+    fp1_arm, event_arm = _receipt_preserve_arms_sql(engine)
+    parts = ["task.status IN ('running', 'paused')"]
+    if fp1_arm:
+        parts.append(fp1_arm)
+    if event_arm:
+        parts.append(f"({event_arm})")
+    if arm3_active:
+        terminal_sql = (
+            "(" + ",".join(
+                f"'{s}'" for s in sorted(TERMINAL_INSTANCE_STATUSES)
+            ) + ")"
+        )
+        parts.append(
+            "(auto_continued_at IS NOT NULL AND EXISTS ("
+            "SELECT 1 FROM instances "
+            "WHERE instances.instance_id = task.instance_id "
+            f"AND instances.status NOT IN {terminal_sql}"
+            "))"
+        )
+    return "(" + " OR ".join(parts) + ")"
+
+
+def _orphan_error_column_available(engine: Engine) -> bool:
+    """Whether ``task.error`` / ``task.completed_at`` exist for the
+    orphan-fail UPDATE. Production always carries them; minimal legacy
+    harness schemas may not. Evaluation failure is fail-closed."""
+    dialect_name = getattr(getattr(engine, "dialect", None), "name", "")
+    try:
+        with engine.connect() as conn:
+            if dialect_name == "sqlite":
+                rows = conn.execute(text("PRAGMA table_info(task)")).all()
+                names = {r[1] for r in rows}
+            else:
+                rows = conn.execute(
+                    text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = 'task'"
+                    )
+                ).all()
+                names = {r[0] for r in rows}
+    except Exception as inspect_err:  # noqa: BLE001 — re-raised fail-closed
+        logger.error(
+            "JOURNAL: boot-wipe task-column probe failed (%s) — "
+            "FAIL-CLOSED: no boot-wipe DELETE may run",
+            inspect_err,
+            exc_info=True,
+        )
+        raise BootWipePredicateError(
+            f"boot-wipe task-column probe failed: {inspect_err!r}"
+        ) from inspect_err
+    return {"error", "completed_at"}.issubset(names)
 
 from daemon.repositories.job_queue.models import (
     active_admission_states_sql,
@@ -1359,58 +1441,40 @@ class SQLModelMessageQueueRepository:
         arm3_active = _message_queue_boot_auto_continued_preserve_enabled()
         with Session(self.engine) as session:
             if preserve_in_flight:
-                if arm3_active:
-                    _terminal_instance_statuses_sql = (
-                        "(" + ",".join(
-                            f"'{s}'" for s in sorted(TERMINAL_INSTANCE_STATUSES)
-                        ) + ")"
-                    )
-                    _arm3_keep_sql = (
-                        " OR ("
-                        "auto_continued_at IS NOT NULL "
-                        "AND EXISTS ("
-                        "SELECT 1 FROM instances "
-                        "WHERE instances.instance_id = task.instance_id "
-                        f"AND instances.status NOT IN {_terminal_instance_statuses_sql}"
-                        ")"
-                        ")"
-                    )
-                else:
-                    _arm3_keep_sql = ""
+                if not arm3_active:
                     logger.warning(
                         "JOURNAL: MessageQueueRepository.clear_all "
                         "kill-switch %s=0 — arm 3 DISABLED; "
                         "preserve predicate reverts to pre-F-1 "
-                        "(arm 1 only).",
+                        "(arms 1 + FP1 + Event).",
                         MESSAGE_QUEUE_BOOT_AUTO_CONTINUED_PRESERVE_KILL_SWITCH_ENV,
                     )
-                _fp1_arm_sql, _event_arm_sql = _receipt_preserve_arms_sql(
-                    self.engine
+                # SHARED PREDICATE (task/repository.py consumes the same
+                # helper): the message-side keep-set is no longer a
+                # hand-copied disjunction that can drift from the task
+                # side. An unevaluable predicate raises here — before
+                # any doomed-id list is returned to the DELETE phase.
+                preserve_sql = boot_wipe_preserve_predicate_sql(
+                    self.engine, arm3_active=arm3_active
                 )
                 # Capture doomed ids BEFORE the wipe.
                 #
                 # F3 (fix/post-outage-recovery b2) — the mq wipe ALIGNS
                 # with the task wipe's keep arms (the asymmetry defect:
                 # a task could be preserved by FP1 while its message row
-                # was deleted). Two preserve arms beyond the legacy
-                # running/paused task-status IN:
-                #   * FP1 alignment — the row's task anchors a
-                #     non-terminal JobItem (same admission vocabulary as
-                #     the task wipe's FP1 arm);
-                #   * Event receipt — the row's task is PENDING and its
-                #     message has a surviving ``message_received`` Event
-                #     (the receipt-of-truth; the enqueue committed and is
-                #     not doomed). Scoped to PENDING tasks in lockstep
-                #     with the task wipe's Event arm so terminal-backlog
-                #     rows stay doomed (pruner role intact).
+                # was deleted). The shared predicate keeps:
+                #   * running/paused tasks;
+                #   * tasks anchoring a non-terminal JobItem (FP1);
+                #   * PENDING tasks with a surviving message_received
+                #     Event (receipt-of-truth);
+                #   * F-1 arm-3 terminal-stamped rows of non-terminal
+                #     instances.
                 doomed_rows = session.exec(
                     text(
                         "SELECT message_id FROM message_queue "
                         "WHERE message_id NOT IN "
                         "(SELECT message_id FROM task "
-                        "WHERE status IN ('running', 'paused')"
-                        f"{_fp1_arm_sql}{_event_arm_sql}"
-                        f"{_arm3_keep_sql}"
+                        f"WHERE {preserve_sql}"
                         ")"
                     )
                 ).all()
@@ -1506,33 +1570,11 @@ class SQLModelMessageQueueRepository:
         # same NOT-IN subquery the capture ran, re-evaluated per chunk
         # against LIVE task state (F-1 contract: the audit and the
         # DELETE must agree on the predicate).
-        preserve_sql = ""
+        preserve_clause = ""
+        orphan_error_column = False
         if preserve_in_flight:
             arm3_active = _message_queue_boot_auto_continued_preserve_enabled()
-            terminal_sql = (
-                "(" + ",".join(f"'{s}'" for s in sorted(TERMINAL_INSTANCE_STATUSES)) + ")"
-            )
-            # F3 (fix/post-outage-recovery b2): the DELETE re-check
-            # predicate mirrors the CAPTURE predicate EXACTLY (the F-1
-            # contract: audit and DELETE agree) — running/paused task
-            # status + the FP1-alignment arm + the Event receipt arm.
-            _fp1_arm_sql, _event_arm_sql = _receipt_preserve_arms_sql(
-                self.engine
-            )
-            preserve_sql = (
-                " AND message_id NOT IN (SELECT message_id FROM task "
-                "WHERE status IN ('running', 'paused')"
-                f"{_fp1_arm_sql}{_event_arm_sql}"
-            )
-            if arm3_active:
-                preserve_sql += (
-                    " OR (auto_continued_at IS NOT NULL AND EXISTS ("
-                    "SELECT 1 FROM instances "
-                    "WHERE instances.instance_id = task.instance_id "
-                    f"AND instances.status NOT IN {terminal_sql})"
-                    ")"
-                )
-            else:
+            if not arm3_active:
                 logger.warning(
                     "JOURNAL: MessageQueueRepository.delete_doomed_ids "
                     "(DELETE_PHASE) preserve_in_flight=True but kill-switch "
@@ -1540,7 +1582,17 @@ class SQLModelMessageQueueRepository:
                     "(predicate matches the capture-time shape)",
                     MESSAGE_QUEUE_BOOT_AUTO_CONTINUED_PRESERVE_KILL_SWITCH_ENV,
                 )
-            preserve_sql += ")"
+            # The SAME shared predicate the task wipe uses. If it cannot
+            # be evaluated this raises BEFORE the chunk loop below, so
+            # no DELETE statement ever runs with a degraded predicate.
+            preserve_sql = boot_wipe_preserve_predicate_sql(
+                self.engine, arm3_active=arm3_active
+            )
+            preserve_clause = (
+                " AND message_id NOT IN (SELECT message_id FROM task "
+                f"WHERE {preserve_sql})"
+            )
+            orphan_error_column = _orphan_error_column_available(self.engine)
         # Chunk the doomed-id list; bounded DELETE-where-in per
         # chunk (matches the existing pre-P3 single-shot DELETE
         # shape, just chunked for safety on large doomed sets).
@@ -1555,10 +1607,45 @@ class SQLModelMessageQueueRepository:
             params = {f"id_{j}": cid for j, cid in enumerate(chunk)}
             sql = (
                 f"DELETE FROM message_queue WHERE message_id IN ({placeholders})"
-                f"{preserve_sql}"
+                f"{preserve_clause}"
             )
             with Session(self.engine) as session:
                 result = session.exec(text(sql), params=params)
+                if orphan_error_column:
+                    # Belt for the 42fd1984 shape: a PENDING task that
+                    # survived to DELETE time (race / pre-existing
+                    # inconsistency) must not be left claimable against
+                    # a vanished message. Runs in the SAME transaction
+                    # as the DELETE, after the row is gone, and is
+                    # scoped to the exact ids this chunk removed.
+                    orphan_reason = (
+                        "orphaned_by_boot_purge: backing message_queue "
+                        "row was deleted by the deferred boot purge"
+                    )
+                    orphan_params = dict(params)
+                    orphan_params["orphan_reason"] = orphan_reason
+                    orphan_params["orphan_at"] = now_utc_naive()
+                    orphan_result = session.exec(
+                        text(
+                            "UPDATE task SET status = 'failed', "
+                            "error = :orphan_reason, "
+                            "completed_at = :orphan_at "
+                            "WHERE status = 'pending' "
+                            f"AND message_id IN ({placeholders}) "
+                            "AND NOT EXISTS (SELECT 1 FROM message_queue mq "
+                            "WHERE mq.message_id = task.message_id)"
+                        ),
+                        params=orphan_params,
+                    )
+                    if orphan_result.rowcount:
+                        logger.error(
+                            "JOURNAL: MessageQueueRepository.delete_doomed_ids "
+                            "(DELETE_PHASE) orphan-failed %d PENDING task(s) "
+                            "whose backing message was deleted "
+                            "(reason=%s)",
+                            orphan_result.rowcount,
+                            orphan_reason,
+                        )
                 session.commit()
                 total_deleted += result.rowcount or 0
         logger.info(
@@ -1610,61 +1697,26 @@ class SQLModelMessageQueueRepository:
         arm3_active = _message_queue_boot_auto_continued_preserve_enabled()
         with Session(self.engine) as session:
             if preserve_in_flight:
-                if arm3_active:
-                    # F-1 arm 3 SQL fragment — terminal-stamped
-                    # rows of non-terminal instances (symmetric to
-                    # the task-side predicate).
-                    _terminal_instance_statuses_sql = (
-                        "(" + ",".join(
-                            f"'{s}'" for s in sorted(TERMINAL_INSTANCE_STATUSES)
-                        ) + ")"
-                    )
-                    _arm3_keep_sql = (
-                        " OR ("
-                        "auto_continued_at IS NOT NULL "
-                        "AND EXISTS ("
-                        "SELECT 1 FROM instances "
-                        "WHERE instances.instance_id = task.instance_id "
-                        f"AND instances.status NOT IN {_terminal_instance_statuses_sql}"
-                        ")"
-                        ")"
-                    )
-                else:
-                    _arm3_keep_sql = ""
+                if not arm3_active:
                     logger.warning(
                         "JOURNAL: MessageQueueRepository.clear_all "
                         "kill-switch %s=0 — arm 3 DISABLED; "
                         "preserve predicate reverts to pre-F-1 "
-                        "(arm 1 only).",
+                        "(arms 1 + FP1 + Event).",
                         MESSAGE_QUEUE_BOOT_AUTO_CONTINUED_PRESERVE_KILL_SWITCH_ENV,
                     )
-                _fp1_arm_sql, _event_arm_sql = _receipt_preserve_arms_sql(
-                    self.engine
+                # Shared predicate — the audit capture and the DELETE
+                # below use the SAME source as the task-side wipe.
+                preserve_sql = boot_wipe_preserve_predicate_sql(
+                    self.engine, arm3_active=arm3_active
                 )
-                # Capture doomed ids BEFORE the wipe.
-                #
-                # F3 (fix/post-outage-recovery b2) — the mq wipe ALIGNS
-                # with the task wipe's keep arms (the asymmetry defect:
-                # a task could be preserved by FP1 while its message row
-                # was deleted). Two preserve arms beyond the legacy
-                # running/paused task-status IN:
-                #   * FP1 alignment — the row's task anchors a
-                #     non-terminal JobItem (same admission vocabulary as
-                #     the task wipe's FP1 arm);
-                #   * Event receipt — the row's task is PENDING and its
-                #     message has a surviving ``message_received`` Event
-                #     (the receipt-of-truth; the enqueue committed and is
-                #     not doomed). Scoped to PENDING tasks in lockstep
-                #     with the task wipe's Event arm so terminal-backlog
-                #     rows stay doomed (pruner role intact).
+                orphan_error_column = _orphan_error_column_available(self.engine)
                 doomed_rows = session.exec(
                     text(
                         "SELECT message_id FROM message_queue "
                         "WHERE message_id NOT IN "
                         "(SELECT message_id FROM task "
-                        "WHERE status IN ('running', 'paused')"
-                        f"{_fp1_arm_sql}{_event_arm_sql}"
-                        f"{_arm3_keep_sql}"
+                        f"WHERE {preserve_sql}"
                         ")"
                     )
                 ).all()
@@ -1696,12 +1748,44 @@ class SQLModelMessageQueueRepository:
                     text(
                         "DELETE FROM message_queue WHERE message_id NOT IN "
                         "(SELECT message_id FROM task "
-                        "WHERE status IN ('running', 'paused')"
-                        f"{_arm3_keep_sql}"
+                        f"WHERE {preserve_sql}"
                         ")"
                     )
                 )
+                if orphan_error_column and doomed_ids:
+                    placeholders = ",".join(
+                        f":id_{j}" for j in range(len(doomed_ids))
+                    )
+                    orphan_params = {
+                        f"id_{j}": cid for j, cid in enumerate(doomed_ids)
+                    }
+                    orphan_params["orphan_reason"] = (
+                        "orphaned_by_boot_purge: backing message_queue "
+                        "row was deleted by the boot purge"
+                    )
+                    orphan_params["orphan_at"] = now_utc_naive()
+                    orphan_result = session.exec(
+                        text(
+                            "UPDATE task SET status = 'failed', "
+                            "error = :orphan_reason, "
+                            "completed_at = :orphan_at "
+                            "WHERE status = 'pending' "
+                            f"AND message_id IN ({placeholders}) "
+                            "AND NOT EXISTS (SELECT 1 FROM message_queue mq "
+                            "WHERE mq.message_id = task.message_id)"
+                        ),
+                        params=orphan_params,
+                    )
+                    if orphan_result.rowcount:
+                        logger.error(
+                            "JOURNAL: MessageQueueRepository.clear_all "
+                            "orphan-failed %d PENDING task(s) whose backing "
+                            "message was deleted (reason=%s)",
+                            orphan_result.rowcount,
+                            orphan_params["orphan_reason"],
+                        )
             else:
+                orphan_error_column = False
                 doomed_rows = session.exec(
                     text("SELECT message_id FROM message_queue")
                 ).all()

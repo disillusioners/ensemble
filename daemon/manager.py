@@ -1648,13 +1648,28 @@ class InstanceManager:
                 # on disk; the next boot's CAPTURE_PHASE will
                 # re-derive the same doomed set (predicate stable)
                 # and DELETE will run. Idempotency preserved.
-                logger.warning(
-                    f"discard_on_startup: CAPTURE_PHASE failed "
-                    f"({_capture_err!r}) — the next boot will "
-                    f"re-capture and retry; rows remain in the "
-                    f"queue until then",
-                    exc_info=True,
+                # A predicate-evaluation failure is different: it is
+                # logged at ERROR and stashes NO doomed ids, so the
+                # deferred DELETE cannot fire with a widened scope.
+                from daemon.repositories.message_queue.repository import (
+                    BootWipePredicateError as _PredicateError,
                 )
+
+                if isinstance(_capture_err, _PredicateError):
+                    logger.error(
+                        f"discard_on_startup: CAPTURE_PHASE predicate "
+                        f"FAIL-CLOSED ({_capture_err!r}) — no doomed "
+                        f"ids stashed; the deferred DELETE cannot fire",
+                        exc_info=True,
+                    )
+                else:
+                    logger.warning(
+                        f"discard_on_startup: CAPTURE_PHASE failed "
+                        f"({_capture_err!r}) — the next boot will "
+                        f"re-capture and retry; rows remain in the "
+                        f"queue until then",
+                        exc_info=True,
+                    )
                 self._pending_doomed_ids = []
 
             # Also discard backlog tasks (linked to messages).

@@ -5764,74 +5764,38 @@ class TaskRepository:
             # operator flips the env var between the two reads).
             arm3_active = _boot_auto_continued_preserve_enabled()
             if preserve_in_flight:
-                # Capture doomed work_ids BEFORE the wipe. The
-                # doomed set is the preserve-complement: every
-                # task row that the preserve predicate would
-                # NOT save (not RUNNING/PAUSED AND not
-                # anchoring a non-terminal JobItem AND not
-                # F-1-arm-3-stamped on a non-terminal instance).
-                # The arm-3 mirror keeps the doomed-id list
-                # honest so the audit log is not over-broad
-                # when the kill-switch is ON.
-                _terminal_instance_statuses_sql = (
-                    "(" + ",".join(
-                        f"'{s}'" for s in sorted(TERMINAL_INSTANCE_STATUSES)
-                    ) + ")"
-                )
-                if arm3_active:
-                    _arm3_mirror_sql = (
-                        "AND NOT ("
-                        "auto_continued_at IS NOT NULL "
-                        "AND EXISTS ("
-                        "SELECT 1 FROM instances "
-                        "WHERE instances.instance_id = task.instance_id "
-                        f"AND instances.status NOT IN {_terminal_instance_statuses_sql}"
-                        ")"
-                        ")"
-                    )
-                else:
-                    # Kill-switch OFF: arm 3 is disabled; the doomed
-                    # set reverts to the exact pre-F-1 mirror.
-                    _arm3_mirror_sql = ""
+                if not arm3_active:
                     logger.warning(
                         "JOURNAL: TaskRepository.clear_all "
                         "kill-switch %s=0 — arm 3 DISABLED; "
                         "preserve predicate reverts to pre-F-1 "
-                        "(arms 1 + FP1 only).",
+                        "(arms 1 + FP1 + Event).",
                         BOOT_AUTO_CONTINUED_PRESERVE_KILL_SWITCH_ENV,
                     )
+                # SHARED PREDICATE SOURCE (b0a02363 / 20c13d1f): the queue
+                # side builds its keep-set from the SAME helper. The two
+                # sides can no longer drift (the old queue-side probe
+                # swallowed a psycopg syntax error and dropped the FP1 /
+                # Event arms while this side kept them, leaving PENDING
+                # tasks against deleted messages). An unevaluable
+                # predicate raises BootWipePredicateError here — before
+                # any DELETE is issued.
+                from daemon.repositories.message_queue.repository import (
+                    boot_wipe_preserve_predicate_sql,
+                )
+
+                preserve_sql = boot_wipe_preserve_predicate_sql(
+                    self.engine, arm3_active=arm3_active
+                )
+                doomed_sql = f"NOT {preserve_sql}"
+                # Capture doomed work_ids BEFORE the wipe. The doomed
+                # set is the preserve-complement: every task row that
+                # the shared preserve predicate does not keep —
+                # i.e. not running/paused, not anchoring a non-terminal
+                # JobItem, not a receipt-backed PENDING row, and not
+                # an F-1 arm-3 stamped row of a non-terminal instance.
                 doomed_rows = db_session.exec(
-                    text(
-                        "SELECT work_id FROM task "
-                        "WHERE status NOT IN ('running', 'paused') "
-                        "AND NOT EXISTS ("
-                        "SELECT 1 FROM job_queue_items jqi "
-                        "WHERE jqi.job_id = task.work_id "
-                        f"AND jqi.admission_state IN {active_admission_states_sql()} "
-                        "AND jqi.deleted_at IS NULL)"
-                        # F3 (fix/post-outage-recovery b2) — the Event
-                        # receipt arm's AUDIT MIRROR: a PENDING task whose
-                        # message has a surviving ``message_received``
-                        # Event is NOT doomed (the Event is the
-                        # receipt-of-truth — the enqueue committed). The
-                        # mirror keeps the doomed-id audit list honest
-                        # (the audit and the DELETE must agree, F-1
-                        # contract).
-                        " AND NOT ("
-                        "task.status = 'pending' "
-                        "AND EXISTS ("
-                        "SELECT 1 FROM event e "
-                        "WHERE e.message_id = task.message_id "
-                        "AND e.kind = 'message_received'"
-                        ")"
-                        ")"
-                        # Render the arm-3 suffix only when present —
-                        # with the kill-switch OFF the suffix is ""
-                        # and the unconditional f-string rendered a
-                        # trailing space into the audit SQL string
-                        # (post-review green #4).
-                        + (f" {_arm3_mirror_sql}" if _arm3_mirror_sql else "")
-                    )
+                    text(f"SELECT work_id FROM task WHERE {doomed_sql}")
                 ).all()
                 doomed_work_ids = [r[0] for r in doomed_rows if r[0] is not None]
                 logger.warning(
@@ -5842,97 +5806,12 @@ class TaskRepository:
                     len(doomed_work_ids),
                     _capped_doomed_id_repr(doomed_work_ids),
                 )
-                # FP1 (2026-10-03, report-delivery-bug-family) — extend
-                # the preserve predicate to cover PENDING tasks that
-                # anchor a non-terminal JobItem. The legacy predicate
-                # only preserved RUNNING/PAUSED rows, so a PENDING
-                # driving task was wiped by the boot-wipe while the
-                # JobItem survived, stranding the JobItem with no
-                # driver (the env-poison dev-boot-on-prod incident
-                # family).
-                #
-                # Cross-dialect preservation: the ``admission_state``
-                # check uses the canonical ``ACTIVE_ADMISSION_STATES``
-                # SQL IN-list (``'active','queued'``) so the predicate
-                # stays in lockstep with the queue-side admission
-                # vocabulary. Both SQLite and PostgreSQL accept the
-                # same IN-list literal (no dialect shim required).
-                #
-                # F-1 (durability-f1-f2 / phase1, plan §2, §13b) —
-                # wipe-side ownership block:
-                # ``daemon/services/instance_lifecycle.py`` (boot
-                # step 1: ``InstanceManager`` constructor's
-                # ``discard_on_startup`` wipe; plan §5). The
-                # ``_parent_errored`` flip in ``dependency_bus.py``
-                # and this wipe are the F-1 contract's two seams.
-                stmt = sql_delete(Task).where(
-                    Task.status.notin_([
-                        TaskStatus.RUNNING.value,
-                        TaskStatus.PAUSED.value,
-                    ])
-                ).where(
-                    text(
-                        "NOT EXISTS ("
-                        "SELECT 1 FROM job_queue_items jqi "
-                        "WHERE jqi.job_id = task.work_id "
-                        f"AND jqi.admission_state IN {active_admission_states_sql()} "
-                        "AND jqi.deleted_at IS NULL"
-                        ")"
-                    )
-                ).where(
-                    # F3 (fix/post-outage-recovery b2) — the Event RECEIPT
-                    # arm. Shape A of the adjudicated post-outage wedge
-                    # pair: the plain-revive enqueue (``enqueue_message``,
-                    # NOT job-driven) creates Task PENDING + a
-                    # ``message_received`` Event but NO JobItem, so the
-                    # FP1 arm above was inapplicable and the boot-wipe
-                    # DELETED a committed, unconsumed enqueue whose
-                    # durable receipt survived. The wipe's contract is
-                    # "discard doomed orphans" — a committed enqueue with
-                    # a surviving receipt is NOT doomed. Scoped to
-                    # PENDING only: terminal backlog (completed/failed/
-                    # cancelled) stays doomed so the backlog-clear keeps
-                    # its pruner role (the live host's volume discipline
-                    # depends on it).
-                    text(
-                        "NOT ("
-                        "task.status = 'pending' "
-                        "AND EXISTS ("
-                        "SELECT 1 FROM event e "
-                        "WHERE e.message_id = task.message_id "
-                        "AND e.kind = 'message_received'"
-                        ")"
-                        ")"
-                    )
-                )
-                if arm3_active:
-                    # F-1 arm 3 (plan §2, §13b) — terminal task rows
-                    # with an ``auto_continued_at`` marker whose
-                    # owning instance is still non-terminal are
-                    # PRESERVED. The negation here is the
-                    # delete-eligibility complement: delete the row
-                    # only when the marker is missing OR the
-                    # instance is already terminal. The
-                    # ``instances`` join is the FIRST instance-join
-                    # introduced into ``clear_all`` SQL — the table
-                    # is read-only here and the join is a
-                    # correlated-EXISTS so the wipe stays
-                    # single-statement. Gated by
-                    # ``ENSEMBLE_BOOT_AUTO_CONTINUED_PRESERVE``;
-                    # kill-switch OFF (=0) restores the exact
-                    # pre-F-1 predicate.
-                    stmt = stmt.where(
-                        text(
-                            "NOT ("
-                            "auto_continued_at IS NOT NULL "
-                            "AND EXISTS ("
-                            "SELECT 1 FROM instances "
-                            "WHERE instances.instance_id = task.instance_id "
-                            f"AND instances.status NOT IN {_terminal_instance_statuses_sql}"
-                            ")"
-                            ")"
-                        )
-                    )
+                # DELETE eligibility is the exact complement of the
+                # shared preserve predicate (same SQL text the queue
+                # side uses): running/paused + FP1 + Event receipt +
+                # F-1 arm-3 rows all survive; only backlog orphans are
+                # wiped. No hand-copied disjunction remains here.
+                stmt = sql_delete(Task).where(text(doomed_sql))
             else:
                 doomed_rows = db_session.exec(
                     text("SELECT work_id FROM task")

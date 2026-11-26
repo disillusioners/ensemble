@@ -316,12 +316,26 @@ async def _deferred_delete_doomed_ids(manager, app, doomed_ids: list[str]) -> No
             f"will re-derive and retry; rows remain until then"
         )
     except Exception as _del_err:
-        logger.warning(
-            f"deferred DELETE_PHASE failed (arm={fired_via}; "
-            f"doomed_ids={len(doomed_ids)}; err={_del_err!r}) — "
-            f"the next boot's CAPTURE_PHASE will re-derive and retry",
-            exc_info=True,
+        from daemon.repositories.message_queue.repository import (
+            BootWipePredicateError as _PredicateError,
         )
+
+        if isinstance(_del_err, _PredicateError):
+            logger.error(
+                f"deferred DELETE_PHASE predicate FAIL-CLOSED "
+                f"(arm={fired_via}; doomed_ids={len(doomed_ids)}; "
+                f"err={_del_err!r}) — ZERO rows deleted; the "
+                f"narrow predicate must be repaired before the "
+                f"next purge",
+                exc_info=True,
+            )
+        else:
+            logger.warning(
+                f"deferred DELETE_PHASE failed (arm={fired_via}; "
+                f"doomed_ids={len(doomed_ids)}; err={_del_err!r}) — "
+                f"the next boot's CAPTURE_PHASE will re-derive and retry",
+                exc_info=True,
+            )
     finally:
         # Clear the manager's stashed list so a re-entrant lifespan
         # (tests that re-instantiate the manager) doesn't re-fire.
