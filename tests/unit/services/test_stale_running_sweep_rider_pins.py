@@ -37,6 +37,13 @@ transport boundaries (the dependency bus singleton) are fakes.
 FAIL-HONEST: the NIT-1 / NIT-2 / NIT-4 / NIT-6 pins are RED at the
 pre-rider base (1eda81daa) — verified in a throwaway /tmp worktree,
 removed + pruned afterwards.
+
+Additive note (revive-wedge, 2026-11-25): the NIT-1 per-child PREFIX
+invariant is refined to "at most one OUTSTANDING obligation per child"
+-- a DELIVERED prior report no longer blocks a new turn (see plan.md
+Sec. 2 / design.md Sec. 5). The three behavioural NIT-1 pins above
+stay GREEN and UNCHANGED under the two-arm disjunction; NEW-1 and NEW-5
+(new class TestReviveWedgeNarrow) pin the refined semantics.
 """
 
 from __future__ import annotations
@@ -703,3 +710,124 @@ class TestNit3DocstringHonesty:
         doc = srs.__doc__ or ""
         assert "CHAIN IS THE NET FOR THE OLD-LIVE-DESCENDANT" in doc
         assert "old-live-descendant" in doc
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Revive-wedge narrow — NEW-1 (row iii) and NEW-5 (ARM A load-bearing)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestReviveWedgeNarrow:
+    @pytest.mark.asyncio
+    async def test_new_anchor_with_prior_delivered_report_mints_a_second_row(
+        self, rider_harness,
+    ):
+        """NEW-1 (truth-table row (iii)): a DIFFERENT anchor + a prior
+        COMPLETED (DELIVERED) report ⇒ the guard does NOT suppress, so a
+        SECOND report row is minted carrying the new anchor, and the
+        child terminalizes to COMPLETED.
+
+        The two rows are the INTENDED consequence of the new policy
+        (PL-6 variant B / K11) — the parent must learn the revived
+        episode's outcome — NOT a leak. Do not treat the second row as a
+        defect.
+        """
+        engine = rider_harness.engine
+        _insert_instance(
+            engine, PARENT,
+            status=InstanceStatus.IDLE.value,
+            agent_id="leader",
+        )
+        _seed_shape_b(engine, instance_id=CHILD, parent_id=PARENT)
+        # The PRIOR report — COMPLETED (DELIVERED) under a DIFFERENT
+        # anchor. COMPLETED is deliberately NOT in ARM B (S-B), and the
+        # anchor differs, so ARM A misses too.
+        _insert_message(
+            engine,
+            instance_id=PARENT,
+            status=MessageStatus.COMPLETED.value,
+            message_id="msg-prior-delivered",
+            content="prior delivered report under anchor-A",
+            source=f"internal_report:{CHILD}:anchor-A",
+        )
+
+        with _patch_drive_seams():
+            await rider_harness.service._process_child_completion_and_notify_parent(
+                CHILD, "", skip_repair=True,
+            )
+
+        sources = _report_rows(engine, child_id=CHILD)
+        assert len(sources) == 2, (
+            f"NEW-1: expected TWO report rows (the new-anchor report is "
+            f"minted on top of the delivered prior), got {sources!r}"
+        )
+        assert f"internal_report:{CHILD}:anchor-A" in sources
+        # The second row carries the NEW (drive) anchor. The drive uses
+        # completed_message_id="" (latest_msg_id or ""), so the new anchor
+        # is the empty/degenerate form.
+        new_rows = [
+            s for s in sources if s != f"internal_report:{CHILD}:anchor-A"
+        ]
+        assert len(new_rows) == 1, new_rows
+        assert new_rows[0] == f"internal_report:{CHILD}:"
+
+        # The child still terminalizes (decoupling — the mint does not
+        # gate terminalization).
+        with engine.begin() as conn:
+            row = conn.execute(
+                text("SELECT status FROM instances WHERE instance_id = :i"),
+                {"i": CHILD},
+            ).first()
+        assert row is not None and row[0] == InstanceStatus.COMPLETED.value, row
+
+    @pytest.mark.asyncio
+    async def test_same_anchor_re_supplied_with_prior_delivered_report_does_not_mint(
+        self, rider_harness,
+    ):
+        """NEW-5 (ARM A is load-bearing — review C5): the SAME anchor
+        re-supplied (the router re-entry shape) with the prior report
+        already DELIVERED (COMPLETED, which is in S-A but NOT in S-B) ⇒
+        ARM A suppresses the mint: NO second report row, and the child
+        still terminalizes (row (i)).
+
+        RED at base (no terminalization at base) and RED under mutation
+        L2c (collapse the guard to ARM B alone ⇒ ARM A gone ⇒ a second
+        row is minted).
+        """
+        engine = rider_harness.engine
+        _insert_instance(
+            engine, PARENT,
+            status=InstanceStatus.IDLE.value,
+            agent_id="leader",
+        )
+        _seed_shape_b(engine, instance_id=CHILD, parent_id=PARENT)
+        # The PRIOR report — COMPLETED (DELIVERED) under the SAME anchor
+        # the drive will re-supply (the empty/degenerate form, since the
+        # drive uses completed_message_id="").
+        _insert_message(
+            engine,
+            instance_id=PARENT,
+            status=MessageStatus.COMPLETED.value,
+            message_id="msg-prior-delivered-same",
+            content="prior delivered report under empty anchor",
+            source=f"internal_report:{CHILD}:",
+        )
+
+        with _patch_drive_seams():
+            await rider_harness.service._process_child_completion_and_notify_parent(
+                CHILD, "", skip_repair=True,
+            )
+
+        sources = _report_rows(engine, child_id=CHILD)
+        assert len(sources) == 1, (
+            f"NEW-5: ARM A must suppress the second mint; expected ONE "
+            f"row, got {sources!r}"
+        )
+        assert sources[0] == f"internal_report:{CHILD}:"
+
+        with engine.begin() as conn:
+            row = conn.execute(
+                text("SELECT status FROM instances WHERE instance_id = :i"),
+                {"i": CHILD},
+            ).first()
+        assert row is not None and row[0] == InstanceStatus.COMPLETED.value, row

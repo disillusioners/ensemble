@@ -787,3 +787,72 @@ class TestStructural:
         """The lane's terminal vocabulary is the house constant."""
         assert TERMINAL_INSTANCE_STATUSES >= {"completed", "error",
                                               "terminated", "failed"}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Revive-wedge drive outcome — NEW drive-outcome pin (L5)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestReviveWedgeDriveOutcome:
+    @pytest.mark.asyncio
+    async def test_revive_wedge_victim_lands_in_healed(
+        self, srs_harness, caplog,
+    ):
+        """L5: the sweep's drive on a revive-wedge victim terminalizes the
+        child and lands in ``healed`` (P-DRIVE-OUTCOME), NEVER
+        ``drive-no-effect``. The P-DRIVE-LOG line fires with its
+        unchanged format, and the terminal reason is persisted onto the
+        row (NIT-6).
+
+        RED at base (the drive leaves the victim RUNNING, class=
+        drive-no-effect); GREEN at merge (the victim terminalizes).
+        """
+        import logging
+
+        caplog.set_level(logging.WARNING)
+        engine = srs_harness.engine
+        _seed_shape_b(engine)
+        sweep = _make_sweep(srs_harness)
+        assert sweep.census_stale_running() == 1
+        with _patch_drive_seams():
+            result = await sweep.sweep_once()
+        assert result.healed == 1, result
+        assert result.drive_no_effect == 0, result
+        assert result.errors == 0, result
+        row = _get_instance_row(engine, ROOT)
+        assert row.status == InstanceStatus.COMPLETED.value
+        # NIT-6 — the typed reason is persisted onto the row.
+        assert (row.instance_metadata or {}).get(
+            "terminal_transition_reason"
+        ) == "finalize_gap_steady_state", row.instance_metadata
+        # P-DRIVE-LOG — the unchanged shape-b WARNING fires.
+        shape_b_lines = [
+            r.getMessage() for r in caplog.records
+            if "stale_running_sweep|shape-b" in r.getMessage()
+        ]
+        assert len(shape_b_lines) == 1, shape_b_lines
+        assert shape_b_lines[0].startswith(
+            f"stale_running_sweep|shape-b: instance={ROOT} "
+        ), shape_b_lines[0]
+        assert "transitioned=completed" in shape_b_lines[0]
+        assert "reason=finalize_gap_steady_state" in shape_b_lines[0]
+        assert sweep.census_stale_running() == 0
+
+    @pytest.mark.asyncio
+    async def test_class_young_still_skipped_for_non_victim(
+        self, srs_harness,
+    ):
+        """A non-victim whose completion evidence is younger than the age
+        bound is still skipped as ``class=young`` (P-SKIP-LOG) — the
+        drive-outcome change does not collapse the age gate."""
+        engine = srs_harness.engine
+        _seed_shape_b(
+            engine, instance_id="trap-young-2",
+            evidence_age=__import__("datetime").timedelta(seconds=30),
+        )
+        sweep = _make_sweep(srs_harness)
+        result = await sweep.sweep_once()
+        assert result.skipped_young >= 1, result
+        assert result.healed == 0, result
+        assert _get_instance_row(engine, "trap-young-2").status == "running"
