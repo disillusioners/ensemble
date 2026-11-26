@@ -23,8 +23,10 @@ in ``tests/test_deadlock_fix.py``.
 
 from __future__ import annotations
 
+import logging
+import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
 import pytest
@@ -129,6 +131,16 @@ def bus(engine: Engine):
     except RuntimeError:
         asyncio.run(b.start())
     set_dependency_bus(b)
+    # Harness fix (revive-wedge C2a): ``DependencyWatcherRepository.
+    # count_pending_for_target`` opens its OWN ``Session`` on the test
+    # engine. Under ``StaticPool`` (one shared connection) that session's
+    # close() rolls back the production transaction on the same
+    # connection, so a minted report row vanishes before the test can
+    # observe it. In production (Postgres) every session has its own
+    # connection and this never happens. These tests seed no watchers, so
+    # the correct value is 0; returning it without opening a session
+    # keeps the production transaction intact.
+    b._repo.count_pending_for_target = lambda target_instance_id: 0
     try:
         yield b
     finally:
@@ -2508,3 +2520,709 @@ class TestTerminalRowStrandNegativeLegs:
         assert result.outcome == "idempotency_skip"
         with _Session(engine) as session:
             assert session.get(Instance, root_id).status == InstanceStatus.COMPLETED.value
+
+
+# =============================================================================
+# Revive-wedge terminalization — the two-arm mint guard + the decoupling
+# (lane ``fix/revive-wedge-terminalization``, 2026-11-25; base ``35ec50e3c``)
+# =============================================================================
+#
+# Plan of record: ``.agents/shared/planning/revive-wedge-terminalization/``
+# (plan.md §2/§3/§7, design.md §2/§3, gate-matrix.md §2-§4). Pins NEW-2,
+# NEW-3, NEW-6a, NEW-6b and NEW-7 (limbs a-e). FAIL-HONEST: NEW-2 / NEW-3 /
+# NEW-6b / NEW-7 are RED at the pre-fix base — there the lifetime-prefix
+# mint guard early-returned BEFORE the terminal CAS, so a suppressed child
+# stayed ``running`` (the revive-wedge). NEW-6a is GREEN at base AND at
+# merge BY CONSTRUCTION: it pins the real duplicate-freedom invariant (the
+# terminal-entry guard + CAS-before-mint atomicity + the per-parent lock)
+# and is the L2d MUTATION target, not a red->green pin.
+#
+# Harness: the REAL sync DB half (``_process_child_completion_db_sync``) on
+# this file's in-memory engine and service builder — nothing on the path
+# under test is mocked. Prior report rows are seeded directly into
+# ``message_queue`` in the production source shape
+# ``internal_report:{child}:{anchor}``. New production symbols are resolved
+# INSIDE the tests (never at import time), so this file still COLLECTS at
+# the base tree — the tester's base leg copies the changed test files onto
+# the un-fixed source and needs per-node reds, not a collection error.
+
+_RW_PARENT = "rw-leader"
+_RW_CHILD = "rw-child"
+
+_RW_ARM_B = "arm-b-suppress"
+_RW_ARM_A = "arm-a-suppress"
+_RW_RETRYING = "retrying-obligation"
+
+
+def _rw_seed_parent(engine: Engine) -> str:
+    return _seed_root_instance(
+        engine, instance_id=_RW_PARENT, status=InstanceStatus.IDLE.value,
+    )
+
+
+def _rw_seed_child(
+    engine: Engine,
+    *,
+    status: str = InstanceStatus.RUNNING.value,
+    instance_id: str = _RW_CHILD,
+    parent_id: str = _RW_PARENT,
+) -> str:
+    with Session(engine) as session:
+        session.add(Instance(
+            instance_id=instance_id,
+            agent_id="worker",
+            agent_name="worker",
+            agent_dir="/tmp/worker",
+            parent_id=parent_id,
+            status=status,
+            version=1,
+            instance_metadata={},
+        ))
+        session.commit()
+    return instance_id
+
+
+def _rw_seed_report(
+    engine: Engine,
+    *,
+    anchor: str,
+    status: str,
+    message_id: str,
+    child_id: str = _RW_CHILD,
+    recipient_id: str = _RW_PARENT,
+    enqueued_at: datetime | None = None,
+) -> str:
+    """Seed ONE report row in the production source shape."""
+    with Session(engine) as session:
+        session.add(MessageQueue(
+            message_id=message_id,
+            instance_id=recipient_id,
+            content=f"report under {anchor}",
+            source=f"internal_report:{child_id}:{anchor}",
+            type=MessageType.COMPLETION_REPORT.value,
+            status=status,
+            **({"enqueued_at": enqueued_at} if enqueued_at is not None else {}),
+        ))
+        session.commit()
+    return message_id
+
+
+def _rw_report_rows(engine: Engine, *, child_id: str = _RW_CHILD) -> list[MessageQueue]:
+    """Every report row for ``child_id`` — by the EXACT colon boundary.
+
+    ``startswith(..., autoescape=True)``: a raw ``LIKE`` would treat the
+    ``_`` in ``internal_report`` as a wildcard.
+    """
+    with Session(engine) as session:
+        return session.exec(
+            sm_select(MessageQueue).where(
+                MessageQueue.source.startswith(
+                    f"internal_report:{child_id}:", autoescape=True,
+                )
+            )
+        ).all()
+
+
+def _rw_report_sources(engine: Engine, *, child_id: str = _RW_CHILD) -> list[str]:
+    return sorted(r.source for r in _rw_report_rows(engine, child_id=child_id))
+
+
+def _rw_set_report_status(
+    engine: Engine, *, status: str, child_id: str = _RW_CHILD,
+) -> None:
+    """Mark EVERY report row of the child (e.g. COMPLETED = delivered)."""
+    with Session(engine) as session:
+        rows = session.exec(
+            sm_select(MessageQueue).where(
+                MessageQueue.source.startswith(
+                    f"internal_report:{child_id}:", autoescape=True,
+                )
+            )
+        ).all()
+        for row in rows:
+            row.status = status
+        session.commit()
+
+
+def _rw_status(engine: Engine, instance_id: str) -> str | None:
+    with Session(engine) as session:
+        row = session.get(Instance, instance_id)
+        return row.status if row else None
+
+
+def _rw_set_status(engine: Engine, instance_id: str, status: str) -> None:
+    with Session(engine) as session:
+        session.get(Instance, instance_id).status = status
+        session.commit()
+
+
+def _rw_records(caplog, record_class: str) -> list[dict[str, str]]:
+    """The observability records of ONE class, parsed to field dicts.
+
+    A record reads ``child_reports|<class>: class=<class> k=v ...``. The
+    class is matched on the ``class=<class>`` token, so ``len()`` counts
+    RECORDS of that class — exactly ONE per ACTUAL suppression.
+    """
+    head = f"child_reports|{record_class}: class={record_class} "
+    out: list[dict[str, str]] = []
+    for rec in caplog.records:
+        msg = rec.getMessage()
+        if head not in msg:
+            continue
+        fields = dict(
+            tok.split("=", 1)
+            for tok in msg.split(head, 1)[1].split(" ")
+            if "=" in tok
+        )
+        fields["_levelno"] = str(rec.levelno)
+        out.append(fields)
+    return out
+
+
+@pytest.fixture
+def rw_caplog(caplog):
+    """Capture INFO and above (the ``retrying`` record is INFO)."""
+    with caplog.at_level(logging.INFO):
+        yield caplog
+
+
+def _rw_loss_total() -> int:
+    # Resolved at CALL time: the counter does not exist at the base tree.
+    return getattr(_child_reports_module, "_ARM_B_SUPPRESS_LOSS_TOTAL", 0)
+
+
+class TestReviveWedgeDecoupling:
+    """NEW-2 / NEW-3 — terminalization no longer depends on a mint."""
+
+    @pytest.mark.parametrize(
+        ("prior_status", "prior_anchor", "incoming_anchor", "row"),
+        [
+            (MessageStatus.COMPLETED.value, "anchor-A", "anchor-A", "i"),
+            (MessageStatus.PROCESSING.value, "anchor-A", "anchor-A", "ii"),
+            (MessageStatus.READY.value, "anchor-A", "anchor-B", "iv-ready"),
+            (
+                MessageStatus.PROCESSING.value, "anchor-A", "anchor-B",
+                "iv-processing",
+            ),
+        ],
+    )
+    def test_a_mint_suppressed_call_still_terminalizes_the_child(
+        self, engine: Engine, prior_status, prior_anchor, incoming_anchor,
+        row,
+    ):
+        """NEW-2 (truth-table rows i / ii / iv): the guard suppresses the
+        mint — AND the child is stamped COMPLETED anyway (the cure).
+
+        At the pre-fix base the mint-guard early return skipped the
+        terminal CAS, so the child stayed ``running`` — RED there.
+        """
+        service = _build_child_reports_service(engine)
+        _rw_seed_parent(engine)
+        _rw_seed_child(engine)
+        _rw_seed_report(
+            engine, anchor=prior_anchor, status=prior_status,
+            message_id="report-prior",
+        )
+
+        result = service._process_child_completion_db_sync(
+            instance_id=_RW_CHILD,
+            completed_message_id=incoming_anchor,
+            last_content="episode-2 report",
+        )
+
+        assert _rw_report_sources(engine) == [
+            f"internal_report:{_RW_CHILD}:{prior_anchor}"
+        ], f"row {row}: no second report row may be minted"
+        assert result.outcome == "idempotency_skip", (
+            f"row {row}: the suppress outcome stays idempotency_skip "
+            f"(the B4 gate keys on it); got {result.outcome!r}"
+        )
+        assert result.parent_id == _RW_PARENT
+        assert _rw_status(engine, _RW_CHILD) == (
+            InstanceStatus.COMPLETED.value
+        ), f"row {row}: a suppressed child MUST still terminalize"
+
+    @pytest.mark.asyncio
+    async def test_the_suppress_outcome_reaches_the_b4_gate_on_a_completed_row(
+        self, engine: Engine, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """NEW-3: the outcome stays ``idempotency_skip`` AND the B4 cycle-2
+        re-mint gate is reached with ``inst.status == COMPLETED``
+        (``P-B4-GATE``).
+
+        ``_emit_terminal_for_child_instance_via_bus`` is the ONLY call
+        inside that gate — it runs iff the outcome is
+        ``idempotency_skip`` AND the freshly re-read row is COMPLETED.
+        At the pre-fix base the row was still ``running`` when the gate
+        re-read it, so the gate never fired — the chicken-and-egg.
+        """
+        service = _build_child_reports_service(engine)
+        # The B4 gate re-reads the row through the instance repository.
+        service._manager._instance_repository = (
+            SQLModelInstanceRepository(engine)
+        )
+        _rw_seed_parent(engine)
+        _rw_seed_child(engine)
+        _rw_seed_report(
+            engine, anchor="anchor-A", status=MessageStatus.READY.value,
+            message_id="report-outstanding",
+        )
+
+        gate_calls: list[dict] = []
+        real_emit = service._emit_terminal_for_child_instance_via_bus
+
+        async def _recording_emit(**kwargs):
+            gate_calls.append({
+                **kwargs, "status_at_gate": _rw_status(engine, _RW_CHILD),
+            })
+            return await real_emit(**kwargs)
+
+        monkeypatch.setattr(
+            service, "_emit_terminal_for_child_instance_via_bus",
+            _recording_emit,
+        )
+
+        result = service._process_child_completion_db_sync(
+            instance_id=_RW_CHILD,
+            completed_message_id="anchor-B",
+            last_content="episode-2 report",
+        )
+        assert result.outcome == "idempotency_skip"
+        assert result.parent_id == _RW_PARENT, "the B4 gate reads parent_id"
+
+        # The async half — exactly what ``_process_child_completion_
+        # and_notify_parent`` dispatches once the DB half returns.
+        await service._dispatch_post_commit_side_effects(
+            result, "episode-2 report", "anchor-B",
+        )
+
+        assert len(gate_calls) == 1, (
+            "the B4 re-mint gate MUST be reached exactly once with a "
+            f"COMPLETED row; got {gate_calls!r}"
+        )
+        assert gate_calls[0]["parent_instance_id"] == _RW_PARENT
+        assert gate_calls[0]["child_instance_id"] == _RW_CHILD
+        assert gate_calls[0]["status"] == "completed"
+        assert gate_calls[0]["status_at_gate"] == (
+            InstanceStatus.COMPLETED.value
+        )
+        assert _rw_status(engine, _RW_CHILD) == (
+            InstanceStatus.COMPLETED.value
+        )
+
+
+class TestReviveWedgeDuplicateFreedom:
+    """NEW-6 — the REAL duplicate-freedom invariant.
+
+    A non-terminal child carries at most ONE report row across chain
+    invocations; a second row appears only after an explicit REVIVE (a new
+    episode — which the new policy intends to report). The invariant is
+    delivered by the terminal-entry guard + CAS-before-mint atomicity +
+    the per-parent lock — NOT by ARM A.
+    """
+
+    def test_a_second_invocation_without_a_revive_mints_no_second_row(
+        self, engine: Engine,
+    ):
+        """NEW-6a — GREEN at base AND at merge; RED under mutation L2d
+        (BOTH status-based mechanisms neutralized ⇒ the second invocation
+        reaches the mint ⇒ ``expected 1 row, got 2``).
+
+        The COMPLETED-prior mark is LOAD-BEARING: a READY/PROCESSING prior
+        sets ``suppress_mint`` via ARM B and the suppress branch returns
+        before the mint even under L2d — the mutation would be vacuous.
+        """
+        service = _build_child_reports_service(engine)
+        _rw_seed_parent(engine)
+        _rw_seed_child(engine)
+
+        # Invocation 1 — mints the report AND stamps the child COMPLETED.
+        first = service._process_child_completion_db_sync(
+            instance_id=_RW_CHILD,
+            completed_message_id="anchor-1",
+            last_content="episode-1 report",
+        )
+        assert first.outcome == "regular_child_completed"
+        assert _rw_report_sources(engine) == [
+            f"internal_report:{_RW_CHILD}:anchor-1"
+        ]
+        assert _rw_status(engine, _RW_CHILD) == (
+            InstanceStatus.COMPLETED.value
+        )
+
+        # The prior report is DELIVERED (COMPLETED) — so ARM A misses on a
+        # different anchor and ARM B misses outright (COMPLETED is not in
+        # S-B): only the status-based mechanisms stand in the way.
+        _rw_set_report_status(engine, status=MessageStatus.COMPLETED.value)
+
+        # Invocation 2 — a DIFFERENT anchor, NO revive.
+        second = service._process_child_completion_db_sync(
+            instance_id=_RW_CHILD,
+            completed_message_id="anchor-2",
+            last_content="stale re-entry",
+        )
+
+        assert _rw_report_sources(engine) == [
+            f"internal_report:{_RW_CHILD}:anchor-1"
+        ], "NEW-6a: a second invocation without a revive must NOT mint"
+        assert second.outcome == "idempotency_skip"
+        assert _rw_status(engine, _RW_CHILD) == (
+            InstanceStatus.COMPLETED.value
+        )
+
+    def test_an_explicit_revive_then_a_new_anchor_mints_a_second_report(
+        self, engine: Engine,
+    ):
+        """NEW-6b (the new episode) — RED at base (the lifetime-prefix
+        guard early-returns and mints nothing — the wedge), GREEN at
+        merge (truth-table row iii), GREEN under L2d.
+
+        The prior report is marked COMPLETED BEFORE the revive half — a
+        READY/PROCESSING prior would be suppressed by ARM B (row iv).
+        """
+        service = _build_child_reports_service(engine)
+        _rw_seed_parent(engine)
+        _rw_seed_child(engine)
+
+        first = service._process_child_completion_db_sync(
+            instance_id=_RW_CHILD,
+            completed_message_id="anchor-1",
+            last_content="episode-1 report",
+        )
+        assert first.outcome == "regular_child_completed"
+        _rw_set_report_status(engine, status=MessageStatus.COMPLETED.value)
+
+        # The explicit revive — what ``send_message`` does to a terminal
+        # child (status -> RUNNING; the new episode).
+        _rw_set_status(engine, _RW_CHILD, InstanceStatus.RUNNING.value)
+
+        second = service._process_child_completion_db_sync(
+            instance_id=_RW_CHILD,
+            completed_message_id="anchor-2",
+            last_content="episode-2 report",
+        )
+
+        assert _rw_report_sources(engine) == [
+            f"internal_report:{_RW_CHILD}:anchor-1",
+            f"internal_report:{_RW_CHILD}:anchor-2",
+        ], "NEW-6b: the revived episode's report MUST reach the parent"
+        assert second.outcome == "regular_child_completed"
+        assert _rw_status(engine, _RW_CHILD) == (
+            InstanceStatus.COMPLETED.value
+        )
+
+
+class TestReviveWedgeObservability:
+    """NEW-7 — the R-K2 observability condition (review C1).
+
+    Exactly ONE suppress record per ACTUAL suppression, emitted in the
+    SUPPRESS BRANCH after the fall-through CAS — never at the guard,
+    never on the defer path — and the loss counter moves ONLY on an R-K2
+    loss. RED at base (no record and no counter exist there).
+    """
+
+    @pytest.mark.parametrize(
+        ("incoming_anchor", "expected_loss", "expected_delta"),
+        [
+            ("anchor-B", 1, 1),
+            ("anchor-A", 0, 0),
+        ],
+        ids=["different-anchor-is-a-loss", "same-anchor-loses-nothing"],
+    )
+    def test_arm_b_suppression_emits_exactly_one_record_and_counts_only_a_loss(
+        self, engine: Engine, rw_caplog, incoming_anchor, expected_loss,
+        expected_delta,
+    ):
+        """(a) ARM-B: child + BOTH anchors + the outstanding marker id +
+        ``loss`` + ``total``; the counter moves by exactly +1 on a loss
+        and by 0 otherwise."""
+        before = _rw_loss_total()
+        service = _build_child_reports_service(engine)
+        _rw_seed_parent(engine)
+        _rw_seed_child(engine)
+        _rw_seed_report(
+            engine, anchor="anchor-A", status=MessageStatus.READY.value,
+            message_id="report-outstanding",
+        )
+
+        result = service._process_child_completion_db_sync(
+            instance_id=_RW_CHILD,
+            completed_message_id=incoming_anchor,
+            last_content="episode-2 report",
+        )
+
+        arm_b = _rw_records(rw_caplog, _RW_ARM_B)
+        assert len(arm_b) == 1, (
+            f"exactly ONE arm-b-suppress record per ACTUAL suppression; "
+            f"got {[r.getMessage() for r in rw_caplog.records]!r}"
+        )
+        rec = arm_b[0]
+        assert rec["child"] == _RW_CHILD
+        assert rec["incoming_anchor"] == incoming_anchor
+        # P-ANCHOR-PARSE — the blocking row's anchor, prefix-stripped.
+        assert rec["outstanding_anchor"] == "anchor-A"
+        assert rec["outstanding_message_id"] == "report-outstanding"
+        assert rec["loss"] == str(expected_loss)
+        assert rec["_levelno"] == str(logging.WARNING)
+
+        after = _rw_loss_total()
+        assert after - before == expected_delta, (
+            f"the counter moves by exactly {expected_delta}; "
+            f"{before} -> {after}"
+        )
+        assert rec["total"] == str(after), (
+            "the running counter value is carried in the record"
+        )
+        # An ARM-B-classified suppression emits NO arm-a record.
+        assert _rw_records(rw_caplog, _RW_ARM_A) == []
+        assert result.outcome == "idempotency_skip"
+        assert _rw_status(engine, _RW_CHILD) == (
+            InstanceStatus.COMPLETED.value
+        )
+
+    def test_an_arm_a_only_suppression_emits_exactly_one_arm_a_record(
+        self, engine: Engine, rw_caplog,
+    ):
+        """(b) ARM-A-only (truth-table row i — a DELIVERED same-anchor
+        re-entry): exactly one ``arm-a-suppress`` record, never an
+        ``arm-b-suppress`` one, and the loss counter does not move."""
+        before = _rw_loss_total()
+        service = _build_child_reports_service(engine)
+        _rw_seed_parent(engine)
+        _rw_seed_child(engine)
+        _rw_seed_report(
+            engine, anchor="anchor-A", status=MessageStatus.COMPLETED.value,
+            message_id="report-delivered",
+        )
+
+        result = service._process_child_completion_db_sync(
+            instance_id=_RW_CHILD,
+            completed_message_id="anchor-A",
+            last_content="router re-entry of a delivered obligation",
+        )
+
+        assert _rw_records(rw_caplog, _RW_ARM_B) == []
+        arm_a = _rw_records(rw_caplog, _RW_ARM_A)
+        assert len(arm_a) == 1, (
+            f"exactly ONE arm-a-suppress record on an ARM-A-only "
+            f"suppression; got {[r.getMessage() for r in rw_caplog.records]!r}"
+        )
+        rec = arm_a[0]
+        assert rec["child"] == _RW_CHILD
+        assert rec["incoming_anchor"] == "anchor-A"
+        assert rec["matched_anchor"] == "anchor-A"
+        assert rec["matched_message_id"] == "report-delivered"
+        assert rec["matched_status"] == MessageStatus.COMPLETED.value
+        assert rec["_levelno"] == str(logging.WARNING)
+        assert _rw_loss_total() - before == 0, "ARM A never moves the counter"
+        assert result.outcome == "idempotency_skip"
+        assert _rw_status(engine, _RW_CHILD) == (
+            InstanceStatus.COMPLETED.value
+        )
+
+    def test_a_mint_over_a_retrying_obligation_emits_exactly_one_info_record(
+        self, engine: Engine, rw_caplog,
+    ):
+        """(c) ``retrying`` is EXCLUDED from ARM B (leader ruling 6): the
+        mint PROCEEDS over a ``retrying`` obligation and logs exactly ONE
+        INFO record — the OLDEST ``retrying`` row + the count."""
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        service = _build_child_reports_service(engine)
+        _rw_seed_parent(engine)
+        _rw_seed_child(engine)
+        _rw_seed_report(
+            engine, anchor="anchor-old", status=MessageStatus.RETRYING.value,
+            message_id="report-retry-old",
+            enqueued_at=now - timedelta(hours=2),
+        )
+        _rw_seed_report(
+            engine, anchor="anchor-newer", status=MessageStatus.RETRYING.value,
+            message_id="report-retry-newer",
+            enqueued_at=now - timedelta(hours=1),
+        )
+
+        result = service._process_child_completion_db_sync(
+            instance_id=_RW_CHILD,
+            completed_message_id="anchor-3",
+            last_content="episode-3 report",
+        )
+
+        assert result.outcome == "regular_child_completed"
+        assert _rw_report_sources(engine) == [
+            f"internal_report:{_RW_CHILD}:anchor-3",
+            f"internal_report:{_RW_CHILD}:anchor-newer",
+            f"internal_report:{_RW_CHILD}:anchor-old",
+        ], "a retrying obligation must NOT block the mint (R-K4)"
+        retrying = _rw_records(rw_caplog, _RW_RETRYING)
+        assert len(retrying) == 1, (
+            f"exactly ONE retrying-obligation record per such mint; got "
+            f"{[r.getMessage() for r in rw_caplog.records]!r}"
+        )
+        rec = retrying[0]
+        assert rec["child"] == _RW_CHILD
+        assert rec["incoming_anchor"] == "anchor-3"
+        assert rec["retrying_anchor"] == "anchor-old"
+        assert rec["retrying_message_id"] == "report-retry-old"
+        assert rec["retrying_count"] == "2"
+        assert rec["_levelno"] == str(logging.INFO)
+        assert _rw_records(rw_caplog, _RW_ARM_B) == []
+        assert _rw_records(rw_caplog, _RW_ARM_A) == []
+
+    def test_no_retrying_record_without_an_obligation_or_on_a_suppression(
+        self, engine: Engine, rw_caplog,
+    ):
+        """(c, negative half) no ``retrying`` obligation ⇒ no record; and
+        a SUPPRESSED mint over a ``retrying`` row ⇒ no record either (the
+        probe is mint-path only)."""
+        service = _build_child_reports_service(engine)
+        _rw_seed_parent(engine)
+        _rw_seed_child(engine)
+
+        # (1) A plain mint — nothing sits in ``retrying``.
+        first = service._process_child_completion_db_sync(
+            instance_id=_RW_CHILD,
+            completed_message_id="anchor-1",
+            last_content="episode-1 report",
+        )
+        assert first.outcome == "regular_child_completed"
+        assert _rw_records(rw_caplog, _RW_RETRYING) == []
+
+        # (2) A revived episode whose mint is SUPPRESSED by an outstanding
+        #     obligation while a ``retrying`` row exists.
+        _rw_set_report_status(engine, status=MessageStatus.COMPLETED.value)
+        _rw_set_status(engine, _RW_CHILD, InstanceStatus.RUNNING.value)
+        _rw_seed_report(
+            engine, anchor="anchor-retry", status=MessageStatus.RETRYING.value,
+            message_id="report-retry",
+        )
+        _rw_seed_report(
+            engine, anchor="anchor-A", status=MessageStatus.READY.value,
+            message_id="report-outstanding",
+        )
+        rw_caplog.clear()
+        second = service._process_child_completion_db_sync(
+            instance_id=_RW_CHILD,
+            completed_message_id="anchor-2",
+            last_content="episode-2 report",
+        )
+        assert second.outcome == "idempotency_skip"
+        assert len(_rw_records(rw_caplog, _RW_ARM_B)) == 1
+        assert _rw_records(rw_caplog, _RW_RETRYING) == [], (
+            "the retrying probe never runs on a suppression"
+        )
+
+    def test_concurrent_counter_increments_lose_no_update(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """(d) the lock: N threads x M increments lose no update, and
+        every increment runs under ``_ARM_B_SUPPRESS_LOCK`` (the chain
+        increments from ``asyncio.to_thread`` workers)."""
+        bump = getattr(
+            _child_reports_module, "_bump_arm_b_suppress_loss_total",
+        )
+        real_lock = _child_reports_module._ARM_B_SUPPRESS_LOCK
+        lock_entries: list[int] = []
+
+        class _CountingLock:
+            def __enter__(self):
+                lock_entries.append(1)
+                return real_lock.__enter__()
+
+            def __exit__(self, *exc):
+                return real_lock.__exit__(*exc)
+
+        monkeypatch.setattr(
+            _child_reports_module, "_ARM_B_SUPPRESS_LOCK", _CountingLock(),
+        )
+        baseline = _rw_loss_total()
+        # Restored to ``baseline`` at teardown (monkeypatch owns it).
+        monkeypatch.setattr(
+            _child_reports_module, "_ARM_B_SUPPRESS_LOSS_TOTAL", baseline,
+        )
+
+        n_threads, per_thread = 8, 400
+        barrier = threading.Barrier(n_threads)
+
+        def _worker() -> None:
+            barrier.wait(timeout=30)
+            for _ in range(per_thread):
+                bump()
+
+        threads = [threading.Thread(target=_worker) for _ in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=60)
+        assert not any(t.is_alive() for t in threads), "worker hung"
+
+        expected = n_threads * per_thread
+        assert _rw_loss_total() - baseline == expected, (
+            f"a bare ``+= 1`` from worker threads loses updates: expected "
+            f"{expected}, got {_rw_loss_total() - baseline}"
+        )
+        assert len(lock_entries) == expected, (
+            "every increment must run under _ARM_B_SUPPRESS_LOCK"
+        )
+
+    @pytest.mark.parametrize("defer_guard", ["active_children", "pending_task"])
+    def test_a_defer_emits_no_suppress_record_and_leaves_the_counter_untouched(
+        self, engine: Engine, rw_caplog, defer_guard,
+    ):
+        """(e) THE DEFER CASE (repair 006 — approver iteration-003
+        BLOCKING 2): the guard sets ``suppress_mint`` and the call then
+        takes a defer guard (``outcome="child_still_running_defer"``) —
+        nothing was suppressed, so NO suppress record (neither ARM-B nor
+        ARM-A), no ``retrying`` record, and the counter is UNCHANGED
+        (+0). Records are captured with ``caplog``."""
+        before = _rw_loss_total()
+        service = _build_child_reports_service(engine)
+        _rw_seed_parent(engine)
+        _rw_seed_child(engine)
+        # The guard WILL suppress: an outstanding obligation under another
+        # anchor (ARM B). Plus a ``retrying`` row — the INFO probe must
+        # stay silent on a defer too.
+        _rw_seed_report(
+            engine, anchor="anchor-A", status=MessageStatus.READY.value,
+            message_id="report-outstanding",
+        )
+        _rw_seed_report(
+            engine, anchor="anchor-retry", status=MessageStatus.RETRYING.value,
+            message_id="report-retry",
+        )
+        if defer_guard == "active_children":
+            # The active-children guard: a live (non-ghost) direct child.
+            _seed_child_instance_full(
+                engine, parent_id=_RW_CHILD,
+                status=InstanceStatus.RUNNING.value,
+            )
+        else:
+            # The pending-task guard: an actionable PENDING task of the
+            # child's own (it will run next and may spawn more children).
+            with Session(engine) as session:
+                session.add(Task(instance_id=_RW_CHILD))
+                session.commit()
+
+        result = service._process_child_completion_db_sync(
+            instance_id=_RW_CHILD,
+            completed_message_id="anchor-B",
+            last_content="episode-2 report",
+        )
+
+        assert result.outcome == "child_still_running_defer", (
+            f"the {defer_guard} guard must defer; got {result.outcome!r}"
+        )
+        assert result.parent_id == _RW_PARENT
+        assert _rw_records(rw_caplog, _RW_ARM_B) == [], (
+            "a defer suppresses nothing — no arm-b record"
+        )
+        assert _rw_records(rw_caplog, _RW_ARM_A) == [], (
+            "a defer suppresses nothing — no arm-a record"
+        )
+        assert _rw_records(rw_caplog, _RW_RETRYING) == [], (
+            "the retrying probe is mint-path only — nothing on a defer"
+        )
+        assert _rw_loss_total() - before == 0, "a defer must not move the counter"
+        # A defer is a defer: the row is untouched until a later re-entry.
+        assert _rw_status(engine, _RW_CHILD) == (
+            InstanceStatus.RUNNING.value
+        )
