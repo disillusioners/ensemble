@@ -134,6 +134,55 @@ class TestSystemLogSearchStartLinePaging:
         out = search.invoke({"pattern": "revive", "filename": "ensemble.log", "start_line": 1, "limit": 1})
         assert "match cap 1 reached" in out
 
+    def test_explicit_window_starts_at_start_line_and_excludes_earlier_lines(self, log_dir, tools, monkeypatch):
+        import daemon.tools.system_log_tools as m
+
+        monkeypatch.setattr(m, "MAX_LINES_SCAN", 10)
+        lines = [f"2026-08-08 08:00:{(i % 60):02d} - daemon.api - INFO - plain line {i}" for i in range(1, 41)]
+        # unique markers at absolute 1-based lines 14, 15, 24, 25
+        lines[13] = "2026-08-08 08:00:14 - daemon.api - INFO - marker BEFORE"
+        lines[14] = "2026-08-08 08:00:15 - daemon.api - INFO - marker ATSTART"
+        lines[23] = "2026-08-08 08:00:24 - daemon.api - INFO - marker LASTINWINDOW"
+        lines[24] = "2026-08-08 08:00:25 - daemon.api - INFO - marker AFTER"
+        (log_dir / "ensemble.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        search = _search(tools)
+        out = search.invoke({"pattern": "marker", "filename": "ensemble.log", "start_line": 15})
+        # ATSTART found at absolute line 15
+        assert "    15 >>>" in out
+        assert "ATSTART" in out
+        # BEFORE (line 14) excluded by the lower-bound guard
+        assert "BEFORE" not in out
+        # AFTER (line 25) outside the window
+        assert "AFTER" not in out
+        # window + NOT-SEARCHED region + resume point
+        assert "window 15-24 of 40" in out
+        assert "NOT SEARCHED: lines 25-40" in out
+        assert "re-run with start_line=25" in out
+
+        # pagination loop: start_line = last + 1
+        out2 = search.invoke({"pattern": "marker", "filename": "ensemble.log", "start_line": 25})
+        assert "    25 >>>" in out2
+        assert "AFTER" in out2
+
+    def test_start_line_is_appended_last_in_the_signature(self, log_dir, tools):
+        import inspect
+
+        search = _search(tools)
+        func = getattr(search, "func", None)
+        assert func is not None
+        sig = inspect.signature(func)
+        params = list(sig.parameters.keys())
+        assert params == ["pattern", "filename", "level", "context", "limit", "start_line"], params
+
+        schema = search.args_schema
+        if hasattr(schema, "model_fields"):
+            fields = list(schema.model_fields.keys())
+        elif hasattr(schema, "__fields__"):
+            fields = list(schema.__fields__.keys())
+        else:
+            fields = list(schema.model_json_schema().get("properties", {}).keys())
+        assert fields == ["pattern", "filename", "level", "context", "limit", "start_line"], fields
+
     def test_start_line_zero_is_rejected_with_friendly_error(self, log_dir, tools, monkeypatch):
         import daemon.tools.system_log_tools as m
 
