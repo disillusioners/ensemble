@@ -69,7 +69,7 @@ Anchors in this brief are LEADS, not truth — re-grep every anchor at use time 
      on BOTH surfaces (tool list via service; REST list via the mock_manager fixture — LEAD:
      tests/test_scheduler_api.py:22-129). Counter-mutations (each must turn the pin RED): (i) derivation mutated out
      (revert to echoing stored "once"); (ii) adapter-only next-fire source reintroduced on REST; (iii) window echo
-     removed. 
+     removed.
   2. **Namespace pin:** create with a cancelled row's label SUCCEEDS; create with a live row's label FAILS; label
      resolution prefers the live row when a dead+live pair shares a label. Counter-mutation: uniqueness lookup
      reverted to match-any-row ⇒ RED; live-preference removed ⇒ RED.
