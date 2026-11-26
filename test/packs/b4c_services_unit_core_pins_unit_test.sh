@@ -2,7 +2,7 @@
 # =============================================================================
 # Test Pack: b4c_services_unit_core_pins_unit_test
 #
-# Lane: feature/pack-coverage-registration (base `ed8ab508c`) — PACKS.md +
+# Lane: feature/pack-coverage-registration (base `40301a5e3`) (re-verified at this base) — PACKS.md +
 #       pack-scripts coverage registration wave.
 #
 # WHAT IT PINS (13 pytest files + 1 standalone Python script leg)
@@ -20,7 +20,7 @@
 #   tests/unit/test_project_future_registration.py                         8 nodes
 #   tests/unit/test_turn_end_injection_drain.py                           31 nodes
 #   Total: 218 pytest nodes (mechanical `--collect-only` census at this freeze
-#   `ed8ab508c`: 218 collected, RC=0, 0 collection errors; per-file counts
+#   `40301a5e3` (re-verified at this base): 218 collected, RC=0, 0 collection errors; per-file counts
 #   3/16/7/40/8/25/3/21/19/11/26/8/31; slicing proof OK).
 #
 #   `tests/unit/test_persona_neutrality.py` (4 nodes) is DELIBERATELY NOT in
@@ -85,7 +85,27 @@ SCRUB=(
   -u ENSEMBLE_AUTH_CLIENT_SECRET -u ENSEMBLE_AUTH_DISCOVERY_URL
   -u ENSEMBLE_AUTH_ALLOWED_ORIGINS -u ENSEMBLE_AUTH_EXTERNAL_REDIRECT_BASE
   -u ENSEMBLE_BASH_TRACKING_ID
+  -u ENSEMBLE_SELF_ENV
 )
+
+# NORMALISE, never refuse: the host's ambient ENSEMBLE_SELF_ENV is `live` (measured
+# on this host). A pack that REFUSED on the parent's ambient value would refuse to
+# start for every tester — every PACKS.md Invocation cell runs
+# `cd $WT && timeout 300 bash test/packs/<script>.sh` with NO prefix. So the pack
+# normalises to `dev` (the value its own legs require) and the assert below can only
+# fire if a future edit drops THIS export — which is exactly the drift it exists to
+# catch.
+export ENSEMBLE_SELF_ENV=dev
+
+# FENCE (self-verifying): the legs below force ENSEMBLE_SELF_ENV=dev, so the child can
+# never inherit the host's ambient value (measured `live` on this host). This assert makes
+# that guarantee LOUD — if a future edit drops the normalising export, the pack refuses
+# rather than silently running against the wrong environment.
+if [ "${ENSEMBLE_SELF_ENV:-}" != "dev" ]; then
+  echo "FENCE FAILURE: ENSEMBLE_SELF_ENV='${ENSEMBLE_SELF_ENV:-<unset>}' — this pack requires 'dev'." >&2
+  echo "RESULT: FAIL (env fence)"
+  exit 1
+fi
 
 # pytest-collectable subset (the standalone script is not pytest-collectable)
 PYTEST_FILES=(

@@ -4,7 +4,7 @@
 #
 # Family A1 "group-chat room" pins — HALF A1b (the routers + services + tools half, 8 files)
 #
-# Lane: feature/pack-coverage-registration (base `40301a5e3`).
+# Lane: feature/pack-coverage-registration (base `40301a5e3`) (re-verified at this base).
 #
 # A1 SPLIT (2026-11-25). The former single 14-file room pack measured
 #   181.4 s standalone, 200.15 s under the cold verifier's conditions and
@@ -101,7 +101,27 @@ SCRUB=(
   -u ENSEMBLE_AUTH_CLIENT_SECRET -u ENSEMBLE_AUTH_DISCOVERY_URL
   -u ENSEMBLE_AUTH_ALLOWED_ORIGINS -u ENSEMBLE_AUTH_EXTERNAL_REDIRECT_BASE
   -u ENSEMBLE_BASH_TRACKING_ID
+  -u ENSEMBLE_SELF_ENV
 )
+
+# NORMALISE, never refuse: the host's ambient ENSEMBLE_SELF_ENV is `live` (measured
+# on this host). A pack that REFUSED on the parent's ambient value would refuse to
+# start for every tester — every PACKS.md Invocation cell runs
+# `cd $WT && timeout 300 bash test/packs/<script>.sh` with NO prefix. So the pack
+# normalises to `dev` (the value its own legs require) and the assert below can only
+# fire if a future edit drops THIS export — which is exactly the drift it exists to
+# catch.
+export ENSEMBLE_SELF_ENV=dev
+
+# FENCE (self-verifying): the legs below force ENSEMBLE_SELF_ENV=dev, so the child can
+# never inherit the host's ambient value (measured `live` on this host). This assert makes
+# that guarantee LOUD — if a future edit drops the normalising export, the pack refuses
+# rather than silently running against the wrong environment.
+if [ "${ENSEMBLE_SELF_ENV:-}" != "dev" ]; then
+  echo "FENCE FAILURE: ENSEMBLE_SELF_ENV='${ENSEMBLE_SELF_ENV:-<unset>}' — this pack requires 'dev'." >&2
+  echo "RESULT: FAIL (env fence)"
+  exit 1
+fi
 
 # ── the SLICING PROOF (node-count parity vs the declared census) ────────
 echo
