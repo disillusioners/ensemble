@@ -34,6 +34,10 @@ A comprehensive installation and configuration guide for the agents-ensemble mul
 | Docker | Latest | Optional | Required only for LightRAG |
 | Git | Any | Yes | For cloning the repository |
 
+> **Running on a small machine (8 GB)?** See the [8 GB reference profile](8gb-reference-profile.md) — how the
+> memory is split between PostgreSQL and the daemon, the four PostgreSQL settings to change, and the
+> restore time the no-redundancy profile rests on.
+
 ### Verifying Python Version
 
 ```bash
