@@ -544,12 +544,16 @@ ARGUMENTS
     preserved verbatim (capped at 64 chars) so a vocabulary gap stays
     visible.
   description (str, REQUIRED) — what is wrong, in your own words.
-    Non-empty; capped at 1000 chars (truncated, never refused).
+    Non-empty; capped at 8000 chars (never refused). If the cap is
+    exceeded the STORED text carries a loud
+    ``[TRUNCATED: original N chars; stored prefix only]`` marker —
+    a halved finding must never read like the whole one.
   severity (str, default "major") — one of minor | major | critical. An
     out-of-set value is REFUSED, never folded (folding critical down to
     major would hide a nest-level event).
   suspected_cause (str | None, optional) — your hypothesis about the
-    cause; capped at 500 chars.
+    cause; capped at 2000 chars, with the same loud stored marker when
+    the cap is exceeded.
 
 THE SUCCESS ENVELOPE (one field per line)
   OK: anomaly accepted
@@ -559,7 +563,8 @@ THE SUCCESS ENVELOPE (one field per line)
   cluster_report_count=<n>
   cluster_first_report_at=<ISO-8601>
   category_fold_notice=<notice>   (ONLY when the category was folded)
-  truncated=true                  (ONLY when a field was capped)
+  truncated=true                  (ONLY when a field was capped; the
+                                    stored text carries the marker)
 
 THE REFUSAL LADDER (checked in this order)
   tool-disabled      — the kill-switch (ENSEMBLE_NEST_REPORT_ENABLED=false),

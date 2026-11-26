@@ -778,22 +778,25 @@ class TestTheSuccessEnvelope:
             "an already-canonical category carries NO fold notice"
         )
 
-    async def test_an_over_length_description_truncates_and_notes(
+    async def test_an_over_length_description_is_loudly_marked_and_noted(
         self, tmp_path
     ) -> None:
-        """AC1 — an over-length input TRUNCATES (never refuses) and the
-        envelope says so."""
+        """AC1 — an over-cap input is stored WITH a loud marker (never a
+        silent cut) and the envelope says so."""
         engine = _engine(tmp_path)
         manager = _StubManager()
         manager._anomaly_service = _service(engine, manager)
         tools = _by_name(_tools(manager))
+        cap = NestReportConfig().description_max_chars
         result = await tools[TOOL_NAME].ainvoke(
-            {"category": "performance", "description": "x" * 5000}
+            {"category": "performance", "description": "x" * (cap + 500)}
         )
         parsed = _parse_envelope(result)
         assert parsed.get("truncated") == "true", result
         row = _row(engine, parsed["report_id"])
-        assert len(row.description) <= 1000
+        assert len(row.description) == cap
+        assert "[TRUNCATED: original" in row.description
+        assert row.description.endswith("stored prefix only]")
 
     async def test_an_over_length_category_is_capped_at_64(self, tmp_path) -> None:
         """AC1 — the raw category is capped at 64 chars and the envelope

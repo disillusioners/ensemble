@@ -387,6 +387,22 @@ class TestTheScrubPipeline:
         out = scrub_text("x" * 500, 32)
         assert len(out) == 32
 
+    def test_the_default_scrub_is_silent_for_harvested_excerpts(self) -> None:
+        # Only the authored-field call sites opt into mark_truncated;
+        # excerpts already carry excerpt_length / excerpt_sha256.
+        out = scrub_text("x" * 500, 32)
+        assert out == "x" * 32
+        assert "TRUNCATED" not in out
+
+    def test_the_loud_marker_fits_inside_the_cap(self) -> None:
+        out = scrub_text("x" * 500, 80, mark_truncated=True)
+        assert len(out) == 80
+        assert out.endswith("stored prefix only]")
+        assert "original 500 chars" in out
+
+    def test_a_tiny_cap_still_carries_a_marker(self) -> None:
+        out = scrub_text("x" * 500, 4, mark_truncated=True)
+        assert out == "[TRU"  # the signal wins over content at a tiny cap
     def test_the_secret_shape_masker_leaves_benign_prose_alone(self) -> None:
         text = "the token expired because the password policy rotated"
         assert scrub_text(text, 200) == text
@@ -517,28 +533,32 @@ class TestTheAcceptPathContract:
     """AC1 / AC2 / AC3 — the service-side halves of the phase-1 contract.
 
     The TOOL signature + the refusal ENVELOPE land in C2 (the tool
-    body); what is pinned here is the SERVICE half: the caps truncate
-    (never refuse), the authored-content refusals persist NOTHING, and
-    the fold notice appears exactly when a fold happened.
+    body); what is pinned here is the SERVICE half: over-cap authored
+    text is stored WITH a loud marker (never refused), the
+    authored-content refusals persist NOTHING, and the fold notice
+    appears exactly when a fold happened.
     """
 
-    async def test_over_length_authored_text_truncates_and_never_refuses(
+    async def test_over_length_authored_text_is_loudly_marked_and_never_refused(
         self, tmp_path
     ) -> None:
         engine = _engine(tmp_path)
         service = _service(engine)
+        config = NestReportConfig()
         result = await service.accept_report(
             agent_id="worker",
             instance_id="inst-1",
             category="tool-failure",
-            description="d" * 5000,
+            description="d" * (config.description_max_chars + 500),
             severity="major",
-            suspected_cause="c" * 2000,
+            suspected_cause="c" * (config.suspected_cause_max_chars + 500),
         )
         row = _row(engine, result.report_id)
-        config = NestReportConfig()
         assert len(row.description) == config.description_max_chars
         assert len(row.suspected_cause) == config.suspected_cause_max_chars
+        assert "[TRUNCATED: original" in row.description
+        assert "[TRUNCATED: original" in row.suspected_cause
+        assert row.description.endswith("stored prefix only]")
         assert result.truncated is True
 
     async def test_the_raw_category_is_capped_at_sixty_four_chars(self, tmp_path) -> None:

@@ -567,7 +567,13 @@ def select_error_excerpt(
     return selected
 
 
-def scrub_text(value: object, cap: int, *, actor: str = SCRUB_ACTOR) -> str:
+def scrub_text(
+    value: object,
+    cap: int,
+    *,
+    actor: str = SCRUB_ACTOR,
+    mark_truncated: bool = False,
+) -> str:
     """The R6 + AM-11 scrub pipeline, in the FIXED order.
 
     0. ``redact_secret_shapes`` — the secret-VALUE masker. It MUST see
@@ -579,19 +585,44 @@ def scrub_text(value: object, cap: int, *, actor: str = SCRUB_ACTOR) -> str:
     2. ``scrub_enqueued_body`` — the exact-match substitution over the
        STORED secret values.
     3. The length cap, post-scrub.
+    4. When ``mark_truncated`` is set, a LOUD marker replaces the tail
+       of the capped text. Authored fields (description /
+       suspected_cause) set it: a row read later must never look like
+       the whole finding when the cap cut it. Harvested excerpts do
+       NOT set it — they carry excerpt_length / excerpt_sha256 and
+       are evidence, not an author's finding.
 
     Args:
         value: The text (any object; a non-string is stringified
             defensively by the maskers).
         cap: The field cap.
         actor: The audit actor for the value-substitution rows.
+        mark_truncated: Append a ``[TRUNCATED: ...]`` marker when the
+            ORIGINAL input exceeded the cap. The marker is measured
+            INTO the cap, so the returned text never exceeds it.
 
     Returns:
-        The scrubbed, capped text. Never raises.
+        The scrubbed, capped (and, when requested, loudly marked)
+        text. Never raises.
     """
+    try:
+        original_len = len(value if isinstance(value, str) else str(value))
+    except Exception:  # pragma: no cover — defensive stringify
+        original_len = len("<unstringifiable>")
     masked = redact_secret_shapes(value, limit=cap)
     shaped = redact_exc_str(masked, limit=cap)
     scrubbed = scrub_enqueued_body(shaped, actor=actor)
+    if mark_truncated and original_len > cap:
+        marker = (
+            f"\n[TRUNCATED: original {original_len} chars; "
+            "stored prefix only]"
+        )
+        if len(marker) >= cap:
+            marker = "[TRUNCATED]"
+        if len(marker) >= cap:
+            # Pathological cap (< 11): sacrifice content for the signal.
+            return marker[:cap]
+        return scrubbed[: cap - len(marker)] + marker
     return scrubbed[:cap]
 
 
@@ -796,6 +827,12 @@ class AnomalyService:
             suspected_cause=suspected_cause,
         )
 
+        # The authored-field cap is CONFIG-owned (never a DB VARCHAR —
+        # anomaly_reports.description is TEXT on both drivers). Raised
+        # from 1000 to 8000: a 1000-char cap cut a filed wedge predicate
+        # mid-predicate, and a silently halved finding is worse than no
+        # finding. The residual cap is LOUD: the stored text carries a
+        # marker, so a later reader cannot mistake a cut for the whole.
         truncated = False
         description_cap = self._config.description_max_chars
         cause_cap = self._config.suspected_cause_max_chars
@@ -804,9 +841,11 @@ class AnomalyService:
         if suspected_cause is not None and len(suspected_cause) > cause_cap:
             truncated = True
 
-        scrubbed_description = scrub_text(description, description_cap)
+        scrubbed_description = scrub_text(
+            description, description_cap, mark_truncated=True
+        )
         scrubbed_cause = (
-            scrub_text(suspected_cause, cause_cap)
+            scrub_text(suspected_cause, cause_cap, mark_truncated=True)
             if suspected_cause is not None
             else None
         )
@@ -1073,10 +1112,16 @@ class AnomalyService:
             category_raw=category[:CATEGORY_RAW_MAX_CHARS],
             severity=severity,
             description=scrub_text(
-                description, self._config.description_max_chars
+                description,
+                self._config.description_max_chars,
+                mark_truncated=True,
             ),
             suspected_cause=(
-                scrub_text(suspected_cause, self._config.suspected_cause_max_chars)
+                scrub_text(
+                    suspected_cause,
+                    self._config.suspected_cause_max_chars,
+                    mark_truncated=True,
+                )
                 if suspected_cause
                 else None
             ),
