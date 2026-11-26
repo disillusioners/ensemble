@@ -971,7 +971,7 @@ class TestIteration2Pins:
                 self._wedge_capture_repository = None
 
         # build a tool message whose content straddles the 500 boundary
-        msg_content = "x" * 490 + secret
+        msg_content = "ERROR: " + "x" * 483 + secret
         from langchain_core.messages import ToolMessage
 
         tm = ToolMessage(content=msg_content, tool_call_id="c1")
