@@ -1,0 +1,74 @@
+============================= test session starts ==============================
+platform linux -- Python 3.14.7, pytest-9.0.2, pluggy-1.6.0 -- /home/nea/ensemble-src-wt-blueprint-lease-release/.venv/bin/python
+cachedir: .pytest_cache
+hypothesis profile 'default'
+rootdir: /home/nea/ensemble-src-wt-blueprint-lease-release
+configfile: pyproject.toml
+plugins: anyio-4.12.1, hypothesis-6.165.10, asyncio-1.3.0, mock-3.15.1, xdist-3.8.0, langsmith-0.7.7, timeout-2.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+timeout: 30.0s
+timeout method: thread
+timeout func_only: False
+collecting ... collected 53 items
+
+tests/services/test_blueprint_lease_release.py::TestDaemonSideRelease::test_lease_is_released_when_job_terminalizes PASSED [  1%]
+tests/services/test_blueprint_lease_release.py::TestDaemonSideRelease::test_lease_is_released_when_job_errors PASSED [  3%]
+tests/services/test_blueprint_lease_release.py::TestAgentSideRelease::test_job_message_carries_the_lease_token PASSED [  5%]
+tests/services/test_blueprint_lease_release.py::TestAgentSideRelease::test_single_mode_block_carries_blueprint_id PASSED [  7%]
+tests/services/test_blueprint_lease_release.py::TestAgentSideRelease::test_agent_can_release_with_the_token_from_the_message PASSED [  9%]
+tests/services/test_blueprint_lease_release.py::TestReleaseSemantics::test_double_release_is_a_benign_noop PASSED [ 11%]
+tests/services/test_blueprint_lease_release.py::TestReleaseSemantics::test_legacy_run_token_argument_still_works PASSED [ 13%]
+tests/services/test_blueprint_lease_release.py::TestReleaseSemantics::test_release_without_any_token_is_benign PASSED [ 15%]
+tests/services/test_blueprint_lease_release.py::TestReleaseSemantics::test_stale_token_does_not_release_a_later_lease PASSED [ 16%]
+tests/services/test_blueprint_lease_release.py::TestLeaseExpiry::test_expired_lease_is_treated_as_free_by_try_claim PASSED [ 18%]
+tests/services/test_blueprint_lease_release.py::TestLeaseExpiry::test_fresh_lease_still_coalesces PASSED [ 20%]
+tests/services/test_blueprint_lease_release.py::TestLeaseExpiry::test_sweep_releases_an_expired_lease PASSED [ 22%]
+tests/services/test_blueprint_lease_release.py::TestLeaseExpiry::test_sweep_keeps_a_live_lease PASSED [ 24%]
+tests/services/test_blueprint_lease_release.py::TestLeaseExpiry::test_ttl_is_env_tunable_per_run PASSED [ 26%]
+tests/services/test_blueprint_trigger_coordinator.py::TestTryClaim::test_try_claim_success PASSED [ 28%]
+tests/services/test_blueprint_trigger_coordinator.py::TestTryClaim::test_try_claim_coalesce_same_mode PASSED [ 30%]
+tests/services/test_blueprint_trigger_coordinator.py::TestTryClaim::test_try_claim_conflict_different_mode PASSED [ 32%]
+tests/services/test_blueprint_trigger_coordinator.py::TestTryClaim::test_try_claim_different_project_independent PASSED [ 33%]
+tests/services/test_blueprint_trigger_coordinator.py::TestTryClaim::test_lease_has_no_heartbeat_field PASSED [ 35%]
+tests/services/test_blueprint_trigger_coordinator.py::TestRelease::test_lease_released_after_claim_and_release PASSED [ 37%]
+tests/services/test_blueprint_trigger_coordinator.py::TestRelease::test_double_release_is_noop PASSED [ 39%]
+tests/services/test_blueprint_trigger_coordinator.py::TestRelease::test_lease_blocks_until_released PASSED [ 41%]
+tests/services/test_blueprint_trigger_coordinator.py::TestRelease::test_release_wrong_token PASSED [ 43%]
+tests/services/test_blueprint_trigger_coordinator.py::TestRelease::test_release_no_lease PASSED [ 45%]
+tests/services/test_blueprint_trigger_coordinator.py::TestIsActive::test_is_active_true_with_lease PASSED [ 47%]
+tests/services/test_blueprint_trigger_coordinator.py::TestIsActive::test_is_active_false_without_lease PASSED [ 49%]
+tests/services/test_blueprint_trigger_coordinator.py::TestIsActive::test_is_active_mode_filter PASSED [ 50%]
+tests/services/test_blueprint_trigger_coordinator.py::TestReconcileOnStartup::test_reconcile_releases_when_no_queue_service PASSED [ 52%]
+tests/services/test_blueprint_trigger_coordinator.py::TestReconcileOnStartup::test_reconcile_no_op_with_no_leases PASSED [ 54%]
+tests/services/test_blueprint_trigger_coordinator.py::TestReconcileOnStartup::test_reconcile_with_terminal_job_releases PASSED [ 56%]
+tests/services/test_blueprint_trigger_coordinator.py::TestReconcileOnStartup::test_reconcile_with_active_job_keeps_lease PASSED [ 58%]
+tests/services/test_blueprint_trigger_coordinator.py::TestReconcileOnStartup::test_reconcile_per_project_failure_isolated PASSED [ 60%]
+tests/services/test_blueprint_trigger_coordinator.py::test_lease_meta_key_matches_spec PASSED [ 62%]
+tests/unit/test_blueprint_tools.py::TestBlueprintSearchMatcherNoneGuard::test_blueprint_search_matcher_none PASSED [ 64%]
+tests/unit/test_blueprint_tools.py::TestBlueprintSearchMatcherPresent::test_blueprint_search_matcher_present PASSED [ 66%]
+tests/unit/test_blueprint_tools.py::TestBlueprintGetOwnership::test_blueprint_get_cross_project_denied PASSED [ 67%]
+tests/unit/test_blueprint_tools.py::TestBlueprintGetOwnership::test_blueprint_get_same_project_ok PASSED [ 69%]
+tests/unit/test_blueprint_tools.py::TestBlueprintUpdateOwnership::test_blueprint_update_cross_project_denied PASSED [ 71%]
+tests/unit/test_blueprint_tools.py::TestBlueprintUpdateOwnership::test_blueprint_update_same_project_ok PASSED [ 73%]
+tests/unit/test_blueprint_tools.py::TestBlueprintToolCount::test_factory_returns_ten_tools PASSED [ 75%]
+tests/unit/test_blueprint_tools.py::TestBlueprintReleaseLease::test_release_lease_tool_success PASSED [ 77%]
+tests/unit/test_blueprint_tools.py::TestBlueprintReleaseLease::test_release_lease_tool_no_coordinator PASSED [ 79%]
+tests/unit/test_blueprint_tools.py::TestBlueprintClaimPending::test_claim_pending_returns_records PASSED [ 81%]
+tests/unit/test_blueprint_tools.py::TestBlueprintClaimPending::test_claim_pending_empty PASSED [ 83%]
+tests/unit/test_blueprint_tools.py::TestBlueprintClaimPending::test_claim_pending_unauthorized PASSED [ 84%]
+tests/unit/test_blueprint_tools.py::TestBlueprintAcknowledgePending::test_acknowledge_pending_success PASSED [ 86%]
+tests/unit/test_blueprint_tools.py::TestBlueprintAcknowledgePending::test_acknowledge_pending_unauthorized PASSED [ 88%]
+tests/unit/test_blueprint_tools.py::TestBlueprintGetPendingCount::test_get_pending_count PASSED [ 90%]
+tests/unit/test_blueprint_tools.py::TestBlueprintGetPendingCount::test_get_pending_count_no_repo PASSED [ 92%]
+tests/unit/test_blueprint_tools.py::TestBlueprintDisable::test_disable_success PASSED [ 94%]
+tests/unit/test_blueprint_tools.py::TestBlueprintDisable::test_disable_unauthorized PASSED [ 96%]
+tests/unit/test_blueprint_tools.py::TestBlueprintDisable::test_disable_not_found PASSED [ 98%]
+tests/unit/test_blueprint_tools.py::TestBlueprintUpdateStatus::test_update_with_status PASSED [100%]
+
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-blueprint-lease-release/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+======================== 53 passed, 1 warning in 8.67s =========================

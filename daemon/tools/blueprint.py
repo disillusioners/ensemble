@@ -583,21 +583,34 @@ def create_blueprint_tools(
     @register_tool_category("blueprint")
     @tool
     async def blueprint_release_lease(
-        run_token: str,
+        lease_token: str = "",
+        run_token: str = "",
         project_id: str = None,
     ) -> str:
         """Release the blueprint coordinator lease.
 
         Call this at the end of every workflow, before reporting, using the
-        run_token from the trigger metadata. This frees the project for
-        subsequent blueprint operations.
+        lease token from the trigger metadata. The token is delivered in the
+        ``[blueprint-trigger]`` block at the end of the message that
+        started this run, under the ``lease_token`` key.
+
+        Releasing is safe and idempotent: only the lease whose token
+        matches is released, so a stale token never frees another run's
+        lease. When this run holds no lease — already released, expired,
+        or never claimed — the call is an explicitly benign no-op, not an
+        error.
 
         Args:
-            run_token: The run_token from the trigger metadata.
+            lease_token: The lease token from the trigger metadata
+                (``lease_token`` key of the ``[blueprint-trigger]`` block).
+            run_token: Legacy alias for ``lease_token`` — accepted so the
+                older "release the run_token from my trigger metadata"
+                contract keeps working. Ignored when ``lease_token`` is
+                supplied.
             project_id: Optional project ID. Auto-detected from context if not provided.
 
         Returns:
-            Success or error message.
+            Success or a benign no-op message. Never raises.
         """
         pid = project_id or _get_project_id()
         if not pid:
@@ -609,16 +622,32 @@ def create_blueprint_tools(
         if coordinator is None:
             return "No coordinator available (lease system not configured)."
 
+        # ``lease_token`` wins when both are supplied.
+        token = lease_token or run_token
+        if not token:
+            return (
+                "No lease token supplied — no lease held by this run; "
+                "nothing to release."
+            )
+
         try:
-            released = await coordinator.release(pid, run_token)
-            if released:
-                return "Lease released successfully."
-            return "Lease not found or already released."
+            released = await coordinator.release(pid, token)
         except Exception as e:
+            # The tool must NEVER raise out to the agent — a release
+            # failure must not break the run's completion.
             logger.warning(
                 "blueprint_release_lease failed: %s", e, exc_info=True
             )
-            return f"Error releasing lease: {e}"
+            return (
+                "Lease release skipped (coordinator error); no lease "
+                "released by this call."
+            )
+        if released:
+            return "Lease released successfully."
+        # Absent lease, expired lease, or a token that does not own the
+        # current lease — all benign, and none of them releases anyone
+        # else's lease.
+        return "No lease held by this run — nothing to release."
 
     return [
         blueprint_search,

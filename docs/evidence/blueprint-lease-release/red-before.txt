@@ -1,0 +1,725 @@
+============================= test session starts ==============================
+platform linux -- Python 3.14.7, pytest-9.0.2, pluggy-1.6.0 -- /home/nea/ensemble-src-wt-blueprint-lease-release/.venv/bin/python
+cachedir: .pytest_cache
+hypothesis profile 'default'
+rootdir: /home/nea/ensemble-src-wt-blueprint-lease-release
+configfile: pyproject.toml
+plugins: anyio-4.12.1, hypothesis-6.165.10, asyncio-1.3.0, mock-3.15.1, xdist-3.8.0, langsmith-0.7.7, timeout-2.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+timeout: 30.0s
+timeout method: thread
+timeout func_only: False
+collecting ... collected 14 items
+
+tests/services/test_blueprint_lease_release.py::TestDaemonSideRelease::test_lease_is_released_when_job_terminalizes FAILED [  7%]
+tests/services/test_blueprint_lease_release.py::TestDaemonSideRelease::test_lease_is_released_when_job_errors FAILED [ 14%]
+tests/services/test_blueprint_lease_release.py::TestAgentSideRelease::test_job_message_carries_the_lease_token FAILED [ 21%]
+tests/services/test_blueprint_lease_release.py::TestAgentSideRelease::test_single_mode_block_carries_blueprint_id FAILED [ 28%]
+tests/services/test_blueprint_lease_release.py::TestAgentSideRelease::test_agent_can_release_with_the_token_from_the_message FAILED [ 35%]
+tests/services/test_blueprint_lease_release.py::TestReleaseSemantics::test_double_release_is_a_benign_noop FAILED [ 42%]
+tests/services/test_blueprint_lease_release.py::TestReleaseSemantics::test_legacy_run_token_argument_still_works PASSED [ 50%]
+tests/services/test_blueprint_lease_release.py::TestReleaseSemantics::test_release_without_any_token_is_benign FAILED [ 57%]
+tests/services/test_blueprint_lease_release.py::TestReleaseSemantics::test_stale_token_does_not_release_a_later_lease FAILED [ 64%]
+tests/services/test_blueprint_lease_release.py::TestLeaseExpiry::test_expired_lease_is_treated_as_free_by_try_claim FAILED [ 71%]
+tests/services/test_blueprint_lease_release.py::TestLeaseExpiry::test_fresh_lease_still_coalesces PASSED [ 78%]
+tests/services/test_blueprint_lease_release.py::TestLeaseExpiry::test_sweep_releases_an_expired_lease FAILED [ 85%]
+tests/services/test_blueprint_lease_release.py::TestLeaseExpiry::test_sweep_keeps_a_live_lease FAILED [ 92%]
+tests/services/test_blueprint_lease_release.py::TestLeaseExpiry::test_ttl_is_env_tunable_per_run FAILED [100%]
+
+=================================== FAILURES ===================================
+______ TestDaemonSideRelease.test_lease_is_released_when_job_terminalizes ______
+
+self = <tests.services.test_blueprint_lease_release.TestDaemonSideRelease object at 0x73b624dc0550>
+coordinator = <daemon.services.blueprint_trigger_coordinator.BlueprintTriggerCoordinator object at 0x73b624dd1010>
+job_queue_service = <daemon.services.job_queue_service.JobQueueService object at 0x73b624dd3b60>
+job_repo = <daemon.repositories.job_queue.repository.JobRepository object at 0x73b624dd1e80>
+project_repo = <daemon.repositories.project.repository.SQLModelProjectRepository object at 0x73b624dd1160>
+pid = '9ff3851f-b5fd-4c3e-a1cb-90719eaa4d57'
+
+    def test_lease_is_released_when_job_terminalizes(
+        self,
+        coordinator,
+        job_queue_service,
+        job_repo,
+        project_repo,
+        pid,
+    ):
+        """THE PRIMARY PRODUCTION PATH.
+    
+        claim → enqueue a real job → the job terminalizes → the observer's
+        release seam runs → the lease is FREE.
+        """
+        claim, job_id = _run(
+            _claim_and_enqueue(
+                coordinator=coordinator,
+                job_queue_service=job_queue_service,
+                project_id=pid,
+            )
+        )
+    
+        # Precondition: the lease is held and the job row carries the
+        # token in its metadata.
+        assert _run(coordinator.is_active(pid)) is True
+        row = job_repo.get(job_id)
+        assert row is not None
+        assert row.job_metadata.get("run_token") == claim.run_token
+        # The job row's project lives in the COLUMN — never in the
+        # metadata map (this is what made the daemon seam dead).
+        assert row.project_id == pid
+        assert "project_id" not in row.job_metadata
+    
+        observer = _make_observer(job_repo=job_repo, coordinator=coordinator)
+        ctx = _ProcessingJobContext(instance_id="inst-1", job_id=job_id)
+        _run(observer._finalize_job(ctx, "inst-1", "completed"))
+    
+        # The lease must be FREE after the job terminalized.
+>       assert _run(coordinator.is_active(pid)) is False
+E       AssertionError: assert True is False
+E        +  where True = _run(<coroutine object BlueprintTriggerCoordinator.is_active at 0x73b6241ec580>)
+E        +    where <coroutine object BlueprintTriggerCoordinator.is_active at 0x73b6241ec580> = is_active('9ff3851f-b5fd-4c3e-a1cb-90719eaa4d57')
+E        +      where is_active = <daemon.services.blueprint_trigger_coordinator.BlueprintTriggerCoordinator object at 0x73b624dd1010>.is_active
+
+tests/services/test_blueprint_lease_release.py:311: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  daemon.registry:registry.py:1589 Tool config validation: Agent 'maintenancer': deny entry 'git_commit' is neither a known category nor a known tool
+WARNING  daemon.services.bash_spawn_reaper:bash_spawn_reaper.py:271 bash reaper: terminal-tier durable sweep is a NO-OP (durable writer (BashSpawnRepository) unset) — skipped 1 time(s) since boot; the durable registry is NOT being maintained on this surface
+WARNING  daemon.services.job_feedback_observer:job_feedback_observer.py:3441 Observer: failed to emit status_change for inst-1...: 'MagicMock' object can't be awaited
+ERROR    daemon.services.job_feedback_observer:job_feedback_observer.py:4870 Observer: failed to spawn instance for job <MagicMock name='mock.start_job().job_id.__getitem__()' id='127226126019152'>...: 'MagicMock' object can't be awaited
+_________ TestDaemonSideRelease.test_lease_is_released_when_job_errors _________
+
+self = <tests.services.test_blueprint_lease_release.TestDaemonSideRelease object at 0x73b624dc0a50>
+coordinator = <daemon.services.blueprint_trigger_coordinator.BlueprintTriggerCoordinator object at 0x73b62422a0d0>
+job_queue_service = <daemon.services.job_queue_service.JobQueueService object at 0x73b62422ad50>
+job_repo = <daemon.repositories.job_queue.repository.JobRepository object at 0x73b62422a210>
+project_repo = <daemon.repositories.project.repository.SQLModelProjectRepository object at 0x73b624229f90>
+pid = '63cacaa9-bbbe-49d2-ba69-b0a5a368c451'
+
+    def test_lease_is_released_when_job_errors(
+        self,
+        coordinator,
+        job_queue_service,
+        job_repo,
+        project_repo,
+        pid,
+    ):
+        """The FAILED/ERROR terminal branch releases the lease too."""
+        claim, job_id = _run(
+            _claim_and_enqueue(
+                coordinator=coordinator,
+                job_queue_service=job_queue_service,
+                project_id=pid,
+            )
+        )
+        assert claim.run_token
+    
+        observer = _make_observer(job_repo=job_repo, coordinator=coordinator)
+        ctx = _ProcessingJobContext(instance_id="inst-1", job_id=job_id)
+        _run(observer._finalize_job(ctx, "inst-1", "error", "boom"))
+    
+>       assert _run(coordinator.is_active(pid)) is False
+E       AssertionError: assert True is False
+E        +  where True = _run(<coroutine object BlueprintTriggerCoordinator.is_active at 0x73b61efbba00>)
+E        +    where <coroutine object BlueprintTriggerCoordinator.is_active at 0x73b61efbba00> = is_active('63cacaa9-bbbe-49d2-ba69-b0a5a368c451')
+E        +      where is_active = <daemon.services.blueprint_trigger_coordinator.BlueprintTriggerCoordinator object at 0x73b62422a0d0>.is_active
+
+tests/services/test_blueprint_lease_release.py:336: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  daemon.services.job_feedback_observer:job_feedback_observer.py:3441 Observer: failed to emit status_change for inst-1...: 'MagicMock' object can't be awaited
+ERROR    daemon.services.job_feedback_observer:job_feedback_observer.py:4870 Observer: failed to spawn instance for job <MagicMock name='mock.start_job().job_id.__getitem__()' id='127226040221776'>...: 'MagicMock' object can't be awaited
+________ TestAgentSideRelease.test_job_message_carries_the_lease_token _________
+
+self = <tests.services.test_blueprint_lease_release.TestAgentSideRelease object at 0x73b624dc0b90>
+coordinator = <daemon.services.blueprint_trigger_coordinator.BlueprintTriggerCoordinator object at 0x73b6240802d0>
+job_queue_service = <daemon.services.job_queue_service.JobQueueService object at 0x73b624080cd0>
+job_repo = <daemon.repositories.job_queue.repository.JobRepository object at 0x73b624080410>
+pid = 'f5f8090d-394a-4b10-acae-3d240f755b33'
+
+    def test_job_message_carries_the_lease_token(
+        self,
+        coordinator,
+        job_queue_service,
+        job_repo,
+        pid,
+    ):
+        """The ``[blueprint-trigger]`` block carries the COORDINATOR token."""
+        claim, job_id = _run(
+            _claim_and_enqueue(
+                coordinator=coordinator,
+                job_queue_service=job_queue_service,
+                project_id=pid,
+            )
+        )
+        row = job_repo.get(job_id)
+>       payload = _trigger_block(row.message)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/services/test_blueprint_lease_release.py:362: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+message = 'Rebuild all project blueprints.'
+
+    def _trigger_block(message: str) -> dict[str, Any]:
+        """Parse the ``[blueprint-trigger]`` block out of a job message."""
+        marker = "[blueprint-trigger]"
+>       assert marker in message, f"no trigger block in message: {message!r}"
+E       AssertionError: no trigger block in message: 'Rebuild all project blueprints.'
+E       assert '[blueprint-trigger]' in 'Rebuild all project blueprints.'
+
+tests/services/test_blueprint_lease_release.py:257: AssertionError
+_______ TestAgentSideRelease.test_single_mode_block_carries_blueprint_id _______
+
+self = <tests.services.test_blueprint_lease_release.TestAgentSideRelease object at 0x73b624dc0910>
+coordinator = <daemon.services.blueprint_trigger_coordinator.BlueprintTriggerCoordinator object at 0x73b6241169e0>
+job_queue_service = <daemon.services.job_queue_service.JobQueueService object at 0x73b624117230>
+job_repo = <daemon.repositories.job_queue.repository.JobRepository object at 0x73b624116b10>
+pid = 'ef288a69-fa37-4a11-a366-077bcd0fdb0a'
+
+    def test_single_mode_block_carries_blueprint_id(
+        self,
+        coordinator,
+        job_queue_service,
+        job_repo,
+        pid,
+    ):
+        """The ``single`` trigger mode carries its blueprint id."""
+        claim, job_id = _run(
+            _claim_and_enqueue(
+                coordinator=coordinator,
+                job_queue_service=job_queue_service,
+                project_id=pid,
+                mode="single",
+                trigger_type="single",
+                blueprint_id="bp-123",
+            )
+        )
+        row = job_repo.get(job_id)
+>       payload = _trigger_block(row.message)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/services/test_blueprint_lease_release.py:389: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+message = 'Rebuild all project blueprints.'
+
+    def _trigger_block(message: str) -> dict[str, Any]:
+        """Parse the ``[blueprint-trigger]`` block out of a job message."""
+        marker = "[blueprint-trigger]"
+>       assert marker in message, f"no trigger block in message: {message!r}"
+E       AssertionError: no trigger block in message: 'Rebuild all project blueprints.'
+E       assert '[blueprint-trigger]' in 'Rebuild all project blueprints.'
+
+tests/services/test_blueprint_lease_release.py:257: AssertionError
+_ TestAgentSideRelease.test_agent_can_release_with_the_token_from_the_message __
+
+self = <tests.services.test_blueprint_lease_release.TestAgentSideRelease object at 0x73b624d79cd0>
+coordinator = <daemon.services.blueprint_trigger_coordinator.BlueprintTriggerCoordinator object at 0x73b61eb68510>
+job_queue_service = <daemon.services.job_queue_service.JobQueueService object at 0x73b61eb68d60>
+job_repo = <daemon.repositories.job_queue.repository.JobRepository object at 0x73b61eb68640>
+project_repo = <daemon.repositories.project.repository.SQLModelProjectRepository object at 0x73b61eb683e0>
+tool_manager = <MagicMock id='127226139713824'>
+pid = '9e70b280-11ca-438c-822d-2c231e6fbb4c'
+
+    def test_agent_can_release_with_the_token_from_the_message(
+        self,
+        coordinator,
+        job_queue_service,
+        job_repo,
+        project_repo,
+        tool_manager,
+        pid,
+    ):
+        """An agent that reads the message can release the lease."""
+        claim, job_id = _run(
+            _claim_and_enqueue(
+                coordinator=coordinator,
+                job_queue_service=job_queue_service,
+                project_id=pid,
+            )
+        )
+        row = job_repo.get(job_id)
+>       payload = _trigger_block(row.message)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/services/test_blueprint_lease_release.py:412: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+message = 'Rebuild all project blueprints.'
+
+    def _trigger_block(message: str) -> dict[str, Any]:
+        """Parse the ``[blueprint-trigger]`` block out of a job message."""
+        marker = "[blueprint-trigger]"
+>       assert marker in message, f"no trigger block in message: {message!r}"
+E       AssertionError: no trigger block in message: 'Rebuild all project blueprints.'
+E       assert '[blueprint-trigger]' in 'Rebuild all project blueprints.'
+
+tests/services/test_blueprint_lease_release.py:257: AssertionError
+__________ TestReleaseSemantics.test_double_release_is_a_benign_noop ___________
+
+self = <tests.services.test_blueprint_lease_release.TestReleaseSemantics object at 0x73b624dc0cd0>
+coordinator = <daemon.services.blueprint_trigger_coordinator.BlueprintTriggerCoordinator object at 0x73b61eb3ee70>
+tool_manager = <MagicMock id='127226126015456'>
+pid = '9f3bd20f-7f72-448a-bab4-6b26c5bdbd09'
+
+    def test_double_release_is_a_benign_noop(
+        self, coordinator, tool_manager, pid,
+    ):
+        """Second release: no exception, benign wording, lease stays free."""
+        claim = _run(coordinator.try_claim(pid, "rebuild", "job-A"))
+        release = _release_lease_tool(tool_manager)
+    
+>       first = _run(release.ainvoke({"lease_token": claim.run_token}))
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/services/test_blueprint_lease_release.py:435: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/services/test_blueprint_lease_release.py:155: in _run
+    return asyncio.run(coro)
+           ^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/runners.py:205: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/runners.py:128: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/base_events.py:720: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+.venv/lib/python3.14/site-packages/langchain_core/tools/structured.py:70: in ainvoke
+    return await super().ainvoke(input, config, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+.venv/lib/python3.14/site-packages/langchain_core/tools/base.py:652: in ainvoke
+    return await self.arun(tool_input, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+.venv/lib/python3.14/site-packages/langchain_core/tools/base.py:1131: in arun
+    raise error_to_raise
+.venv/lib/python3.14/site-packages/langchain_core/tools/base.py:1085: in arun
+    tool_args, tool_kwargs = self._to_args_and_kwargs(tool_input, tool_call_id)
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+.venv/lib/python3.14/site-packages/langchain_core/tools/base.py:862: in _to_args_and_kwargs
+    tool_input = self._parse_input(tool_input, tool_call_id)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = StructuredTool(name='blueprint_release_lease', description='Release the blueprint coordinator lease.\n\nCall this at t...eprint_release_lease'>, coroutine=<function create_blueprint_tools.<locals>.blueprint_release_lease at 0x73b61ebe9c70>)
+tool_input = {'lease_token': '6fa559a1-c242-4794-8bf6-aef090da0792'}
+tool_call_id = None
+
+    def _parse_input(
+        self, tool_input: str | dict, tool_call_id: str | None
+    ) -> str | dict[str, Any]:
+        """Parse and validate tool input using the args schema.
+    
+        Args:
+            tool_input: The raw input to the tool.
+            tool_call_id: The ID of the tool call, if available.
+    
+        Returns:
+            The parsed and validated input.
+    
+        Raises:
+            ValueError: If `string` input is provided with JSON schema `args_schema`.
+            ValueError: If `InjectedToolCallId` is required but `tool_call_id` is not
+                provided.
+            TypeError: If `args_schema` is not a Pydantic `BaseModel` or dict.
+        """
+        input_args = self.args_schema
+    
+        if isinstance(tool_input, str):
+            if input_args is not None:
+                if isinstance(input_args, dict):
+                    msg = (
+                        "String tool inputs are not allowed when "
+                        "using tools with JSON schema args_schema."
+                    )
+                    raise ValueError(msg)
+                key_ = next(iter(get_fields(input_args).keys()))
+                if issubclass(input_args, BaseModel):
+                    input_args.model_validate({key_: tool_input})
+                elif issubclass(input_args, BaseModelV1):
+                    input_args.parse_obj({key_: tool_input})
+                else:
+                    msg = f"args_schema must be a Pydantic BaseModel, got {input_args}"
+                    raise TypeError(msg)
+            return tool_input
+    
+        if input_args is not None:
+            if isinstance(input_args, dict):
+                return tool_input
+            if issubclass(input_args, BaseModel):
+                # Check args_schema for InjectedToolCallId
+                for k, v in get_all_basemodel_annotations(input_args).items():
+                    if _is_injected_arg_type(v, injected_type=InjectedToolCallId):
+                        if tool_call_id is None:
+                            msg = (
+                                "When tool includes an InjectedToolCallId "
+                                "argument, tool must always be invoked with a full "
+                                "model ToolCall of the form: {'args': {...}, "
+                                "'name': '...', 'type': 'tool_call', "
+                                "'tool_call_id': '...'}"
+                            )
+                            raise ValueError(msg)
+                        tool_input[k] = tool_call_id
+>               result = input_args.model_validate(tool_input)
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E               pydantic_core._pydantic_core.ValidationError: 1 validation error for blueprint_release_lease
+E               run_token
+E                 Field required [type=missing, input_value={'lease_token': '6fa559a1...4794-8bf6-aef090da0792'}, input_type=dict]
+E                   For further information visit https://errors.pydantic.dev/2.12/v/missing
+
+.venv/lib/python3.14/site-packages/langchain_core/tools/base.py:711: ValidationError
+________ TestReleaseSemantics.test_release_without_any_token_is_benign _________
+
+self = <tests.services.test_blueprint_lease_release.TestReleaseSemantics object at 0x73b624d79ba0>
+coordinator = <daemon.services.blueprint_trigger_coordinator.BlueprintTriggerCoordinator object at 0x73b61ec35480>
+tool_manager = <MagicMock id='127226126012768'>
+pid = '64149eaf-f7d0-455a-a414-e5fdf107464d'
+
+    def test_release_without_any_token_is_benign(
+        self, coordinator, tool_manager, pid,
+    ):
+        """The token argument is optional — a call with none is a no-op."""
+        _run(coordinator.try_claim(pid, "rebuild", "job-A"))
+        release = _release_lease_tool(tool_manager)
+>       result = _run(release.ainvoke({}))
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/services/test_blueprint_lease_release.py:462: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/services/test_blueprint_lease_release.py:155: in _run
+    return asyncio.run(coro)
+           ^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/runners.py:205: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/runners.py:128: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/base_events.py:720: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+.venv/lib/python3.14/site-packages/langchain_core/tools/structured.py:70: in ainvoke
+    return await super().ainvoke(input, config, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+.venv/lib/python3.14/site-packages/langchain_core/tools/base.py:652: in ainvoke
+    return await self.arun(tool_input, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+.venv/lib/python3.14/site-packages/langchain_core/tools/base.py:1131: in arun
+    raise error_to_raise
+.venv/lib/python3.14/site-packages/langchain_core/tools/base.py:1085: in arun
+    tool_args, tool_kwargs = self._to_args_and_kwargs(tool_input, tool_call_id)
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+.venv/lib/python3.14/site-packages/langchain_core/tools/base.py:862: in _to_args_and_kwargs
+    tool_input = self._parse_input(tool_input, tool_call_id)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = StructuredTool(name='blueprint_release_lease', description='Release the blueprint coordinator lease.\n\nCall this at t...ase_lease'>, extras={}, coroutine=<function create_blueprint_tools.<locals>.blueprint_release_lease at 0x73b61ec2be20>)
+tool_input = {}, tool_call_id = None
+
+    def _parse_input(
+        self, tool_input: str | dict, tool_call_id: str | None
+    ) -> str | dict[str, Any]:
+        """Parse and validate tool input using the args schema.
+    
+        Args:
+            tool_input: The raw input to the tool.
+            tool_call_id: The ID of the tool call, if available.
+    
+        Returns:
+            The parsed and validated input.
+    
+        Raises:
+            ValueError: If `string` input is provided with JSON schema `args_schema`.
+            ValueError: If `InjectedToolCallId` is required but `tool_call_id` is not
+                provided.
+            TypeError: If `args_schema` is not a Pydantic `BaseModel` or dict.
+        """
+        input_args = self.args_schema
+    
+        if isinstance(tool_input, str):
+            if input_args is not None:
+                if isinstance(input_args, dict):
+                    msg = (
+                        "String tool inputs are not allowed when "
+                        "using tools with JSON schema args_schema."
+                    )
+                    raise ValueError(msg)
+                key_ = next(iter(get_fields(input_args).keys()))
+                if issubclass(input_args, BaseModel):
+                    input_args.model_validate({key_: tool_input})
+                elif issubclass(input_args, BaseModelV1):
+                    input_args.parse_obj({key_: tool_input})
+                else:
+                    msg = f"args_schema must be a Pydantic BaseModel, got {input_args}"
+                    raise TypeError(msg)
+            return tool_input
+    
+        if input_args is not None:
+            if isinstance(input_args, dict):
+                return tool_input
+            if issubclass(input_args, BaseModel):
+                # Check args_schema for InjectedToolCallId
+                for k, v in get_all_basemodel_annotations(input_args).items():
+                    if _is_injected_arg_type(v, injected_type=InjectedToolCallId):
+                        if tool_call_id is None:
+                            msg = (
+                                "When tool includes an InjectedToolCallId "
+                                "argument, tool must always be invoked with a full "
+                                "model ToolCall of the form: {'args': {...}, "
+                                "'name': '...', 'type': 'tool_call', "
+                                "'tool_call_id': '...'}"
+                            )
+                            raise ValueError(msg)
+                        tool_input[k] = tool_call_id
+>               result = input_args.model_validate(tool_input)
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E               pydantic_core._pydantic_core.ValidationError: 1 validation error for blueprint_release_lease
+E               run_token
+E                 Field required [type=missing, input_value={}, input_type=dict]
+E                   For further information visit https://errors.pydantic.dev/2.12/v/missing
+
+.venv/lib/python3.14/site-packages/langchain_core/tools/base.py:711: ValidationError
+_____ TestReleaseSemantics.test_stale_token_does_not_release_a_later_lease _____
+
+self = <tests.services.test_blueprint_lease_release.TestReleaseSemantics object at 0x73b624d79e00>
+coordinator = <daemon.services.blueprint_trigger_coordinator.BlueprintTriggerCoordinator object at 0x73b61ece8c50>
+tool_manager = <MagicMock id='127226126008400'>
+pid = '18ee2d23-d2fb-4df6-9f01-85620dda4f5a'
+
+    def test_stale_token_does_not_release_a_later_lease(
+        self, coordinator, tool_manager, pid,
+    ):
+        """A token from an EARLIER run must not free a LATER run's lease."""
+        first = _run(coordinator.try_claim(pid, "rebuild", "job-A"))
+        release = _release_lease_tool(tool_manager)
+>       assert "released" in _run(
+            release.ainvoke({"lease_token": first.run_token})
+        ).lower()
+
+tests/services/test_blueprint_lease_release.py:473: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/services/test_blueprint_lease_release.py:155: in _run
+    return asyncio.run(coro)
+           ^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/runners.py:205: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/runners.py:128: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/base_events.py:720: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+.venv/lib/python3.14/site-packages/langchain_core/tools/structured.py:70: in ainvoke
+    return await super().ainvoke(input, config, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+.venv/lib/python3.14/site-packages/langchain_core/tools/base.py:652: in ainvoke
+    return await self.arun(tool_input, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+.venv/lib/python3.14/site-packages/langchain_core/tools/base.py:1131: in arun
+    raise error_to_raise
+.venv/lib/python3.14/site-packages/langchain_core/tools/base.py:1085: in arun
+    tool_args, tool_kwargs = self._to_args_and_kwargs(tool_input, tool_call_id)
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+.venv/lib/python3.14/site-packages/langchain_core/tools/base.py:862: in _to_args_and_kwargs
+    tool_input = self._parse_input(tool_input, tool_call_id)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = StructuredTool(name='blueprint_release_lease', description='Release the blueprint coordinator lease.\n\nCall this at t...ase_lease'>, extras={}, coroutine=<function create_blueprint_tools.<locals>.blueprint_release_lease at 0x73b61e91c510>)
+tool_input = {'lease_token': 'f16515ab-bca1-4afe-be9a-aca4ab2ff13c'}
+tool_call_id = None
+
+    def _parse_input(
+        self, tool_input: str | dict, tool_call_id: str | None
+    ) -> str | dict[str, Any]:
+        """Parse and validate tool input using the args schema.
+    
+        Args:
+            tool_input: The raw input to the tool.
+            tool_call_id: The ID of the tool call, if available.
+    
+        Returns:
+            The parsed and validated input.
+    
+        Raises:
+            ValueError: If `string` input is provided with JSON schema `args_schema`.
+            ValueError: If `InjectedToolCallId` is required but `tool_call_id` is not
+                provided.
+            TypeError: If `args_schema` is not a Pydantic `BaseModel` or dict.
+        """
+        input_args = self.args_schema
+    
+        if isinstance(tool_input, str):
+            if input_args is not None:
+                if isinstance(input_args, dict):
+                    msg = (
+                        "String tool inputs are not allowed when "
+                        "using tools with JSON schema args_schema."
+                    )
+                    raise ValueError(msg)
+                key_ = next(iter(get_fields(input_args).keys()))
+                if issubclass(input_args, BaseModel):
+                    input_args.model_validate({key_: tool_input})
+                elif issubclass(input_args, BaseModelV1):
+                    input_args.parse_obj({key_: tool_input})
+                else:
+                    msg = f"args_schema must be a Pydantic BaseModel, got {input_args}"
+                    raise TypeError(msg)
+            return tool_input
+    
+        if input_args is not None:
+            if isinstance(input_args, dict):
+                return tool_input
+            if issubclass(input_args, BaseModel):
+                # Check args_schema for InjectedToolCallId
+                for k, v in get_all_basemodel_annotations(input_args).items():
+                    if _is_injected_arg_type(v, injected_type=InjectedToolCallId):
+                        if tool_call_id is None:
+                            msg = (
+                                "When tool includes an InjectedToolCallId "
+                                "argument, tool must always be invoked with a full "
+                                "model ToolCall of the form: {'args': {...}, "
+                                "'name': '...', 'type': 'tool_call', "
+                                "'tool_call_id': '...'}"
+                            )
+                            raise ValueError(msg)
+                        tool_input[k] = tool_call_id
+>               result = input_args.model_validate(tool_input)
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E               pydantic_core._pydantic_core.ValidationError: 1 validation error for blueprint_release_lease
+E               run_token
+E                 Field required [type=missing, input_value={'lease_token': 'f16515ab...4afe-be9a-aca4ab2ff13c'}, input_type=dict]
+E                   For further information visit https://errors.pydantic.dev/2.12/v/missing
+
+.venv/lib/python3.14/site-packages/langchain_core/tools/base.py:711: ValidationError
+______ TestLeaseExpiry.test_expired_lease_is_treated_as_free_by_try_claim ______
+
+self = <tests.services.test_blueprint_lease_release.TestLeaseExpiry object at 0x73b624dc1450>
+coordinator = <daemon.services.blueprint_trigger_coordinator.BlueprintTriggerCoordinator object at 0x73b61ee7b050>
+project_repo = <daemon.repositories.project.repository.SQLModelProjectRepository object at 0x73b61ee7b850>
+pid = 'bf7a5842-8db1-4892-8945-f02c35b8d1ce'
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x73b624df7230>
+
+    def test_expired_lease_is_treated_as_free_by_try_claim(
+        self, coordinator, project_repo, pid, monkeypatch,
+    ):
+        """An expired lease does not coalesce forever — it is reclaimed."""
+        # A lease claimed 10 hours ago, with the TTL at 180 minutes.
+        old = "2020-01-01T00:00:00+00:00"
+        project_repo.set_metadata(
+            pid,
+            LEASE_META_KEY,
+            {
+                "run_token": "stale-token",
+                "job_id": "job-stale",
+                "mode": "rebuild",
+                "claimed_at": old,
+            },
+        )
+        monkeypatch.setenv("BLUEPRINT_LEASE_TTL_MINUTES", "180")
+    
+        result = _run(coordinator.try_claim(pid, "rebuild", "job-NEW"))
+>       assert result.claimed is True
+E       AssertionError: assert False is True
+E        +  where False = ClaimResult(claimed=False, job_id='job-stale', coalesced=True, conflict_mode=None, run_token=None).claimed
+
+tests/services/test_blueprint_lease_release.py:519: AssertionError
+_____________ TestLeaseExpiry.test_sweep_releases_an_expired_lease _____________
+
+self = <tests.services.test_blueprint_lease_release.TestLeaseExpiry object at 0x73b624d7a190>
+coordinator = <daemon.services.blueprint_trigger_coordinator.BlueprintTriggerCoordinator object at 0x73b61ec3b020>
+project_repo = <daemon.repositories.project.repository.SQLModelProjectRepository object at 0x73b61ec3ad50>
+pid = 'e2581e79-3040-445c-986e-fc81917db5e1'
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x73b624205bf0>
+
+    def test_sweep_releases_an_expired_lease(
+        self, coordinator, project_repo, pid, monkeypatch,
+    ):
+        """The periodic sweep frees leases past the TTL."""
+        project_repo.set_metadata(
+            pid,
+            LEASE_META_KEY,
+            {
+                "run_token": "stale-token",
+                "job_id": "job-stale",
+                "mode": "rebuild",
+                "claimed_at": "2020-01-01T00:00:00+00:00",
+            },
+        )
+        monkeypatch.setenv("BLUEPRINT_LEASE_TTL_MINUTES", "180")
+    
+>       released = _run(coordinator.sweep_expired_leases())
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: 'BlueprintTriggerCoordinator' object has no attribute 'sweep_expired_leases'
+
+tests/services/test_blueprint_lease_release.py:553: AttributeError
+________________ TestLeaseExpiry.test_sweep_keeps_a_live_lease _________________
+
+self = <tests.services.test_blueprint_lease_release.TestLeaseExpiry object at 0x73b624d79f30>
+coordinator = <daemon.services.blueprint_trigger_coordinator.BlueprintTriggerCoordinator object at 0x73b61e9c7d90>
+project_repo = <daemon.repositories.project.repository.SQLModelProjectRepository object at 0x73b61e9c7e70>
+pid = '0d1ebbb8-d59a-4511-825a-141546ebdede'
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x73b61e9c2990>
+
+    def test_sweep_keeps_a_live_lease(
+        self, coordinator, project_repo, pid, monkeypatch,
+    ):
+        """The sweep does NOT free a lease inside the TTL."""
+        _run(coordinator.try_claim(pid, "rebuild", "job-A"))
+        monkeypatch.setenv("BLUEPRINT_LEASE_TTL_MINUTES", "180")
+    
+>       released = _run(coordinator.sweep_expired_leases())
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: 'BlueprintTriggerCoordinator' object has no attribute 'sweep_expired_leases'
+
+tests/services/test_blueprint_lease_release.py:565: AttributeError
+_______________ TestLeaseExpiry.test_ttl_is_env_tunable_per_run ________________
+
+self = <tests.services.test_blueprint_lease_release.TestLeaseExpiry object at 0x73b624db9b50>
+coordinator = <daemon.services.blueprint_trigger_coordinator.BlueprintTriggerCoordinator object at 0x73b61e8f3e70>
+project_repo = <daemon.repositories.project.repository.SQLModelProjectRepository object at 0x73b61e8f1ef0>
+pid = '2c446fdf-d849-4a36-a564-53a4d0e996cd'
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x73b61e9c3e90>
+
+    def test_ttl_is_env_tunable_per_run(
+        self, coordinator, project_repo, pid, monkeypatch,
+    ):
+        """``BLUEPRINT_LEASE_TTL_MINUTES`` is read PER RUN."""
+        project_repo.set_metadata(
+            pid,
+            LEASE_META_KEY,
+            {
+                "run_token": "stale-token",
+                "job_id": "job-stale",
+                "mode": "rebuild",
+                "claimed_at": "2020-01-01T00:00:00+00:00",
+            },
+        )
+        # A huge TTL keeps the (ancient) lease alive.
+        monkeypatch.setenv("BLUEPRINT_LEASE_TTL_MINUTES", "100000")
+>       assert _run(coordinator.sweep_expired_leases()) == 0
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: 'BlueprintTriggerCoordinator' object has no attribute 'sweep_expired_leases'
+
+tests/services/test_blueprint_lease_release.py:585: AttributeError
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-blueprint-lease-release/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/services/test_blueprint_lease_release.py::TestDaemonSideRelease::test_lease_is_released_when_job_terminalizes
+FAILED tests/services/test_blueprint_lease_release.py::TestDaemonSideRelease::test_lease_is_released_when_job_errors
+FAILED tests/services/test_blueprint_lease_release.py::TestAgentSideRelease::test_job_message_carries_the_lease_token
+FAILED tests/services/test_blueprint_lease_release.py::TestAgentSideRelease::test_single_mode_block_carries_blueprint_id
+FAILED tests/services/test_blueprint_lease_release.py::TestAgentSideRelease::test_agent_can_release_with_the_token_from_the_message
+FAILED tests/services/test_blueprint_lease_release.py::TestReleaseSemantics::test_double_release_is_a_benign_noop
+FAILED tests/services/test_blueprint_lease_release.py::TestReleaseSemantics::test_release_without_any_token_is_benign
+FAILED tests/services/test_blueprint_lease_release.py::TestReleaseSemantics::test_stale_token_does_not_release_a_later_lease
+FAILED tests/services/test_blueprint_lease_release.py::TestLeaseExpiry::test_expired_lease_is_treated_as_free_by_try_claim
+FAILED tests/services/test_blueprint_lease_release.py::TestLeaseExpiry::test_sweep_releases_an_expired_lease
+FAILED tests/services/test_blueprint_lease_release.py::TestLeaseExpiry::test_sweep_keeps_a_live_lease
+FAILED tests/services/test_blueprint_lease_release.py::TestLeaseExpiry::test_ttl_is_env_tunable_per_run
+=================== 12 failed, 2 passed, 1 warning in 4.76s ====================
