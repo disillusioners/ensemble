@@ -20,8 +20,8 @@ a connection, and never reports "healthy" when it could not establish health.
 
 Run from a checkout whose tree contains `scripts/audit/dump_lane_staleness.py` (tag
 v0.31.53 or later — NOT `/home/nea/ensemble-src`, which is a detached HEAD at
-bf4bfde6e that predates `scripts/audit/`, drifts by design, is never a commit
-target, and ships no `scripts/audit/`). One-time setup:
+bf4bfde6e that carries `scripts/audit/` but not `scripts/audit/dump_lane_staleness.py`,
+drifts by design, and is never a commit target). One-time setup:
 
 ```bash
 WT=/home/nea/ensemble-src-wt-audit

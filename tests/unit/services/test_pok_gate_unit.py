@@ -39,6 +39,7 @@ from daemon.services.pok_gate import (
     VerdictCache,
     build_active_digest,
     build_judge_prompt,
+    JudgePrompt,
     cache_key,
     classify_answer,
     family_home,
@@ -51,10 +52,14 @@ from daemon.services.pok_gate import (
 )
 from daemon.services.pok_gate_timeout_resolver import (
     DEFAULT_GATE_TIMEOUT_S,
+    DEFAULT_GATE_WALL_CLOCK_S,
     GATE_MAX_RETRIES,
     GATE_WALL_CLOCK_CAP_S,
     MAX_GATE_TIMEOUT_S,
+    MAX_GATE_WALL_CLOCK_S,
     MIN_GATE_TIMEOUT_S,
+    MIN_GATE_WALL_CLOCK_S,
+    POK_GATE_WALL_CLOCK_S_ENV,
     get_gate_timeout_s,
     get_gate_wall_clock_cap_s,
     reset_gate_timeout_resolver_for_tests,
@@ -227,7 +232,7 @@ class TestDigest:
             reason="the deploy invariant",
         )
         assert "INTRA-STORE" in digest
-        assert "A RAG twin is" in digest
+        assert "A twin in the general knowledge base" in digest
 
     def test_the_zero_overlap_fallback_is_family_first_not_slug_order(self) -> None:
         """The zero-overlap fallback is same-family-first, then
@@ -335,45 +340,731 @@ class TestStubMode:
 
 class TestTimeoutResolver:
     def setup_method(self) -> None:
+        import os
+
+        os.environ.pop("ENSEMBLE_POK_GATE_TIMEOUT_S", None)
+        os.environ.pop("ENSEMBLE_POK_GATE_WALL_CLOCK_S", None)
         reset_gate_timeout_resolver_for_tests()
 
     def teardown_method(self) -> None:
+        import os
+
+        os.environ.pop("ENSEMBLE_POK_GATE_TIMEOUT_S", None)
+        os.environ.pop("ENSEMBLE_POK_GATE_WALL_CLOCK_S", None)
         reset_gate_timeout_resolver_for_tests()
 
-    def test_the_defaults_are_the_overturned_ones(self) -> None:
-        assert DEFAULT_GATE_TIMEOUT_S == 20.0
-        assert GATE_WALL_CLOCK_CAP_S == 45.0
+    def test_the_defaults_are_the_five_minute_budget(self) -> None:
+        """Pin (a): the defaults ARE the five-minute budget.
+
+        The Emperor's 2026-11-25 ruling: the TOTAL judge budget is
+        300s; the per-attempt cap EQUALS the total so a single judge
+        call may use the WHOLE budget (the gate spends
+        ``min(attempt, remaining)`` and the per-attempt value never
+        silently truncates a ruling); the retry budget is untouched
+        (a budget change, not a retry change). Replaces the
+        pre-ruling ``test_the_defaults_are_the_overturned_ones``
+        (20.0 / 45.0 / 1).
+        """
+        assert DEFAULT_GATE_TIMEOUT_S == 300.0
+        assert GATE_WALL_CLOCK_CAP_S == DEFAULT_GATE_WALL_CLOCK_S == 300.0
         assert GATE_MAX_RETRIES == 1
+        reset_gate_timeout_resolver_for_tests()
+        assert get_gate_timeout_s() == 300.0
+        assert get_gate_wall_clock_cap_s() == 300.0
 
     def test_the_min_clamp_is_ten_seconds(self) -> None:
         import os
 
         os.environ["ENSEMBLE_POK_GATE_TIMEOUT_S"] = "3"
         reset_gate_timeout_resolver_for_tests()
-        assert get_gate_timeout_s() == MIN_GATE_TIMEOUT_S
-        del os.environ["ENSEMBLE_POK_GATE_TIMEOUT_S"]
-        reset_gate_timeout_resolver_for_tests()
+        try:
+            assert get_gate_timeout_s() == MIN_GATE_TIMEOUT_S
+        finally:
+            del os.environ["ENSEMBLE_POK_GATE_TIMEOUT_S"]
+            reset_gate_timeout_resolver_for_tests()
 
-    def test_the_max_clamp_is_one_hundred_eighty(self) -> None:
+    def test_the_max_clamp_is_three_hundred_sixty(self) -> None:
+        """Raised 180 → 360 with the ruling: the OLD 180 clamp would
+        have SILENTLY cut the new 300s per-attempt default down to 180
+        and defeated the ruling. A far-above-bounds value (9999)
+        resolves to the clamp, never through it."""
         import os
 
         os.environ["ENSEMBLE_POK_GATE_TIMEOUT_S"] = "9999"
         reset_gate_timeout_resolver_for_tests()
-        assert get_gate_timeout_s() == MAX_GATE_TIMEOUT_S
-        del os.environ["ENSEMBLE_POK_GATE_TIMEOUT_S"]
-        reset_gate_timeout_resolver_for_tests()
+        try:
+            assert MAX_GATE_TIMEOUT_S == 360.0
+            assert get_gate_timeout_s() == MAX_GATE_TIMEOUT_S
+        finally:
+            del os.environ["ENSEMBLE_POK_GATE_TIMEOUT_S"]
+            reset_gate_timeout_resolver_for_tests()
 
     def test_an_invalid_value_fails_open_to_the_default(self) -> None:
         import os
 
         os.environ["ENSEMBLE_POK_GATE_TIMEOUT_S"] = "abc"
         reset_gate_timeout_resolver_for_tests()
-        assert get_gate_timeout_s() == DEFAULT_GATE_TIMEOUT_S
-        del os.environ["ENSEMBLE_POK_GATE_TIMEOUT_S"]
+        try:
+            assert get_gate_timeout_s() == DEFAULT_GATE_TIMEOUT_S == 300.0
+        finally:
+            del os.environ["ENSEMBLE_POK_GATE_TIMEOUT_S"]
+            reset_gate_timeout_resolver_for_tests()
+
+    def test_the_wall_clock_is_env_tunable_and_the_override_is_honoured(self) -> None:
+        """Pin (b): the TOTAL is env-tunable — REWRITES the pre-ruling
+        ``test_the_wall_clock_is_a_constant`` (that pin is now FALSE:
+        before 2026-11-25 the TOTAL was the constant 45.0). The seam's
+        env name is ``ENSEMBLE_POK_GATE_WALL_CLOCK_S``; the Pattern C
+        cached global is restart-read (set env + reset + resolve), so
+        the override is honoured on the next resolve."""
+        import os
+
+        assert POK_GATE_WALL_CLOCK_S_ENV == "ENSEMBLE_POK_GATE_WALL_CLOCK_S"
+        os.environ["ENSEMBLE_POK_GATE_WALL_CLOCK_S"] = "600"
+        reset_gate_timeout_resolver_for_tests()
+        try:
+            assert get_gate_wall_clock_cap_s() == 600.0
+        finally:
+            del os.environ["ENSEMBLE_POK_GATE_WALL_CLOCK_S"]
+            reset_gate_timeout_resolver_for_tests()
+
+
+class TestGateWallBoundsTheWholeCycle:
+    """THE 300s TOTAL BOUNDS THE WHOLE JUDGE CYCLE (pokgt-fix-ceiling).
+
+    The Emperor's 2026-11-25 ruling is FIVE MINUTES for the WHOLE
+    judge cycle. The gate's wall cap alone did NOT deliver it: the
+    failover facade evaluates its own cap ONLY BETWEEN attempts, and
+    the house factory captured ONE per-request timeout at client-build
+    time — so a facade attempt that started just before expiry ran
+    under the FULL 300s client timeout with nothing left to kill it
+    (the worst case was wall + one attempt ≈ 600s).
+
+    These pins drive the REAL house path (``_house_llm_call`` + the
+    REAL failover facade) with a FAKE CLOCK and a FAKE ``openai``
+    client that RECORDS the timeout it is handed:
+
+    * EVERY recorded request timeout is <= the LIVE remaining wall at
+      the moment that client was built — a request that starts near
+      expiry CANNOT run the full 300s;
+    * the cycle ends FAIL-CLOSED (``POKGateUnavailable("timeout")``)
+      when the clock passes the wall, and the elapsed time NEVER
+      exceeds the wall.
+    """
+
+    _FAKE_LLM_CONFIG = {"api_key": "k", "base_url": "http://127.0.0.1:9"}
+
+    def setup_method(self) -> None:
+        import os
+
+        os.environ.pop("ENSEMBLE_POK_GATE_TIMEOUT_S", None)
+        os.environ.pop("ENSEMBLE_POK_GATE_WALL_CLOCK_S", None)
         reset_gate_timeout_resolver_for_tests()
 
-    def test_the_wall_clock_is_a_constant(self) -> None:
-        assert get_gate_wall_clock_cap_s() == 45.0
+    def teardown_method(self) -> None:
+        import os
+
+        os.environ.pop("ENSEMBLE_POK_GATE_TIMEOUT_S", None)
+        os.environ.pop("ENSEMBLE_POK_GATE_WALL_CLOCK_S", None)
+        reset_gate_timeout_resolver_for_tests()
+
+    @staticmethod
+    def _judge_once(**overrides):
+        kwargs = dict(
+            project_id=PROJECT,
+            project_name="proj",
+            slug="s",
+            body="a well formed operating fact",
+            reason="the operational invariant",
+            rows=[],
+            mode="llm",
+            llm_config=TestGateWallBoundsTheWholeCycle._FAKE_LLM_CONFIG,
+            is_production=False,
+        )
+        kwargs.update(overrides)
+        return judge_pok_write(**kwargs)
+
+    @staticmethod
+    def _install_recording_client(monkeypatch, clock, behaviour):
+        """Install a fake ``openai`` module whose client RECORDS the
+        per-request timeout it is handed (plus the clock reading at
+        build time).
+
+        ``behaviour(call_index, timeout)`` runs inside
+        ``chat.completions.create`` — it advances the fake clock and/or
+        raises to simulate a hanging request.
+        """
+        import sys
+        import types
+
+        recorded: list[dict] = []
+
+        class _Completions:
+            def create(self, **kwargs):
+                index = len(recorded) - 1
+                behaviour(index, recorded[index]["timeout"])
+                message = type("_M", (), {"content": _judge_payload()})()
+                choice = type("_C", (), {"message": message})()
+                return type("_R", (), {"choices": [choice]})()
+
+        class _Chat:
+            completions = _Completions()
+
+        class _Client:
+            chat = _Chat()
+
+            def __init__(self, **kwargs):
+                recorded.append(
+                    {
+                        "timeout": float(kwargs.get("timeout")),
+                        "at": clock.monotonic(),
+                    }
+                )
+
+        fake_openai = types.ModuleType("openai")
+        fake_openai.OpenAI = _Client
+        monkeypatch.setitem(sys.modules, "openai", fake_openai)
+        # the judge path reads the clock through the module namespace
+        # (``pok_gate.time``) — the fake clock is the ONLY clock the
+        # gate and the house factory see.
+        monkeypatch.setattr(pok_gate, "time", _FakeTimeModule(clock))
+        return recorded
+
+    @staticmethod
+    def _neutralise_backoff(monkeypatch) -> None:
+        """The facade's exponential-jitter backoff sleeps REAL seconds
+        between attempts (tenacity's default wait: ~1s, 2s, 4s, 8s
+        across the facade's 5-attempt ceiling) — neutralise it (the
+        WAIT is not under test here; the per-request timeout DERIVATION
+        is)."""
+        from daemon.services import llm_failover
+        from tenacity import wait_none
+
+        monkeypatch.setattr(
+            llm_failover, "wait_exponential_jitter", lambda: wait_none()
+        )
+
+    def test_a_request_that_starts_near_expiry_cannot_run_the_full_budget(
+        self, monkeypatch
+    ) -> None:
+        """PIN (j): the per-request timeout is RE-DERIVED from the LIVE
+        remaining wall on EVERY facade attempt.
+
+        The first request consumes 295 of the 300 wall-seconds and
+        times out; the facade re-enters the factory with 5 seconds
+        left. The SECOND client must be handed <= 5s — it CANNOT run
+        the full 300s. The defect: the timeout was captured ONCE (at
+        client-build time), so every facade attempt got the same
+        value and the last attempt could outlive the wall by a whole
+        attempt."""
+        clock = _FakeMonotonicClock()
+        deadline = clock.monotonic() + get_gate_wall_clock_cap_s()
+
+        def _behaviour(index: int, timeout: float) -> None:
+            if index == 0:
+                clock.advance(295.0)
+                raise TimeoutError("fake house client: request timed out")
+
+        recorded = self._install_recording_client(
+            monkeypatch, clock, _behaviour
+        )
+        self._neutralise_backoff(monkeypatch)
+
+        verdict = self._judge_once()
+        assert verdict.verdict == "ACCEPT"
+        assert len(recorded) == 2
+        # the FIRST request had the whole wall ...
+        assert recorded[0]["timeout"] == 300.0
+        # ... the SECOND (near-expiry) request was CUT to the live
+        # remaining wall.
+        live_remaining = deadline - recorded[1]["at"]
+        assert live_remaining == 5.0
+        assert recorded[1]["timeout"] <= live_remaining
+        assert recorded[1]["timeout"] < 300.0
+
+    def test_the_cycle_ends_fail_closed_and_never_outlives_the_wall(
+        self, monkeypatch
+    ) -> None:
+        """PIN (k): the WHOLE cycle stays INSIDE the wall and ends
+        FAIL-CLOSED (``POKGateUnavailable("timeout")``).
+
+        Every request hangs for its FULL handed timeout. The cycle
+        stops AT the wall: the elapsed time never exceeds the cap, the
+        wall is spent ⇒ the fail-closed timeout error (never a
+        reject), and NO client is built once the wall is spent (the
+        abort happens BEFORE the client exists — a client is never
+        built with a non-positive timeout). The pre-fix code (ONE
+        captured client timeout for every attempt) ran the cycle PAST
+        the wall by a full attempt."""
+        clock = _FakeMonotonicClock()
+        deadline = clock.monotonic() + get_gate_wall_clock_cap_s()
+
+        def _behaviour(index: int, timeout: float) -> None:
+            clock.advance(timeout)
+            raise TimeoutError("fake house client: request timed out")
+
+        recorded = self._install_recording_client(
+            monkeypatch, clock, _behaviour
+        )
+        self._neutralise_backoff(monkeypatch)
+
+        with pytest.raises(POKGateUnavailable) as excinfo:
+            self._judge_once()
+        assert excinfo.value.code == "pok_gate_unavailable"
+        assert excinfo.value.reason == "timeout"
+        # the WHOLE cycle stayed inside the wall
+        assert clock.monotonic() <= deadline
+        # EVERY request was cut to the live remaining wall
+        for entry in recorded:
+            assert entry["timeout"] <= deadline - entry["at"]
+        # and NO client was built after the wall was spent
+        assert len(recorded) == 1
+
+
+class TestGateWallClockKnob:
+    """The NEW TOTAL knob (``ENSEMBLE_POK_GATE_WALL_CLOCK_S``): the
+    same fail-open + clamp posture as the per-attempt knob, with its
+    own independent WARN buckets."""
+
+    def setup_method(self) -> None:
+        import os
+
+        os.environ.pop("ENSEMBLE_POK_GATE_TIMEOUT_S", None)
+        os.environ.pop("ENSEMBLE_POK_GATE_WALL_CLOCK_S", None)
+        reset_gate_timeout_resolver_for_tests()
+
+    def teardown_method(self) -> None:
+        import os
+
+        os.environ.pop("ENSEMBLE_POK_GATE_TIMEOUT_S", None)
+        os.environ.pop("ENSEMBLE_POK_GATE_WALL_CLOCK_S", None)
+        reset_gate_timeout_resolver_for_tests()
+
+    def test_an_invalid_wall_clock_value_fails_open_to_the_default(self) -> None:
+        """Pin (c): a non-numeric / non-positive TOTAL fails OPEN to
+        the 300s default (the Pattern C numeric posture — a mis-typed
+        knob must never fail the gate CLOSED)."""
+        import os
+
+        for bad in ("abc", "0", "-5"):
+            os.environ["ENSEMBLE_POK_GATE_WALL_CLOCK_S"] = bad
+            reset_gate_timeout_resolver_for_tests()
+            try:
+                assert (
+                    get_gate_wall_clock_cap_s() == DEFAULT_GATE_WALL_CLOCK_S
+                )
+            finally:
+                del os.environ["ENSEMBLE_POK_GATE_WALL_CLOCK_S"]
+                reset_gate_timeout_resolver_for_tests()
+
+    def test_the_wall_clock_clamps_below_and_above_its_bounds(self) -> None:
+        """Pin (d): BOTH clamp directions in one node — "1" clamps UP
+        to the 30.0 floor, "99999" clamps DOWN to the 1800.0 ceiling;
+        the ruling value 300 is strictly inside the bounds so it is
+        always reachable."""
+        import os
+
+        assert MIN_GATE_WALL_CLOCK_S == 30.0
+        assert MAX_GATE_WALL_CLOCK_S == 1800.0
+        assert MIN_GATE_WALL_CLOCK_S < 300.0 < MAX_GATE_WALL_CLOCK_S
+        os.environ["ENSEMBLE_POK_GATE_WALL_CLOCK_S"] = "1"
+        reset_gate_timeout_resolver_for_tests()
+        try:
+            assert get_gate_wall_clock_cap_s() == MIN_GATE_WALL_CLOCK_S
+        finally:
+            del os.environ["ENSEMBLE_POK_GATE_WALL_CLOCK_S"]
+            reset_gate_timeout_resolver_for_tests()
+        os.environ["ENSEMBLE_POK_GATE_WALL_CLOCK_S"] = "99999"
+        reset_gate_timeout_resolver_for_tests()
+        try:
+            assert get_gate_wall_clock_cap_s() == MAX_GATE_WALL_CLOCK_S
+        finally:
+            del os.environ["ENSEMBLE_POK_GATE_WALL_CLOCK_S"]
+            reset_gate_timeout_resolver_for_tests()
+
+
+class _FakeMonotonicClock:
+    """Fake ``time.monotonic()`` source — the ONLY clock the judge
+    path sees once :func:`_install_fake_judge` is installed."""
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self.now = start
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class _FakeTimeModule:
+    """Stands in for the ``time`` module inside ``pok_gate`` (only
+    ``monotonic`` is on the judge path)."""
+
+    def __init__(self, clock: _FakeMonotonicClock) -> None:
+        self._clock = clock
+
+    def monotonic(self) -> float:
+        return self._clock.monotonic()
+
+
+def _install_fake_judge(
+    monkeypatch: pytest.MonkeyPatch,
+    clock: _FakeMonotonicClock,
+    *,
+    consumed: float,
+    calls: list,
+    mid_call_guard=None,
+) -> list:
+    """Patch ``daemon.services.pok_gate.time`` (fake clock) and
+    ``daemon.services.pok_gate._house_llm_call`` (fake house client).
+
+    The fake models the REAL overrun semantics faithfully: the gate
+    hands the client ``timeout_s=budget`` and the failover facade
+    ``wall_clock_cap_s``; a call that outlives its handed budget
+    raises ``TimeoutError`` — the type the gate's timeout leg catches
+    (a REAL raw-SDK mid-call timeout surfaces as
+    ``openai.APITimeoutError``, which does NOT subclass
+    ``TimeoutError`` and lands on the ``llm_error`` leg — still D2
+    fail-closed; the ``TimeoutError`` leg is the canonical
+    timeout-classification surface). The gate's OWN enforcement is
+    the top-of-loop ``remaining <= 0`` deadline check, which kills
+    any retry beyond the wall.
+
+    The fake accepts the house seam's ``deadline`` (the ABSOLUTE
+    monotonic instant the cycle must finish by) and RECORDS it — the
+    house factory re-derives the per-request client timeout from that
+    deadline on every facade attempt (see
+    :class:`TestGateWallBoundsTheWholeCycle`).
+    """
+
+    def _fake_house_call(
+        llm_config,
+        prompt,
+        *,
+        model,
+        timeout_s,
+        wall_clock_cap_s,
+        deadline=None,
+    ):
+        calls.append(
+            {
+                "timeout_s": timeout_s,
+                "wall_clock_cap_s": wall_clock_cap_s,
+                "deadline": deadline,
+            }
+        )
+        if mid_call_guard is not None:
+            mid_call_guard()
+        if consumed > timeout_s:
+            clock.advance(consumed)
+            raise TimeoutError(
+                f"fake judge outlasted its {timeout_s:.1f}s budget"
+            )
+        clock.advance(consumed)
+        return _judge_payload()
+
+    monkeypatch.setattr(pok_gate, "time", _FakeTimeModule(clock))
+    monkeypatch.setattr(pok_gate, "_house_llm_call", _fake_house_call)
+    return calls
+
+
+class TestGateBudgetEnforcement:
+    """ENFORCEMENT (not declaration): a FAKE CLOCK
+    (``daemon.services.pok_gate.time``) + a FAKE HOUSE CLIENT
+    (``daemon.services.pok_gate._house_llm_call``) drive the real
+    ``judge_pok_write`` → ``_call_judge_with_retry`` path, so the
+    resolved seam values are proven to reach the client and to bind."""
+
+    _FAKE_LLM_CONFIG = {"api_key": "k", "base_url": "http://127.0.0.1:9"}
+
+    def setup_method(self) -> None:
+        import os
+
+        os.environ.pop("ENSEMBLE_POK_GATE_TIMEOUT_S", None)
+        os.environ.pop("ENSEMBLE_POK_GATE_WALL_CLOCK_S", None)
+        reset_gate_timeout_resolver_for_tests()
+
+    def teardown_method(self) -> None:
+        import os
+
+        os.environ.pop("ENSEMBLE_POK_GATE_TIMEOUT_S", None)
+        os.environ.pop("ENSEMBLE_POK_GATE_WALL_CLOCK_S", None)
+        reset_gate_timeout_resolver_for_tests()
+
+    @staticmethod
+    def _judge_once(**overrides):
+        kwargs = dict(
+            project_id=PROJECT,
+            project_name="proj",
+            slug="s",
+            body="a well formed operating fact",
+            reason="the operational invariant",
+            rows=[],
+            mode="llm",
+            llm_config=TestGateBudgetEnforcement._FAKE_LLM_CONFIG,
+            is_production=False,
+        )
+        kwargs.update(overrides)
+        return judge_pok_write(**kwargs)
+
+    def test_a_judge_consuming_250_fake_seconds_succeeds_under_the_budget(
+        self, monkeypatch
+    ) -> None:
+        """Pin (e): ENFORCEMENT — the ruling is NOT truncated.
+
+        A judge call consuming 250 fake-seconds MUST succeed: the
+        per-attempt budget is 300s and the wall 300s, so the gate
+        hands ``min(300, 300) = 300s`` and the call fits. Under the
+        OLD knobs (20s attempt / 45s wall) this SAME call was
+        fail-closed — leg B proves it LIVE: with the knobs pinned to
+        the old values through the SAME env seam, the 250s call
+        raises ``POKGateUnavailable("timeout")`` (the mutation leg
+        that makes the pre-ruling behaviour RED)."""
+        clock = _FakeMonotonicClock()
+        calls: list = []
+        _install_fake_judge(monkeypatch, clock, consumed=250.0, calls=calls)
+
+        verdict = self._judge_once()
+        assert verdict.verdict == "ACCEPT"
+        assert calls[0]["timeout_s"] == 300.0
+
+        # Leg B — the old knobs, LIVE through the same seam: RED.
+        import os
+
+        os.environ["ENSEMBLE_POK_GATE_TIMEOUT_S"] = "20"
+        os.environ["ENSEMBLE_POK_GATE_WALL_CLOCK_S"] = "45"
+        reset_gate_timeout_resolver_for_tests()
+        try:
+            calls.clear()
+            clock2 = _FakeMonotonicClock()
+            _install_fake_judge(
+                monkeypatch, clock2, consumed=250.0, calls=calls
+            )
+            with pytest.raises(POKGateUnavailable) as excinfo:
+                self._judge_once()
+            assert excinfo.value.reason == "timeout"
+        finally:
+            del os.environ["ENSEMBLE_POK_GATE_TIMEOUT_S"]
+            del os.environ["ENSEMBLE_POK_GATE_WALL_CLOCK_S"]
+            reset_gate_timeout_resolver_for_tests()
+
+    def test_a_judge_that_outlasts_the_wall_raises_pok_gate_unavailable_timeout(
+        self, monkeypatch
+    ) -> None:
+        """Pin (f): ENFORCEMENT — D2 fail-closed preserved.
+
+        A judge consuming 400 fake-seconds outlasts the 300s wall: the
+        fake client raises ``TimeoutError`` on its overrun (the
+        facade's wall-clock semantics), the retry leg fires, and the
+        gate's own top-of-loop deadline check finds ``remaining <= 0``
+        and raises ``POKGateUnavailable("timeout")`` — NEVER
+        re-labelled ``pok_gate_reject``. Only ONE house call fires:
+        the wall kills the RETRY, not just the first attempt."""
+        clock = _FakeMonotonicClock()
+        calls: list = []
+        _install_fake_judge(monkeypatch, clock, consumed=400.0, calls=calls)
+
+        with pytest.raises(POKGateUnavailable) as excinfo:
+            self._judge_once()
+        assert excinfo.value.code == "pok_gate_unavailable"
+        assert excinfo.value.reason == "timeout"
+        assert len(calls) == 1  # the wall fired BEFORE the second attempt
+
+    def test_the_wall_cap_and_the_per_attempt_budget_come_from_the_same_seam(
+        self, monkeypatch
+    ) -> None:
+        """Pin (g): the gate hands the house client BUDGETS resolved
+        from THIS seam — no buried constant anywhere.
+
+        The fake house client RECORDS ``timeout_s`` / ``wall_clock_cap_s``.
+        Leg A (defaults): handed ``(300.0, 300.0)`` == the resolved
+        seam values. Leg B (env move + reset): TOTAL=1800 and
+        per-attempt=360 → handed ``(360.0, 1800.0)`` — moving the
+        env knobs moves BOTH handed budgets, and the per-attempt leg
+        also proves the gate spends ``min(attempt, remaining)``
+        (360 < 1800), not a copy of the wall."""
+        import os
+
+        clock = _FakeMonotonicClock()
+        calls: list = []
+        _install_fake_judge(monkeypatch, clock, consumed=5.0, calls=calls)
+
+        self._judge_once()
+        assert calls[0]["timeout_s"] == get_gate_timeout_s() == 300.0
+        assert (
+            calls[0]["wall_clock_cap_s"]
+            == get_gate_wall_clock_cap_s()
+            == 300.0
+        )
+
+        os.environ["ENSEMBLE_POK_GATE_WALL_CLOCK_S"] = "1800"
+        os.environ["ENSEMBLE_POK_GATE_TIMEOUT_S"] = "360"
+        reset_gate_timeout_resolver_for_tests()
+        try:
+            calls.clear()
+            self._judge_once()
+            assert get_gate_timeout_s() == 360.0
+            assert get_gate_wall_clock_cap_s() == 1800.0
+            assert calls[0]["timeout_s"] == 360.0
+            assert calls[0]["wall_clock_cap_s"] == 1800.0
+        finally:
+            del os.environ["ENSEMBLE_POK_GATE_WALL_CLOCK_S"]
+            del os.environ["ENSEMBLE_POK_GATE_TIMEOUT_S"]
+            reset_gate_timeout_resolver_for_tests()
+
+    def test_no_lock_and_no_db_session_is_held_across_the_judge_call(
+        self, monkeypatch
+    ) -> None:
+        """Pin (i): NO LOCK and NO DB session/transaction across the
+        judge call.
+
+        Instrumentation 1 (sessions): ``sqlmodel.Session.__init__``
+        is wrapped with a recorder for the WHOLE node; the fake house
+        client asserts ZERO open sessions MID-CALL (the brief's
+        window — inside the LLM call) and the node asserts zero
+        across the whole ``judge_pok_write`` run. A transaction
+        requires a Session first, so zero sessions ⇒ zero open
+        transactions on the calling thread.
+        Instrumentation 2 (locks): the judge-path module namespaces
+        (the gate, its timeout resolver, the service facade, the pok
+        repositories — the repository is session-per-call) are
+        scanned for lock-shaped objects (``_thread.lock`` /
+        ``threading.Semaphore`` / ``threading.Event`` /
+        ``threading.Condition`` / ``asyncio.Lock`` /
+        ``asyncio.Semaphore`` / ``asyncio.Event`` /
+        ``asyncio.Condition``). The TOOL module (``daemon/tools/pok``)
+        is NOT on the judge call path (it executes AFTER the verdict)
+        and is therefore not scanned.
+        TEETH — the deliberate violations that make this pin RED are
+        demonstrated in-node, then cleaned: (1) injecting a live
+        ``threading.Lock`` into ``pok_gate``'s namespace makes the
+        scan name it (a lock held across the call would do the
+        same); (2) constructing a ``sqlmodel.Session`` under the
+        recorder records it (a repository read/write added inside
+        the judge path would do the same)."""
+        import asyncio
+        import importlib
+        import sys
+        import threading
+
+        import sqlmodel
+
+        judge_path_modules = (
+            "daemon.services.pok_gate",
+            "daemon.services.pok_gate_timeout_resolver",
+            "daemon.services.pok_service",
+            "daemon.repositories.pok.repository",
+            "daemon.repositories.pok.models",
+        )
+
+        def _lock_holders() -> list:
+            shapes = (
+                type(threading.Lock()),
+                threading.Semaphore,
+                threading.Event,
+                threading.Condition,
+                asyncio.Lock,
+                asyncio.Semaphore,
+                asyncio.Event,
+                asyncio.Condition,
+            )
+            hits = []
+            for name in judge_path_modules:
+                module = (
+                    sys.modules[name]
+                    if name in sys.modules
+                    else importlib.import_module(name)
+                )
+                for attr, value in vars(module).items():
+                    if isinstance(value, shapes):
+                        hits.append(f"{name}.{attr}")
+            return hits
+
+        opened_sessions: list = []
+        original_session_init = sqlmodel.Session.__init__
+
+        def _spy_session_init(session, *args, **kwargs):
+            opened_sessions.append(session)
+            return original_session_init(session, *args, **kwargs)
+
+        monkeypatch.setattr(sqlmodel.Session, "__init__", _spy_session_init)
+
+        # ── TEETH leg 1: a live lock in the judge path is CAUGHT ────
+        monkeypatch.setattr(
+            pok_gate,
+            "_pin_i_mutation_sentinel",
+            threading.Lock(),
+            raising=False,
+        )
+        assert "daemon.services.pok_gate._pin_i_mutation_sentinel" in (
+            _lock_holders()
+        )
+        monkeypatch.setattr(
+            pok_gate, "_pin_i_mutation_sentinel", None, raising=True
+        )
+        assert _lock_holders() == []
+
+        # ── TEETH leg 2: a Session opened under the spy is CAUGHT ───
+        session_tooth = sqlmodel.Session()
+        assert opened_sessions == [session_tooth]
+        opened_sessions.clear()
+
+        # ── The clean run: the judge path holds NOTHING ─────────────
+        def _mid_call_guard() -> None:
+            assert opened_sessions == [], (
+                "a DB session was opened on the calling thread DURING "
+                "the judge call — the gate must not hold a session or "
+                "transaction across the house LLM call"
+            )
+
+        clock = _FakeMonotonicClock()
+        calls: list = []
+        _install_fake_judge(
+            monkeypatch,
+            clock,
+            consumed=5.0,
+            calls=calls,
+            mid_call_guard=_mid_call_guard,
+        )
+        verdict = self._judge_once()
+        assert verdict.verdict == "ACCEPT"
+        assert opened_sessions == []
+        assert _lock_holders() == []
+
+
+class TestGateCeilingCoherence:
+    def test_the_resolved_wall_cap_fits_inside_the_turn_budget(self) -> None:
+        """Pin (h): COHERENCE WITH THE HOUSE CEILING — the resolved
+        wall cap must fit inside the daemon turn budget with room for
+        a retry.
+
+        Reads the REAL config seam —
+        ``ServicesConfig.model_fields["graph_timeout_minutes"].default``
+        (the DECLARED pydantic default, 120.0 min = 7200s). The field
+        DEFAULT is read instead of instantiating ``ServicesConfig()``
+        because a Settings instantiation is env-sensitive in a unit
+        test; the declared default is the invariant's reference value
+        (stated here per the brief). Legs: (1) the default-resolved
+        wall (300s) is far inside the 7200s turn budget; (2) even the
+        1800s CLAMP ceiling stays inside it; (3) clamp ceiling + a
+        full per-attempt attempt (1800 + 360) still fits — room for a
+        retry is structural, not incidental."""
+        import os
+
+        from daemon.config import ServicesConfig
+
+        turn_budget_s = float(
+            ServicesConfig.model_fields["graph_timeout_minutes"].default
+        ) * 60.0
+        assert turn_budget_s == 7200.0
+
+        os.environ.pop("ENSEMBLE_POK_GATE_TIMEOUT_S", None)
+        os.environ.pop("ENSEMBLE_POK_GATE_WALL_CLOCK_S", None)
+        reset_gate_timeout_resolver_for_tests()
+        assert get_gate_wall_clock_cap_s() < turn_budget_s
+        assert MAX_GATE_WALL_CLOCK_S < turn_budget_s
+        assert MAX_GATE_WALL_CLOCK_S + MAX_GATE_TIMEOUT_S < turn_budget_s
 
 
 # ── the verdict cache (T7.8 / T8.13) ───────────────────────────────────────
@@ -826,7 +1517,7 @@ class TestRetrievabilityLeg:
 
 
 class TestPromptClauses:
-    def _prompt(self, **overrides) -> str:
+    def _prompt(self, **overrides):
         kwargs = {
             "project_name": "proj",
             "slug": "s",
@@ -838,33 +1529,214 @@ class TestPromptClauses:
         return build_judge_prompt(**kwargs)
 
     def test_the_r1_beats_r4_clause_is_verbatim(self) -> None:
-        assert "R1 beats R4" in self._prompt()
-        assert "A RAG twin is NOT a rejection basis" in self._prompt()
+        prompt = self._prompt()
+        assert "R1 beats R4" in prompt.system
+        assert "A RAG twin is NOT a rejection basis" in prompt.system
 
     def test_the_r_prov_protective_clause_is_present(self) -> None:
-        assert "R-PROV" in self._prompt()
-        assert "EVIDENCE FOR an operational claim" in self._prompt()
+        prompt = self._prompt()
+        assert "R-PROV" in prompt.system
+        assert "EVIDENCE FOR an operational claim" in prompt.system
 
     def test_the_r_ret_question_is_present(self) -> None:
-        assert "R-RET" in self._prompt()
-        assert "operative terms" in self._prompt()
+        prompt = self._prompt()
+        assert "R-RET" in prompt.system
+        assert "operative terms" in prompt.system
 
     def test_the_judge_question_is_present(self) -> None:
-        assert "What breaks in THIS repo if we drop this?" in self._prompt()
+        assert "What breaks in THIS repo if we drop this?" in self._prompt().system
 
     def test_the_r1_question_never_asks_is_this_general(self) -> None:
         prompt = self._prompt()
         assert (
             "Does the body still teach the same lesson in a repo with no "
-            "ensemble?" in prompt
+            "ensemble?" in prompt.system
         )
         # The forbidden phrasing appears ONLY inside the prohibition.
-        assert "NEVER ask 'is this general?'" in prompt
-        assert prompt.count("is this general") == 1
+        assert "NEVER ask 'is this general?'" in prompt.system
+        assert prompt.system.count("is this general") == 1
 
     def test_the_r3_clause_is_advisory_only(self) -> None:
-        assert "ADVISORY FLAG ONLY" in self._prompt()
-        assert "NEVER a rejection basis" in self._prompt()
+        prompt = self._prompt()
+        assert "ADVISORY FLAG ONLY" in prompt.system
+        assert "NEVER a rejection basis" in prompt.system
+
+    def test_the_system_half_carries_role_and_rules(self) -> None:
+        prompt = self._prompt()
+        assert "Project Operating Knowledge (POK)" in prompt.system
+        assert "RULES:" in prompt.system
+        assert "OUTCOMES:" in prompt.system
+        assert "JSON" in prompt.system
+
+    def test_the_user_half_carries_slug_body_claim_digest(self) -> None:
+        prompt = self._prompt()
+        assert "CANDIDATE SLUG: s" in prompt.user
+        assert "CANDIDATE BODY: b" in prompt.user
+        assert "CALLER'S OPERATIONAL CLAIM" in prompt.user
+        assert "DIGEST" in prompt.user
+
+    def test_the_house_call_sends_system_and_user_roles(self, monkeypatch) -> None:
+        import sys
+        import types
+
+        captured = {}
+
+        class _Completions:
+            def create(self, **kwargs):
+                captured["messages"] = kwargs.get("messages")
+                class _M:
+                    content = (
+                        '{"verdict": "ACCEPT", "family": "scope", '
+                        '"explanation": "ok", "alternative": null, '
+                        '"confidence": 0.9, "target_slug": null, '
+                        '"merged_body_proposal": null, "proposed_slug": null, '
+                        '"question": null}'
+                    )
+
+                class _C:
+                    message = _M()
+
+                return type("R", (), {"choices": [_C()]})()
+
+        class _Chat:
+            completions = _Completions()
+
+        class _Client:
+            chat = _Chat()
+
+        fake_openai = types.ModuleType("openai")
+        fake_openai.OpenAI = lambda **kwargs: _Client()
+        monkeypatch.setitem(sys.modules, "openai", fake_openai)
+
+        from daemon.services import pok_gate
+
+        jp = self._prompt()
+        pok_gate._house_llm_call(
+            {"api_key": "k", "base_url": "http://x"},
+            jp,
+            model="quick",
+            timeout_s=10.0,
+            wall_clock_cap_s=10.0,
+        )
+        msgs = captured["messages"]
+        assert len(msgs) == 2
+        assert msgs[0]["role"] == "system"
+        assert msgs[1]["role"] == "user"
+
+    def test_no_bare_pok_or_rag_anywhere_in_either_message(self) -> None:
+        prompt = build_judge_prompt(
+            project_name=None,
+            slug="s",
+            body="b",
+            reason="r",
+            digest=("PROJECT OPERATING KNOWLEDGE (POK) ACTIVE-ROW DIGEST\n"
+                    "Boundary (R4): a twin in the general knowledge base"),
+        )
+        for text in (prompt.system, prompt.user):
+            # Every occurrence of the abbreviation "POK" must be the
+            # expansion form "Project Operating Knowledge (POK)".
+            i = 0
+            while True:
+                idx = text.find("POK", i)
+                if idx == -1:
+                    break
+                assert text[idx - len("Project Operating Knowledge (") : idx].lower() == (
+                    "project operating knowledge ("
+                ), text[max(0, idx - 40) : idx + 10]
+                i = idx + 3
+            # Every occurrence of "RAG" must be the expansion form
+            # "(RAG, ..." / "(RAG)".
+            i = 0
+            while True:
+                idx = text.find("RAG", i)
+                if idx == -1:
+                    break
+                # Allowed forms: the expansion "(RAG, ..." / "(RAG)"
+                # and the verbatim R4 rule label "already-in-RAG".
+                if text[max(0, idx - len("already-in-")) : idx] == "already-in-":
+                    i = idx + 3
+                    continue
+                if "RAG twin" in text[max(0, idx - 5) : idx + len("RAG twin")]:
+                    i = idx + 3
+                    continue
+                assert text[idx - 1 : idx] == "(", text[max(0, idx - 10) : idx + 10]
+                i = idx + 3
+            # No bare "rag tool" phrase anywhere.
+            assert "rag tool" not in text.lower()
+
+    def test_the_glossary_defines_terms_of_art(self) -> None:
+        prompt = self._prompt()
+        assert "slug = " in prompt.system
+        assert "verdict = " in prompt.system
+        assert "digest = " in prompt.system
+
+    def test_the_prompt_never_contains_unnamed_placeholder(self) -> None:
+        prompt = build_judge_prompt(
+            project_name=None,
+            slug="s",
+            body="b",
+            reason="r",
+            digest="DIGEST",
+        )
+        full = prompt.system + prompt.user
+        assert "(unnamed)" not in full
+        assert "was not available to this call" in full
+
+    def test_build_judge_prompt_returns_a_carrier_not_a_string(self) -> None:
+        prompt = self._prompt()
+        assert isinstance(prompt, JudgePrompt)
+        assert isinstance(prompt.system, str)
+        assert isinstance(prompt.user, str)
+
+    def test_project_name_reaches_prompt_from_project_repository(self) -> None:
+        from daemon.tools import pok as pok_mod
+
+        class _Repo:
+            def get(self, pid):
+                return type("P", (), {"name": "My Project"})()
+
+        class _Manager:
+            _project_repository = _Repo()
+
+        assert pok_mod._project_name(_Manager(), "p1") == "My Project"
+
+        class _InstRepo:
+            pass
+
+        assert pok_mod._project_name(_InstRepo(), "p1") is None
+
+
+
+class TestRealDigestHeader:
+    """B4: pin over the REAL build_active_digest output (not a hand-built
+    string). The real header must be the expansion form (never a bare
+    "POK"), and the real boundary clause must carry no bare abbreviation.
+    """
+
+    def test_the_real_digest_header_is_the_expansion_form(self) -> None:
+        digest = build_active_digest(
+            candidate_slug="s",
+            candidate_body="b",
+            rows=[_row("r1", "body")],
+            reason="r",
+        )
+        assert (
+            "PROJECT OPERATING KNOWLEDGE (POK) ACTIVE-ROW DIGEST "
+            "(project-scoped, bounded)" in digest
+        )
+        clause = next(
+            line for line in digest.splitlines() if line.startswith("Boundary (R4):")
+        )
+        # The boundary clause must carry no bare "POK" abbreviation.
+        i = 0
+        while True:
+            idx = clause.find("POK", i)
+            if idx == -1:
+                break
+            prefix = clause[idx - len("Project Operating Knowledge (") : idx]
+            assert prefix.lower() == "project operating knowledge (", clause
+            i = idx + 3
+
 
 
 # ── the pending-ASK store (T8.6 / T8.7) ───────────────────────────────────

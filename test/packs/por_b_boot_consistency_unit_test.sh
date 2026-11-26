@@ -125,14 +125,14 @@ rm -f "$COLLECT_OUT"
 echo
 echo "--- lane b: boot consistency pins + reconciler ---"
 OUT="$(mktemp)"
+  # NOTE: `--ff` is the pytest>=9 spelling of `--rf` (--failed-first);
+  #       pytest 9.0.2 REMOVED the `--rf` short form (unrecognized argument).
 timeout 280 env \
   "${SCRUB[@]}" \
   ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0 \
   ENSEMBLE_SELF_ENV=dev \
   PYTHONDONTWRITEBYTECODE=1 \
   PYTEST_TIMEOUT=280 \
-  # NOTE: `--ff` is the pytest>=9 spelling of `--rf` (--failed-first);
-  #       pytest 9.0.2 REMOVED the `--rf` short form (unrecognized argument).
   "$PYTHON_BIN" -m pytest \
     -q \
     -p no:randomly \

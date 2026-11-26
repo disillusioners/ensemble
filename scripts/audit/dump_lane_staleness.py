@@ -690,16 +690,20 @@ def main(argv: list[str] | None = None) -> int:
 
     # The threshold.
     max_age_seconds = DEFAULT_MAX_AGE_SECONDS
+    # ``argparse``'s ``type=float`` accepts the non-finite spellings
+    # ("nan", "inf", "+inf", "infinity"), and a FINITE-but-huge value (e.g.
+    # 1e305) whose x3600 conversion OVERFLOWS to inf. Guard the COMPUTED
+    # seconds: a NaN/infinite threshold, or a finite one that overflows the
+    # multiply, would otherwise escape ``int(round(...))`` as a bare
+    # traceback (exit 1), OUTSIDE the 78 family. Refuse them HERE.
+    computed_seconds = (
+        args.max_age_hours * 3600 if args.max_age_hours is not None else None
+    )
     if (
-        args.max_age_hours is None
-        or not math.isfinite(args.max_age_hours)
+        computed_seconds is None
+        or not math.isfinite(computed_seconds)
         or args.max_age_hours <= 0
     ):
-        # ``argparse``'s ``type=float`` accepts the non-finite spellings
-        # ("nan", "inf", "+inf", "infinity"). A NaN threshold never trips the
-        # ``<= 0`` comparison and an infinite one OVERFLOWS the conversion to
-        # seconds — both would escape as a bare traceback (exit 1), OUTSIDE
-        # the 78 family. Refuse them HERE, on the house exit-78 path.
         return _refuse(
             REASON_BAD_MAX_AGE,
             f"--max-age-hours must be a finite number > 0 "
@@ -709,7 +713,7 @@ def main(argv: list[str] | None = None) -> int:
             max_age_seconds=max_age_seconds,
             now=now,
         )
-    max_age_seconds = int(round(args.max_age_hours * 3600))
+    max_age_seconds = int(round(computed_seconds))
 
     # The provider's own REQUIRED argument — the probe never guesses.
     if provider == "pg" and not args.db_url:

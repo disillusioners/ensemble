@@ -97,6 +97,7 @@ __all__ = [
     "VerdictCache",
     "build_active_digest",
     "build_judge_prompt",
+    "JudgePrompt",
     "cache_key",
     "judge_pok_write",
     "normalize_reason",
@@ -621,10 +622,13 @@ def build_active_digest(
     selected = ordered[: max(0, k)]
 
     header_lines = [
-        "POK ACTIVE-ROW DIGEST (project-scoped, bounded)",
+        "PROJECT OPERATING KNOWLEDGE (POK) ACTIVE-ROW DIGEST "
+        "(project-scoped, bounded)",
         (
-            "Boundary (R4): redundancy means INTRA-STORE duplication only "
-            "— an ACTIVE POK row already carrying the fact. A RAG twin is "
+            "Boundary (R4): INTRA-STORE = within this same store; "
+            "redundancy means INTRA-STORE duplication only — an ACTIVE row "
+            "in this Project Operating Knowledge (POK) store already "
+            "carrying the fact. A twin in the general knowledge base is "
             "explicitly NOT a rejection basis; judge the BOUNDARY "
             "(operational how-to vs general knowledge), never store "
             "exclusivity."
@@ -659,9 +663,12 @@ def build_active_digest(
 
 #: The FIXED PERSONA (technical-analysis "Judge Prompt Design").
 GATE_PERSONA: str = (
-    "You are the POK write gate for project {project_name}. POK is "
-    "durable operational how-to (DevOps kind) for THIS project only; RAG "
-    "is the knowledge store."
+    "You are the write gate for the Project Operating Knowledge (POK) "
+    "store of {project_name}. Project Operating Knowledge (POK) is the "
+    "store of durable operational how-to knowledge (DevOps-kind rules, "
+    "traps and conventions) for THIS project only, distinct from the "
+    "general knowledge base (RAG, retrieval-augmented generation — "
+    "free-form reference material)."
 )
 
 #: The judge question (design-amendments-v2 §1, verbatim): what breaks
@@ -739,6 +746,14 @@ JSON_OUTPUT_CONTRACT: str = (
 )
 
 
+@dataclass(frozen=True)
+class JudgePrompt:
+    """Frozen carrier for the split judge prompt (SYSTEM + USER)."""
+
+    system: str
+    user: str
+
+
 def build_judge_prompt(
     *,
     project_name: str | None,
@@ -746,25 +761,31 @@ def build_judge_prompt(
     body: str,
     reason: str,
     digest: str,
-) -> str:
-    """Compose the judge's prompt (T7.12 + T7.15).
+) -> JudgePrompt:
+    """Compose the judge's prompt (T7.12 + T7.15), split into a SYSTEM
+    message (role + instructions) and a USER message (per-write payload).
 
-    The prompt carries the project identity, the bounded digest (with
-    the boundary-not-exclusivity clause), the caller's OPERATIONAL
-    CLAIM, the rule set (R0–R5 + R-RET/R-PROV) and the judge
-    question. The judge makes NO tool calls — it sees the digest, not
-    a live store.
+    The judge makes NO tool calls — it sees the digest, not a live store.
     """
-    persona = GATE_PERSONA.format(project_name=project_name or "(unnamed)")
+    project_label = project_name or (
+        "the project this write targets (its name was not available to "
+        "this call)"
+    )
+    persona = GATE_PERSONA.format(project_name=project_label)
     bounded_reason = (reason or "")[:REASON_MAX_CHARS]
-    sections = [
+
+    system_sections = [
         persona,
         "",
-        f"CANDIDATE SLUG: {slug}",
-        f"CANDIDATE BODY: {body}",
-        f"CALLER'S OPERATIONAL CLAIM (the primary judge input): {bounded_reason}",
-        "",
-        digest,
+        "GLOSSARY (terms used below): slug = the short identifier "
+        "(kebab-case name) of a knowledge entry; body = its one-paragraph "
+        "content; row = one entry already in the store; digest = the "
+        "bounded list of existing entries supplied with this write; "
+        "verdict = the outcome you return (ACCEPT / MERGE / ASK / REJECT); "
+        "ACTIVE = a row currently in the store (status active); "
+        "INTRA-STORE = within this same store (not the general knowledge "
+        "base); KV / board = a release-tree snapshot or a board entry "
+        "(an episode, not a durable rule).",
         "",
         "RULES:",
         R0_CLAUSE,
@@ -778,9 +799,15 @@ def build_judge_prompt(
         R_RET_ADVISORY_CLAUSE,
         "",
         f"JUDGE QUESTION: {JUDGE_QUESTION}",
+        "",
+        "OUTCOMES:",
         (
-            "MERGE means an ACTIVE POK row already carries the fact: name "
-            "it in target_slug and propose the merged body in "
+            "ACCEPT means the fact belongs in Project Operating Knowledge "
+            "(POK) as a new row: write it."
+        ),
+        (
+            "MERGE means an ACTIVE row in this store already carries the "
+            "fact: name it in target_slug and propose the merged body in "
             "merged_body_proposal (omit the proposal when the target "
             "already carries the fact fully)."
         ),
@@ -789,17 +816,64 @@ def build_judge_prompt(
             "question you want answered in question."
         ),
         (
-            "REJECT means the fact does not belong in POK: name the "
-            "alternative home in alternative (never leave it empty)."
+            "REJECT means the fact does not belong in Project Operating "
+            "Knowledge (POK): name the alternative home in alternative "
+            "(never leave it empty)."
         ),
         (
             "If your confidence is <= 0.67, answer ASK — never reject a "
             "fact you are not sure about."
         ),
         "",
+        "REJECTION EXAMPLES (every rejection names its alternative home):",
+        (
+            "boundary (operational how-to vs general knowledge): this is "
+            "general knowledge rather than this project's operating "
+            "how-to — capture it with experience() (the general knowledge base), not "
+            "in Project Operating Knowledge (POK). "
+            + "the information does not belong to Project Operating Knowledge (POK); use the general knowledge base instead"
+        ),
+        (
+            "reason (the operational claim is not coherent): the stated "
+            "operational claim is not coherent or specific enough to keep "
+            "— sharpen the reason: state the operational invariant this "
+            "fact protects, not 'because' or boilerplate. "
+            + "the information does not belong to Project Operating Knowledge (POK); use the general knowledge base instead"
+        ),
+        (
+            "durability (a snapshot/episode, not a durable rule): this "
+            "records a snapshot or an episode rather than a durable rule "
+            "— the release tree / KV / board — a snapshot or an episode "
+            "does not belong in a durable operating rule. "
+            + "the information does not belong to Project Operating Knowledge (POK); use the general knowledge base instead"
+        ),
+        (
+            "redundancy (an ACTIVE row already carries it): an ACTIVE "
+            "row in this store already carries this fact — the named "
+            "ACTIVE row — supersede it instead of adding a second row. "
+            + "the information does not belong to Project Operating Knowledge (POK); use the general knowledge base instead"
+        ),
+        (
+            "scope (it does not belong to THIS project): this does not "
+            "belong to THIS project — the project it actually belongs to "
+            "— do not write it to this project. "
+            + "the information does not belong to Project Operating Knowledge (POK); use the general knowledge base instead"
+        ),
+        "",
         f"ANSWER WITH EXACTLY ONE JSON OBJECT AND NOTHING ELSE: {JSON_OUTPUT_CONTRACT}",
     ]
-    return "\n".join(sections)
+    system = "\n".join(system_sections)
+
+    user_sections = [
+        f"CANDIDATE SLUG: {slug}",
+        f"CANDIDATE BODY: {body}",
+        f"CALLER'S OPERATIONAL CLAIM (the primary judge input): {bounded_reason}",
+        "",
+        digest,
+    ]
+    user = "\n".join(user_sections)
+
+    return JudgePrompt(system=system, user=user)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1000,6 +1074,7 @@ def _house_llm_call(
     model: str,
     timeout_s: float,
     wall_clock_cap_s: float,
+    deadline: float | None = None,
 ) -> str:
     """ONE judge call through the house failover facade (T7.2).
 
@@ -1008,6 +1083,28 @@ def _house_llm_call(
     RE-READS the failover URL on every attempt (capturing it in a
     closure would break the primary→backup swap), the per-attempt HTTP
     timeout rides the client, and the wall clock rides the facade.
+
+    THE WALL BINDS EVERY REQUEST (the Emperor's 2026-11-25 five-minute
+    ruling): the facade evaluates its own wall cap ONLY BETWEEN
+    attempts, so a per-request timeout captured ONCE (at client-build
+    time) cannot bound the cycle — the LAST facade attempt could start
+    just before expiry and then run the FULL per-attempt timeout with
+    nothing left to kill it (the worst case was wall + one attempt,
+    ~600s, NOT the ruled 300s). The wall therefore reaches the factory
+    as an ABSOLUTE monotonic instant (``deadline`` — NOT a pre-computed
+    duration), and the factory RE-DERIVES the client timeout from the
+    LIVE remaining wall on EVERY entry (the factory is re-entered once
+    per facade attempt)::
+
+        remaining = request_deadline - time.monotonic()
+        client_timeout = min(timeout_s, remaining)
+
+    A non-positive ``remaining`` ABORTS the request with the fail-closed
+    timeout error (:class:`POKGateUnavailable` ``"timeout"``) — a
+    client is NEVER built with a non-positive timeout. ``deadline=None``
+    means NO cycle deadline was supplied (a direct call outside the
+    judge cycle): the facade's own wall window, measured from THIS
+    call, is used instead — the request is bounded either way.
     """
     import openai  # noqa: PLC0415 — lazy init
 
@@ -1020,23 +1117,51 @@ def _house_llm_call(
     api_key = str(config.get("api_key") or "")
     base_url = config.get("base_url")
     base_url_backup = config.get("base_url_backup")
+    if hasattr(prompt, "system") and hasattr(prompt, "user"):
+        _system_content = str(getattr(prompt, "system") or "")
+        _user_content = str(getattr(prompt, "user") or "")
+    else:
+        _system_content = ""
+        _user_content = str(prompt)
     if not base_url and not api_key:
         # NO CONNECTION CONFIG ⇒ the judge is UNAVAILABLE, and it says
         # so WITHOUT attempting a network call (a test double with no
         # LLM config must never reach out to a provider).
         raise POKGateUnavailable("llm_error")
 
+    # THE WALL EVERY REQUEST MUST FIT INSIDE: the cycle deadline (an
+    # ABSOLUTE monotonic instant) when the caller handed one, else the
+    # facade's own wall window measured from THIS call. The request
+    # timeout is re-derived from it on EVERY factory entry.
+    request_deadline = (
+        float(deadline)
+        if deadline is not None
+        else time.monotonic() + float(wall_clock_cap_s)
+    )
+
     def _factory() -> str:
         url = current_failover_url() or base_url
+        # THE PER-REQUEST TIMEOUT IS RE-DERIVED HERE, ON EVERY FACTORY
+        # ENTRY (the facade re-enters the factory once per attempt):
+        # it is bounded by the LIVE remaining wall, so a request that
+        # starts near expiry can NEVER run the full per-attempt budget.
+        remaining = request_deadline - time.monotonic()
+        if remaining <= 0:
+            # The wall is spent — ABORT the request (the fail-closed
+            # timeout error). Never build a client with a non-positive
+            # timeout.
+            raise POKGateUnavailable("timeout")
+        request_timeout = min(float(timeout_s), remaining)
         client = openai.OpenAI(
             api_key=api_key,
             base_url=url or None,
-            timeout=float(timeout_s),
+            timeout=request_timeout,
             max_retries=0,
         )
         response = client.chat.completions.create(
             model=model,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "system", "content": _system_content},
+                     {"role": "user", "content": _user_content}],
             temperature=0.0,
         )
         choices = getattr(response, "choices", None) or []
@@ -1305,7 +1430,7 @@ def judge_pok_write(
     reason: str,
     rows: Sequence[ActiveRow],
     llm_config: Mapping[str, Any] | None = None,
-    llm_call: Callable[[str], str] | None = None,
+    llm_call: Callable[[JudgePrompt], str] | None = None,
     mode: str | None = None,
     merge_policy: str = DEFAULT_MERGE_POLICY,
     cache: VerdictCache | None = None,
@@ -1318,6 +1443,11 @@ def judge_pok_write(
     The function is PURE with respect to the knowledge store: it
     READS the digest rows it is handed and RETURNS a typed verdict. It
     never writes a POK row (the TOOL executes — the authority split).
+
+    The ``llm_call`` seam is a ONE-argument callable that receives the
+    split :class:`JudgePrompt` (the SYSTEM + USER halves — NOT a
+    string) and returns the RAW judge answer; it is the injection point
+    for a test double in place of the house client.
 
     ``shadow=True`` marks the verdict ADVISORY: the caller still
     writes, but the verdict is logged (``phase=ASK_SHADOW`` for an ASK,
@@ -1438,19 +1568,47 @@ def judge_pok_write(
 
 
 def _call_judge_with_retry(
-    prompt: str,
+    prompt: JudgePrompt,
     *,
     llm_config: Mapping[str, Any] | None,
-    llm_call: Callable[[str], str] | None,
+    llm_call: Callable[[JudgePrompt], str] | None,
     model: str,
 ) -> str:
     """The judge call + its retry budget (T7.2 / T7.10).
 
     At most ONE retry (so at most TWO attempts): the retry fires on a
     timeout or an UNPARSABLE answer (the attestation judge's
-    retry-once semantics). The total wall clock is capped at
-    :data:`GATE_WALL_CLOCK_CAP_S` (45s) — the binding defense that
-    keeps the gate inside the 180s graph heartbeat.
+    retry-once semantics). The TOTAL wall clock is capped at
+    :data:`GATE_WALL_CLOCK_CAP_S` (300s — the Emperor's 2026-11-25
+    five-minute ruling; env-tunable via ``ENSEMBLE_POK_GATE_WALL_CLOCK_S``
+    through :mod:`daemon.services.pok_gate_timeout_resolver`).
+
+    THE WALL BOUNDS THE WHOLE CYCLE — and it does so because EVERY
+    request's client timeout is derived from the LIVE remaining
+    deadline: the deadline is an ABSOLUTE monotonic instant, handed to
+    the house factory, which RE-DERIVES
+    ``min(per_attempt, deadline - now)`` on EVERY facade attempt (the
+    facade re-enters the factory once per attempt). A request that
+    starts near expiry therefore CANNOT run the full per-attempt budget
+    — it is cut to the seconds that are actually left — so the time
+    spent in requests stays inside the cap (the gate's own top-of-loop
+    ``remaining <= 0`` check aborts the cycle when the wall is spent,
+    and the house factory aborts the request with the same fail-closed
+    timeout error). The one component OUTSIDE the wall is the failover
+    facade's inter-attempt BACKOFF SLEEP: tenacity checks its stop
+    BEFORE it sleeps, so a sleep that starts just before expiry can
+    carry the cycle a few seconds past the cap (the wait strategy
+    lives in :mod:`daemon.services.llm_failover`, outside this
+    module).
+
+    The per-attempt budget stays ``min(attempt_timeout, remaining)`` —
+    one judge call may use the WHOLE budget and the per-attempt value
+    never silently truncates a ruling. The ceiling that actually
+    bounds the gate is the daemon TURN budget —
+    ``graph_timeout_minutes`` (default 120 min = 7200s, enforced by
+    MainLoopBridge); the old "180s graph heartbeat" figure was a
+    ``log_sumup`` INFO window (``daemon/graph.py``), a LOG line,
+    never a kill.
     """
     attempt_timeout = get_gate_timeout_s()
     wall_cap = get_gate_wall_clock_cap_s()
@@ -1472,6 +1630,7 @@ def _call_judge_with_retry(
                     model=model,
                     timeout_s=budget,
                     wall_clock_cap_s=max(remaining, 1.0),
+                    deadline=deadline,
                 )
         except POKGateUnavailable:
             raise

@@ -1386,7 +1386,7 @@ case "$sub" in
                 echo "MainPID=${SC_MAINPID:-0}"
                 exit 0 ;;
         esac
-        case "$prop" in MainPID) echo "${SC_MAINPID:-0}" ;; *) echo "" ;; esac
+        case "$prop" in MainPID) echo "${SC_MAINPID:-0}" ;; ControlGroup) echo "${SC_CONTROLGROUP:-}" ;; *) echo "" ;; esac
         exit 0 ;;
     start) exit 0 ;;
     *) exit 0 ;;
@@ -1428,11 +1428,12 @@ fi
 P38_OUT="$(PATH="$P38_STUB:$PATH" INSTALL_DIR="$P38_FIX" \
     SYSTEMCTL_BIN="$P38_STUB/systemctl" SC_LOG="$P38_FIX/sc.log" \
     PORT=19991 PROMOTE_EXPECTED_VERSION=0.28.5 HANDBACK_VERIFY_BUDGET_S=4 \
-    SC_MAINPID=9999 \
+    SC_MAINPID=9999 SC_CONTROLGROUP=/system.slice/ensemble-p38.service \
     bash -c '
         unset ENSEMBLE_SUPERVISION ENSEMBLE_RESTART_UNIT 2>/dev/null || true
         . "'"$REPO_ROOT"'/scripts/upgrade/lib.sh" >/dev/null 2>&1
         _supervision_owned_pids() { printf "%s\n" 424242; }
+        _supervision_pid_cgroup_path() { printf "%s\n" /system.slice/foreign.slice; }
         SUPERVISION_MODE=unit; SUPERVISION_STATE=UNIT_MANAGED
         SUPERVISION_UNIT=ensemble-p38.service; SUPERVISION_PRESTOP_MAINPID=777
         VERSION=v9.9.9-p38

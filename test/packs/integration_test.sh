@@ -10,13 +10,17 @@ echo "=== Test Pack: integration_test ==="
 
 cd "$PROJECT_DIR"
 
-timeout 300s .venv/bin/python -m pytest \
+EXIT_CODE=0
+ENSEMBLE_SELF_ENV=dev timeout 300s .venv/bin/python -m pytest \
   tests/integration/ \
   --override-ini="addopts=" \
   -m integration \
-  --tb=short -q 2>&1
+  --tb=short -q 2>&1 || EXIT_CODE=$?
 
-EXIT_CODE=$?
+# A killed pytest leaves its `-q` progress line with NO trailing newline, which
+# glued the verdict (`........RESULT: TIMEOUT`). Emit one first so `RESULT:`
+# always lands on its own line at column 0 for `^RESULT:` consumers.
+echo
 
 if [ $EXIT_CODE -eq 124 ]; then
   echo "RESULT: TIMEOUT"

@@ -124,10 +124,25 @@ LIVEZ="$(_probe_once "/livez" "$PORT")"
 # failure below (same posture as the version-smoke mismatch).
 STATUS_ATTR_MISMATCH=""
 if [ -n "$LIVEZ" ]; then
-    if ! _gate_serving_attribution "status smoke"; then
-        STATUS_ATTR_MISMATCH="${GATE_ATTRIBUTION_DETAIL:-unattributed answerer on :$PORT}"
-        _warn "status: serving-process attribution MISMATCH — $STATUS_ATTR_MISMATCH (the answer below may be from the WRONG process)"
-    fi
+    __status_attr_rc=0
+    _gate_serving_attribution "status smoke" || __status_attr_rc=$?
+    case "$__status_attr_rc" in
+        0) : ;;
+        2)
+            # ROW 20 (T7e): a TRANSIENT attribution deferral is NOT a verify
+            # failure — it is "attribution deferred (transient)". The note is
+            # informational and --verify must NOT fail on a transient.
+            STATUS_ATTR_MISMATCH=""
+            _warn "status: serving-process attribution DEFERRED (transient — budget expired) — the smoke answer below may be from an unattributed answerer; re-run --verify once the deferral window clears"
+            ;;
+        *)
+            STATUS_ATTR_MISMATCH="${GATE_ATTRIBUTION_DETAIL:-unattributed answerer on :$PORT}"
+            _warn "status: serving-process attribution MISMATCH — $STATUS_ATTR_MISMATCH (the answer below may be from the WRONG process)"
+            ;;
+    esac
+    # The original `if !` consumer collapsed the transient `2` into the
+    # mismatch branch; the explicit capture above keeps the two classes apart.
+
     running_ver="$(_json_field "$LIVEZ" version)"
     [ -n "$running_ver" ] || running_ver="(no version field)"
     _log "daemon :$PORT /livez version=$running_ver"

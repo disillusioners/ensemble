@@ -5244,6 +5244,58 @@ _run_bounded() {
     return "$rc"
 }
 
+# _bounded_rc_kind <rc> — the HONEST outcome class of a bounded-child rc, as
+# the journal ROW token (`kind=`). Pure string function, no I/O, no side
+# effects: the three probe call sites keep their own site label / unit /
+# budget-knob name (T1, promote-handback-halt Phase 1 §4.3).
+#
+# WHY the taxonomy lives HERE and not in _run_bounded: _run_bounded is the
+# house's portable replacement for GNU timeout(1) and its only legitimate
+# remap is 137|143 → 124 (a killed child). Teaching it `systemctl` semantics
+# would poison every other caller (stop_via_stop_script, _df_systemctl), so
+# _run_bounded stays BYTE-UNCHANGED and the taxonomy is applied where the
+# child rc is INTERPRETED (§4.1 of the plan).
+#
+#   124 → budget        (the watcher SIGTERM→SIGKILL'd the child at the budget)
+#   else → nonzero_exit (a GENUINE command failure — including rc 3, which
+#                        `systemctl is-active` returns for every inactive unit;
+#                        the CALL SITE decides whether that deserves a journal
+#                        row at all — §4.3 site 2 grants rc 3 an INFO line only)
+_bounded_rc_kind() {
+    case "${1:-}" in
+        124) printf '%s' "budget" ;;
+        *)   printf '%s' "nonzero_exit" ;;
+    esac
+}
+
+# _bounded_rc_reason <rc> [<state-hint>] [<budget-descriptor>] — the ROW
+# `reason=` payload for a bounded-child rc. Pure string function.
+#   124 → "timeout(<budget-descriptor>)"   (byte-identical to legacy when the
+#         caller passes e.g. SYSTEMCTL_PROBE_BUDGET_S=5)
+#   else → "nonzero rc=<rc>" [+ " state=<state-hint>" when a hint is given]
+# The caller supplies the `child: ` prefix (it owns the site label/unit), so
+# the 124 arms can reproduce the legacy journal text character-for-character.
+_bounded_rc_reason() {
+    local __rc="${1:-}" __hint="${2:-}" __bdescr="${3:-}"
+    case "$__rc" in
+        124) printf 'timeout(%s)' "${__bdescr:-budget}" ;;
+        *)
+            if [ -n "$__hint" ]; then
+                printf 'nonzero rc=%s state=%s' "$__rc" "$__hint"
+            else
+                printf 'nonzero rc=%s' "$__rc"
+            fi
+            ;;
+    esac
+}
+
+# _bounded_state_hint <raw> — sanitize a probe's stdout token for journaling
+# ([a-z-]{1,20}; empty → empty, the caller applies its own fallback literal).
+# Keeps hostile/garbled probe output out of the single-line journal field.
+_bounded_state_hint() {
+    printf '%s' "${1:-}" | tr -cd 'a-z-' | cut -c1-20
+}
+
 # _resolve_wait_s_mirror <env_file> — PARENT-SIDE mirror of the child's
 # WAIT_S resolution chain (scripts/stop-ensemble.sh:113 + 270-289 + 292-307).
 # SYNC-GUARD: this function MUST stay byte-identical in semantics to the
@@ -6826,7 +6878,7 @@ _hb_verify_diag() {
 #           quarantine language); the CALLER owns the halt.
 #         2 = transient (keep polling — the daemon is booting).
 _handback_serving_probe() {
-    local running hspc_rc=0
+    local running hspc_rc=0 __attr_rc=0
     _probe_once_classified "/livez" "${PORT:-}" || hspc_rc=$?
     case "$hspc_rc" in
         0)
@@ -6835,16 +6887,31 @@ _handback_serving_probe() {
             # A mismatch is probe-level FAIL-FAST (the probe's own vocabulary:
             # no amount of polling fixes a foreign answerer — the incident's
             # nohup-serves-while-launchd-crash-loops shape).
-            if ! _gate_serving_attribution "hand-back verify"; then
-                # D6-(iv) / AC-D6-6: the REFUSAL DETAIL is the reason the
-                # halt must carry — it is captured on the dedicated
-                # verifier-reason channel (the launchd HB_ERR channel is
-                # untouched) and emitted to BOTH sinks (the payload log
-                # included — F16).
-                _handback_verify_reason_write "attribution-refused: ${GATE_ATTRIBUTION_DETAIL:-<no attribution detail captured>}"
-                _hb_verify_diag "hand-back verify: serving-process attribution REFUSED${GATE_ATTRIBUTION_DETAIL:+ — $GATE_ATTRIBUTION_DETAIL} (probe-level fail-fast, Fix #2); NOT success"
-                return 1
-            fi
+            # RESOLVED H1 (branch T7b / D-P1-4 × L 0f133d2b9 D6-(iv), AC-D6-6):
+            # explicit rc capture stays; the definitive rc=1 arm keeps L's
+            # reason-channel write + dual-sink diagnostic; the transient rc=2
+            # arm keeps polling and writes NO halt reason (there is no halt).
+            __attr_rc=0
+            _gate_serving_attribution "hand-back verify" || __attr_rc=$?
+            case "$__attr_rc" in
+                1)
+                    # D6-(iv) / AC-D6-6: the REFUSAL DETAIL is the reason the
+                    # halt must carry — captured on the dedicated verifier-
+                    # reason channel (the launchd HB_ERR channel is untouched)
+                    # and emitted to BOTH sinks (the payload log included — F16).
+                    _handback_verify_reason_write "attribution-refused: ${GATE_ATTRIBUTION_DETAIL:-<no attribution detail captured>}"
+                    _hb_verify_diag "hand-back verify: serving-process attribution REFUSED${GATE_ATTRIBUTION_DETAIL:+ — $GATE_ATTRIBUTION_DETAIL} (probe-level fail-fast, Fix #2); NOT success"
+                    return 1
+                    ;;
+                2)
+                    # transient: keep polling within the caller's verify budget.
+                    # No reason write: rc 2 is NOT a halt, and a stale reason
+                    # would poison a later halt in the same run.
+                    return 2
+                    ;;
+                0) : ;;
+                *) return 2 ;;   # contract violation — treated as transient (I-B13)
+            esac
             if [ -n "${PROMOTE_EXPECTED_VERSION:-}" ]; then
                 running="$(_json_field "${_PROBE_BODY:-}" version 2>/dev/null)" || running=""
                 if [ -z "$running" ]; then
@@ -7285,10 +7352,24 @@ _supervision_handback_unit() {
         :
     else
         local sbrc=$?
-        _warn "reset-failed probe exceeded budget (${SYSTEMCTL_PROBE_BUDGET_S}s) for $unit — continuing (best-effort; child SIGTERM→SIGKILL'd)"
-        journal_history_append subprocess_wait_timeout \
-            "site=handback_reset_failed kind=budget reason=$(printf 'child: timeout(SYSTEMCTL_PROBE_BUDGET_S=%s)' "$SYSTEMCTL_PROBE_BUDGET_S") unit=$unit rc=124 — SIGTERM→SIGKILL, continuing (best-effort)" \
-            || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
+        # D-P1-1 / I-A1..A4 (promote-handback-halt Phase 1 §4.3 site 1): the
+        # rc is CLASSIFIED, never assumed. The legacy arm hard-coded `rc=124`
+        # and said "exceeded budget" for EVERY nonzero rc — on a healthy
+        # hand-back `reset-failed` can exit nonzero for an ordinary reason,
+        # and the mislabel is what made the incident's journal read as a
+        # timeout. The event kind names the bounded-wait FAMILY; the row's
+        # `kind=` names the OUTCOME (§4.2).
+        if [ "$(_bounded_rc_kind "$sbrc")" = "budget" ]; then
+            _warn "reset-failed probe exceeded budget (${SYSTEMCTL_PROBE_BUDGET_S}s) for $unit — continuing (best-effort; child SIGTERM→SIGKILL'd)"
+            journal_history_append subprocess_wait_timeout \
+                "site=handback_reset_failed kind=budget reason=child: $(_bounded_rc_reason "$sbrc" "" "SYSTEMCTL_PROBE_BUDGET_S=${SYSTEMCTL_PROBE_BUDGET_S}") unit=$unit rc=$sbrc — SIGTERM→SIGKILL, continuing (best-effort)" \
+                || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
+        else
+            _warn "reset-failed probe FAILED (rc=$sbrc) for $unit — continuing (best-effort)"
+            journal_history_append subprocess_wait_timeout \
+                "site=handback_reset_failed kind=nonzero_exit reason=child: $(_bounded_rc_reason "$sbrc") unit=$unit rc=$sbrc — nonzero rc, continuing (best-effort; the probe's own failure is never fatal)" \
+                || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
+        fi
     fi
     # 2. is-active preflight — ALREADY-ACTIVE ≠ SUCCESS: a unit start on
     #    an active unit is a NO-OP that exits 0 (the false-success
@@ -7324,22 +7405,40 @@ _supervision_handback_unit() {
     # The observed state word (stdout) — flattened to one line, trimmed.
     isact_state="$(printf '%s' "${isact:-}" | tr '\n' ' ' | tr -s ' ' | sed 's/[[:space:]]*$//')"
     if [ "$isact_rc" -ne 0 ]; then
-        if [ "$isact_rc" = "124" ]; then
+        # RESOLVED H2 (branch D-P1-1 three-way × L 865ec4ad3 D6-(iii),
+        # AC-D6-1/2): the failure-shaped `subprocess_wait_timeout` taxonomy is
+        # the branch's (124 budget / other nonzero_exit / rc 3 INFO, no
+        # timeout-shaped row); L's ADDITIVE `handback_is_active_state` row is
+        # kept for EVERY answered rc≠124 because two L-side tests read it
+        # (tests/test_bounded_subprocess_waits.sh:404,
+        # tests/packs/promote_handback_halt_gate_legs_test.sh:614).
+        __isact_kind="$(_bounded_rc_kind "$isact_rc")"
+        if [ "$__isact_kind" = "budget" ]; then
             _warn "is-active probe exceeded budget (${SYSTEMCTL_PROBE_BUDGET_S}s) for $unit — treating as NOT-active; continuing into the start attempt (the MainPID/port verify owns the verdict)"
             journal_history_append subprocess_wait_timeout \
-                "site=handback_is_active kind=budget reason=$(printf 'child: timeout(SYSTEMCTL_PROBE_BUDGET_S=%s)' "$SYSTEMCTL_PROBE_BUDGET_S") unit=$unit rc=$isact_rc — treating as not-active, continuing" \
+                "site=handback_is_active kind=budget reason=child: $(_bounded_rc_reason "$isact_rc" "" "SYSTEMCTL_PROBE_BUDGET_S=${SYSTEMCTL_PROBE_BUDGET_S}") unit=$unit rc=$isact_rc — treating as not-active, continuing" \
                 || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
-        else
-            # NOT a timeout: systemctl ANSWERED with a non-zero rc (rc=3 =
-            # not active — the expected pre-start value; rc=1 = failed /
-            # unknown; ...). The answer + the observed state word are
-            # journaled on their OWN event kind (additive; NOT a terminal
-            # kind, NOT in _TERMINAL_EVENTS) — the timeout row is reserved
-            # for rc=124 alone. VERDICT UNCHANGED: still treat as
-            # NOT-active and continue into the start attempt.
-            _warn "is-active probe answered rc=$isact_rc for $unit (state=${isact_state:-<none>}) — NOT a timeout (rc≠124): treating as NOT-active; continuing into the start attempt (the MainPID/port verify owns the verdict)"
+        elif [ "$isact_rc" = "3" ]; then
+            # rc 3 = systemctl's ROUTINE pre-start answer (inactive OR
+            # activating): INFO only on the timeout surface, with the site
+            # token, state and rc so post-mortem greps still find this site.
+            # The state token falls back to `unknown` (never the literal
+            # `inactive|activating` form — CP-10).
+            __isact_state="$(_bounded_state_hint "${isact}")"
+            [ -n "$__isact_state" ] || __isact_state="unknown"
+            _log "is-active: site=handback_is_active state=${__isact_state} rc=3 — routine pre-start answer; proceeding into the start attempt"
             journal_history_append handback_is_active_state \
-                "site=handback_is_active kind=state unit=$unit rc=$isact_rc state=${isact_state:-<none>} — systemctl answered (not a timeout; rc≠124); treating as not-active, continuing" \
+                "site=handback_is_active kind=state reason=state:${__isact_state} unit=$unit rc=$isact_rc state=${isact_state:-<none>} — systemctl answered (not a timeout; rc≠124); treating as not-active, continuing" \
+                || _warn "handback_is_active_state journal event append FAILED (best-effort)"
+        else
+            # Answered rc≠124 other than the routine rc 3 (e.g. rc 4 unknown,
+            # rc 1 failed): genuine probe failure — WARN + the branch's
+            # true-rc `nonzero_exit` row, carried on L's additive state event
+            # so L's "no subprocess_wait_timeout row for an answered rc" pin
+            # (tests/test_bounded_subprocess_waits.sh:422) stays true.
+            _warn "is-active probe FAILED (rc=$isact_rc state=${isact:-<none>}) for $unit — treating as NOT-active; continuing into the start attempt (the MainPID/port verify owns the verdict)"
+            journal_history_append handback_is_active_state \
+                "site=handback_is_active kind=nonzero_exit reason=child: $(_bounded_rc_reason "$isact_rc" "$(_bounded_state_hint "${isact}")") unit=$unit rc=$isact_rc state=${isact_state:-<none>} — systemctl answered (not a timeout; rc≠124); treating as not-active, continuing" \
                 || _warn "handback_is_active_state journal event append FAILED (best-effort)"
         fi
         isact=""
@@ -7413,10 +7512,22 @@ _supervision_handback_unit() {
         if [ "$sbrc" = "124" ]; then
             start_hung=1
             _warn "unit start exceeded budget — under-budget child (HANDBACK_START_BUDGET_S=${HANDBACK_START_BUDGET_S}s) was SIGTERM→SIGKILL'd; unit=$unit — NOT terminal (D6 AC-D6-4: systemd keeps processing the start job); continuing into the bounded verify"
+            # RESOLVED H3 (branch dynamic reason × L 0f133d2b9/865ec4ad3
+            # D6 AC-D6-4): _bounded_rc_reason emits the byte-identical
+            # `child: timeout(HANDBACK_START_BUDGET_S=<n>)` text for 124,
+            # and the true rc variable replaces L's hardcoded rc=124.
+            # L's truthful NOT-terminal tail is kept (the start job
+            # continues server-side; the bounded verify owns the verdict).
             journal_history_append subprocess_wait_timeout \
-                "site=handback_start kind=budget reason=$(printf 'child: timeout(HANDBACK_START_BUDGET_S=%s)' "$HANDBACK_START_BUDGET_S") unit=$unit rc=124 — SIGTERM→SIGKILL of the CLIENT; NOT terminal (D6): continuing into the bounded verify (the start job continues server-side)" \
+                "site=handback_start kind=budget reason=child: $(_bounded_rc_reason "$sbrc" "" "HANDBACK_START_BUDGET_S=${HANDBACK_START_BUDGET_S}") unit=$unit rc=$sbrc — SIGTERM→SIGKILL of the CLIENT; NOT terminal (D6 AC-D6-4): continuing into the bounded verify (the start job continues server-side)" \
                 || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
         else
+            # Leader ruling D2 (phase1 §4.3 note) — journal SYMMETRY: a genuine
+            # non-124 start failure gets its own `kind=nonzero_exit` row so it
+            # is machine-visible with the TRUE rc (the WARN text is unchanged).
+            journal_history_append subprocess_wait_timeout \
+                "site=handback_start kind=nonzero_exit reason=child: $(_bounded_rc_reason "$sbrc") unit=$unit rc=$sbrc — nonzero rc (not a timeout), halting for caller's B4 policy" \
+                || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
             _warn "unit hand-back FAILED: unit $unit did not come up (${first:-no stderr}) — NO nohup fallback (Amendment #1: a fallback re-creates the survivor lineage and abandons Restart=/journald ownership) — halting for the caller's B4 policy"
             _handback_verify_reason_write "unit-start-failed: unit $unit did not come up (rc=${sbrc}; ${first:-no stderr})"
             return 1
@@ -7753,10 +7864,26 @@ restart_via_launcher() {
         _sc_isact="$(_run_bounded "$SYSTEMCTL_PROBE_BUDGET_S" -- "$SYSTEMCTL_BIN" is-active "$ENSEMBLE_RESTART_UNIT" 2>/dev/null)"
         _sc_rc=$?
         if [ "$_sc_rc" -ne 0 ]; then
-            _warn "is-active probe exceeded budget (${SYSTEMCTL_PROBE_BUDGET_S}s) for $ENSEMBLE_RESTART_UNIT — treating as NOT-active; continuing (probe timeout never fails the launcher start on its own)"
-            journal_history_append subprocess_wait_timeout \
-                "site=scope_arm_is_active kind=budget reason=$(printf 'child: timeout(SYSTEMCTL_PROBE_BUDGET_S=%s)' "$SYSTEMCTL_PROBE_BUDGET_S") unit=$ENSEMBLE_RESTART_UNIT rc=$_sc_rc — treating as not-active, continuing" \
-                || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
+            # D-P1-1 / I-A1..A4 / I-D4 (§4.3 site 3 — the scope arm, identical
+            # three-way split to site 2): rc 124 only is a budget class; rc 3
+            # is the routine pre-start answer (INFO, NO journal row — the twins'
+            # incident shape was exactly this rc being journaled as a timeout);
+            # rc 4/other is a genuine probe failure with the TRUE rc.
+            if [ "$(_bounded_rc_kind "$_sc_rc")" = "budget" ]; then
+                _warn "is-active probe exceeded budget (${SYSTEMCTL_PROBE_BUDGET_S}s) for $ENSEMBLE_RESTART_UNIT — treating as NOT-active; continuing (probe timeout never fails the launcher start on its own)"
+                journal_history_append subprocess_wait_timeout \
+                    "site=scope_arm_is_active kind=budget reason=child: $(_bounded_rc_reason "$_sc_rc" "" "SYSTEMCTL_PROBE_BUDGET_S=${SYSTEMCTL_PROBE_BUDGET_S}") unit=$ENSEMBLE_RESTART_UNIT rc=$_sc_rc — treating as not-active, continuing" \
+                    || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
+            elif [ "$_sc_rc" = "3" ]; then
+                __sc_state="$(_bounded_state_hint "${_sc_isact}")"
+                [ -n "$__sc_state" ] || __sc_state="unknown"
+                _log "is-active: site=scope_arm_is_active state=${__sc_state} rc=3 — routine pre-start answer; proceeding into the start attempt"
+            else
+                _warn "is-active probe FAILED (rc=$_sc_rc state=${_sc_isact:-<none>}) for $ENSEMBLE_RESTART_UNIT — treating as NOT-active; continuing (probe failure never fails the launcher start on its own)"
+                journal_history_append subprocess_wait_timeout \
+                    "site=scope_arm_is_active kind=nonzero_exit reason=child: $(_bounded_rc_reason "$_sc_rc" "$(_bounded_state_hint "${_sc_isact}")") unit=$ENSEMBLE_RESTART_UNIT rc=$_sc_rc state=$(_bounded_state_hint "${_sc_isact}") — treating as not-active, continuing" \
+                    || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
+            fi
             _sc_isact=""
         fi
         if [ "$_sc_isact" = "active" ]; then
@@ -7805,10 +7932,16 @@ restart_via_launcher() {
             if [ "$_sc_rc" = "124" ]; then
                 _warn "$SYSTEMCTL_BIN start $ENSEMBLE_RESTART_UNIT timed out (budget=${SCOPE_START_BUDGET_S}s) — falling back to nohup launcher (comp7 opt-in path)"
                 journal_history_append subprocess_wait_timeout \
-                    "site=scope_arm_start kind=budget reason=$(printf 'child: timeout(SCOPE_START_BUDGET_S=%s)' "$SCOPE_START_BUDGET_S") unit=$ENSEMBLE_RESTART_UNIT rc=124 — SIGTERM→SIGKILL, falling back to nohup" \
+                    "site=scope_arm_start kind=budget reason=child: $(_bounded_rc_reason "$_sc_rc" "" "SCOPE_START_BUDGET_S=${SCOPE_START_BUDGET_S}") unit=$ENSEMBLE_RESTART_UNIT rc=$_sc_rc — SIGTERM→SIGKILL, falling back to nohup" \
                     || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
             else
                 _warn "systemctl start $ENSEMBLE_RESTART_UNIT failed: ${_sc_first:-no stderr} — falling back to nohup launcher (comp7 opt-in path)"
+                # Leader ruling D2 (phase1 §4.3 note) — journal SYMMETRY: the
+                # genuine non-124 arm gets its own `kind=nonzero_exit` row (the
+                # frozen 7c WARN wording above stays BYTE-IDENTICAL).
+                journal_history_append subprocess_wait_timeout \
+                    "site=scope_arm_start kind=nonzero_exit reason=child: $(_bounded_rc_reason "$_sc_rc") unit=$ENSEMBLE_RESTART_UNIT rc=$_sc_rc — nonzero rc (not a timeout), falling back to nohup" \
+                    || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
             fi
         fi
     fi
@@ -8162,20 +8295,72 @@ _supervision_pid_in_launchd_lineage() {
     return 1
 }
 
-# _supervision_pid_cgroup_leaf <pid> — basename of the pid's cgroup LEAF,
-# or nothing. TWINS-PINNED parse (~6 lines, duplicated in the python twin
-# _supervision_read_cgroup_leaf — cross-language seam; see the section
-# comment). EVERY /proc read is behind [ -r ... ] per the P1 contract.
-_supervision_pid_cgroup_leaf() {
-    local pid="$1" line path leaf
+# _supervision_pid_cgroup_path <pid> — the pid's cgroup LAST LINE with the
+# leading `<id>:` prefix stripped (the full cgroup PATH, e.g.
+# /system.slice/ensemble-main.service/mcp-child.scope), or nothing.
+# TWINS-PINNED parse: the ONE shared read used by both projections —
+# _supervision_pid_cgroup_leaf (basename) and the containment ladder's R2
+# rung (full path). A third copy of this parse must never be minted
+# (promote-handback-halt Phase 1 §5.3, A32). EVERY /proc read is behind
+# [ -r ... ] per the P1 contract.
+_supervision_pid_cgroup_path() {
+    local pid="${1:-}" line path
     [ -n "$pid" ] || return 1
     [ -r "/proc/$pid/cgroup" ] || return 1
     line="$(tail -n 1 "/proc/$pid/cgroup" 2>/dev/null)" || return 1
     [ -n "$line" ] || return 1
     path="${line##*:}"
+    printf '%s\n' "$path"
+}
+
+# _supervision_pid_cgroup_leaf <pid> — basename of the pid's cgroup LEAF,
+# or nothing. TWINS-PINNED parse (~6 lines, duplicated in the python twin
+# _supervision_read_cgroup_leaf — cross-language seam; see the section
+# comment). EVERY /proc read is behind [ -r ... ] per the P1 contract.
+# Projection over _supervision_pid_cgroup_path (ONE parse, two projections).
+_supervision_pid_cgroup_leaf() {
+    local pid="$1" path leaf
+    [ -n "$pid" ] || return 1
+    path="$(_supervision_pid_cgroup_path "$pid" 2>/dev/null)" || return 1
+    [ -n "$path" ] || return 1
     leaf="${path##*/}"
     [ -n "$leaf" ] || return 1
     printf '%s\n' "$leaf"
+}
+
+# _supervision_pid_ancestor_of <pid> <roots-spaced> — is <pid> inside the
+# given pid SET (spaced list) by birth, i.e. is it a root itself or a
+# bounded ppid-descendant of one? T3 (promote-handback-halt Phase 1 §5.3
+# rung R3). Same bounded-walk shape as _supervision_pid_in_launchd_lineage
+# (depth 12) but testing membership in the argv/cwd-anchored OWNED SET
+# (Layer 1's trust root) rather than a single job pid — portable, because it
+# uses POSIX `ps` only (so it also serves Darwin / nohup shapes).
+#
+# Returns: 0 = reachable (contained); 1 = the walk COMPLETED without
+# entering the set (a reparented orphan ends at pid 1 — answered, and pid
+# reuse is judged on the CURRENT occupant, so no false accept is reachable,
+# architect closure C-5); 2 = cannot answer (`ps` unavailable — a missing
+# tool is NEVER refusal evidence, the _gate_attr_unprobeable contract).
+_supervision_pid_ancestor_of() {
+    local cur="${1:-}" roots="${2:-}" depth=0
+    [ -n "$cur" ] || return 2
+    # An EMPTY owned set is an ANSWERED negative: nothing can be the
+    # ancestor of a process that is not in a set that has no members
+    # (phase1 P8 / M3 — "R1 empty, R2 n/a, R3 root set empty => 1").
+    [ -n "$roots" ] || return 1
+    command -v ps >/dev/null 2>&1 || return 2
+    while [ -n "$cur" ] && [ "$depth" -lt 12 ]; do
+        case " $roots " in
+            *" $cur "*) return 0 ;;
+        esac
+        cur="$(ps -o ppid= -p "$cur" 2>/dev/null | tr -d '[:space:]')"
+        case "$cur" in
+            ''|0|1) return 1 ;;
+            *[!0-9]*) return 1 ;;
+        esac
+        depth=$(( depth + 1 ))
+    done
+    return 1
 }
 
 # _supervision_unit_from_dotenv — read ENSEMBLE_RESTART_UNIT directly from
@@ -9168,9 +9353,300 @@ _gate_attr_unprobeable() {
     _GATE_ATTR_WARNED=1
     _warn "attribution [$1]: skipped (${2}) — the serving-process conjunct cannot be evaluated on this host/shape (Fix #2; gates do NOT refuse on a missing probe tool, but this is NOT a pass evidence)"
 }
+# ── rc=2 consumer contract — the helper family (T7d-v2, R2 §2.1-2.2) ────────
+# Canonical carrier: gate_defer_reason — the SINGLE transient-carrier name
+# (the per-surface aliases are STRUCK). Read/written exclusively via
+# ${gate_defer_reason:-} forms => set -u-safe by construction. _gate_consume
+# is the SOLE WRITER (statement position only — never inside $( )); every
+# guard/success/logbook branch reads _gate_outcome (the SOLE READER), never a
+# carrier variable — that is what makes an omitted-site read structurally
+# impossible on the read side (T7g census, I-B14).
+#
+# Wording classes are CLOSED vocabularies: definitive labels
+# (/livez unreachable >Ns, version verify mismatch, soak failure, ...) go ONLY
+# into the surface's failure carrier (byte-preserved); transient labels go
+# ONLY into gate_defer_reason + the gate-defer: detail. Never cross-
+# contaminated (D-P1-4 / T7c).
+gate_defer_reason=""
+# _gate_consume <surface> <rc> <label> — consume a one-shot gate call's rc.
+#   rc=0: no-op (echo ok).
+#   rc=1: set the surface's FAILURE CARRIER with today's byte-exact string;
+#         return 1 so the caller's existing branch keeps its shape.
+#   rc=2: set gate_defer_reason (transient wording — never a definitive
+#         label), failure carrier UNTOUCHED, write ONE gate_defer row per run
+#         (fire-once latch = the carrier itself), _warn per tick, return 2.
+#   unknown rc: contract violation -> treated as 2 + a warn row.
+# Post-defer chain semantics (§5.4a-1, ruling D-P1-14, NORMATIVE precedence
+# fail > defer > ok):
+#   (1) DEFINITIVE-FAILURE PRECEDENCE — a defer never downgrades a definitive
+#       failure: _gate_consume refuses to mint a defer carrier while the
+#       surface's failure carrier is already set (the fail wins; the defer
+#       tick is recorded on stderr only).
+#   (2) LATER-GREEN SUPERSESSION — an earlier defer does not veto a later
+#       attributed ^ version-correct green at the cycle's terminal read; the
+#       consuming reads below therefore clear the carrier on a definitive ok
+#       (consume clears — rule 3).
+#   (3) CONSUME CLEARS — the carrier never leaks across stages/cycles: every
+#       consumption clears it after the read.
+_gate_consume() {
+    local __surface="$1" __rc="$2" __label="$3"
+    case "$__rc" in
+        0)
+            # A definitive ok supersedes an earlier defer in this cycle
+            # (rule 2) and the carrier is cleared after the read (rule 3).
+            gate_defer_reason=""
+            printf '%s' "ok"
+            return 0
+            ;;
+        1)
+            # Definitive failure: the failure carrier wins (rule 1) and any
+            # stale defer token from an earlier gate in this cycle is
+            # irrelevant to the fail path — clear it so the halt/rollback
+            # branch never renders two verdicts.
+            gate_defer_reason=""
+            printf '%s' "fail"
+            return 1
+            ;;
+        2)
+            if [ -n "${gate_fail_reason:-}${GATE_FAIL:-}${REGATE_FAIL:-}" ]; then
+                # rule 1: a definitive failure already recorded in this cycle
+                # is NEVER downgraded by a defer.
+                _warn "gate-consume [$__surface]: transient at '$__label' IGNORED — a definitive failure is already recorded this cycle (fail > defer)"
+                printf '%s' "defer-suppressed"
+                return 2
+            fi
+            if [ -n "${gate_defer_reason:-}" ]; then
+                # fire-once: one halt row per run per surface (the latch IS the
+                # carrier); still warn per tick.
+                _warn "gate-consume [$__surface]: '$__label' attribution deferred again (transient) — $gate_defer_reason"
+                printf '%s' "defer"
+                return 2
+            fi
+            gate_defer_reason="$__label: attribution deferred (transient — budget expired)"
+            _warn "gate-consume [$__surface]: '$__label' attribution DEFERRED (transient) — $gate_defer_reason"
+            journal_history_append gate_defer "gate-defer: $__surface $__label — $gate_defer_reason (transient; NOT a failure verdict; no rollback, no quarantine)"                 || true
+            printf '%s' "defer"
+            return 2
+            ;;
+        *)
+            # Contract violation (I-B13): an unknown rc is treated as 2.
+            _warn "gate-contract violation: $__surface '$__label' returned rc=$__rc (expected 0|1|2) — treating as transient"
+            gate_defer_reason="$__label: gate-contract violation (rc=$__rc treated as transient)"
+            journal_history_append gate_defer "gate-defer: $__surface $__label — $gate_defer_reason (contract violation; treated as transient)"                 || true
+            printf '%s' "defer"
+            return 2
+            ;;
+    esac
+}
+# _gate_outcome <surface> — THE reader. Echoes ok | fail | defer from the
+# surface's carriers; guards branch on THIS token, never on a carrier read.
+_gate_outcome() {
+    local __surface="$1"
+    case "$__surface" in
+        promote)
+            if [ -n "${gate_fail_reason:-}" ]; then printf '%s' "fail"
+            elif [ -n "${gate_defer_reason:-}" ]; then printf '%s' "defer"
+            else printf '%s' "ok"; fi
+            ;;
+        restart)
+            if [ -n "${GATE_FAIL:-}" ]; then printf '%s' "fail"
+            elif [ -n "${gate_defer_reason:-}" ]; then printf '%s' "defer"
+            else printf '%s' "ok"; fi
+            ;;
+        rollback)
+            if [ -n "${REGATE_FAIL:-}" ]; then printf '%s' "fail"
+            elif [ -n "${gate_defer_reason:-}" ]; then printf '%s' "defer"
+            else printf '%s' "ok"; fi
+            ;;
+        *)
+            _warn "gate-contract violation: _gate_outcome called with unknown surface '$__surface'"
+            printf '%s' "fail"
+            ;;
+    esac
+}
+# _gate_defer_reset — CONSUME CLEARS (rule 3): stage/cycle boundaries reset
+# the carrier so it never leaks.
+_gate_defer_reset() { gate_defer_reason=""; }
+
+# ── T7 — the pooled deferral seam (I-B8, leader D1/D3; NOT an exported knob,
+# NOT registered — routed through _numeric_knob for its integer parse, then
+# CLAMPED to [0,5], and honoured only under the dual-key test marker
+# ENSEMBLE_TEST_GATE_DEFER=1; never exported; re-armed per CALL).
+# The pool counts SECONDS (decrement by the slept duration — the honest
+# sleep bound is <= _GATE_ATTR_DEFER_S + 1s per CALL at 2s granularity
+# (5s => 3 sleeps = 6s), not iterations and not a per-shell total).
+_GATE_ATTR_DEFER_S="$(_numeric_knob _GATE_ATTR_DEFER_S "${_GATE_ATTR_DEFER_S:-}" 5)"
+case "$_GATE_ATTR_DEFER_S" in
+    ''|*[!0-9]*) _GATE_ATTR_DEFER_S=5 ;;
+esac
+if [ "$_GATE_ATTR_DEFER_S" -gt 5 ]; then
+    _GATE_ATTR_DEFER_S=5   # clamp: a leaked 300 becomes 5 (D3)
+fi
+if [ "$_GATE_ATTR_DEFER_S" -lt 0 ]; then
+    _GATE_ATTR_DEFER_S=0
+fi
+if [ "${ENSEMBLE_TEST_GATE_DEFER:-0}" != "1" ]; then
+    _GATE_ATTR_DEFER_S=5   # dual-key: a non-default value is honoured ONLY
+                           # under the explicit test marker; absent => 5
+fi
+# Per-shell patience pool, initialised at source time from the clamped seam.
+_GATE_ATTR_DEFER_REMAIN="$_GATE_ATTR_DEFER_S"
+# Fire-once latch for the exhaustion marker (the _GATE_ATTR_WARNED precedent).
+_GATE_ATTR_EXHAUST_LATCH=""
+
+# _gate_attr_containment <holder> [<owned-spaced>] [<what>] — THE containment
+# ladder (T5, promote-handback-halt Phase 1 §5.3). Classifies ONE port holder
+# against the supervised tree. Three-valued, fail-closed:
+#   0 = CONTAINED (an answered accept — evidence-only)
+#   1 = positively NOT contained (today's refusal)
+#   2 = unattributable-yet (the deciding tooling could not answer) -> deferral
+#
+# Rungs, in cost order (each rung is only reached if every earlier rung could
+# not ANSWER):
+#   R1  argv/cwd ownership       — holder in the owned set. Zero extra cost.
+#   R2  systemd cgroup containment — unit mode + Linux only. Segment-aware:
+#       pcg == cg || pcg PREFIX-matches "$cg"/  (canonical predicate; the raw
+#       substring form is the over-accept this lane exists to kill — decisions
+#       §2.1/D-P2-3. The legacy Layer 2 substring stays byte-identical and is
+#       deliberately NOT this rung).
+#   R3  ppid ancestry into the OWNED SET (POSIX ps — also the Darwin path).
+#   R4  launchd job lineage (Darwin): a registered-but-pidless job while the
+#       port is served is the v0.30.3 dual-supervisor shape -> refuse.
+#
+# COMPOSITION RULE (architect closure C-1, NORMATIVE): the FIRST rung that
+# ANSWERS decides (0 accept / 1 refuse); only a 2 (cannot-answer) falls
+# through. An answered 1 is DOWNGRADED to 2 when a STRONGER (earlier) rung was
+# unanswerable — an incomplete determination is not positive foreignness, else
+# a wedged systemctl would make the ladder STRICTER than today's check.
+_gate_attr_containment() {
+    local h="${1:-}" owned_space="${2:-}" what="${3:-gate}"
+    local pcg cg mainpid rc lpid r4_rc __pre
+    [ -n "$h" ] || return 2
+
+    # ── R1 — argv/cwd ownership ──────────────────────────────────────
+    # `owned_space` is THREADED EXPLICITLY (T6/A32): the legacy gate has a
+    # leaked `owned_spaced` global, and the ladder must not become its second
+    # reader. An EMPTY owned set answers NOTHING here (no member can match) —
+    # R3 then answers the negative (P8/M3: `owned:<none>` still refuses).
+    if [ -n "$owned_space" ]; then
+        case " $owned_space " in
+            *" $h "*) return 0 ;;
+        esac
+    fi
+
+    # ── R2 — systemd cgroup containment (unit mode, Linux+systemd only) ──
+    local r2_ran=0 r2_unanswered=0
+    if [ "${SUPERVISION_MODE:-}" = "unit" ] && [ -n "${SUPERVISION_UNIT:-}" ] \
+       && _supervision_host_allows_unit; then
+        r2_ran=1
+        # ONE ctx resolve per gate invocation (the cache is reset at gate entry
+        # — T6); a second holder reuses the same MainPID/ControlGroup.
+        if [ "${_GA_CTX_READY:-0}" != "1" ]; then
+            if _gate_attr_unit_ctx "$what" >/dev/null 2>&1; then
+                _GA_CTX_READY=1
+            else
+                _GA_CTX_READY=0
+                _GA_CTX_REASON="${_GA_UNIT_UNPROBEABLE_WHY:-unknown}"
+            fi
+        fi
+        if [ "$_GA_CTX_READY" != "1" ]; then
+            r2_unanswered=1
+        else
+            mainpid="$_GA_UNIT_MAINPID"
+            cg="$_GA_UNIT_CG"
+            # the equality arm (unchanged by the amendment)
+            if [ "$h" = "$mainpid" ]; then
+                return 0
+            fi
+            # degenerate guard: "" or "/" => the tooling resolved no real
+            # cgroup. This is THE false-halt class — abstain, never decide.
+            if [ -z "$cg" ] || [ "$cg" = "/" ]; then
+                r2_unanswered=1
+            else
+                pcg="$(_supervision_pid_cgroup_path "$h" 2>/dev/null)"
+                if [ -z "$pcg" ]; then
+                    r2_unanswered=1        # unreadable /proc read is no evidence
+                elif [ "$pcg" = "$cg" ]; then
+                    return 0               # (a) exact ControlGroup
+                else
+                    # (b) SEGMENT-BOUNDARY PREFIX test. The case pattern is
+                    # anchored at the LEFT of $pcg: $cg literal, then '/', then
+                    # anything. A cgroup name containing glob metacharacters
+                    # would be mis-read as a PATTERN, so the prefix form is
+                    # pre-checked with a LITERAL string comparison instead of
+                    # relying on the glob (approver iter-001 note 9).
+                    __pre=0
+                    case "$pcg" in "$cg"/*) __pre=1 ;; esac
+                    # The case pattern treats a cgroup name's glob
+                    # metacharacters as PATTERN syntax, so it can mis-match in
+                    # either direction; the quoted parameter expansion below is
+                    # the AUTHORITATIVE literal prefix test (approver iter-001
+                    # note 9). Accept if EITHER form says prefix.
+                    if [ "$__pre" = "1" ] || [ "${pcg#"$cg"/}" != "$pcg" ]; then
+                        return 0
+                    fi
+                    # positively NOT contained. R2 is the strongest rung, so an
+                    # answered 1 here is final (the C-1 downgrade applies to the
+                    # WEAKER R3 negative when R2 was unanswerable — below).
+                    return 1
+                fi
+            fi
+        fi
+    fi
+
+    # ── R3 — ppid ancestry into the owned set (portable / Darwin) ─────
+    rc=0
+    _supervision_pid_ancestor_of "$h" "$owned_space" || rc=$?
+    case "$rc" in
+        0) return 0 ;;
+        1) if [ "$r2_unanswered" = "1" ]; then
+               : # DOWNGRADE (C-1): a stronger rung could not answer, so this
+                 # negative is not positive foreignness — fall through.
+           else
+               return 1
+           fi
+           ;;
+        *) : ;;   # ps unavailable — cannot answer, fall through to R4
+    esac
+
+    # ── R4 — launchd job lineage (Darwin; the dual-supervisor refusal) ──
+    if [ "${SUPERVISION_MODE:-}" = "launchd" ] && [ -n "${SUPERVISION_UNIT:-}" ] \
+       && _supervision_host_allows_launchd; then
+        lpid="$(_supervision_launchd_job_pid "$SUPERVISION_UNIT")"
+        r4_rc=$?
+        case "$r4_rc" in
+            2) : ;;   # probe failure — no evidence, keep abstaining
+            *)
+                if [ -z "$lpid" ]; then
+                    # registered-but-pidless job while a holder serves: refuse
+                    # (the v0.30.3 shape; M7 pin preserved)
+                    return 1
+                fi
+                if _supervision_pid_in_launchd_lineage "$h" "$lpid"; then
+                    return 0
+                fi
+                return 1
+                ;;
+        esac
+    fi
+
+    # ── Exhausted ────────────────────────────────────────────────────
+    return 2
+}
+
 _gate_serving_attribution() {
-    local what="${1:-gate}" holders h owned nonmatch="" lpid lrc hrc
+    local what="${1:-gate}" holders h owned owned_spaced nonmatch="" lpid lrc hrc
+    local ladder_accept ladder_refuse ladder_unattrib l2_holders __lrc __h
     GATE_ATTRIBUTION_DETAIL=""
+    # Per-invocation ctx cache: the ladder resolves the unit MainPID /
+    # ControlGroup at most ONCE per gate call (T4/T6); resetting here keeps it
+    # per-invocation, so a $( ) fork and a statement call never share state.
+    _GA_CTX_READY=0
+    _GA_CTX_REASON=""
+    # owned_spaced is a PROPER LOCAL now (A32): it was a leaked global, and
+    # the ladder must not become its second reader — it is threaded into
+    # _gate_attr_containment explicitly instead.
+    owned_spaced=""
     holders="$(_supervision_port_holders)"
     hrc=$?
     case "$hrc" in
@@ -9204,13 +9680,141 @@ _gate_serving_attribution() {
         esac
     done
     if [ -n "$nonmatch" ]; then
-        # owned_spaced (NOT $owned) in the detail: GATE_ATTRIBUTION_DETAIL is
-        # threaded into promote's gate_fail_reason and from there into the
-        # journal event detail — a single-line quoted string by contract (the
-        # same reason the bootstrap stash flattens newlines to ';').
-        GATE_ATTRIBUTION_DETAIL="port-holder(s):${nonmatch} NOT in the supervision-owned pid set (owned:${owned_spaced:-<none>}) — the :${PORT} answerer is not this install's daemon"
-        _warn "attribution [$what]: REFUSED —$GATE_ATTRIBUTION_DETAIL (ensemble-vm §5.1: :9797 held by kubectl/monitor while the daemon serves :9798)"
-        return 1
+        # ── Layer 1b: THE CONTAINMENT LADDER (T6, B-primary) ──────────────
+        # Layer 1 (argv/cwd ownership) is the cheap accept and stays FIRST, so
+        # the common all-owned path never reaches this block and issues ZERO
+        # extra probes (I-B2 — byte-identical common case). The ladder is
+        # attempted ONLY on shapes that refuse today: a holder that is
+        # demonstrably inside the supervised tree (unit cgroup / owned
+        # ancestor / launchd lineage) is a HEALTHY boot, not a foreign one —
+        # the incident class (inherited-LISTEN-fd MCP children of the
+        # supervised daemon) is exactly this shape.
+        ladder_accept=""
+        ladder_refuse=""
+        ladder_unattrib=""
+        for h in $nonmatch; do
+            [ -n "$h" ] || continue
+            __lrc=0
+            _gate_attr_containment "$h" "$owned_spaced" "$what" || __lrc=$?
+            case "$__lrc" in
+                0) ladder_accept="$ladder_accept $h" ;;
+                1) ladder_refuse="$ladder_refuse $h" ;;
+                *) ladder_unattrib="$ladder_unattrib $h" ;;
+            esac
+        done
+        # CONSUME CLEARS / DEFINITIVE-FAILURE PRECEDENCE (ruling D): a refusal
+        # is never downgraded by a deferral classification, and no carrier
+        # survives past this block (see _gate_consume in C3's helper family).
+        if [ -n "$ladder_refuse" ]; then
+            # owned_spaced (NOT $owned) in the detail: GATE_ATTRIBUTION_DETAIL
+            # is threaded into promote's gate_fail_reason and from there into
+            # the journal event detail — a single-line quoted string by
+            # contract. The PREFIX is byte-identical to the pre-fix refusal
+            # (the M1/M3/M6/M7 pins assert it); the ladder verdict is appended
+            # as a SUFFIX only.
+            GATE_ATTRIBUTION_DETAIL="port-holder(s):${nonmatch} NOT in the supervision-owned pid set (owned:${owned_spaced:-<none>}) — the :${PORT} answerer is not this install's daemon; containment ladder:${ladder_refuse}"
+            _warn "attribution [$what]: REFUSED —$GATE_ATTRIBUTION_DETAIL (ensemble-vm §5.1: :9797 held by kubectl/monitor while the daemon serves :9798)"
+            return 1
+        fi
+        if [ -n "$ladder_accept" ]; then
+            # INFO on STDERR, never _log: every gate call runs inside a $( )
+            # capture (LIVEZ_JSON="$(gate_livez)", newpid="$(_supervision_
+            # unit_serving …)") where the captured payload must be the ONLY
+            # stdout content (I-B2b; the :6210 budget-printf precedent).
+            printf '%s[%s]: %s\n' "$LOG_TAG" "${UP_TARGET:-lib}" "attribution [$what]: ACCEPTED — port-holder(s):${ladder_accept} contained in the supervised tree (cgroup containment / owned ancestry; the argv-anchored owned set does not cover them)" >&2 2>/dev/null
+            # Layer 2 (refusal-only, and deliberately still raw-substring)
+            # must NOT re-test holders the ladder already accepted — closure
+            # C-2: re-testing risks a silent false veto in the mixed case where
+            # the unit probes resolve but the holder's /proc/<pid>/cgroup is
+            # unreadable.
+            l2_holders="$(printf '%s\n' $holders | while IFS= read -r __h; do
+                case " $ladder_accept " in *" $__h "*) ;; *) printf '%s\n' "$__h" ;; esac
+            done)"
+        fi
+        # ── The DEFERRAL RUNG (T7, I-B8, leader D1) ────────────────────────
+        # The residual "unattributable-yet" class: the deciding tooling could
+        # not answer (systemctl wedged, cgroup unreadable, ps absent). The
+        # ladder NEVER accepts on missing evidence — it DEFERS, bounded by a
+        # per-call patience pool that counts SECONDS (the honest sleep bound
+        # is <= _GATE_ATTR_DEFER_S + 1s per CALL at 2s granularity:
+        # _GATE_ATTR_DEFER_S=5 => 3 sleeps => 6s; NOT a per-shell total).
+        # Exhaustion => the TRANSIENT rc 2 (leader D1): refusal happens ONLY
+        # at the caller's budget end through the unchanged floor-wins verdict.
+        # A positively-foreign holder (ladder_refuse) never reaches this rung.
+        if [ -n "$ladder_unattrib" ]; then
+            _GATE_ATTR_DEFER_REMAIN="$_GATE_ATTR_DEFER_S"
+            while [ "${_GATE_ATTR_DEFER_REMAIN:-0}" -gt 0 ]; do
+                sleep 2
+                _GATE_ATTR_DEFER_REMAIN=$(( _GATE_ATTR_DEFER_REMAIN - 2 ))
+                [ "$_GATE_ATTR_DEFER_REMAIN" -lt 0 ] && _GATE_ATTR_DEFER_REMAIN=0
+                # re-census + re-classify
+                holders="$(_supervision_port_holders)"
+                hrc=$?
+                if [ "$hrc" = "2" ] || [ -z "$holders" ]; then
+                    # still unattributable — keep waiting (or the pool ends)
+                    continue
+                fi
+                owned="$(_supervision_owned_pids 2>/dev/null)"
+                owned_spaced="$(printf '%s' "$owned" | tr '\n' ' ')"
+                nonmatch=""
+                for h in $holders; do
+                    [ -n "$h" ] || continue
+                    case " $owned_spaced " in
+                        *" $h "*) ;;
+                        *) nonmatch="$nonmatch $h" ;;
+                    esac
+                done
+                if [ -z "$nonmatch" ]; then
+                    # every holder is owned now — accept (evidence-only).
+                    GATE_ATTRIBUTION_DETAIL=""
+                    return 0
+                fi
+                ladder_accept=""; ladder_refuse=""; ladder_unattrib=""
+                for h in $nonmatch; do
+                    [ -n "$h" ] || continue
+                    __lrc=0
+                    _gate_attr_containment "$h" "$owned_spaced" "$what" || __lrc=$?
+                    case "$__lrc" in
+                        0) ladder_accept="$ladder_accept $h" ;;
+                        1) ladder_refuse="$ladder_refuse $h" ;;
+                        *) ladder_unattrib="$ladder_unattrib $h" ;;
+                    esac
+                done
+                if [ -n "$ladder_refuse" ]; then
+                    # a definitive negative arrived during the deferral window:
+                    # refuse NOW (the deferral never downgrades a fail).
+                    GATE_ATTRIBUTION_DETAIL="port-holder(s):${nonmatch} NOT in the supervision-owned pid set (owned:${owned_spaced:-<none>}) — the :${PORT} answerer is not this install's daemon; containment ladder:${ladder_refuse}"
+                    _warn "attribution [$what]: REFUSED —$GATE_ATTRIBUTION_DETAIL (ensemble-vm §5.1: :9797 held by kubectl/monitor while the daemon serves :9798)"
+                    return 1
+                fi
+                if [ -n "$ladder_accept" ]; then
+                    printf '%s[%s]: %s\n' "$LOG_TAG" "${UP_TARGET:-lib}" "attribution [$what]: ACCEPTED — port-holder(s):${ladder_accept} contained in the supervised tree (cgroup containment / owned ancestry; the argv-anchored owned set does not cover them)" >&2 2>/dev/null
+                    l2_holders="$(printf '%s\n' $holders | while IFS= read -r __h; do
+                        case " $ladder_accept " in *" $__h "*) ;; *) printf '%s\n' "$__h" ;; esac
+                    done)"
+                    break
+                fi
+                # still unattributable — loop until the pool is exhausted
+            done
+            if [ -n "$ladder_accept" ]; then
+                : # accepted inside the deferral window (evidence-only)
+            else
+                # ── EXHAUSTION (leader D1): TRANSIENT, not a refusal ──────
+                # The distinct marker rides STDERR (I-B2b) and journals ONE
+                # fire-once row (the latch) with the NEW row token
+                # kind=attr_deferred — the EVENT kind stays
+                # subprocess_wait_timeout (no new event kind, I-E3).
+                if [ -z "$_GATE_ATTR_EXHAUST_LATCH" ]; then
+                    _GATE_ATTR_EXHAUST_LATCH=1
+                    journal_history_append subprocess_wait_timeout \
+                        "site=gate_attr kind=attr_deferred reason=child: containment UNATTRIBUTABLE within ${_GATE_ATTR_DEFER_S}s (unit MainPID/ControlGroup unresolvable, ps unavailable) — deferring to the verify budget" \
+                        || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
+                fi
+                printf '%s[%s]: %s\n' "$LOG_TAG" "${UP_TARGET:-lib}" "attribution [$what]: containment UNATTRIBUTABLE within ${_GATE_ATTR_DEFER_S}s (unit MainPID/ControlGroup unresolvable, ps unavailable) — deferring to the verify budget" >&2 2>/dev/null
+                GATE_ATTRIBUTION_DETAIL="port-holder(s):${nonmatch} NOT in the supervision-owned pid set (owned:${owned_spaced:-<none>}) — containment UNATTRIBUTABLE within ${_GATE_ATTR_DEFER_S}s — deferring to the verify budget (transient)"
+                return 2
+            fi
+        fi
     fi
     # ── Layer 2: supervisor lineage (consume the PRE-STOP classify) ──
     case "${SUPERVISION_MODE:-}" in
@@ -9251,10 +9855,54 @@ _gate_serving_attribution() {
                 # word-splits per holder (F1 council fix: a quoted pass made a
                 # multi-holder host probe /proc/"p1 NL p2"/cgroup and
                 # false-refuse with garbled detail).
-                _gate_attr_unit_lineage "$what" $holders || return 1
+                # closure C-2: skip holders the ladder already accepted
+                _gate_attr_unit_lineage "$what" ${l2_holders-$holders} || return 1
             fi
             ;;
     esac
+    return 0
+}
+
+# _gate_attr_unit_ctx <what> — resolve the unit's MainPID + ControlGroup ONCE
+# per gate invocation (T4, promote-handback-halt Phase 1 §5.3). Sets the two
+# globals `_GA_UNIT_MAINPID` / `_GA_UNIT_CG` and returns:
+#   0 = resolved (both values usable)
+#   2 = unprobeable (systemctl tool/budget/unit-state failure, MainPID 0, or a
+#       degenerate ControlGroup of ""/"") — the caller ABSTAINS, never decides
+#       (a "/"-or-empty ControlGroup means the tooling resolved no real cgroup;
+#       reading it as positive foreignness is exactly the false-halt class this
+#       lane removes — the code precedent is the twin guard in the legacy
+#       lineage arm).
+# The single factored home of the two bounded `systemctl show` probes: the
+# containment ladder's R2 rung and the legacy Layer 2 arm BOTH read it, so a
+# gate invocation that reaches either path pays for at most two probes and the
+# probe arithmetic lives in exactly one place.
+_GA_UNIT_MAINPID=""
+_GA_UNIT_CG=""
+_GA_UNIT_UNPROBEABLE_WHY=""
+_gate_attr_unit_ctx() {
+    local what="${1:-gate}" tmp rc_main main_pid cg
+    tmp="$(mktemp -t attr.XXXXXX 2>/dev/null || printf '/tmp/attr.%s.out' "$$")"
+    _run_bounded "$SYSTEMCTL_PROBE_BUDGET_S" -- "$SYSTEMCTL_BIN" show "$SUPERVISION_UNIT" -p MainPID --value > "$tmp" 2>/dev/null
+    rc_main=$?
+    main_pid="$(cat "$tmp" 2>/dev/null)"
+    if [ "$rc_main" -ne 0 ] || [ -z "$main_pid" ] || [ "$main_pid" = "0" ]; then
+        rm -f "$tmp" 2>/dev/null
+        _GA_UNIT_MAINPID=""; _GA_UNIT_CG=""
+        _GA_UNIT_UNPROBEABLE_WHY="MainPID"
+        return 2
+    fi
+    _GA_UNIT_MAINPID="$main_pid"
+    _run_bounded "$SYSTEMCTL_PROBE_BUDGET_S" -- "$SYSTEMCTL_BIN" show "$SUPERVISION_UNIT" -p ControlGroup --value > "$tmp" 2>/dev/null
+    cg="$(cat "$tmp" 2>/dev/null)"
+    rm -f "$tmp" 2>/dev/null
+    if [ -z "$cg" ] || [ "$cg" = "/" ]; then
+        _GA_UNIT_MAINPID="$main_pid"; _GA_UNIT_CG=""
+        _GA_UNIT_UNPROBEABLE_WHY="ControlGroup"
+        return 2
+    fi
+    _GA_UNIT_CG="$cg"
+    _GA_UNIT_UNPROBEABLE_WHY=""
     return 0
 }
 
@@ -9266,31 +9914,32 @@ _gate_serving_attribution() {
 # ANSWERED-but-uncontainable holder is a mismatch → refuse.
 _gate_attr_unit_lineage() {
     local what="$1"; shift
-    local h main_pid cg pcg rc_main
-    _gate_attr_unit_lineage_out="$(mktemp -t attr.XXXXXX 2>/dev/null || printf '/tmp/attr.%s.out' "$$")"
-    _run_bounded "$SYSTEMCTL_PROBE_BUDGET_S" -- "$SYSTEMCTL_BIN" show "$SUPERVISION_UNIT" -p MainPID --value > "$_gate_attr_unit_lineage_out" 2>/dev/null
-    rc_main=$?
-    main_pid="$(cat "$_gate_attr_unit_lineage_out" 2>/dev/null)"
-    if [ "$rc_main" -ne 0 ] || [ -z "$main_pid" ] || [ "$main_pid" = "0" ]; then
-        rm -f "$_gate_attr_unit_lineage_out" 2>/dev/null
-        _gate_attr_unprobeable "$what" "systemd MainPID unresolvable for '$SUPERVISION_UNIT' (tool/budget/unit state)"
+    local h main_pid cg pcg
+    # T4: behaviour-identical re-implementation on top of the factored ctx
+    # resolver (ONE home for the two bounded probes). The messages — including
+    # the `MainPID=` / `cgroup=` detail tokens — stay BYTE-IDENTICAL.
+    if ! _gate_attr_unit_ctx "$what"; then
+        # Distinguish the two unprobeable shapes so the loud note keeps its
+        # legacy wording: an unresolvable MainPID vs an unobservable
+        # ControlGroup.
+        if [ "${_GA_UNIT_UNPROBEABLE_WHY:-}" = "ControlGroup" ]; then
+            _gate_attr_unprobeable "$what" "unit '$SUPERVISION_UNIT' ControlGroup unobservable — containment unverifiable"
+        else
+            _gate_attr_unprobeable "$what" "systemd MainPID unresolvable for '$SUPERVISION_UNIT' (tool/budget/unit state)"
+        fi
         return 0
     fi
-    _run_bounded "$SYSTEMCTL_PROBE_BUDGET_S" -- "$SYSTEMCTL_BIN" show "$SUPERVISION_UNIT" -p ControlGroup --value > "$_gate_attr_unit_lineage_out" 2>/dev/null
-    cg="$(cat "$_gate_attr_unit_lineage_out" 2>/dev/null)"
-    rm -f "$_gate_attr_unit_lineage_out" 2>/dev/null
-    if [ -z "$cg" ] || [ "$cg" = "/" ]; then
-        _gate_attr_unprobeable "$what" "unit '$SUPERVISION_UNIT' ControlGroup unobservable — containment unverifiable"
-        return 0
-    fi
+    main_pid="$_GA_UNIT_MAINPID"
+    cg="$_GA_UNIT_CG"
     for h in "$@"; do
         [ -n "$h" ] || continue
         [ "$h" = "$main_pid" ] && continue
-        pcg=""
-        if [ -r "/proc/$h/cgroup" ]; then
-            pcg="$(tail -n 1 "/proc/$h/cgroup" 2>/dev/null)"
-            pcg="${pcg##*:}"
-        fi
+        # The legacy raw-substring containment test is DELIBERATELY kept
+        # byte-identical (decisions.md §2.2(5)): Layer 2 is refusal-only and
+        # the common path must not change. The ladder's R2 rung is the
+        # segment-aware (strictly narrower) form; a ladder-accepted holder
+        # never reaches this re-test (closure C-2).
+        pcg="$(_supervision_pid_cgroup_path "$h" 2>/dev/null)"
         case "$pcg" in
             *"$cg"*) ;;
             *)
@@ -9306,8 +9955,45 @@ _gate_attr_unit_lineage() {
 # gate_livez / gate_readyz — budgeted probes (D2). Print body; nonzero on fail.
 # Fix #2: a green answer is only trusted when the attribution conjunct
 # holds (the SUPERVISED daemon answers — see _gate_serving_attribution).
-gate_livez()  { _probe "/livez"  "$LIVEZ_BUDGET_S"  "$PORT" && _gate_serving_attribution "/livez"; }
-gate_readyz() { _probe "/readyz" "$READYZ_BUDGET_S" "$PORT" && _gate_serving_attribution "/readyz"; }
+# ROW 2 (phase1 §5.4b, ruling D-P1-15): the probe's budget-exhaustion rc 2
+# ("NOBODY ANSWERED" — the daemon is dead/unreachable) is NORMALIZED to rc 1
+# at livez/readyz: no answer at all IS a health verdict, so the 8b
+# auto-rollback stays armed (the B-dead-daemon leg). The gate's own rc 2
+# (green but UNATTRIBUTABLE) is NOT normalized — it stays transient and is
+# consumed as a deferral by the one-shot consumers (T7c). This asymmetry is
+# deliberate and recorded (phase1 §5.4a).
+_gate_livez_rc() {
+    local __rc=0 __grc=0
+    _probe "/livez" "$LIVEZ_BUDGET_S" "$PORT" || __rc=$?
+    case "$__rc" in
+        0) ;;
+        2) return 1 ;;   # nobody answered => definitive health failure
+        *) return "$__rc" ;;
+    esac
+    _gate_serving_attribution "/livez" || __grc=$?
+    case "$__grc" in
+        0) return 0 ;;
+        2) return 2 ;;   # transient: green but unattributable
+        *) return 1 ;;
+    esac
+}
+_gate_readyz_rc() {
+    local __rc=0 __grc=0
+    _probe "/readyz" "$READYZ_BUDGET_S" "$PORT" || __rc=$?
+    case "$__rc" in
+        0) ;;
+        2) return 1 ;;   # nobody answered => definitive health failure
+        *) return "$__rc" ;;
+    esac
+    _gate_serving_attribution "/readyz" || __grc=$?
+    case "$__grc" in
+        0) return 0 ;;
+        2) return 2 ;;   # transient: green but unattributable
+        *) return 1 ;;
+    esac
+}
+gate_livez()  { _gate_livez_rc; }
+gate_readyz() { _gate_readyz_rc; }
 
 # gate_version <expected> — one-shot /livez version check (D2/ADR-027: the
 # RUNNING daemon must self-report the manifest's binary_version).
@@ -9315,7 +10001,7 @@ gate_readyz() { _probe "/readyz" "$READYZ_BUDGET_S" "$PORT" && _gate_serving_att
 # the conjunct rides the green answer (gate_soak's per-tick version
 # check inherits the attribution from this site).
 gate_version() {
-    local expected="$1" body running
+    local expected="$1" body running __vrc=0
     body="$(_probe_once "/livez" "$PORT")"
     [ -n "$body" ] || { _warn "version verify: /livez not answering on :$PORT"; return 1; }
     running="$(_json_field "$body" version)"
@@ -9323,7 +10009,15 @@ gate_version() {
         _warn "version verify MISMATCH: running=$running expected=$expected (manifest binary_version)"
         return 1
     fi
-    _gate_serving_attribution "version verify" || return 1
+    # ROW 2: the direct collapse (`|| return 1`) is REMOVED — the gate's rc is
+    # captured so a TRANSIENT attribution deferral (rc 2) survives to the
+    # consumer instead of being laundered into a definitive "version verify
+    # mismatch" (which would arm the 8b auto-rollback on a healthy boot).
+    __vrc=0
+    _gate_serving_attribution "version verify" || __vrc=$?
+    if [ "$__vrc" != "0" ]; then
+        return "$__vrc"
+    fi
     _log "version verify OK: $running"
     return 0
 }
@@ -9458,7 +10152,17 @@ gate_soak() {
                 _warn "soak FAILURE: /readyz went red at ${waited}s (conservative mode)"
                 return 1
             fi
-            gate_version "$expected" > /dev/null || { _warn "soak FAILURE: version drifted at ${waited}s (conservative mode)"; return 1; }
+            # T7f / note 8 (decisions §9c): the soak tick routes through the
+            # gate family. A per-tick FRESH pool, and a transient tick is
+            # INCONCLUSIVE (streak-freeze) — never a definitive failure.
+            _GATE_ATTR_DEFER_REMAIN="$_GATE_ATTR_DEFER_S"
+            __svrc=0
+            gate_version "$expected" > /dev/null || __svrc=$?
+            case "$__svrc" in
+                0) : ;;
+                2) _log "soak: version tick INCONCLUSIVE at ${waited}s (attribution deferred — transient; streak frozen, counter neither advanced nor reset)";;
+                *) _warn "soak FAILURE: version drifted at ${waited}s (conservative mode)"; return 1 ;;
+            esac
             now="$(_now_epoch)"
             [ "$now" -lt "$deadline" ] || break
             sleep 30
@@ -9484,6 +10188,10 @@ gate_soak() {
     #   NEVER extend past it (requirements §4.3 P3).
     local consecutive_hold=0
     local granted=0
+    # ROW 19 (T7f): INCONCLUSIVE-tick counter — the cap-reach discriminator
+    # that separates "we could not tell" (rc 2, transient) from "genuinely
+    # never green" (rc 1, auto-rollback).
+    local __soak_inconclusive=0
     local soak_absolute_bound=$(( soak_start + ADAPTIVE_SOAK_CAP_S + GRACE_EXTENSION_CAP_S_INT ))
     while :; do
         lock_heartbeat
@@ -9546,11 +10254,26 @@ gate_soak() {
         # into an instant soak failure (the C2 violation). A genuine
         # drift still arrives on a 200 tick and fails exactly per the
         # pin.
+        # T7f / note 8 (decisions §9c): the soak tick MUST route through the
+        # gate family — a per-tick FRESH pool (the pool is reset at the top of
+        # each tick's version check), and a transient tick is INCONCLUSIVE
+        # (streak-freeze: it neither increments nor resets consecutive_green).
+        local __soak_tick_rc=0 __soak_version_rc=0
+        local observation_kind="RESET"
         if [ "$livez_rc" = "0" ] && [ "$readyz_rc" = "0" ]; then
-            if ! gate_version "$expected" > /dev/null; then
-                _warn "soak FAILURE: version drifted at ${waited}s (lib.sh:4258 pin)"
-                return 1
-            fi
+            _GATE_ATTR_DEFER_REMAIN="$_GATE_ATTR_DEFER_S"
+            gate_version "$expected" > /dev/null || __soak_version_rc=$?
+            __soak_tick_rc="$__soak_version_rc"
+        fi
+        if [ "$__soak_tick_rc" = "2" ]; then
+            __soak_inconclusive=$(( ${__soak_inconclusive:-0} + 1 ))
+            # INCONCLUSIVE — a third observation kind, distinct from the
+            # probe-transient RESET (which is preserved). The streak FREEZES.
+            _log "soak: version tick INCONCLUSIVE at ${waited}s (attribution deferred — transient; streak frozen, counter neither advanced nor reset)"
+            observation_kind="INCONCLUSIVE"
+        elif [ "$__soak_tick_rc" != "0" ] && [ "$__soak_tick_rc" != "" ]; then
+            _warn "soak FAILURE: version drifted at ${waited}s (lib.sh:4258 pin)"
+            return 1
         fi
         # Advance the consecutive-green counter ONLY on real green
         # results (boot-grace-suppressed and busy-amnesty soft-greens
@@ -9582,7 +10305,8 @@ gate_soak() {
         # breaks and resets) — a stream of holds can never manufacture
         # greens, and a never-green daemon still ends at cap-reach with
         # consecutive_green < 3 => return 1 => auto-rollback.
-        local observation_kind="RESET"
+        # (observation_kind is declared ABOVE, before the tick-rc block, so the
+        # INCONCLUSIVE arm can set it — T7f.)
         # One leak parse per tick — the same unchanged body fed BOTH the
         # HELD classification below and the extension guard (the parsers
         # are pure; re-parsing per site would be wasted work).
@@ -9599,6 +10323,13 @@ gate_soak() {
             observation_kind="HELD"
         fi
         case "$observation_kind" in
+            INCONCLUSIVE)
+                # STREAK-FREEZE (T7f, R2 §2.4): a transient tick neither
+                # advances nor resets the streak — incrementing would
+                # manufacture greens from unattributable observations, and
+                # resetting would let a transient storm reach the cap with
+                # zero greens.
+                ;;
             GREEN)
                 if [ "$consecutive_hold" -gt "$MAX_HOLDS_PER_GREEN" ]; then
                     # The hold budget is SPENT: a green behind more than
@@ -9659,6 +10390,15 @@ gate_soak() {
             if [ "$consecutive_green" -ge "$adaptive_n" ]; then
                 _log "soak SUCCESS at cap (${waited}s) — ${consecutive_green} consecutive greens"
                 return 0
+            fi
+            # ROW 19 (phase1 §5.4b) — cap-reach disposition. A cap reached
+            # with INCONCLUSIVE ticks and no definitive red is NOT a health
+            # verdict: it returns the TRANSIENT rc 2 so the promote consumer
+            # takes the defer arm (never 8b). A genuine never-green
+            # (inconclusive == 0) keeps the C-1 anti-silent-commit rc 1.
+            if [ "${__soak_inconclusive:-0}" -gt 0 ]; then
+                _warn "soak: cap-reach at ${waited}s with consecutive_green=$consecutive_green < $adaptive_n AND ${__soak_inconclusive} inconclusive (unattributable) tick(s) — INCONCLUSIVE, deferring (transient; NOT an auto-rollback verdict)"
+                return 2
             fi
             _warn "soak FAILURE: cap-reach at ${waited}s with consecutive_green=$consecutive_green < $adaptive_n — auto-rollback route (C-1: never-green commit bug under sustained DB churn)"
             return 1
