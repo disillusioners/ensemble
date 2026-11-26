@@ -852,6 +852,19 @@ class _BrokenScrubber:
         raise RuntimeError("store down")
 
 
+class _ToctouScrubber:
+    """Effective at the GAP-2 probe but drops on the real scrub call."""
+
+    def is_effective(self) -> bool:
+        return True
+
+    def _current_rows(self):
+        raise RuntimeError("store dropped mid-scrub")
+
+    def _plaintext_pairs(self, rows):
+        return []
+
+
 class TestIteration2Pins:
     def _register_secret(self, value: str = "STRADDLESECRET123"):
         reset_process_registry()
@@ -865,30 +878,43 @@ class TestIteration2Pins:
         register_secret_service(svc)
         return value
 
-    # T-a
+    # T-a (re-geometried, iteration 3): straddle leg + roomy control leg.
     def test_t_a_description_straddle_no_fragment_survives(self) -> None:
         secret = self._register_secret("STRADDLESECRET123")
+        # Straddle leg: filler 45 + 17-char secret = 62, cap 60. Under the
+        # fix the full secret is scrubbed first, so no 8-gram survives;
+        # under a pre-cut (source[:cap]) a 15-char fragment survives.
         cap = 60
-        content = "x" * (cap - 5) + secret
+        content = "x" * 45 + secret
         out, _ = scrub_text(content, cap, mark_truncated=False)
         for i in range(len(secret) - 7):
             gram = secret[i : i + 8]
             assert gram not in out, f"fragment survived: {gram!r} in {out!r}"
+        # Roomy control leg: cap large enough that the token survives the
+        # cut -> substitution actually fired (discriminating control).
+        out2, _ = scrub_text(content, 200, mark_truncated=False)
+        assert _re.search(r"__ENS_REDACTED__[0-9a-f]{12}__", out2) is not None, out2
         reset_process_registry()
 
-    # T-c (handle + bisected token)
+    # T-c (re-geometried, iteration 3): cut lands INSIDE the token.
     def test_t_c_no_redeemable_handle_or_bisected_token(self) -> None:
         secret = self._register_secret("STRADDLESECRET123")
-        cap = 60
-        content = "x" * (cap - 5) + secret
+        # filler 5 + 17-char secret = 22, cap 30. Post-scrub = 35 > 30
+        # (expansion) -> marker collapses to [TRUNCATED] (11) ->
+        # content_limit 19 lands INSIDE token interval [5,35) ->
+        # token_safe_cut backs up to 5 (no partial token); a blind cut
+        # leaves the partial prefix __ENS_REDACTED.
+        cap = 30
+        content = "x" * 5 + secret
         out, _ = scrub_text(content, cap, mark_truncated=True)
-        assert _re.search(r"__ENS_SECRET__[0-9a-f-]{36}__", out) is None, out
-        for m in _re.finditer(r"__ENS_REDACTED__", out):
-            # every occurrence must be a COMPLETE token
-            tail = out[m.start() :]
+        assert "[TRUNCATED]" in out, out
+        # Every occurrence of the prefix must be a COMPLETE token.
+        for m in _re.finditer(r"__ENS_REDACTED", out):
+            tail = out[m.start():]
             assert _re.match(r"__ENS_REDACTED__[0-9a-f]{12}__", tail), (
                 f"bisected token: {tail[:40]!r}"
             )
+        assert _re.search(r"__ENS_SECRET__[0-9a-f-]{36}__", out) is None, out
         reset_process_registry()
 
     # T-d
@@ -945,7 +971,7 @@ class TestIteration2Pins:
                 self._wedge_capture_repository = None
 
         # build a tool message whose content straddles the 500 boundary
-        msg_content = "x" * (500 - 5) + secret
+        msg_content = "x" * 490 + secret
         from langchain_core.messages import ToolMessage
 
         tm = ToolMessage(content=msg_content, tool_call_id="c1")
@@ -1035,4 +1061,41 @@ class TestIteration2Pins:
         from daemon.services.anomaly_service import SCRUB_UNAVAILABLE_PLACEHOLDER
 
         assert out == SCRUB_UNAVAILABLE_PLACEHOLDER
+        reset_process_registry()
+
+    # INV-2 closure pin: exception path yields placeholder, not plaintext.
+    def test_inv2_scrub_exception_path_withheld(self, monkeypatch) -> None:
+        import daemon.services.secret_persistence_scrub as _sps
+
+        monkeypatch.setattr(
+            _sps, "get_process_scrubber", lambda: _ToctouScrubber(), raising=True
+        )
+        monkeypatch.setattr(
+            anomaly_service, "get_process_scrubber", lambda: _ToctouScrubber(), raising=True
+        )
+        raw = "supersecret-plaintext-payload"
+        out, truncated = scrub_text(raw, 100, mark_truncated=False)
+        from daemon.services.anomaly_service import SCRUB_UNAVAILABLE_PLACEHOLDER
+
+        assert out == SCRUB_UNAVAILABLE_PLACEHOLDER, out
+        assert raw not in out
+        assert truncated is True
+        reset_process_registry()
+
+    # DEFECT-3 pin: withheld case distinguishable from cap cut by stored text.
+    def test_inv4_withheld_distinguishable_from_cap_cut(self, monkeypatch) -> None:
+        import daemon.services.secret_persistence_scrub as _sps
+        from daemon.services.anomaly_service import SCRUB_UNAVAILABLE_PLACEHOLDER
+
+        # cap-cut case (no registered scrubber -> normal path)
+        out_cut, _ = scrub_text("x" * 500, 200, mark_truncated=True)
+        assert "[TRUNCATED" in out_cut
+
+        # withheld case
+        monkeypatch.setattr(_sps, "get_process_scrubber", lambda: _BrokenScrubber(), raising=True)
+        monkeypatch.setattr(anomaly_service, "get_process_scrubber", lambda: _BrokenScrubber(), raising=True)
+        out_withheld, _ = scrub_text("hello world", 100, mark_truncated=True)
+        assert out_withheld == SCRUB_UNAVAILABLE_PLACEHOLDER
+        assert out_withheld != out_cut
+        assert "withheld" in out_withheld or "unavailable" in out_withheld
         reset_process_registry()

@@ -640,6 +640,14 @@ def _token_safe_cut(text: str, limit: int) -> str:
     return text[:p]
 
 
+class _ScrubUnavailableError(RuntimeError):
+    """Private sentinel: ``_anomaly_exact_scrub`` could not guarantee a
+    scrub (store drop / ineffective scrubber / load failure). Carries no
+    data; ``scrub_text`` maps it to the fail-closed placeholder so no
+    exception path can yield plaintext (INV-2 closure).
+    """
+
+
 def _anomaly_exact_scrub(text: str, *, actor: str) -> str:
     """Exact-match substitution of STORED secrets with a NON-resolvable
     redaction token (R1).
@@ -651,9 +659,13 @@ def _anomaly_exact_scrub(text: str, *, actor: str) -> str:
     a secret-USE surface, so it must carry no capability.
 
     Runs on the FULL text (no cap) so a secret straddling a boundary
-    is matched whole (INV-1). Returns the text unchanged on any
-    failure (fail-open for the authored-field path; the excerpt path
-    gates separately on effectiveness).
+    is matched whole (INV-1).
+
+    Fail-closed (INV-2): any failure to load / probe the scrubber (or
+    an ineffective/unloadable store) raises ``_ScrubUnavailableError``
+    instead of returning the text unchanged. The caller (``scrub_text``)
+    maps that sentinel to ``SCRUB_UNAVAILABLE_PLACEHOLDER``. Returning
+    the raw text on a store drop is forbidden - it would leak plaintext.
     """
     # Resolve through the scrubber module so the (possibly
     # monkeypatched) anomaly_service.get_process_scrubber binding does
@@ -664,17 +676,23 @@ def _anomaly_exact_scrub(text: str, *, actor: str) -> str:
 
     scrubber = _sps.get_process_scrubber()
     if scrubber is None:
+        # No registered secrets => nothing to leak; shape redaction
+        # still runs downstream.
         return text
+    # Effectiveness probe (INV-5): presence alone is not enough.
+    if not _scrubber_effective(scrubber):
+        raise _ScrubUnavailableError("scrubber ineffective")
     try:
         rows = scrubber._current_rows()
-    except Exception:  # noqa: BLE001 — never break the scrub
-        return text
+    except Exception:  # noqa: BLE001 — fail closed, never leak
+        raise _ScrubUnavailableError("store dropped on load") from None
     if not rows:
+        # Loaded successfully but no stored secrets => nothing to leak.
         return text
     try:
         pairs = scrubber._plaintext_pairs(rows)
     except Exception:  # noqa: BLE001
-        return text
+        raise _ScrubUnavailableError("pair extraction failed") from None
     if not pairs:
         return text
     result = text
@@ -771,6 +789,15 @@ def scrub_text(
         ``(text, truncated)`` — the scrubbed, capped (and, when
         requested, loudly marked) text plus a boolean that is True iff a
         loud marker was attached (i.e. the text was cut). Never raises.
+
+        Semantics of ``truncated`` (DEFECT-3): the flag means "the
+        stored value is NOT the authored whole" — either a cap cut
+        attached a loud marker, OR the field was WITHHELD (scrubber
+        unavailable) and replaced with ``SCRUB_UNAVAILABLE_PLACEHOLDER``.
+        A withheld field is distinguishable from a cap cut by its stored
+        TEXT (the placeholder names the reason), not by this flag. This
+        keeps the envelope's truncated flag a single "not-the-whole"
+        signal while the reason lives in the stored value.
     """
     # Stringify ONCE, the same way the maskers do, so the measured
     # length can never disagree with the text the masker actually
@@ -792,8 +819,13 @@ def scrub_text(
         _real_scrubber
     ):
         return (SCRUB_UNAVAILABLE_PLACEHOLDER, True)
-    # 1. Exact-match scrub on the FULL text (no cap).
-    exact_scrubbed = _anomaly_exact_scrub(source, actor=actor)
+    # 1. Exact-match scrub on the FULL text (no cap). Fail-closed
+    #    (INV-2): a store drop mid-scrub surfaces as
+    #    _ScrubUnavailableError -> withheld placeholder, never plaintext.
+    try:
+        exact_scrubbed = _anomaly_exact_scrub(source, actor=actor)
+    except Exception:  # noqa: BLE001 — fail closed (INV-2)
+        return (SCRUB_UNAVAILABLE_PLACEHOLDER, True)
     # 2. Shape redaction on the full text (NO cap).
     masked = redact_secret_shapes(exact_scrubbed, limit=10**9)
     shaped = redact_exc_str(masked, limit=10**9)

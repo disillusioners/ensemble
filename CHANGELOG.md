@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The transcript-excerpt path is now fail-closed on scrubber effectiveness (scrubber present AND store reachable AND scrub set loaded), not presence alone; raw tool stdout is withheld when the scrub cannot be trusted.
 - The truncation marker now reports the pre-scrub length; the redaction-expansion case names both the pre-scrub and post-redaction lengths distinctly. A post-scrub length is never labelled "original".
 - The payload cut is token-aware so a redaction token is never bisected.
+- Iteration-3 follow-up: the exact-scrub fail-open window is closed — a store drop between the effectiveness check and the scrub now raises a private sentinel and surfaces as `SCRUB_UNAVAILABLE_PLACEHOLDER` instead of leaking plaintext (INV-2). The `truncated` flag means "stored value is not the authored whole" (cap cut OR withheld); a withheld field is distinguishable from a cap cut by its stored text (the placeholder names the reason).
 
 ## [v0.31.58] — 2026-11-25
 
