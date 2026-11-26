@@ -653,6 +653,54 @@ class TestRollupBodyHasNoNondeterministicSource:
 # ══════════════════════════════════════════════════════════════════════════
 
 
+def test_the_weight_heading_and_disclosure_are_computed_from_the_rollup(
+    tmp_path, monkeypatch
+):
+    """§6.1 (B1) — both verbatim heading variants plus the permanent
+    disclosure blockquote, quoted from a REAL render. The old hard-coded
+    'sorted by schema weight × calls, descending' claim must be gone."""
+    engine = _sqlite_engine(tmp_path, "weight-heading.db")
+    monkeypatch.setattr(tud, "allowlists", lambda: {})
+    _seed(engine, [_row(DAY_D1, PROJECT_MAIN, "w_absent", "a", 3)])
+    fallback_data = tud.rollup(engine, RUN_DATE)
+    fallback_md = tud.render_markdown(fallback_data, "FIXED")
+    fallback_lines = fallback_md.splitlines()
+
+    assert fallback_data["weight_heading"] == tud.FALLBACK_WEIGHT_HEADING
+    assert fallback_data["weight_heading"] == (
+        "### Tools (sorted by calls 7d, descending — no per-tool schema weights are available; "
+        "every tool uses the 230-token average fallback, so the weight does not discriminate)"
+    )
+    idx = fallback_lines.index(tud.FALLBACK_WEIGHT_HEADING)
+    assert fallback_lines[idx + 1:idx + 4] == [
+        "> **Weight disclosure:** the per-tool schema-weight artifact (`tool-weights.json`) is currently empty.",
+        "> All tools in this section use the 230-token average fallback (deterministic; `phase3-plan.md` §3.3).",
+        "> While the fallback is in effect the Weight column is constant (230) and the ranking is frequency-only.",
+    ]
+    assert _table_row(fallback_md, "w_absent")[:5] == [
+        "w_absent", "230", "3", "3", "690"
+    ]
+    assert len(_table_row(fallback_md, "w_absent")) == 6
+
+    # One measured weight flips the heading AND the disclosure's counts;
+    # the table shape and the score basis stay byte-identical.
+    monkeypatch.setattr(tud, "tool_weights", lambda: {"w_heavy": 50})
+    _seed(engine, [_row(DAY_D1, PROJECT_MAIN, "w_heavy", "a", 2)])
+    measured_data = tud.rollup(engine, RUN_DATE)
+    measured_md = tud.render_markdown(measured_data, "FIXED")
+    measured_lines = measured_md.splitlines()
+
+    assert measured_data["weight_heading"] == tud.WEIGHT_HEADING
+    assert measured_data["weight_heading"] == (
+        "### Tools (sorted by schema weight × calls 7d, descending)"
+    )
+    idx = measured_lines.index(tud.WEIGHT_HEADING)
+    assert "measured weights for 1 of 2 rendered rows; 1 rows use the 230-token average fallback" in measured_lines[idx + 1]
+    assert len(_table_row(measured_md, "w_heavy")) == 6
+    assert "sorted by schema weight × calls, descending" not in fallback_md
+    assert "sorted by schema weight × calls, descending" not in measured_md
+
+
 def test_the_digest_never_consumes_the_display_name_category_function():
     """Node 38 (§3.9.2): a SOURCE pin plus a DATA pin.
 

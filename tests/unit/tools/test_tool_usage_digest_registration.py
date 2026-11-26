@@ -45,6 +45,7 @@ from sqlalchemy import create_engine
 from sqlmodel import SQLModel, Session
 
 from daemon.repositories.tool_usage.models import ToolUsageDaily
+from daemon.tools import _tool_registry as registry_mod
 from daemon.tools._tool_registry import (
     CATEGORY_MODULES,
     DYNAMIC_TOOL_NAMES,
@@ -506,3 +507,44 @@ def test_committed_bundle_equals_generator_output(tmp_path):
         f"(rc={drifted.returncode} stdout={drifted.stdout!r} stderr={drifted.stderr!r})"
     )
     assert artifact.read_text(encoding="utf-8") == original
+
+
+def test_an_attribute_called_decorator_ahead_of_a_tool_does_not_abandon_the_module_scan(
+    tmp_path, monkeypatch
+):
+    """W1 — `dec` is an `ast.Call` in the attribute-decorator branch; reading
+    `dec.attr` raises AttributeError, which the file-level `except` swallows,
+    abandoning the WHOLE module's scan. A future attribute-called decorator
+    ahead of a factory-built `@tool` would then silently drop that tool from
+    `categories` and cause FALSE NOs in the digest."""
+    fake = tmp_path / "fake_attr_decorator_module.py"
+    fake.write_text(
+        "from decorators import registry\n"
+        "\n"
+        "@registry.namespaced()\n"
+        "@tool\n"
+        "def early_tool():\n"
+        "    ...\n"
+        "\n"
+        "@tool\n"
+        "def later_tool():\n"
+        "    ...\n",
+        encoding="utf-8",
+    )
+    # The scanner resolves `daemon.tools.<parts[2:]>` under
+    # `Path(_tool_registry.__file__).parent`; point that anchor at tmp_path.
+    monkeypatch.setattr(
+        registry_mod, "__file__", str(tmp_path / "_tool_registry.py")
+    )
+    monkeypatch.setattr(
+        registry_mod,
+        "CATEGORY_MODULES",
+        {"w1-synthetic": "daemon.tools.fake_attr_decorator_module"},
+    )
+
+    result = registry_mod.scan_category_module_sources_by_category()
+
+    assert "early_tool" in result.get("w1-synthetic", {}), (
+        f"the attribute-called decorator must not abandon the module scan: {result!r}"
+    )
+    assert "later_tool" in result.get("w1-synthetic", {})

@@ -771,6 +771,29 @@ def test_the_innate_skill_expansion_is_modelled():
     )
     assert "todo_list_create" in granted[agent_id]
 
+    # W2 — the innate grant carries its ATTRIBUTION through the published
+    # flat map. `AllowSource.grant_reason` alone re-derives from `allow`
+    # only and would return "no reason available" for this third of agents.
+    g, reasons, _cats = tud.effective_agent_tools(_agent_view(src, agent_id), src)
+    assert reasons.get("todo_list_create") == "category:todo"
+    published = tud.allowlists()
+    published_reasons = getattr(published, "reasons", None) or {}
+    assert published_reasons.get(agent_id, {}).get("todo_list_create") == "category:todo"
+    verdict, reason = tud.grant_verdict(
+        "todo_list_create",
+        agent_id,
+        set(published[agent_id]),
+        src,
+        reasons=published_reasons.get(agent_id, {}),
+    )
+    assert verdict == "yes"
+    assert reason == "category:todo"
+    # The reason is DEGRAABLE: a synthetic flat map with no attribution
+    # keeps the SAME verdict and only loses the "category:todo" string.
+    degraded = tud.grant_verdict("todo_list_create", agent_id, set(published[agent_id]), src)
+    assert degraded[0] == verdict
+    assert degraded[1] == "no reason available"
+
     # --- the inherit-all agent ------------------------------------------
     inherit_agent = "watcher"
     assert src.agents[inherit_agent]["allow"] == []
@@ -880,3 +903,133 @@ def test_an_agent_allowing_plane_renders_an_unowned_plane_name_unknown():
     assert verdict == "unknown", f"expected verdict 'unknown', got {verdict!r} (reason {reason!r})"
     assert verdict != "no", "a swept plane_ name must never render a confident 'no'"
     assert "plane_" in reason, f"the reason must name the plane_ sweep; got {reason!r}"
+
+
+# ---------------------------------------------------------------------------
+# R3/V2 — the tester's FULL exact-match model as a third module-level mutant
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def full_exact_match_mutant(monkeypatch: pytest.MonkeyPatch):
+    """The FULL exact-match model: literal-only expansion AND no category
+    grants in the SOURCE (so the ownership guard cannot re-derive a "yes").
+
+    The existing ``exact_match_mutant`` changes only the expansion; the
+    verdict path's owner branch still re-derives grants from
+    ``AllowSource.granted_categories``. This mutant patches BOTH seams at
+    their module-level entry points, which is the model the tester flagged.
+    """
+    monkeypatch.setattr(tud, "effective_agent_tools", _mutant_exact_match)
+    monkeypatch.setattr(
+        tud.AllowSource,
+        "granted_categories",
+        property(lambda self: {str(a): set() for a in (self.agents or {})}),
+    )
+    return _mutant_exact_match
+
+
+def test_the_full_exact_match_mutant_flips_the_rendered_verdicts(
+    full_exact_match_mutant,
+):
+    """R3/V2 — under the full model the RENDERED verdicts flip to "no":
+    explorer×rag_get_graph by the ownership guard, devops×edit_file too."""
+    src = tud.allowlist_source()
+    assert src.state == "ok"
+    assert tud.effective_agent_tools is _mutant_exact_match
+    assert all(not cats for cats in src.granted_categories.values())
+
+    granted = _flat_grant_map(src)
+    assert "rag_get_graph" not in granted["explorer"]
+    assert "edit_file" not in granted["devops"]
+
+    pairs = [("explorer", "rag_get_graph"), ("devops", "edit_file")]
+    agents_out = []
+    for agent_id, tool in pairs:
+        verdict, reason = tud.grant_verdict(tool, agent_id, granted[agent_id], src)
+        assert verdict == "no", f"{agent_id}×{tool} rendered {verdict!r} ({reason!r})"
+        assert "ownership guard" in reason
+        agents_out.append(
+            {
+                "agent_id": agent_id,
+                "calls_24h": 0,
+                "calls_7d": 1,
+                "allow_listed": False,
+                "allow_listed_detail": {"verdict": verdict, "reason": reason},
+            }
+        )
+
+    data = {
+        "run_date": "2026-11-21",
+        "last24_day": "2026-11-20",
+        "week_days": [f"2026-11-{d}" for d in range(14, 21)],
+        "projects": [
+            {
+                "project_id": "p-r3",
+                "tools": [
+                    {
+                        "tool_name": tool,
+                        "weight": 230,
+                        "calls_24h": 0,
+                        "calls_7d": 1,
+                        "score": 230,
+                        "allow_listed_any": False,
+                        "allowed_agents": [],
+                        "agents": [agents_out[i]],
+                        "allow_listed_cell": "no",
+                    }
+                    for i, (_agent, tool) in enumerate(pairs)
+                ],
+            }
+        ],
+        "zero_near_zero": [],
+        "allowlist_state": "ok",
+        "allowlist_schema_version": 2,
+        "unresolved": {"allow": [], "deny": []},
+    }
+    md = tud.render_markdown(data, "FIXED")
+    assert (
+        "- explorer: 24h=0 7d=1 (not allow-listed — owned by category rag - "
+        "not swept into the allowed category (ownership guard))"
+    ) in md
+    assert (
+        "- devops: 24h=0 7d=1 (not allow-listed — owned by category filesystem - "
+        "not swept into the allowed category (ownership guard))"
+    ) in md
+
+
+def test_grant_verdict_yes_is_equivalent_to_membership_in_the_published_map():
+    """R3/V2 — the real-artifact invariant: a "yes" verdict is exactly a
+    name in `allowlists()[agent]` (deny excepted). This converts the
+    map-leg detection into verdict-level discrimination in-tree."""
+    src = tud.allowlist_source()
+    assert src.state == "ok"
+    published = tud.allowlists()
+    reasons = getattr(published, "reasons", None) or {}
+
+    # A bounded but load-bearing sample: every agent with a deny list, the
+    # innate-grant agent, the inherit-all agent, and the first 8 by id.
+    sample = {
+        "ari", "devops", "explorer", "maintenancer", "worker", "watcher",
+        *sorted(published)[:8],
+    }
+    checked = 0
+    for agent_id in sorted(sample & set(published)):
+        tools = published[agent_id]
+        granted = set(tools)
+        for tool in sorted(set(src.known_tool_names) | granted):
+            verdict, _reason = tud.grant_verdict(
+                tool, agent_id, granted, src, reasons=reasons.get(agent_id, {})
+            )
+            checked += 1
+            if verdict == "yes":
+                assert tool in granted, (
+                    f"{agent_id}×{tool}: a 'yes' verdict must be a published grant"
+                )
+            elif tool in granted:
+                # The only legitimate exception is the deny gate (deny wins).
+                assert src.deny_entry_for(agent_id, tool) is not None, (
+                    f"{agent_id}×{tool}: a published grant must render 'yes' "
+                    "unless a deny entry removes it"
+                )
+    assert checked > 1000, f"vacuity guard: only {checked} pairs checked"

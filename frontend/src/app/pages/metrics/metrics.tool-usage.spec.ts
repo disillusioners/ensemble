@@ -474,8 +474,10 @@ describe('ToolUsageTabComponent — the summary source', () => {
   // schema weights published today (every tool carries the 230-token
   // average fallback, so the Weight column is constant and the ranking
   // is frequency-only) and the allow-list intersection the copy names is
-  // currently computed by exact string match against raw allow entries
-  // (wrong for categorized tools). The corrected copy says "is the
+  // now computed from EFFECTIVE grants (categories expanded, deny wins,
+  // MCP names render unknown) — not by exact match against raw entries.
+  // The FE's own `calls_7d` sort is still a frequency-only proxy, never an
+  // authoritative WEIGHT ranking. The corrected copy says "is the
   // authoritative day-figure and allow-list surface" instead. Normalised
   // for the same re-wrap reason as the positive pin above.
   it('the ranking caveat does NOT carry the withdrawn "authoritative ranking surface" claim', () => {

@@ -33,6 +33,14 @@ logger = logging.getLogger(__name__)
 #: Weight fallback for tools absent from the committed weight artifact.
 FALLBACK_WEIGHT = 230
 
+#: §6.1 — the two verbatim heading variants.  The renderer NEVER hard-codes
+#: the choice: `rollup()` computes it from the rendered rows' weights.
+WEIGHT_HEADING = "### Tools (sorted by schema weight × calls 7d, descending)"
+FALLBACK_WEIGHT_HEADING = (
+    "### Tools (sorted by calls 7d, descending — no per-tool schema weights are available; "
+    "every tool uses the 230-token average fallback, so the weight does not discriminate)"
+)
+
 #: Near-zero threshold (calls in the 7d window) — mirrors the FE's
 #: ``NEAR_ZERO_CALLS_7D``.
 NEAR_ZERO_CALLS_7D = 3
@@ -129,6 +137,9 @@ class AllowSource:
     known_tool_names: set = field(default_factory=set)
     unresolved: dict = field(default_factory=lambda: {"allow": [], "deny": []})
     provenance: dict = field(default_factory=dict)
+    #: The human-readable cause of a `state="rejected"` verdict.  The logger
+    #: alone is not enough — the markdown banner must name the real cause.
+    rejection_reason: str = ""
 
     @property
     def category_keys(self) -> set:
@@ -317,6 +328,7 @@ def allowlist_source() -> AllowSource:
             known_tool_names=set(known) if isinstance(known, list) else set(),
             unresolved=unresolved if isinstance(unresolved, dict) else {"allow": [], "deny": []},
             provenance=provenance if isinstance(provenance, dict) else {},
+            rejection_reason="the artifact's schema_version is not 2 (schema-1 payloads are not read)",
         )
 
     if not isinstance(agents_raw, dict):
@@ -342,6 +354,7 @@ def allowlist_source() -> AllowSource:
                 known_tool_names=set(known) if isinstance(known, list) else set(),
                 unresolved=unresolved if isinstance(unresolved, dict) else {"allow": [], "deny": []},
                 provenance=provenance if isinstance(provenance, dict) else {},
+                rejection_reason="a per-agent object lacks the mandatory 'deny' key",
             )
 
     return AllowSource(
@@ -370,22 +383,42 @@ def tool_weights() -> dict[str, int]:
     return out
 
 
+class _GrantMap(dict):
+    """``allowlists()``'s flat grant map plus DEGRADABLE attribution.
+
+    The dict is the verdict authority (§3.6.3 step 1); ``reasons`` is a
+    separate, optional input.  A monkeypatched ``allowlists`` returning a
+    plain dict simply has no attribution — the verdict must not change.
+    """
+
+    def __init__(self, *args: Any, reasons: dict[str, dict[str, str]] | None = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.reasons: dict[str, dict[str, str]] = reasons or {}
+
+
 def allowlists() -> dict[str, list[str]]:
     src = allowlist_source()
     if src.state != "ok":
-        return {}
-    out: dict[str, list[str]] = {}
+        return _GrantMap()
+    out = _GrantMap()
+    reasons_out: dict[str, dict[str, str]] = {}
     for agent_id, info in (src.agents or {}).items():
         if not isinstance(info, dict):
             out[str(agent_id)] = []
+            reasons_out[str(agent_id)] = {}
             continue
         agent = {
             "allow": info.get("allow", []),
             "deny": info.get("deny", []),
             "innate": info.get("innate", []),
         }
-        g, _r, _c = effective_agent_tools(agent, src)
+        g, r, _c = effective_agent_tools(agent, src)
         out[str(agent_id)] = sorted(g)
+        # W2: the reasons computed WITH innate expansion are the attribution
+        # source; `AllowSource.grant_reason` alone re-derives from `allow`
+        # only and loses the `category:todo` grants of innate skills.
+        reasons_out[str(agent_id)] = r
+    out.reasons = reasons_out
     return out
 
 
@@ -443,7 +476,7 @@ def effective_agent_tools(agent: Any, src: AllowSource) -> tuple[set[str], dict[
         granted = {t for cat, tools in (src.categories or {}).items()
                    if cat not in (src.privileged_categories or [])
                    for t in (tools or [])}
-        reasons = {t: "inherit-all (empty allow; non-privileged only)" for t in granted}
+        reasons = {t: "inherit-all (empty allow; non-privileged default universe)" for t in granted}
         granted_categories = {cat for cat in src.category_keys
                              if cat not in (src.privileged_categories or [])}
     else:
@@ -470,7 +503,13 @@ def effective_agent_tools(agent: Any, src: AllowSource) -> tuple[set[str], dict[
     return granted, reasons, granted_categories
 
 
-def grant_verdict(tool: str, agent_id: str, granted: set[str], src: AllowSource) -> tuple[str, str]:
+def grant_verdict(
+    tool: str,
+    agent_id: str,
+    granted: set[str],
+    src: AllowSource,
+    reasons: dict[str, str] | None = None,
+) -> tuple[str, str]:
     # 0. deny gate precedes every grant branch
     hit = src.deny_entry_for(agent_id, tool)
     if hit is not None and tool not in granted:
@@ -485,7 +524,12 @@ def grant_verdict(tool: str, agent_id: str, granted: set[str], src: AllowSource)
     # legs into "unknown" and REDS two assertions that must keep passing
     # unchanged (tests/unit/services/test_tool_usage_digest_determinism.py:541, :544).
     if tool in granted:
-        return "yes", src.grant_reason(agent_id, tool)
+        # The reason is SEPARATE and DEGRAABLE: the effective-grant map's own
+        # attribution (which includes innate-skill categories) wins when it
+        # is available; the artifact-derived fallback covers monkeypatched
+        # flat maps that carry no attribution.  Neither path changes verdict.
+        attribution = (reasons or {}).get(tool)
+        return "yes", attribution if attribution else src.grant_reason(agent_id, tool)
     # 2. degraded artifact
     if src.state != "ok":
         return "unknown", f"artifact {src.state} (allow-list dimension disabled)"
@@ -556,6 +600,9 @@ def rollup(engine: Engine, run_date: str | None = None) -> dict[str, Any]:
 
     wl: dict[str, int] = tool_weights()
     al: dict[str, list[str]] = allowlists()
+    # W2: the flat map carries its attribution alongside it. A plain-dict
+    # monkeypatch has none — the reason degrades, the verdict does not.
+    grant_reasons: dict[str, dict[str, str]] = getattr(al, "reasons", None) or {}
     src = allowlist_source()
 
     tool_allowed_agents: dict[str, set[str]] = {}
@@ -575,7 +622,9 @@ def rollup(engine: Engine, run_date: str | None = None) -> dict[str, Any]:
             for agent in sorted(t["agents"].keys()):
                 a = t["agents"][agent]
                 granted_set = set(al.get(agent, []))
-                verdict, reason = grant_verdict(tool, agent, granted_set, src)
+                verdict, reason = grant_verdict(
+                    tool, agent, granted_set, src, reasons=grant_reasons.get(agent, {})
+                )
                 agents_out.append({
                     "agent_id": agent,
                     "calls_24h": a["calls_24h"],
@@ -608,6 +657,28 @@ def rollup(engine: Engine, run_date: str | None = None) -> dict[str, Any]:
         tool_list.sort(key=lambda x: (-x["score"], x["tool_name"]))
         project_list.append({"project_id": proj, "tools": tool_list})
 
+    # §6.1 — the heading and its permanent disclosure are COMPUTED from the
+    # rendered rows, never hard-coded in the renderer. Score stays
+    # `weight × calls_7d` and the six-column table is unchanged.
+    rendered_weights = [t["weight"] for p in project_list for t in p["tools"]]
+    measured = sum(1 for w in rendered_weights if w != FALLBACK_WEIGHT)
+    fallback_rows = len(rendered_weights) - measured
+    if measured == 0:
+        weight_heading = FALLBACK_WEIGHT_HEADING
+        weight_disclosure = [
+            "> **Weight disclosure:** the per-tool schema-weight artifact (`tool-weights.json`) is currently empty.",
+            "> All tools in this section use the 230-token average fallback (deterministic; `phase3-plan.md` §3.3).",
+            "> While the fallback is in effect the Weight column is constant (230) and the ranking is frequency-only.",
+        ]
+    else:
+        weight_heading = WEIGHT_HEADING
+        weight_disclosure = [
+            "> **Weight disclosure:** the per-tool schema-weight artifact (`tool-weights.json`) carries measured "
+            f"weights for {measured} of {len(rendered_weights)} rendered rows; {fallback_rows} rows use the "
+            "230-token average fallback (deterministic; `phase3-plan.md` §3.3).",
+            "> Rows on the fallback carry a constant Weight (230); their ranking contribution is frequency-only.",
+        ]
+
     all_allowed_tools: set[str] = set()
     for agent, tools in al.items():
         for t in tools:
@@ -634,6 +705,9 @@ def rollup(engine: Engine, run_date: str | None = None) -> dict[str, Any]:
         "tool_allowed_agents": {k: sorted(v) for k, v in tool_allowed_agents.items()},
         "allowlist_state": src.state,
         "allowlist_schema_version": src.schema_version,
+        "allowlist_rejection_reason": src.rejection_reason,
+        "weight_heading": weight_heading,
+        "weight_disclosure": weight_disclosure,
         "unresolved": src.unresolved,
     }
 
@@ -657,12 +731,23 @@ def render_markdown(rollup_data: dict[str, Any], generated_at: str | None = None
             found = rollup_data.get("allowlist_schema_version")
             found_str = str(found) if found else "none"
             lines.append(f"> ⚠️ ARTIFACT SCHEMA REJECTED (found: {found_str}, required: 2)")
+            rejection_reason = rollup_data.get("allowlist_rejection_reason")
+            if rejection_reason:
+                lines.append(f"> rejection reason: {rejection_reason}")
         lines.append("")
 
     for p in rollup_data["projects"]:
         lines.append(f"## Project: {p['project_id']}")
         lines.append("")
-        lines.append("### Tools (sorted by schema weight × calls, descending)")
+        # §6.1: the heading is data, not a literal in the renderer. Hand-built
+        # rollups (tests) without the new fields degrade to the honest fallback.
+        heading = rollup_data.get("weight_heading")
+        if not heading:
+            weights = [t["weight"] for t in p["tools"]]
+            heading = WEIGHT_HEADING if any(w != FALLBACK_WEIGHT for w in weights) else FALLBACK_WEIGHT_HEADING
+        lines.append(heading)
+        for disclosure_line in rollup_data.get("weight_disclosure") or []:
+            lines.append(disclosure_line)
         lines.append("")
         lines.append("| Tool | Weight | Calls 24h | Calls 7d | Score | Allow-listed |")
         lines.append("|---|---:|---:|---:|---:|---|")
@@ -751,6 +836,8 @@ def write_digest(engine: Engine, run_date: str | None = None) -> tuple[str, Path
 
 __all__ = [
     "FALLBACK_WEIGHT",
+    "WEIGHT_HEADING",
+    "FALLBACK_WEIGHT_HEADING",
     "NEAR_ZERO_CALLS_7D",
     "DIGEST_ROOT_ENV",
     "ARTIFACT_DIR_ENV",

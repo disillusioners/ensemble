@@ -342,6 +342,15 @@ def test_a_missing_deny_list_is_not_read_as_an_empty_deny_list(monkeypatch, tmp_
                 assert a["allow_listed_detail"]["verdict"] == "unknown"
                 assert a["allow_listed"] is False
 
+    # W3: the REASON must reach the human-facing banner, not just the log.
+    assert data["allowlist_rejection_reason"] == (
+        "a per-agent object lacks the mandatory 'deny' key"
+    )
+    md = tud.render_markdown(data, "FIXED")
+    banner = " ".join(_banner_lines(md))
+    assert "ARTIFACT SCHEMA REJECTED" in banner
+    assert "a per-agent object lacks the mandatory 'deny' key" in banner
+
 
 # ── 51. MCP rows render unknown — never yes, never no ─────────────────────
 
@@ -653,3 +662,63 @@ def test_a_missing_artifact_degrades_to_unknown_not_no(monkeypatch, tmp_path):
     banners = _banner_lines(md)
     assert banners, "no degradation banner was rendered"
     assert "allow-list" in " ".join(banners).lower()
+
+
+# ── R3/V2 cross-surface: per-agent lines ⇄ zero/near-zero allowed_agents ──
+
+
+def test_allow_listed_per_agent_lines_match_the_zero_near_zero_allowed_agents(
+    monkeypatch, tmp_path
+):
+    """Every tool/agent pair rendered `(allow-listed)` in the per-agent
+    breakdown must appear in the zero/near-zero section's `allowed_agents`
+    set, and vice versa. The two surfaces are driven by ONE grant map."""
+    artifact_dir = tmp_path / "artifacts-cross"
+    _write_artifact(
+        artifact_dir,
+        {
+            "schema_version": 2,
+            "agents": {
+                "ari": {"allow": ["filesystem"], "deny": [], "innate": []},
+                "worker": {"allow": ["todo"], "deny": [], "innate": []},
+            },
+            "categories": {
+                "filesystem": ["read_file"],
+                "todo": ["todo_clear"],
+            },
+            "runtime_only_categories": [],
+            "privileged_categories": [],
+            "dynamic_prefixes": [],
+            "innate_skill_categories": {},
+            "known_tool_names": ["read_file", "todo_clear"],
+            "unresolved": {"allow": [], "deny": []},
+            "provenance": {},
+        },
+    )
+    _point_reader_at(monkeypatch, artifact_dir)
+
+    engine = _sqlite_engine(tmp_path, "cross-surface.db")
+    _seed(
+        engine,
+        [
+            _row(DAY_D1, PROJECT, "read_file", "ari", 1),
+            _row(DAY_D1, PROJECT, "todo_clear", "worker", 2),
+        ],
+    )
+    data = tud.rollup(engine, RUN_DATE)
+    md = tud.render_markdown(data, "FIXED")
+
+    from_lines: set[tuple[str, str]] = set()
+    for tool in ("read_file", "todo_clear"):
+        for line in _agent_lines(md, tool):
+            agent = line.split(":", 1)[0].removeprefix("- ").strip()
+            if "(allow-listed)" in line:
+                from_lines.add((tool, agent))
+
+    from_zero: set[tuple[str, str]] = set()
+    for entry in data["zero_near_zero"]:
+        for agent in entry["allowed_agents"]:
+            from_zero.add((entry["tool_name"], agent))
+
+    assert from_lines == {("read_file", "ari"), ("todo_clear", "worker")}
+    assert from_zero == from_lines

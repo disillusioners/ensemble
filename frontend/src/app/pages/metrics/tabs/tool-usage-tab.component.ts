@@ -73,10 +73,12 @@ import { chartSeriesColor } from '../../../components/charts/chart-theme';
  * The table carries that caveat verbatim. Note: there are NO per-tool
  * schema weights published today (every tool carries the 230-token
  * average fallback, so the Weight column is constant and the ranking is
- * frequency-only), and the allow-list intersection the copy names is
- * currently computed by exact string match against raw allow entries
- * (wrong for categorized tools) — hence the withdrawn phrasing "is the
- * authoritative ranking surface" must not reappear.
+ * frequency-only), and the allow-list intersection the copy names is now
+ * computed from EFFECTIVE grants: registry categories are expanded, deny
+ * wins, and runtime-swept names (MCP / `plane_`) render `unknown` rather
+ * than a false yes/no — hence the withdrawn phrasing "is the authoritative
+ * ranking surface" must not reappear. The FE's own `calls_7d` sort remains
+ * a frequency-only proxy, not an authoritative WEIGHT ranking.
  *
  * ── THE D-7 DISCLOSURE ─────────────────────────────────────────────────
  *

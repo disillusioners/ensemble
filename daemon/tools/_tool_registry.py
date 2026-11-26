@@ -1128,7 +1128,7 @@ def scan_category_module_sources_by_category() -> "dict[str, dict[str, str | Non
                             if isinstance(dec.func, ast.Name):
                                 dec_name = dec.func.id
                             elif isinstance(dec.func, ast.Attribute):
-                                dec_name = dec.attr
+                                dec_name = dec.func.attr
                             # extract arg for register_tool_category
                             if dec_name == "register_tool_category":
                                 if dec.args:
