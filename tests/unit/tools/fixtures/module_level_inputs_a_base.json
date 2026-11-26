@@ -7,7 +7,33 @@
     "pydantic": "2.12.5",
     "langchain_core": "1.2.16",
     "base_commit": "3506a326d",
-    "entry_shape": "[tool_name, convert_to_openai_tool(tool)]"
+    "entry_shape": "[tool_name, convert_to_openai_tool(tool)]",
+    "rebaseline": {
+      "timestamp_utc": "2026-11-26T04:28:20.130003+00:00",
+      "reason": "deliberate re-baseline: commit f3ffcf6bb changed the agent-visible task_schedule_cancel.label description (live-preference resolution wording - a label resolves to the LIVE row that owns it); the five other factories are byte-identical to the base",
+      "factory": "create_scheduling_tools",
+      "changed_tools": [
+        "task_schedule_cancel"
+      ],
+      "changed_leaves": [
+        "factories.create_scheduling_tools[2].function.parameters.properties.label.description"
+      ],
+      "unchanged_factories": [
+        "create_board_link_tools",
+        "create_board_tools",
+        "create_job_tools",
+        "create_mission_watch_tools",
+        "create_view_write_tools"
+      ],
+      "branch_context": "feature/schedule-listing-truth-phase1 @ 7933bda88382afad9ab4adf22ed1e3030239919f (the parent of this change)",
+      "gate_ref": "house gate sched-p1 merge 46f62eac6 — NOT READY, 1 branch-attributable red",
+      "scope_note": "f3ffcf6bb ALSO rewrote the _full_doc_ extended tool_help documentation of task_schedule / task_schedule_list / task_schedule_update (the window / project_id / armed / enabled / last_execution_status / live-preference wording). _full_doc_ is a SEPARATE registry channel (_full_docs in daemon/tools/_tool_registry.py, consumed by tool_help) and is NOT part of the OpenAI tool payload, so those three payloads are byte-identical to the base and are NOT re-baselined here. The ONLY agent-visible movement is the one parameter description named in changed_leaves.",
+      "regenerated_under": {
+        "python": "3.14.7",
+        "pydantic": "2.12.5",
+        "langchain_core": "1.2.16"
+      }
+    }
   },
   "factories": {
     "create_job_tools": [
@@ -1333,7 +1359,7 @@
                     }
                   ],
                   "default": null,
-                  "description": "Schedule label — alternative to source_id (exact match; first match wins on collision)"
+                  "description": "Schedule label — alternative to source_id (exact match; resolves to the LIVE row that owns it)"
                 }
               },
               "type": "object"

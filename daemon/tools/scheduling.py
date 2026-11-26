@@ -114,7 +114,7 @@ class TaskScheduleCancelInput(BaseModel):
     """Input schema for task_schedule_cancel."""
 
     source_id: Annotated[str | None, Field(default=None, description="Schedule ID (from task_schedule / task_schedule_list)")]
-    label: Annotated[str | None, Field(default=None, description="Schedule label — alternative to source_id (exact match; first match wins on collision)")]
+    label: Annotated[str | None, Field(default=None, description="Schedule label — alternative to source_id (exact match; resolves to the LIVE row that owns it)")]
 
 
 class TaskScheduleUpdateInput(BaseModel):
@@ -231,7 +231,7 @@ def create_scheduling_tools(
     @tool(args_schema=TaskScheduleCancelInput)
     async def task_schedule_cancel(
         source_id: Annotated[str | None, Field(default=None, description="Schedule ID")] = None,
-        label: Annotated[str | None, Field(default=None, description="Schedule label — alternative to source_id (exact match; first match wins on collision)")] = None,
+        label: Annotated[str | None, Field(default=None, description="Schedule label — alternative to source_id (exact match; resolves to the LIVE row that owns it)")] = None,
     ) -> dict:
         """Cancel a scheduled task (TERMINAL — history is preserved). Use tool_help("task_schedule_cancel") for details."""
         try:
@@ -252,8 +252,17 @@ def create_scheduling_tools(
                 # ``to_thread`` discipline in ``daemon/tools/blueprint.py``
                 # and elsewhere; this is the only sync call in the
                 # async cancel tool, hence the targeted scope.
+                #
+                # The resolution PREFERS THE LIVE row that owns the label
+                # and refuses an ambiguity between two live rows (dead
+                # labels are reusable, so a plain first-match lookup can
+                # hand back a CANCELLED row while a live schedule owns
+                # the same label).  See
+                # ``daemon.services.scheduling_service.resolve_label_row``.
+                from daemon.services.scheduling_service import resolve_label_row
+
                 row = await asyncio.to_thread(
-                    source_repo.get_source_config_by_name, label
+                    resolve_label_row, source_repo, label
                 )
                 if row is None:
                     return _error(f"No schedule found with label {label!r}")
@@ -303,8 +312,10 @@ with a loud warning). The warning is never suppressed — read
 `tz_warning` in the response.
 
 Args:
-    label: Unique human-readable name (1-128 chars). Duplicate labels are
-        rejected.
+    label: Unique human-readable name (1-128 chars). A label already
+        owned by a LIVE schedule is rejected; a CANCELLED schedule keeps
+        its name for history but no longer owns it, so the label may be
+        reused.
     message: The message sent to the agent when the schedule fires.
     when: User-stated local time. ISO 8601 (naive or tz-aware) for
         recurrence="once"; "HH:MM" for daily/weekly. Ignored for cron.
@@ -355,8 +366,12 @@ Args:
 Returns:
     dict {"schedules": [...], "count": N}; each schedule carries
     source_id, label, status, recurrence, local_time, timezone,
-    next_run_at_local, next_run_at_utc, agent, project_id, last_run_at.
-    Large lists are truncated with a _pagination hint.
+    next_run_at_local, next_run_at_utc, agent, project_id, last_run_at,
+    last_execution_status and window. The recurrence is the EFFECTIVE
+    one (a windowed recurring schedule renders as "weekly (windowed)",
+    never as "once"), and `window` carries the start/end/weekday/
+    timezone when the schedule has one. Large lists are truncated with a
+    _pagination hint.
 
 Examples:
     task_schedule_list()
@@ -375,9 +390,11 @@ resumable.
 Args:
     source_id: The schedule ID (from task_schedule / task_schedule_list).
     label: The schedule's human-readable name — alternative to source_id.
-        Exact match; if two schedules share a label the first match wins
-        (prefer source_id when labels may collide). Provide exactly one
-        of source_id / label.
+        Exact match; the label resolves to the LIVE schedule that owns
+        it (a cancelled schedule keeps its name for history but no
+        longer owns it). If TWO LIVE schedules share the label the call
+        is REFUSED (use source_id). Provide exactly one of source_id /
+        label.
 
 Returns:
     dict with source_id, status ("cancelled"), cancelled_at, and
