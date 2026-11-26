@@ -5,7 +5,7 @@ import json
 import logging
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from daemon.services.timestamps import now_utc, now_utc_naive
@@ -18,6 +18,10 @@ from sqlmodel import select as sqlmodel_select
 from ..graph import ThinkingChatOpenAI, clean_llm_config
 from ..persistence import get_instance_messages
 from .event_registry import record as _event_registry_record
+# Component C (revive-wedge): the completion guard's recency bound is the
+# REPO'S OWN constant (imported, never re-declared) so the two backstops
+# cannot drift. See the ``P_C_RECENCY_BOUND_SECONDS`` block below.
+from .eligible_pending_sweep import DEFAULT_MIN_PENDING_AGE_SECONDS
 from ..repositories.instance.models import Instance, InstanceStatus
 from ..repositories.message_queue.models import MessageQueue, MessageStatus, MessageType
 from ..repositories.report_injection.repository import (
@@ -286,6 +290,93 @@ def _emit_retrying_obligation_info(
             "%s... (non-fatal, mint proceeds): %r",
             instance_id[:8], probe_exc,
         )
+
+
+# ── Revive-wedge terminalization — Component C: the parent-completion seam ──
+# Lane ``fix/revive-wedge-terminalization`` (2026-11-26). Plan of record:
+# ``.agents/shared/planning/revive-wedge-terminalization/`` (plan.md §15,
+# plan.md §7 ``### Component C`` table, decisions.md §9 D20-D28,
+# gate-matrix.md §11). BODY WINS ON CONFLICT.
+#
+# THE SEAM (D20): the completion guard's PENDING-TASK COUNT —
+# ``_count_actionable_pending_tasks`` — reached from the ROOT guard and the
+# NON-ROOT guard (ONE definition, TWO call sites). A parent must complete
+# AT THE MOMENT its last child finishes; today the count refuses that
+# completion when the parent's own queue holds
+#
+#   (i)  the WaitingChildren watchdog's OWN wake notice — a notice that
+#        exists ONLY to tell the parent to complete. Counting it defers
+#        the very completion it asks for (the self-defeating wedge: the
+#        guard's deferral line has NO re-arm, so the parent strands), and
+#   (ii) a PENDING task that is already DEAD by the repo's own recency
+#        rule (``is_deferred = false AND created_at < now() - 60s``) —
+#        a dead task cannot defer a completion for hours.
+#
+#   pending_work = COUNT(PENDING tasks for the instance)
+#                  − (P-C-NOTICES-EXCLUDED)
+#                  − (P-C-RECENCY)
+#                  − (the pre-existing INJECTED-report exclusion — UNCHANGED)
+#
+# P-C-NOTICES-EXCLUDED — the TWO-LAYER watchdog discriminator, mirroring
+# the HOUSE PRECEDENT (``daemon/services/waiting_children_watchdog.py`` —
+# the watchdog excludes its OWN notices from the queued-completion-report
+# scan by BOTH the metadata keys AND the source pair):
+#   source IN ('system:watchdog', 'system:watchdog:wedge')
+#       (the watchdog's ``WATCHDOG_SOURCE`` / ``WEDGE_SOURCE``)
+#   OR message_metadata carries one of
+#       ('watchdog_notice', 'watchdog_escalation', 'watchdog_release',
+#        'wedge_notice')
+# It is NOT a blanket ``system:`` exclusion — ``system:resume_wake`` /
+# ``system:wedge-resolve`` / ``system:memoir-proposal`` /
+# ``system:injection_drain`` STILL count (invariant I-C5).
+#
+# P-C-RECENCY — DEAD iff ``is_deferred = false AND created_at < now() - 60s``
+# — the MIRROR of the repo's own orphan conjunct
+# (``daemon/services/job_feedback_observer.py``) and of the drift detector
+# (``daemon/repositories/task/repository.py``).
+#
+# P-C-RECENCY-BOUND — the bound is the repo's OWN constant
+# (``DEFAULT_MIN_PENDING_AGE_SECONDS``), IMPORTED (never re-declared) so
+# the two backstops cannot drift.
+#
+# PORTABILITY: the plan's canonical string uses the PostgreSQL jsonb ``?``
+# key-existence operator, which does not exist on SQLite (the repo is
+# PG-primary with SQLite compatibility, and the unit pins run on SQLite).
+# The metadata layer is therefore expressed with the SQLAlchemy JSON
+# indexed access, which compiles to a DIALECT-PORTABLE key lookup:
+# ``json_extract(metadata, '$."<key>"') IS NOT NULL`` on SQLite and
+# ``metadata ->> '<key>' IS NOT NULL`` on PostgreSQL (both backends agree:
+# a key whose value is JSON ``null`` reads as ABSENT on both).
+#
+# FENCE (D27): no wake-creation change, no config, no env knob, no
+# migration, no index, no lifecycle action — ONE helper predicate plus
+# its pins. The pre-existing INJECTED-report exclusion and the guard's
+# deferral log line are UNCHANGED.
+
+#: P-C-WATCHDOG-SOURCES — the WC-watchdog's own provenance markers, as
+#: stamped onto ``message_queue.source``.
+WATCHDOG_NOTICE_SOURCES: tuple[str, ...] = (
+    "system:watchdog",        # waiting_children_watchdog.WATCHDOG_SOURCE
+    "system:watchdog:wedge",  # waiting_children_watchdog.WEDGE_SOURCE
+)
+
+#: P-C-WATCHDOG-METADATA-KEYS — the markers the WC watchdog stamps into
+#: ``message_queue.metadata`` (``watchdog_notice`` = hang,
+#: ``watchdog_escalation`` / ``watchdog_release`` = the escalate/release
+#: notices, ``wedge_notice`` = the wedge notice).
+WATCHDOG_NOTICE_METADATA_KEYS: tuple[str, ...] = (
+    "watchdog_notice",
+    "watchdog_escalation",
+    "watchdog_release",
+    "wedge_notice",
+)
+
+#: P-C-RECENCY-BOUND — the recency bound of the completion guard's
+#: pending-task count. BOUND TO THE REPO'S OWN CONSTANT (imported above,
+#: never re-declared): ``DEFAULT_MIN_PENDING_AGE_SECONDS`` is the same age
+#: boundary the eligible-PENDING sweep uses to re-notify the worker pool
+#: and the same one the job-finalization gate's orphan rule uses.
+P_C_RECENCY_BOUND_SECONDS: int = DEFAULT_MIN_PENDING_AGE_SECONDS
 
 
 # ── Terminal-row strand (9f0ed4f5 family, 2026-10-31) ──────────────
@@ -3835,6 +3926,23 @@ Provide a concise summary:"""
         (``process_message``) there is no matching ``report_injections``
         row, so the EXISTS is false and the task is counted.
 
+        COMPONENT C (revive-wedge, 2026-11-26) — TWO conjuncts on top of
+        the predicate above. The pre-existing INJECTED-report exclusion is
+        UNCHANGED (invariant I-C1); the two new conjuncts are FILTERS on
+        the SAME single COUNT query (no new I/O, no new index):
+
+        (i)  ``P-C-NOTICES-EXCLUDED`` — a PENDING task whose message is a
+             WaitingChildren-watchdog notice is NOT pending work. The
+             notice exists ONLY to tell the parent to complete; counting
+             it defers the very completion it asks for (the self-
+             defeating wedge). TWO layers, mirroring the house precedent
+             in ``daemon/services/waiting_children_watchdog.py``: the
+             watchdog source pair AND the watchdog metadata keys.
+        (ii) ``P-C-RECENCY`` — a PENDING task that is already DEAD by the
+             repo's own orphan rule (``is_deferred = false AND created_at
+             < now() - P_C_RECENCY_BOUND_SECONDS``) is NOT pending work.
+             A dead task cannot defer a completion for hours.
+
         Args:
             session: An open (WriteGuard)Session.
             instance_id: The instance whose pending tasks to count.
@@ -3848,12 +3956,48 @@ Provide a concise summary:"""
             .where(ReportInjection.state == ReportInjectionState.INJECTED.value)
             .exists()
         )
+        # P-C-NOTICES-EXCLUDED — the watchdog's OWN notice. The correlated
+        # EXISTS joins ``task.message_id`` → ``message_queue.message_id``
+        # (the watchdog's enqueue path writes BOTH rows with the SAME
+        # message id). The metadata layer uses the SQLAlchemy JSON
+        # indexed access so it compiles to a portable key lookup on BOTH
+        # backends (SQLite ``json_extract`` / PostgreSQL ``->>``) — the
+        # PostgreSQL-only jsonb ``?`` operator of the plan's canonical
+        # string does not exist on SQLite.
+        watchdog_notice_exists = (
+            select(MessageQueue.message_id)
+            .where(MessageQueue.message_id == Task.message_id)
+            .where(
+                or_(
+                    MessageQueue.source.in_(WATCHDOG_NOTICE_SOURCES),
+                    *(
+                        MessageQueue.message_metadata[key]
+                        .as_string()
+                        .isnot(None)
+                        for key in WATCHDOG_NOTICE_METADATA_KEYS
+                    ),
+                )
+            )
+            .exists()
+        )
+        # P-C-RECENCY — the DEAD-by-age conjunct, mirroring the repo's own
+        # orphan rule. The cutoff is computed in the COLUMN's frame
+        # (naive UTC — ``Task.created_at`` stores naive-UTC digits; an
+        # aware threshold makes PostgreSQL cast the column through the
+        # session TimeZone, the frame bug the drift detector documents).
+        dead_by_recency = and_(
+            Task.is_deferred.is_(False),
+            Task.created_at
+            < (now_utc_naive() - timedelta(seconds=P_C_RECENCY_BOUND_SECONDS)),
+        )
         return session.exec(
             select(func.count())
             .select_from(Task)
             .where(Task.instance_id == instance_id)
             .where(Task.status == TaskStatus.PENDING.value)
             .where(~injected_report_exists)
+            .where(~watchdog_notice_exists)
+            .where(~dead_by_recency)
         ).scalar_one()
 
     def _process_child_completion_db_sync(
