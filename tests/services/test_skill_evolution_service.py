@@ -4885,6 +4885,181 @@ class TestF3GuardBypass:
         # The corrective path ran (skipped False on success).
         assert result["skipped"] is False
 
+    @pytest.mark.asyncio
+    async def test_ab_testing_skill_corrective_default_false_is_refused_by_f3(
+        self, evolution_service, skill_repo, project_id, tmp_path
+    ):
+        """F3 (2026-11-27): the ``corrective`` half of the F3 predicate is
+        LOAD-BEARING — this test is its pin.
+
+        A source skill that is ``is_active=False`` + ``status='ab_testing'``
+        is NOT servable. With ``corrective=False`` (the DECLARED DEFAULT of
+        :meth:`SkillEvolutionService.evolve_skill`) the F3 guard MUST fire
+        the typed refusal ``non_servable_target`` — it must NOT silently
+        re-route to the ``ab_guard`` refusal that sits further down the
+        same method.
+
+        Mutation A — dropping the ``corrective and`` conjunct at BOTH
+        predicate sites (``skill_evolution_service.py:983`` and ``:1011``)
+        — makes the shape SILENTLY RE-ROUTE to ``ab_guard``: the returned
+        envelope carries NO ``refusal_reason`` key and the observability
+        token becomes ``ab_guard``. The pre-existing pins
+        (``test_deactivated_skill_corrective_is_refused`` and
+        ``test_ab_testing_inactive_skill_corrective_not_refused``) cover
+        only the ``status`` half, so Mutation A is DELETABLE WITH ZERO
+        REDS without this test. THIS TEST IS THE MISSING PIN.
+        """
+        from daemon.services import skill_capture_observability as observability
+        from daemon.repositories.skill.models import Skill, SkillABTest
+        from daemon.services.skill_evolution_service import (
+            SkillEvolutionService,
+        )
+        from sqlmodel import Session, select
+
+        # (0) The DECLARED DEFAULT for ``corrective`` — pinned so a silent
+        # default flip surfaces as a named failure, not as a mystery delta.
+        corrective_default = inspect.signature(
+            SkillEvolutionService.evolve_skill
+        ).parameters["corrective"].default
+        assert corrective_default is False, (
+            "evolve_skill's `corrective` default changed: "
+            f"{corrective_default!r}"
+        )
+
+        skill = _make_skill(
+            skill_repo, project_id, "ab-testing-non-corrective"
+        )
+        # The discriminating shape: NOT servable (is_active=False) AND
+        # status='ab_testing' — the ONLY combination where the
+        # ``corrective`` conjunct of the F3 predicate changes the outcome.
+        skill_repo.update(skill.id, is_active=False, status="ab_testing")
+
+        before = skill_repo.get(skill.id)
+        assert before.is_active is False
+        assert before.status == "ab_testing"
+        before_fields = {
+            "id": before.id,
+            "name": before.name,
+            "description": before.description,
+            "content": before.content,
+            "category": before.category,
+            "is_active": before.is_active,
+            "status": before.status,
+            "lineage_origin": before.lineage_origin,
+            "generation": before.generation,
+            "ab_test_group": before.ab_test_group,
+            "updated_at": before.updated_at,
+        }
+
+        with Session(skill_repo.engine) as session:
+            before_skill_rows = len(list(session.exec(select(Skill))))
+            before_ab_rows = len(list(session.exec(select(SkillABTest))))
+            before_max_generation = max(
+                (s.generation for s in session.exec(select(Skill))),
+                default=0,
+            )
+
+        observability.reset_counters()
+        before_refusals = dict(observability.counters().execution_refusals)
+
+        with patch.object(
+            evolution_service,
+            "_call_llm",
+            AsyncMock(
+                return_value=json.dumps(
+                    {
+                        "description": None,
+                        "edits": [
+                            {
+                                "op": "replace",
+                                "anchor": "content for ab-testing-non-corrective",
+                                "replacement": "new content",
+                            }
+                        ],
+                    }
+                )
+            ),
+        ):
+            result = await evolution_service.evolve_skill(
+                skill.id, "FIX", "repair it", corrective=False
+            )
+
+        after_refusals = dict(observability.counters().execution_refusals)
+
+        # (1) The typed F3 refusal — NOT a generic skip.
+        assert result.get("skipped") is True
+        assert result.get("refusal_reason") == "non_servable_target"
+
+        # (2) The execution-refusal counter moved by EXACTLY ONE.
+        assert (
+            after_refusals.get("non_servable_target", 0)
+            - before_refusals.get("non_servable_target", 0)
+        ) == 1
+
+        # (3) NO new generation was minted.
+        assert result.get("new_skill_id") is None
+        assert result.get("ab_test_group") is None
+        with Session(skill_repo.engine) as session:
+            after_rows = list(session.exec(select(Skill)))
+        after_max_generation = max(
+            (s.generation for s in after_rows), default=0
+        )
+        assert after_max_generation == before_max_generation
+
+        # (4) NO new ``ab_test_group`` row.
+        with Session(skill_repo.engine) as session:
+            after_ab_rows = len(list(session.exec(select(SkillABTest))))
+        assert after_ab_rows == before_ab_rows
+
+        # (5) The skill row count is unchanged.
+        assert len(after_rows) == before_skill_rows
+
+        # (6) The source row is untouched (status and every other field).
+        after = skill_repo.get(skill.id)
+        after_fields = {
+            "id": after.id,
+            "name": after.name,
+            "description": after.description,
+            "content": after.content,
+            "category": after.category,
+            "is_active": after.is_active,
+            "status": after.status,
+            "lineage_origin": after.lineage_origin,
+            "generation": after.generation,
+            "ab_test_group": after.ab_test_group,
+            "updated_at": after.updated_at,
+        }
+        assert after_fields == before_fields
+        assert after.is_active is False
+        assert after.status == "ab_testing"
+
+        # (7) The observability token is ``non_servable_target`` and NOT
+        # ``ab_guard`` — a SILENT RE-ROUTE must be caught here, in the
+        # counter AND in the sink record.
+        assert (
+            after_refusals.get("ab_guard", 0)
+            == before_refusals.get("ab_guard", 0)
+        ), "the refusal silently re-routed to ab_guard"
+        assert "ab_guard" not in after_refusals
+
+        sink_records = []
+        for path in sorted(tmp_path.rglob("skill-capture-*.jsonl")):
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line:
+                    sink_records.append(json.loads(line))
+        execution_refusals = [
+            r
+            for r in sink_records
+            if r.get("stage") == "execution" and r.get("outcome") == "refused"
+        ]
+        assert execution_refusals, (
+            "no execution-refusal record reached the observability sink"
+        )
+        tokens = [r.get("refusal_reason") for r in execution_refusals]
+        assert tokens.count("non_servable_target") == 1, tokens
+        assert not any("ab_guard" in str(token) for token in tokens), tokens
+
 
 class TestDuplicatedAnchorRejection:
     """W6 (2026-11-17): exact-ONCE anchoring is a D5 core invariant.
