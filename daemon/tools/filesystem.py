@@ -49,6 +49,12 @@ READ_SCOPE_REFUSAL_EVENT = "read_scope_refusal"
 #: Same for the silent candidate drop (denied basenames / symlinks).
 READ_SCOPE_DROP_TOKEN = "READ_SCOPE_CANDIDATE_DROP"
 READ_SCOPE_DROP_EVENT = "read_scope_candidate_drop"
+#: Git object-id shape, single-sourced (L20): the read-surface resolver
+#: and the raw-HEAD probe must accept exactly the same spellings.
+_GIT_SHA_RE = re.compile(r"[0-9a-fA-F]{7,40}\Z")
+#: Short-HEAD renderer width (L21); the rendered text still says 12-char.
+_SHORT_SHA_LEN = 12
+
 #: Journal level for the scoped-refusal + candidate-drop lines.
 #:
 #: WHY WARNING, not INFO (MEASURED 2026-11-26 on the live install,
@@ -523,7 +529,9 @@ def _log_scope_refusal(reason: str) -> tuple[None, str]:
     Single choke point for all five authored refusal strings in
     :func:`_resolve_within_scope` — a refused call emits exactly one
     journal line, never one per check. Content is NEVER logged: only the
-    agent id, tool name, and a short reason token.
+    agent id, tool name, and the full authored refusal sentence passed
+    as ``reason`` (not a short token — the text is the tool's own
+    error message, already free of file content).
     """
     logger.log(
         SCOPE_REFUSAL_LOG_LEVEL,
@@ -626,11 +634,11 @@ def _git_commit_of_tree(anchor: Path | None) -> str:
     sha: str | None = None
     if head.startswith("ref: "):
         sha = _resolve_git_ref(git_dir, head[len("ref: "):].strip())
-    elif re.fullmatch(r"[0-9a-fA-F]{7,40}", head):
+    elif _GIT_SHA_RE.fullmatch(head):
         sha = head
     if not sha:
         return "UNKNOWN (no commit resolved)"
-    return f"{sha[:12]} (12-char short HEAD sha)"
+    return f"{sha[:_SHORT_SHA_LEN]} (12-char short HEAD sha)"
 
 
 def _resolve_git_ref(git_dir: Path, ref: str) -> str | None:
@@ -639,10 +647,21 @@ def _resolve_git_ref(git_dir: Path, ref: str) -> str | None:
     A linked worktree keeps its refs in the shared ``commondir``, so that
     directory is checked too. Ref names are validated before use — no
     traversal, no absolute paths, no execution.
+
+    NON-GOALS (stated honestly; L14 / L6-docstring / tidier deferred #6):
+
+    * A SHA-256 (64-hex) object-format repository is NOT supported —
+      only the 7..40-hex SHA-1 spelling is recognised. A 64-hex ref
+      value is treated as unresolvable (``UNKNOWN (no commit
+      resolved)``), never guessed at.
+    * A SYMBOLIC-REF CHAIN is NOT followed. A loose ref whose content
+      is ``ref: refs/...`` is not recursively resolved, and a
+      symlinked ref file is read as a plain file (the target text is
+      whatever the filesystem returns); only a literal hex object id
+      in the loose ref or ``packed-refs`` resolves.
     """
     if not ref or Path(ref).is_absolute() or ".." in Path(ref).parts:
         return None
-    sha_re = re.compile(r"[0-9a-fA-F]{7,40}\Z")
 
     common: Path | None = None
     try:
@@ -664,7 +683,7 @@ def _resolve_git_ref(git_dir: Path, ref: str) -> str | None:
             text = (base / ref).read_text(encoding="utf-8", errors="replace").strip()
         except (OSError, ValueError):
             continue
-        if sha_re.fullmatch(text):
+        if _GIT_SHA_RE.fullmatch(text):
             return text
 
     for base in (git_dir, common):
@@ -684,7 +703,7 @@ def _resolve_git_ref(git_dir: Path, ref: str) -> str | None:
             if (
                 len(parts) == 2
                 and parts[1].strip() == ref
-                and sha_re.fullmatch(parts[0])
+                and _GIT_SHA_RE.fullmatch(parts[0])
             ):
                 return parts[0]
     return None
@@ -2215,11 +2234,6 @@ def grep_files(
         )
 
         if not matches:
-            truncation_notice = _walk_truncation_notice(
-                walk,
-                oversized_skips=oversized_skips,
-                match_capped=match_capped,
-            )
             return (
                 f"No matches found for: {pattern}"
                 f"{truncation_notice}{surface}"

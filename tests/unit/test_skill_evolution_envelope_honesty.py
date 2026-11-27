@@ -45,7 +45,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from sqlmodel import Session, SQLModel, create_engine, select
+from sqlmodel import SQLModel, create_engine
 
 from daemon.repositories.skill.models import (  # noqa: F401 — tables
     Skill,

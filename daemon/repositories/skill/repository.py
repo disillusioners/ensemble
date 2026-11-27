@@ -40,8 +40,9 @@ Design highlights
   stored as plain JSON arrays of floats (NOT BYTEA, NOT pickle,
   NOT numpy) — the project standard for JSON-shaped columns.
 
-Size rationale (2470 lines): six repositories share one table module
-and the raw-SQL hot paths (atomic counters, BM25 full-text search,
+Size rationale (2536 lines after this cleanup, 2533 before it): six
+repositories share one table module, and the raw-SQL hot paths (atomic
+counters, BM25 full-text search,
 bulk embedding lookup) live alongside the CRUD, so the file sits in
 the 1000-3000 band honestly. Splitting per repository would scatter
 the shared engine/JSONB conventions and the whitelisted-column
@@ -555,7 +556,7 @@ class SkillRepository:
             stmt = select(Skill).where(Skill.ab_test_group == ab_test_group)
             return list(session.exec(stmt))
 
-    def get_arm_traffic(self, skill_id: str) -> dict[str, int] | None:
+    def get_arm_traffic(self, skill_id: str) -> dict[str, int | str] | None:
         """Read ONE A/B arm's serving-TRAFFIC counters (F5).
 
         READ-ONLY. Returns the skill row's live traffic counters —
@@ -595,9 +596,11 @@ class SkillRepository:
             return {
                 "skill_id": skill_id,
                 "total_selections": int(
-                    getattr(row, "total_selections", 0) or 0
+                    getattr(row, "total_selections", None) or 0
                 ),
-                "total_applied": int(getattr(row, "total_applied", 0) or 0),
+                "total_applied": int(
+                    getattr(row, "total_applied", None) or 0
+                ),
             }
 
     def get_active_variant(

@@ -161,7 +161,7 @@ class TestAnchorCommitDisclosure:
     def test_real_git_checkout_anchor_reports_its_own_head_sha(self, scope_env, tmp_path):
         repo = tmp_path / "real-repo"
         sha = _make_git_repo(repo)
-        with scope_env("glob_files") as anchor:
+        with scope_env("glob_files"):
             tokens = (
                 fs.set_trusted_workdir(str(repo)),
                 fs.set_caller_agent_id("skill-keeper"),
@@ -413,7 +413,6 @@ class TestFixedString:
             }
         )
         assert "only a.b here" in out
-        assert "xa.bx here" not in out
         assert "a.bx here" not in out
 
     def test_fixed_string_composes_with_case_sensitive(self, tmp_path):

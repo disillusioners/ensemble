@@ -461,7 +461,7 @@ class TestComparisonsJoinsPredicate:
             new_traffic=(0, 0),
         )
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="traffic-bearing"):
             await svc.resolve_ab_test_sanctioned(
                 "g-cmp-site-b", basis="stalled", reason="sweep",
             )

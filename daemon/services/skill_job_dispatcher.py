@@ -91,6 +91,15 @@ _SWITCH_OFF_TOKENS = frozenset({"0", "false", "no", "off"})
 _MISSING = object()
 
 
+def _short_skill_id(skill_id: Any) -> Any:
+    """Log-facing short id — the ONE spelling of the ``[:8]`` idiom.
+
+    Non-string inputs pass through unchanged (the original expression
+    did exactly that), so log/record output stays byte-identical.
+    """
+    return skill_id[:8] if isinstance(skill_id, str) else skill_id
+
+
 def _resolve_switch(env_name: str, configured_default: bool = False) -> bool:
     """Resolve a kill-switch env var against the SHARED token sets.
 
@@ -341,9 +350,7 @@ class SkillFixBurstCapRefused(SkillLaneRefused):
     #: The stable token the REST route returns in the refusal envelope.
     reason = "fix_burst_cap"
 
-    def __init__(
-        self,
-        message: str) -> None:
+    def __init__(self, message: str) -> None:
         """Build the refusal.
 
         Args:
@@ -763,7 +770,7 @@ class SkillJobDispatcher:
                 "(the job service does not expose a repository with "
                 "count_fix_admissions_since) — the durable FIX burst cap "
                 "is DEGRADED (RAM cooldown only) for skill %s",
-                skill_id[:8] if isinstance(skill_id, str) else skill_id,
+                _short_skill_id(skill_id),
             )
             # M18 — the DEGRADED posture is ALWAYS RECORDED. The posture
             # itself stays fail-open for AVAILABILITY (a rate limiter must
@@ -790,7 +797,7 @@ class SkillJobDispatcher:
                 "SkillJobDispatcher: the job repository does not implement "
                 "count_fix_admissions_since — the durable FIX burst cap is "
                 "DEGRADED (RAM cooldown only) for skill %s",
-                skill_id[:8] if isinstance(skill_id, str) else skill_id,
+                _short_skill_id(skill_id),
             )
             observability.append_run_record(
                 observability.build_run_record(
@@ -833,7 +840,7 @@ class SkillJobDispatcher:
         if recent < self._fix_burst_cap:
             return None
 
-        short_id = skill_id[:8] if isinstance(skill_id, str) else skill_id
+        short_id = _short_skill_id(skill_id)
         message = (
             f"refused: burst cap — {recent} FIX admissions for skill "
             f"{short_id} within {self._fix_burst_window_seconds}s "
@@ -919,7 +926,7 @@ class SkillJobDispatcher:
                 "F3 FIX servability gate is DEGRADED (fail-open) for "
                 "skill %s; the execution-time guard remains the "
                 "backstop",
-                skill_id[:8] if isinstance(skill_id, str) else skill_id,
+                _short_skill_id(skill_id),
             )
             observability.append_run_record(
                 observability.build_run_record(
@@ -940,7 +947,7 @@ class SkillJobDispatcher:
                 "SkillJobDispatcher: FIX servability read failed for skill "
                 "%s (%s: %s) — FAIL-OPEN (the admission proceeds; the "
                 "execution-time guard still applies)",
-                skill_id[:8] if isinstance(skill_id, str) else skill_id,
+                _short_skill_id(skill_id),
                 type(read_err).__name__, read_err,
             )
             observability.append_run_record(
@@ -978,7 +985,7 @@ class SkillJobDispatcher:
                 "DEGRADED (fail-open) for skill %s — the skill row has NO "
                 "'is_active' attribute (servability UNKNOWN); the "
                 "execution-time guard remains the backstop",
-                skill_id[:8] if isinstance(skill_id, str) else skill_id,
+                _short_skill_id(skill_id),
             )
             observability.append_run_record(
                 observability.build_run_record(
@@ -995,7 +1002,7 @@ class SkillJobDispatcher:
         if is_active_value:
             return None
 
-        short_id = skill_id[:8] if isinstance(skill_id, str) else skill_id
+        short_id = _short_skill_id(skill_id)
         status = getattr(skill, "status", None)
         message = (
             f"refused: non-servable target — skill {short_id} is NOT "
@@ -1225,7 +1232,7 @@ class SkillJobDispatcher:
                         "%.0fs since last admission, window=%ds. "
                         "Refusing duplicate FIX admission.",
                         normalized_project_id[:8] if normalized_project_id else "<none>",
-                        skill_id[:8] if isinstance(skill_id, str) else skill_id,
+                        _short_skill_id(skill_id),
                         elapsed,
                         self._fix_cooldown_seconds,
                     )

@@ -1869,7 +1869,7 @@ async def _build_auto_load_block(
             _al_name = (getattr(_skill, "name", "") or "").strip()
             _al_id = getattr(_skill, "id", None)
             _al_label = _al_name or str(_al_id or "")
-            _al_header = f"\U0001f4cb **Skill: {_al_label}** (id: {_al_id})"
+            _al_header = f"📋 **Skill: {_al_label}** (id: {_al_id})"
             al_sections.append(f"{_al_header}\n\n{_content}")
     if not al_sections:
         return None

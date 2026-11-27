@@ -35,8 +35,10 @@ Design highlights
   in active A/B testing (``status='ab_testing'``) — creating nested
   A/B tests would corrupt the per-group resolution bookkeeping.
 
-Size rationale (3815 lines, PRE-EXISTING at 3749 lines before this
-range): the service exceeds the 3000-line band, but the seams are
+Size rationale (4237 lines after this cleanup, 4248 before it;
+PRE-EXISTING at 3749 lines before this range; F2/F3/F5/F6/F10 grew it
+past the earlier 3815-line figure): the service exceeds the 3000-line
+band, but the seams are
 separable for a future refactor — Tier-2/Tier-3 analysis vs the
 CAPTURED flow vs A/B resolution. Flagged for refactor; no code
 movement this pass.
@@ -870,17 +872,20 @@ class SkillEvolutionService:
             and does NOT carry the edit-contract keys:
 
             * ``FIX``: ``{"new_skill_id", "old_skill_id",
-              "ab_test_group", "skipped"}``.
+              "ab_test_group", "skipped"}`` plus the edit-contract keys
+              (and ``production_meta``).
             * ``DERIVED``: ``{"new_skill_id", "parent_ids",
-              "skipped"}``.
-            * ``FIX``/``DERIVED`` with a rejected op:
-              ``partial_apply=True`` + the per-op reasons in
-              ``edit_rejections``.
+              "skipped"}`` plus the edit-contract keys (and
+              ``production_meta``).
+            * ``partial_apply`` is ALWAYS present on those paths:
+              ``False`` for a complete evolution, ``True`` when at
+              least one op was rejected (``edit_rejections`` carries
+              the per-op reasons; ``[]`` when none).
             * CAPTURED (via :meth:`capture_skill` /
               ``SkillEvolutionService._evolve_captured``):
               ``{"new_skill_id", "skipped", "skip_reason"?, ...}`` with
               the edit-contract keys NEUTRAL (``mode="captured"``, zero
-              counts) — CAPTURED runs no edit pipeline.
+              counts, ``partial_apply=False``) — CAPTURED runs no edit pipeline.
 
         Raises:
             EvolutionEditRejected: (a ``ValueError`` subclass) the
@@ -1002,7 +1007,7 @@ class SkillEvolutionService:
                     },
                 )
             )
-            # fall through (fail-open): do NOT refuse
+        # fall through (fail-open): do NOT refuse
         elif not getattr(skill, "is_active", True) and not corrective:
             skill_id_val = getattr(skill, "id", None)
             logger.warning(
@@ -2446,21 +2451,9 @@ class SkillEvolutionService:
         variants — the ``skills`` row counters the serving/feedback
         paths bump) AND pair age >= the stall timeout.
 
-        WHY ``comparisons`` is now a (second) signal: ``SkillABTest.
-        comparisons`` is bumped by exactly ONE site —
-        ``increment_comparison`` — whose only caller is the
-        INJECTION/serving selector (``skill_injection_service.
-        _select_ab_variant``). It is NOT bumped by ``record_feedback``
-        / ``record_task_completion`` / any feedback path, so a pair
-        can carry real feedback traffic with ``comparisons == 0`` (the
-        live 98c3e028 shape). ``comparisons`` alone is therefore NOT
-        sufficient evidence of serving — a feedback-bearing pair can
-        have ``comparisons == 0``. Both-arms-zero remains the PRIMARY
-        signal (a pair with traffic on EITHER arm is never listed
-        here); ``comparisons == 0`` is a further NECESSARY condition,
-        not a sufficient one. Adding it makes the predicate strictly
-        MORE conservative: a pair with real traffic still has non-zero
-        arm counters and is still excluded.
+        WHY ``comparisons`` is a second signal (and why it is NOT
+        sufficient on its own): see :meth:`_pair_has_traffic`, the ONE
+        shared traffic predicate both enforcement sites call.
 
         Absent arm row (row deleted / desynced): no counters exist, so
         the pair is NOT traffic-bearing by this predicate — it is
@@ -2585,10 +2578,10 @@ class SkillEvolutionService:
           on both ``skills`` rows (the serving/feedback counters) —
           AND the pair's OWN ``comparisons == 0`` — AND age >=
           ``ab_stall_timeout_days``. ``comparisons`` is a further
-          NECESSARY condition, not a sufficient one (a feedback-
-          bearing pair can carry comparisons == 0). Winner by E-6 (newer GENERATION
-          NUMBER wins; never timestamps). Generation tie ⇒ PARK +
-          SURFACE (anomaly row, no mutation). A defective-divert
+          NECESSARY condition, not a sufficient one (a feedback-bearing
+          pair can carry comparisons == 0). Winner by E-6 (newer
+          GENERATION NUMBER wins; never timestamps). Generation tie ⇒
+          PARK + SURFACE (anomaly row, no mutation). A defective-divert
           (``defective_arm_id``) may be supplied EXPLICITLY by the
           operator — then the non-defective member wins regardless of
           generation (E-6: never crown a verified-defective newer
@@ -2651,7 +2644,6 @@ class SkillEvolutionService:
             raise ValueError(
                 f"ab_test_group {ab_test_group!r} is already resolved"
             )
-        comparisons = int(getattr(ab_test, "comparisons", 0) or 0)
         variants = {
             str(getattr(ab_test, "skill_id_old", "") or ""),
             str(getattr(ab_test, "skill_id_new", "") or ""),
@@ -2688,18 +2680,15 @@ class SkillEvolutionService:
             stall_timeout_days = float(
                 getattr(self._config, "ab_stall_timeout_days", 7.0) or 7.0
             )
-            # F5 (M-1 follow-up, 2026-11-27): the traffic signal is
-            # the ARMS' SERVING counters (``total_selections`` /
-            # ``total_applied`` on the ``skills`` rows) — the PRIMARY
-            # signal — PLUS the pair's OWN ``comparisons`` counter as
-            # a further NECESSARY condition (injection-side serving
-            # moved). ``comparisons`` alone is NOT sufficient (a
-            # feedback-bearing pair can carry comparisons == 0, the
-            # 98c3e028 shape), so both-arms-zero stays primary. A pair
+            # F5 (M-1 follow-up, 2026-11-27): both-arms-zero arm counters
+            # PLUS the pair's OWN ``comparisons == 0`` are enforced by
+            # the ONE shared predicate :meth:`_pair_has_traffic` (its
+            # docstring carries the full rationale, including the live
+            # 98c3e028 feedback-with-zero-comparisons shape). A pair
             # with traffic on EITHER arm is refused here — the SAME
-            # BOTH-ARMS-ZERO predicate ``find_stalled_ab_tests`` uses
-            # (both enforcement sites move together; changing only one
-            # would let a traffic-bearing pair through the other).
+            # predicate ``find_stalled_ab_tests`` uses (both enforcement
+            # sites move together; changing only one would let a
+            # traffic-bearing pair through the other).
             if await self._pair_has_traffic(ab_test):
                 raise ValueError(
                     f"stalled basis refused: ab_test_group "
@@ -2793,7 +2782,7 @@ class SkillEvolutionService:
         # — and two concurrent resolvers could interleave their
         # mutations.
         #
-        #    They now run inside ONE transaction behind a compare-and-set
+        # They now run inside ONE transaction behind a compare-and-set
         # claim on the pair row:
         #
         # * CAS predicate: ``resolved_at IS NULL`` ALWAYS, plus

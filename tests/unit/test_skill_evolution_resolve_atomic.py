@@ -160,7 +160,7 @@ def _make_pair(skill_repo, ab_test_repo, *, group="ab-atomic", comparisons=0,
 
 
 @pytest.fixture
-def _skill_write_spy(engine, request=None):
+def _skill_write_spy(engine, request):
     """Count per-row writes to the ``skills`` table across a window.
 
     Two independent counters:
@@ -173,13 +173,8 @@ def _skill_write_spy(engine, request=None):
       reach the database exactly once (the pair-row UPDATE targets
       ``skillabtest`` and is filtered out by the table-name prefix).
 
-    The listeners close over a PLAIN counters dict, not over the spy
-    object, so the only strong reference to the spy is the caller's.
-    That makes ``weakref.finalize(spy, _cleanup)`` actually able to
-    fire when the spy is collected (a finalizer callback must not
-    reference the object it finalizes). The spy also exposes
-    ``on_flush`` / ``on_exec`` (the listener functions) and a
-    ``cleanup()`` method for deterministic teardown, plus
+    The spy exposes ``on_flush`` / ``on_exec`` (the listener functions)
+    and a ``cleanup()`` method for deterministic teardown, plus
     ``dirty`` / ``updates`` views of the same counters.
 
     The listeners are REMOVED in teardown (both of them) so they do
@@ -187,7 +182,6 @@ def _skill_write_spy(engine, request=None):
     test that touches a SQLModel session.
     """
     import daemon.repositories.skill.repository as repo_mod
-    import weakref
 
     # Plain counters dict — the listeners close over THIS, not over
     # the spy object, so the spy stays collectable.
@@ -240,13 +234,9 @@ def _skill_write_spy(engine, request=None):
     event.listens_for(repo_mod.Session, "before_flush")(_on_flush)
     event.listens_for(engine, "before_cursor_execute")(_on_exec)
 
-    if request is not None:
-        request.addfinalizer(_cleanup)
-    else:
-        weakref.finalize(spy, _cleanup)
+    request.addfinalizer(_cleanup)
 
     return spy
-
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -442,7 +432,7 @@ class TestSanctionedResolverUsesAtomicCAS:
         self, skill_repo, ab_test_repo
     ):
         """Two concurrent sanctioned resolvers ⇒ exactly one wins."""
-        old, new, _row = _make_pair(skill_repo, ab_test_repo)
+        _old, new, _row = _make_pair(skill_repo, ab_test_repo)
         svc = _make_service(skill_repo, ab_test_repo)
 
         outcomes = await asyncio.gather(
@@ -477,7 +467,7 @@ class TestSanctionedResolverUsesAtomicCAS:
         true race, where the guard's read is stale (see the concurrent
         test above and the repository-level duplicate test).
         """
-        old, new, _row = _make_pair(skill_repo, ab_test_repo)
+        _old, new, _row = _make_pair(skill_repo, ab_test_repo)
         svc = _make_service(skill_repo, ab_test_repo)
 
         first = await svc.resolve_ab_test_sanctioned(
@@ -524,7 +514,6 @@ class TestSanctionedResolverUsesAtomicCAS:
         assert pair.resolved_at is None
         assert skill_repo.get(old.id).is_active is True
         assert skill_repo.get(new.id).ab_test_group == "ab-atomic"
-
 
 
 # ── FIX 8 regression pin — the session-global listener must NOT leak ──────

@@ -1242,7 +1242,6 @@ class SkillMetricsService:
         # NULL — while the usage row stores ``""``), so a global-scope
         # (``None``) name lookup SILENTLY MISSED the row it was about to
         # write. Both sides now use the SAME expression.
-        resolved_skill_row = None
         raw_skill_ref = str(skill_id or "")
         if raw_skill_ref:
             try:
@@ -1254,7 +1253,7 @@ class SkillMetricsService:
                         self.skill_repo.get_by_name,
                         usage_project_id,
                         raw_skill_ref,
-                        0,
+                        generation=0,
                     )
                     if resolved_skill_row is None and project_id is None:
                         # COMPATIBILITY (FIX 7): a GLOBAL skill row stores
@@ -1268,7 +1267,7 @@ class SkillMetricsService:
                             self.skill_repo.get_by_name,
                             project_id,
                             raw_skill_ref,
-                            0,
+                            generation=0,
                         )
             except Exception as exc:  # noqa: BLE001 — soft-fail
                 logger.warning(

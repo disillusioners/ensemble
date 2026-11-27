@@ -137,7 +137,20 @@ class TestChangeSummaryHelper:
         assert _change_summary("FIX", "   \n  ") == "FIX"
 
     def test_the_cap_is_200_and_documented(self):
+        """The cap is 200 AND the DOCUMENTATION states the same cap.
+
+        The previous version compared the imported constant against its
+        OWN literal and never touched the "documented" half its name
+        claims. The module docstring is the documented half: it states
+        the chosen cap, so it must agree with the constant the code
+        actually uses.
+        """
         assert _MAX_CHANGE_SUMMARY_CHARS == 200
+        # The DOCUMENTED half: this module's docstring states the cap
+        # the constant carries (the "CHOSEN CAP: 200 chars" line).
+        assert (
+            f"CHOSEN CAP: {_MAX_CHANGE_SUMMARY_CHARS} chars" in (__doc__ or "")
+        ), "the module docstring must document the cap the constant uses"
 
 
 # ── The three production sites use it ────────────────────────────────────
