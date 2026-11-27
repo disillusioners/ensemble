@@ -3838,7 +3838,14 @@ class TestArmPreflightDbPreflight:
         out = await _arm_demo_promote(tools)
 
         assert "UPGRADE ARMED" in out, out
-        assert "db-preflight: SKIPPED (self_env=demo)" in out, out
+        # L6 pin: the env-skip verdict is SKIPPED-BY-ENV (built from
+        # udp.VERDICT_SKIPPED_BY_ENV), NOT the bare SKIPPED that the
+        # identity-unchanged skip prints — the two must be distinguishable.
+        assert (
+            "db-preflight: "
+            f"{udp.VERDICT_SKIPPED_BY_ENV.upper()} (self_env=demo)" in out
+        ), out
+        assert "db-preflight: SKIPPED (" not in out, out
         assert self._history_events(install) == []
         assert uj.journal_read(install)["db_preflight"] is None
         assert markers and markers[-1]["kind"] == "promote"
@@ -3892,6 +3899,75 @@ class TestArmPreflightDbPreflight:
         assert f"token={udp.TOK_FULL_DUMP_UNAVAILABLE}" in refused[0]["detail"]
         assert f"token={udp.TOK_MODE_UNKNOWN}" in refused[1]["detail"]
         assert uj.journal_read(install)["db_preflight"] is None
+
+    # ── (M2, lock-release order) the refusal append rides UNDER the lock ──
+
+    async def test_arm_refusal_journals_under_lock_belt_is_sole_release(
+        self, harness, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """M2 (lock-release order): every journal append a REFUSED arm makes
+        — the explicit ``db_preflight_refused`` row AND the ``refusal`` row
+        written by ``_refusal`` → ``_journal_refusal_event`` — is observed
+        WHILE THE LOCK IS STILL HELD; the ``finally`` belt is the SINGLE
+        release point (no arm releases early).
+
+        Why this is the safe order: ``journal_history_append`` is an
+        unlocked read-modify-write of ``state.json`` that never acquires the
+        lock itself (caller discipline serializes it), so the held lock is
+        the ONLY thing standing between the append and a concurrent
+        holder's RMW. The ``pipeline-busy`` carve-out in
+        ``_journal_refusal_event`` keys on the REASON TOKEN, never on the
+        lock, so holding the lock cannot suppress the row.
+
+        NON-LIVE on purpose (the demo ``harness``): on live
+        ``_journal_refusal_event`` returns at the live carve-out BEFORE any
+        append, so a live harness could never observe the ``refusal`` row
+        and this ordering would be untestable (vacuous) there. The
+        ``full-dump`` mode gate drives the REAL verdict to REFUSED on demo.
+
+        PATCH-TARGET: ``journal_lock_release`` is an ALIASED import bound in
+        the ``ut`` namespace — patching ``uj.lock_release`` is a silent
+        no-op. Both append sites resolve ``uj.journal_history_append`` as a
+        module attribute at call time, so patching ``uj`` captures both.
+
+        Non-vacuous (red on the pre-fix order): with an explicit
+        ``journal_lock_release`` before ``return _refusal(...)``, the log is
+        ``[append:db_preflight_refused, release, append:refusal, release]``
+        — two releases, and a release PRECEDES the refusal append — so the
+        single-release and last-entry assertions both fail.
+        """
+        tools, _markers, install = harness
+        assert udp.evaluate_db_preflight is not _default_pass_verdict
+        log: list[str] = []
+        monkeypatch.setattr(
+            ut, "journal_lock_release",
+            self._wrap_sync(ut.journal_lock_release, "release", log),
+        )
+        real_append = uj.journal_history_append
+
+        def _recording_append(install_dir, event, detail):  # noqa: ANN001, ANN202
+            result = real_append(install_dir, event, detail)
+            log.append(f"append:{event}")
+            return result
+
+        monkeypatch.setattr(uj, "journal_history_append", _recording_append)
+
+        out = await tools["system_upgrade"].ainvoke(
+            {"target_env": "demo", "version": "1.2.3", "dry_run": False,
+             "db_preflight": "full-dump"}
+        )
+
+        assert _refusal_reason(out) == udp.TOK_FULL_DUMP_UNAVAILABLE, out
+        # Both rows DID append (non-live) — the ordering claim below is about
+        # real events, not an early-returned carve-out.
+        assert "append:db_preflight_refused" in log, log
+        assert "append:refusal" in log, log
+        # The belt is the SINGLE release and it is LAST: no append — the
+        # explicit row or the ``refusal`` row — ran after the lock was gone.
+        assert log.count("release") == 1, log
+        assert log[-1] == "release", log
+        # …and the lock really is gone afterwards (no wedge).
+        assert not (install / "releases" / "rollback.lock.d").exists()
 
     async def test_db_preflight_runs_when_live(
         self, live_harness, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

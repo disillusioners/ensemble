@@ -4447,23 +4447,34 @@ never decides go/rollback).
             # test-awareness branch and never inspects the engine: it
             # journals, records, discloses and refuses. Nothing else.
             #
-            # LOCK-RELEASE BELT (cycle-4 BLOCKING-1 — the house's own
-            # system_restart shape): the flag-gated `finally` below releases
-            # the lock for EVERY non-success exit of this block — every
-            # refusal, every exception class (Exception / OSError / TypeError
-            # / CancelledError / KeyboardInterrupt / SystemExit alike,
-            # including the FIRST await inside the held lock — the registry
-            # read) and any return made before the flag flips. Success KEEPS
-            # the lock: the tool hands it to the executor at drain (the
-            # promote executor acquires the lock itself at preflight;
-            # releasing here would leave two lock holders). A BARE
-            # `finally: release` would break that handoff. Release is
-            # idempotent, so the refusal arms' explicit release is harmless.
+            # LOCK-RELEASE BELT (cycle-4 BLOCKING-1): the flag-gated `finally`
+            # below is the SINGLE release point for EVERY non-success exit of
+            # this block — every refusal, every exception class (Exception /
+            # OSError / TypeError / CancelledError / KeyboardInterrupt /
+            # SystemExit alike, including the FIRST await inside the held
+            # lock — the registry read) and any return made before the flag
+            # flips. Success KEEPS the lock: the tool hands it to the
+            # executor at drain (the promote executor acquires the lock
+            # itself at preflight; releasing here would leave two lock
+            # holders). A BARE `finally: release` would break that handoff.
+            # M2 (lock-release order): NO arm releases early. `_refusal`
+            # journals through `_journal_refusal_event` →
+            # `journal_history_append`, an UNLOCKED read-modify-write of
+            # state.json (it never acquires the lock; caller discipline is
+            # the serializer). Releasing before `_refusal` put that RMW
+            # OUTSIDE the lock (the clobber hazard); holding the lock until
+            # the belt makes every refusal append a LOCKED write. The
+            # `pipeline-busy` carve-out there keys on the reason token, never
+            # on the lock, so the row is not suppressed by holding it.
             db_preflight_handoff_ok = False
+            # L6: the env-skip verdict is built from the module CONSTANT
+            # (``SKIPPED-BY-ENV``), never a hand-typed ``SKIPPED`` — the
+            # identity-unchanged skip below prints ``SKIPPED`` and the two
+            # verdicts must stay shape-distinguishable in ceremony output.
             db_preflight_line = (
-                f"db-preflight: SKIPPED (self_env={self_env}) — the "
-                "backup-artifact registry lives in the live database only; no "
-                "validation ran"
+                f"db-preflight: {udp.VERDICT_SKIPPED_BY_ENV.upper()} "
+                f"(self_env={self_env}) — the backup-artifact registry lives in "
+                "the live database only; no validation ran"
             )
             db_preflight_verdict = None
             try:
@@ -4500,7 +4511,6 @@ never decides go/rollback).
                             udp.EVENT_REFUSED,
                             db_preflight_verdict.detail,
                         )
-                    journal_lock_release(install_dir)
                     return _refusal(
                         label,
                         db_preflight_token,
@@ -4546,8 +4556,10 @@ never decides go/rollback).
             except uj.JournalTorn:
                 # (1c)(1) NO row — the journal is the unavailable substrate on
                 # this path (the pre-write probe or one of this check's own
-                # writes raised it).
-                journal_lock_release(install_dir)
+                # writes raised it). The lock stays held through `_refusal`
+                # (M2 — the belt is the single release; the refusal append
+                # is a locked write, and on this path the torn journal makes
+                # it a logged no-op inside `_journal_refusal_event`).
                 return _refusal(
                     label,
                     udp.TOK_JOURNAL_TORN,
@@ -4577,7 +4589,6 @@ never decides go/rollback).
                         exc,
                         db_preflight_verdict.detail,
                     )
-                    journal_lock_release(install_dir)
                     return _refusal(
                         label,
                         db_preflight_verdict.token or udp.TOK_REGISTRY_UNAVAILABLE,
