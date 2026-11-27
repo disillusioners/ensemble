@@ -49,6 +49,7 @@ from typing import TYPE_CHECKING
 
 from daemon.services.project_skill_source.model import is_pf_address
 import daemon.services.skill_capture_observability as observability
+from daemon.services.skill_evolution_service import EvolutionEditRejected
 from daemon.services.skill_job_dispatcher import (
     SKILL_CAPTURE_KILL_SWITCH_ENV,
     _resolve_capture_enabled,
@@ -202,6 +203,15 @@ async def _invoke_service(manager, service_name, method_name, *args, **kwargs):
         if hasattr(result, "__await__"):
             result = await result
         return json.dumps(result, default=str, indent=2)
+    except EvolutionEditRejected as e:
+        # F6 (2026-11-26): a REFUSED surgical evolution (every op
+        # rejected, no description change) must reach the agent as
+        # STRUCTURED data — not as free text inside an ERROR string.
+        # The exception carries the per-op rejection reasons and its
+        # own JSON-safe envelope (same edit-contract keys as a
+        # success), so the caller can tell a COMPLETE evolution from a
+        # PARTIAL one from a REFUSED one by the returned shape ALONE.
+        return json.dumps(e.to_payload(), default=str, indent=2)
     except Exception as e:
         return f"ERROR: {service_name}.{method_name} failed: {e}"
 
@@ -332,10 +342,14 @@ stub message instead of raising.
 Run a Tier 3 evolution pass on a skill.
 
 Delegates to ``SkillEvolutionService.evolve_skill(skill_id,
-evolution_type, direction)``. Dispatches on ``evolution_type``:
+evolution_type, direction, corrective=...)``. Dispatches on
+``evolution_type``:
 
 * ``FIX`` — create a tweaked copy and start an A/B test vs the
-  original (guarded against nested A/B tests).
+  original (guarded against nested A/B tests). With
+  ``corrective=True`` (FIX only) the SANCTIONED CORRECTIVE path runs:
+  fix a verified-defective A/B pair member, then resolve the pair to
+  its sibling (E-6).
 * ``DERIVED`` — create a specialized sibling (new name,
   generation 0, lineage to the original).
 * ``CAPTURED`` — wrap ``direction`` and the skill into a
@@ -348,18 +362,34 @@ Args:
     direction: Free-form human-readable direction the evolution
         should respect — e.g. ``"add explicit error-handling
         guidance"`` or ``"favor concise bullet lists over prose"``.
+    corrective: FIX only (default ``False``). ``True`` runs the
+        sanctioned corrective path on a verified-defective A/B pair
+        member (requires the skill to carry a live ``ab_test_group``
+        with a persisted pair row).
 
 Returns:
-    JSON document describing the proposed change. ``FIX`` returns
-    ``new_skill_id`` / ``old_skill_id`` / ``ab_test_group`` /
-    ``skipped``; ``DERIVED`` returns ``new_skill_id`` /
-    ``parent_ids`` / ``skipped``; ``CAPTURED`` returns
-    ``new_skill_id`` / ``skipped``.
+    JSON document describing the outcome. EVERY path carries the
+    EDIT CONTRACT keys — ``mode`` (``"surgical"`` / ``"full_regen"`` /
+    ``"captured"``), ``edits_applied``, ``edits_rejected``,
+    ``edit_rejections`` (list, always present) and ``partial_apply``
+    (bool) — so a caller can tell a COMPLETE evolution from a PARTIAL
+    one by the returned shape ALONE. Path-specific keys:
+
+    * ``FIX`` → ``new_skill_id`` / ``old_skill_id`` / ``ab_test_group``
+      / ``skipped``.
+    * ``DERIVED`` → ``new_skill_id`` / ``parent_ids`` / ``skipped``.
+    * ``CAPTURED`` → ``new_skill_id`` / ``skipped`` (plus
+      ``skip_reason`` when skipped); the edit-contract keys are
+      NEUTRAL (``mode="captured"``, zero counts) — CAPTURED runs no
+      edit pipeline.
+
+    A REFUSED surgical evolution (every edit op rejected, no
+    description change) returns a STRUCTURED refusal document —
+    ``ok=false`` / ``reason="no_applicable_edits"`` / the per-op
+    ``edit_rejections`` + ``error`` — never bare prose.
 
 While the underlying service is not yet wired up, this tool
-returns the stub message containing ``"⏳"``. Once connected,
-the returned payload is a JSON document describing the
-proposed diff.
+returns the stub message containing ``"⏳"``.
 """
 
     @register_tool_category("skill-evolution")

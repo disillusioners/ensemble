@@ -383,6 +383,106 @@ def _wants_full_regen(direction: str) -> bool:
     return bool(direction) and bool(_FULL_REGEN_MARKER_RE.search(direction))
 
 
+def _captured_envelope(
+    new_skill_id: str | None,
+    *,
+    skip_reason: str | None = None,
+    similarity_score: float | None = None,
+) -> dict[str, Any]:
+    """F6 (2026-11-26): the ONE CAPTURED-path result envelope.
+
+    CAPTURED never runs the surgical edit pipeline (no
+    ``_produce_evolved_body``), so its shape used to OMIT the
+    edit-contract keys entirely — while the documented shape promised
+    only ``new_skill_id``/``skipped``. F6 makes the envelope UNIFORM
+    across all three Tier-3 paths: the edit-contract keys are ALWAYS
+    present, explicitly neutral for CAPTURED (``mode="captured"``,
+    zero edit counts, ``partial_apply=False``), so a caller reads ONE
+    shape and can tell a COMPLETE evolution from a PARTIAL one (and
+    from a skip) without path-specific probing.
+
+    Args:
+        new_skill_id: The created / matched skill id, or ``None``.
+        skip_reason: Present ⇒ this envelope is a SKIP
+            (``skipped=True``).
+        similarity_score: Set by the Layer-2 embedding-dedup skip only.
+    """
+    skipped = skip_reason is not None
+    envelope: dict[str, Any] = {
+        "new_skill_id": new_skill_id,
+        "skipped": skipped,
+        "mode": "captured",
+        "edits_applied": 0,
+        "edits_rejected": 0,
+        "edit_rejections": [],
+        "partial_apply": False,
+    }
+    if skip_reason is not None:
+        envelope["skip_reason"] = skip_reason
+    if similarity_score is not None:
+        envelope["similarity_score"] = similarity_score
+    return envelope
+
+
+class EvolutionEditRejected(ValueError):
+    """F6 (2026-11-26): surgical evolution produced NO applicable edits.
+
+    The FAILED-evolution signal for the surgical path — every op in the
+    edit script was rejected (anchor absent / ambiguous) AND the payload
+    carried no description change, so no generation may be created.
+
+    Before F6 this was a bare ``ValueError`` whose ONLY carrier of the
+    per-op rejection reasons was the exception MESSAGE, which
+    ``_invoke_service`` (daemon/tools/skill_evolution_tools.py)
+    flattened into a free-text ``ERROR: ...`` string — the reasons
+    reached the calling agent as prose, not as STRUCTURED data. This
+    subclass carries them as attributes and renders a JSON-safe
+    :meth:`to_payload` the tool lane serialises verbatim.
+
+    It IS a ``ValueError`` (not a new base) so every existing
+    caller/guard that catches ``ValueError`` for a failed evolution
+    keeps its semantics.
+    """
+
+    def __init__(
+        self,
+        reasons: list[str] | None = None,
+        *,
+        edits_rejected: int = 0,
+        mode: str = "surgical",
+    ) -> None:
+        self.reasons: list[str] = list(reasons or [])
+        self.edits_rejected: int = int(edits_rejected)
+        self.mode: str = mode
+        super().__init__(
+            "surgical evolution produced no applicable edits and "
+            f"no description change (rejected ops: "
+            f"{self.reasons or 'none'}) — refusing to create a no-op "
+            "or unfulfilled generation"
+        )
+
+    def to_payload(self) -> dict[str, Any]:
+        """The STRUCTURED failure envelope (JSON-safe).
+
+        Mirrors the success-path envelope keys (``mode`` /
+        ``edits_applied`` / ``edits_rejected`` / ``edit_rejections`` /
+        ``partial_apply``) so a caller can tell a COMPLETE evolution
+        from a PARTIAL one from a REFUSED one by the returned shape
+        ALONE — no prose parsing.
+        """
+        return {
+            "ok": False,
+            "skipped": False,
+            "mode": self.mode,
+            "edits_applied": 0,
+            "edits_rejected": self.edits_rejected,
+            "edit_rejections": list(self.reasons),
+            "partial_apply": False,
+            "reason": "no_applicable_edits",
+            "error": str(self),
+        }
+
+
 def _sanitize_payload_description(raw: Any) -> str:
     """D1: sanitize a payload-supplied skill description.
 
@@ -716,14 +816,34 @@ class SkillEvolutionService:
             direction: Short instruction fed to the evolution LLM.
 
         Returns:
-            Dict whose shape depends on the path:
+            Dict whose shape depends on the path — F6 (2026-11-26):
+            EVERY path additionally carries the EDIT CONTRACT keys
+            ``mode`` (``"surgical"`` / ``"full_regen"`` / ``"captured"``),
+            ``edits_applied``, ``edits_rejected``, ``edit_rejections``
+            (list — always present) and ``partial_apply`` (bool) — so a
+            caller can tell a COMPLETE evolution from a PARTIAL one by
+            the returned shape ALONE:
 
             * ``FIX``: ``{"new_skill_id", "old_skill_id",
               "ab_test_group", "skipped"}``.
             * ``DERIVED``: ``{"new_skill_id", "parent_ids",
               "skipped"}``.
+            * ``FIX``/``DERIVED`` with a rejected op:
+              ``partial_apply=True`` + the per-op reasons in
+              ``edit_rejections``.
+            * CAPTURED (via :meth:`capture_skill` /
+              ``SkillEvolutionService._evolve_captured``):
+              ``{"new_skill_id", "skipped", "skip_reason"?, ...}`` with
+              the edit-contract keys NEUTRAL (``mode="captured"``, zero
+              counts) — CAPTURED runs no edit pipeline.
 
         Raises:
+            EvolutionEditRejected: (a ``ValueError`` subclass) the
+                surgical edit script applied NOTHING and carried no
+                description change. Carries the per-op rejection
+                reasons STRUCTURED (``.reasons`` / ``.to_payload()``) —
+                the tool lane serialises the payload verbatim instead
+                of flattening a message into an ``ERROR:`` string.
             ValueError: When ``skill_id`` is not found, when
                 ``evolution_type`` is ``CAPTURED`` (rejected — use
                 :meth:`capture_skill` instead), or when
@@ -1364,11 +1484,9 @@ class SkillEvolutionService:
                 "[SkillEvolution] CAPTURED P0 gate: blank task_message "
                 "— nothing to distill; skipping capture."
             )
-            return {
-                "new_skill_id": None,
-                "skipped": True,
-                "skip_reason": "blank_task_message",
-            }
+            return _captured_envelope(
+                None, skip_reason="blank_task_message"
+            )
         try:
             iterations_int = int(iterations or 0)
         except (TypeError, ValueError):
@@ -1379,21 +1497,17 @@ class SkillEvolutionService:
                 f"({iterations!r}) — no loop procedure to distill; "
                 "skipping capture."
             )
-            return {
-                "new_skill_id": None,
-                "skipped": True,
-                "skip_reason": "trivial_iterations",
-            }
+            return _captured_envelope(
+                None, skip_reason="trivial_iterations"
+            )
         if not agent_id or not str(agent_id).strip():
             logger.warning(
                 "[SkillEvolution] CAPTURED P0 gate: blank agent_id — "
                 "capture not attributable; skipping."
             )
-            return {
-                "new_skill_id": None,
-                "skipped": True,
-                "skip_reason": "blank_agent_id",
-            }
+            return _captured_envelope(
+                None, skip_reason="blank_agent_id"
+            )
         if project_id is None or not str(project_id).strip():
             # Project scope is the DEFAULT (skill-scope decision:
             # "default project scope, global via explicit API/UI
@@ -1406,11 +1520,9 @@ class SkillEvolutionService:
                 "— captures are project-scoped by default (global "
                 "requires an explicit share action); skipping."
             )
-            return {
-                "new_skill_id": None,
-                "skipped": True,
-                "skip_reason": "missing_project_scope",
-            }
+            return _captured_envelope(
+                None, skip_reason="missing_project_scope"
+            )
 
         # ------------------------------------------------------------
         # Layer 1 prep: fetch other active project skills (excluding
@@ -1467,11 +1579,9 @@ class SkillEvolutionService:
                 f"skipping creation — matched existing "
                 f"skill_id={skip_id!r}"
             )
-            return {
-                "new_skill_id": skip_id,
-                "skipped": True,
-                "skip_reason": "llm_skip_duplicate",
-            }
+            return _captured_envelope(
+                skip_id, skip_reason="llm_skip_duplicate"
+            )
 
         # Loose fallback: the LLM emitted ``SKIP_DUPLICATE`` without
         # a usable id (e.g. ``SKIP_DUPLICATE:`` with no token, or a
@@ -1491,11 +1601,9 @@ class SkillEvolutionService:
                 "SKIP_DUPLICATE without a valid skill_id; "
                 "skipping capture (no target picked)."
             )
-            return {
-                "new_skill_id": None,
-                "skipped": True,
-                "skip_reason": "llm_skip_duplicate_no_id",
-            }
+            return _captured_envelope(
+                None, skip_reason="llm_skip_duplicate_no_id"
+            )
 
         name, description, content = self._parse_capture_response(raw)
 
@@ -1515,11 +1623,7 @@ class SkillEvolutionService:
                 f"({quality_skip}) — rejecting candidate "
                 f"name={name!r}; no row inserted."
             )
-            return {
-                "new_skill_id": None,
-                "skipped": True,
-                "skip_reason": quality_skip,
-            }
+            return _captured_envelope(None, skip_reason=quality_skip)
 
         # ------------------------------------------------------------
         # Layer 2 gate: embedding-similarity backstop.
@@ -1542,12 +1646,11 @@ class SkillEvolutionService:
                 f">= {_CAPTURED_DEDUP_THRESHOLD} matched "
                 f"skill_id={matched_id!r}"
             )
-            return {
-                "new_skill_id": matched_id,
-                "skipped": True,
-                "skip_reason": "embedding_similarity",
-                "similarity_score": similarity,
-            }
+            return _captured_envelope(
+                matched_id,
+                skip_reason="embedding_similarity",
+                similarity_score=similarity,
+            )
 
         new_skill = await asyncio.to_thread(
             self._skill_repo.create,
@@ -1570,10 +1673,7 @@ class SkillEvolutionService:
                 f"Skill remains BM25-searchable."
             )
 
-        return {
-            "new_skill_id": new_skill.id,
-            "skipped": False,
-        }
+        return _captured_envelope(new_skill.id)
 
     async def _embedding_dedup_check(
         self,
@@ -3583,10 +3683,21 @@ class SkillEvolutionService:
             self._gate_evolved_content(
                 parent_content, new_content, direction
             )
+            # F6 (2026-11-26): the meta carries the FULL edit-contract
+            # keys on EVERY mode — a full regen applies no surgical
+            # edits, so the counts are explicit zeros rather than
+            # ABSENT keys (the documented shape must never promise a
+            # key a path does not return).
             return (
                 new_content,
                 _resolve_fix_description(skill.description, None),
-                {"mode": "full_regen"},
+                {
+                    "mode": "full_regen",
+                    "edits_applied": 0,
+                    "edits_rejected": 0,
+                    "edit_rejections": [],
+                    "partial_apply": False,
+                },
             )
 
         payload = await self._generate_evolved_payload(
@@ -3600,20 +3711,46 @@ class SkillEvolutionService:
             _sanitize_payload_description(payload.get("description"))
         )
         if applied == 0 and not has_description:
-            raise ValueError(
-                "surgical evolution produced no applicable edits and "
-                f"no description change (rejected ops: "
-                f"{reasons or 'none'}) — refusing to create a no-op "
-                "or unfulfilled generation"
+            # F6: the failure is STRUCTURED — the per-op rejection
+            # reasons ride the exception as attributes (and a JSON-safe
+            # payload), never as prose inside an ERROR string; and the
+            # refused execution is LOGGED + PERSISTED through the house
+            # observability mechanism (mirrors the `_evolve_fix`
+            # ab_guard shape: an execution-refusal counter + a sink
+            # run record).
+            observability.record_execution_refusal("no_applicable_edits")
+            observability.append_run_record(
+                observability.build_run_record(
+                    stage="execution",
+                    run_id=observability.new_run_id(),
+                    agent_id=None,
+                    prompt_source="_produce_evolved_body",
+                    outcome="refused",
+                    refusal_reason="no_applicable_edits",
+                    extra={
+                        "skill_id": getattr(skill, "id", None),
+                        "edits_rejected": rejected,
+                        "edit_rejections": list(reasons),
+                    },
+                )
+            )
+            raise EvolutionEditRejected(
+                reasons, edits_rejected=rejected, mode="surgical"
             )
         self._gate_evolved_content(parent_content, new_content, direction)
         meta = {
             "mode": "surgical",
             "edits_applied": applied,
             "edits_rejected": rejected,
+            # F6: the key is ALWAYS present ([] when nothing was
+            # rejected) — a caller reads the shape, never a
+            # present/absent probe.
+            "edit_rejections": list(reasons),
+            # F6: a PARTIAL apply is a successful-but-incomplete
+            # evolution; the flag makes that distinguishable from a
+            # COMPLETE one by the returned shape ALONE.
+            "partial_apply": rejected > 0,
         }
-        if reasons:
-            meta["edit_rejections"] = reasons
         return (
             new_content,
             _resolve_fix_description(
