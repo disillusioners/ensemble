@@ -54,6 +54,7 @@ NAMED MUTATION LEGS (each turns this file RED):
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -164,6 +165,13 @@ class _FakeJobService:
 class _StubQueueRepo:
     def get_by_name(self, project_id, queue_name):
         return None
+
+
+class _RaisingSkillRepo:
+    """A repo whose row read RAISES — the read-error fail-open leg."""
+
+    def get(self, skill_id):
+        raise RuntimeError("db down")
 
 
 class _RecordingReporter:
@@ -299,6 +307,65 @@ class TestDispatcherAdmissionGate:
         assert any(
             r.get("outcome") == "servability_gate_degraded" for r in records
         ), f"the degraded posture must be recorded — got {records!r}"
+
+    @pytest.mark.asyncio
+    async def test_read_error_fails_open_and_is_recorded(
+        self, skill_repo, tmp_path, caplog
+    ):
+        """A RAISING row read ⇒ the admission PROCEEDS (fail-open) and
+        the degraded posture is RECORDED (a WARNING naming the read
+        failure + a ``servability_check_error`` sink record). A
+        DEGRADED gate is NOT a refusal: no ``non_servable_target``
+        refusal counter and no anomaly row."""
+        reporter = _RecordingReporter()
+        observability.set_anomaly_reporter(reporter)
+        live = _make_skill(skill_repo, name="f3-live3", is_active=True)
+        dispatcher = _make_dispatcher(_RaisingSkillRepo())
+
+        with caplog.at_level(logging.WARNING):
+            job_id = await dispatcher.enqueue_evolution(
+                PROJECT, live.id, EVOLUTION_TYPE_FIX, "fix it"
+            )
+
+        # (a) FAIL-OPEN: the admission proceeds — a job id is returned
+        # and exactly ONE keeper job was enqueued.
+        assert job_id == "job-001"
+        assert len(dispatcher._job_service.enqueued) == 1
+
+        # (b) RECORDED: a WARNING names the read failure + the
+        # fail-open posture, and the sink carries the
+        # ``servability_check_error`` admission record.
+        read_error_warnings = [
+            r
+            for r in caplog.records
+            if "FIX servability read failed" in r.getMessage()
+        ]
+        assert read_error_warnings, (
+            "the read-error fail-open must log a WARNING naming the "
+            f"read failure — got {[r.getMessage() for r in caplog.records]!r}"
+        )
+        assert any("FAIL-OPEN" in r.getMessage() for r in read_error_warnings)
+        records = _sink_records(tmp_path)
+        error_records = [
+            r for r in records if r.get("outcome") == "servability_check_error"
+        ]
+        assert error_records, (
+            "the read-error fail-open must leave a sink record — "
+            f"got {records!r}"
+        )
+        assert any(r.get("stage") == "admission" for r in error_records)
+
+        # (c) A degraded posture is NOT a refusal — the
+        # admission-refusal counter stays untouched.
+        assert (
+            observability.counters().admission_refusals.get(
+                "non_servable_target"
+            )
+            is None
+        )
+
+        # (d) NO anomaly row — the fail-open path announces no refusal.
+        assert reporter.calls == []
 
 
 # ── Chokepoint 2 — the service execution guard (_evolve_fix) ──────────────
