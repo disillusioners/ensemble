@@ -3295,7 +3295,8 @@ class TestArmPreflightDbPreflight:
     * REAL verdict via `_real_seam(...)` — every node that asserts a refusal,
       a real pass, or a pure constant: pre-lock, torn-journal, both dry-run
       nodes, (ζ), (η), both arm-refusal nodes, the PendingOp-capture node, the
-      M2 live node, and the executor-boundary / shell-untouched / planted-edit
+      M2 live node, the non-live mode-gate node (on the demo `harness`, never
+      stubbed), and the executor-boundary / shell-untouched / planted-edit
       pins. Each asserts
       `udp.evaluate_db_preflight is not _default_pass_verdict`.
     * DEFAULT STUB kept, deliberately — (α) ONLY, because the ordering claim
@@ -3841,6 +3842,56 @@ class TestArmPreflightDbPreflight:
         assert self._history_events(install) == []
         assert uj.journal_read(install)["db_preflight"] is None
         assert markers and markers[-1]["kind"] == "promote"
+
+    async def test_mode_gate_fires_in_a_non_live_environment(
+        self, harness
+    ) -> None:
+        """(M2)/(d) — the MODE gate PRECEDES the environment gate (T1 #8a;
+        N-5): a ``full-dump`` / unrecognised mode requested on a NON-live
+        environment is REFUSED by the mode gate — the non-live skip never
+        swallows a mode refusal into a green arm.
+
+        The demo ``harness`` is never stubbed, so the arm runs the REAL
+        verdict, whose FIRST action is the mode gate: the mock engine is
+        never touched and the registry is never read. Asserts per mode: the
+        refusal reason (never ``UPGRADE ARMED``, never a SKIPPED line), no
+        execution scheduled, the lock released, a ``db_preflight_refused``
+        history row carrying the token (the arm-path site writes it under the
+        held lock in EVERY environment), and no D3 record.
+
+        MUTATION PROOF (measured in-lane): moving the environment gate ahead
+        of the mode gate inside ``evaluate_db_preflight`` turns the
+        ``full-dump`` call into a green ``UPGRADE ARMED`` with a ``SKIPPED
+        (self_env=demo)`` line — this node goes RED at its first assertion
+        — and before it existed no other node in either test module caught
+        that reorder (the mutant survived all 45).
+        """
+        tools, markers, install = harness
+        assert udp.evaluate_db_preflight is not _default_pass_verdict
+
+        expected = (
+            ("full-dump", udp.TOK_FULL_DUMP_UNAVAILABLE),
+            ("snapshot", udp.TOK_MODE_UNKNOWN),
+        )
+        for mode, token in expected:
+            out = await tools["system_upgrade"].ainvoke(
+                {"target_env": "demo", "version": "1.2.3", "dry_run": False,
+                 "db_preflight": mode}
+            )
+            assert "UPGRADE ARMED" not in out, out
+            assert "db-preflight: SKIPPED" not in out, out
+            assert _refusal_reason(out) == token, out
+
+        assert markers == [], "a mode refusal must not schedule an execution"
+        assert not (install / "releases" / "rollback.lock.d").exists()
+        refused = self._history_events(install)
+        assert [entry["event"] for entry in refused] == [
+            "db_preflight_refused",
+            "db_preflight_refused",
+        ], refused
+        assert f"token={udp.TOK_FULL_DUMP_UNAVAILABLE}" in refused[0]["detail"]
+        assert f"token={udp.TOK_MODE_UNKNOWN}" in refused[1]["detail"]
+        assert uj.journal_read(install)["db_preflight"] is None
 
     async def test_db_preflight_runs_when_live(
         self, live_harness, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
