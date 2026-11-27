@@ -159,7 +159,8 @@ def _make_pair(skill_repo, ab_test_repo, *, group="ab-atomic", comparisons=0,
 # ─────────────────────────────────────────────────────────────────────
 
 
-def _skill_write_spy(engine):
+@pytest.fixture
+def _skill_write_spy(engine, request=None):
     """Count per-row writes to the ``skills`` table across a window.
 
     Two independent counters:
@@ -171,10 +172,21 @@ def _skill_write_spy(engine):
       via ``before_cursor_execute`` — proves the row writes actually
       reach the database exactly once (the pair-row UPDATE targets
       ``skillabtest`` and is filtered out by the table-name prefix).
+
+    The listeners are REMOVED in teardown (both of them) so they do
+    not leak into the rest of the pytest session or into any later
+    test that touches a SQLModel session.
     """
     import daemon.repositories.skill.repository as repo_mod
+    import weakref
 
-    spy = SimpleNamespace(dirty={}, updates={})
+    class _Spy:
+        __slots__ = ('dirty', 'updates', 'cleanup', '__weakref__')
+        def __init__(self):
+            self.dirty = {}
+            self.updates = {}
+            self.cleanup = None
+    spy = _Spy()
 
     def _on_flush(session, flush_context, instances):
         for obj in session.dirty:
@@ -193,8 +205,26 @@ def _skill_write_spy(engine):
             if row_id is not None:
                 spy.updates[row_id] = spy.updates.get(row_id, 0) + 1
 
+    def _cleanup():
+        try:
+            event.remove(repo_mod.Session, "before_flush", _on_flush)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            event.remove(engine, "before_cursor_execute", _on_exec)
+        except Exception:  # noqa: BLE001
+            pass
+
+    spy.cleanup = _cleanup
+
     event.listens_for(repo_mod.Session, "before_flush")(_on_flush)
     event.listens_for(engine, "before_cursor_execute")(_on_exec)
+
+    if request is not None:
+        request.addfinalizer(_cleanup)
+    else:
+        weakref.finalize(spy, _cleanup)
+
     return spy
 
 
@@ -235,14 +265,14 @@ class TestResolveAtomicCAS:
         assert winner_row.ab_test_group is None
 
     def test_winner_and_loser_are_each_written_exactly_once(
-        self, skill_repo, ab_test_repo, engine
+        self, skill_repo, ab_test_repo, engine, _skill_write_spy
     ):
         """F2: a resolution writes the WINNER and the LOSER exactly
         once each — one transaction, one flush, no double-write of
         either row (and the pair-row UPDATE is not a skills write)."""
         old, new, _row = _make_pair(skill_repo, ab_test_repo)
 
-        spy = _skill_write_spy(engine)
+        spy = _skill_write_spy
 
         won = ab_test_repo.resolve_atomic("ab-atomic", new.id, old.id)
         assert won is True
@@ -473,3 +503,4 @@ class TestSanctionedResolverUsesAtomicCAS:
         assert pair.resolved_at is None
         assert skill_repo.get(old.id).is_active is True
         assert skill_repo.get(new.id).ab_test_group == "ab-atomic"
+
