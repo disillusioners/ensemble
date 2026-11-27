@@ -1198,6 +1198,51 @@ class SkillMetricsService:
         # on-miss insert path doesn't blow up on the NOT NULL
         # constraint.
         usage_project_id = project_id or ""
+
+        # ── F7 (2026-11-26): resolve a skill NAME to the skill row ──
+        # This surface used to be UUID-only on BOTH branches: the
+        # usage lookup filters ``SkillUsageRecord.skill_id == skill_id``
+        # and the row lookup is ``skill_repo.get(skill_id)`` — a bare
+        # skill NAME matched NEITHER, so name-keyed feedback was
+        # DROPPED ENTIRELY (measured: 13,412 usage rows, ALL uuid-keyed,
+        # 0 non-uuid). The name form is now first-class:
+        #
+        #   * a value that resolves to a row via ``get()`` is used
+        #     AS-IS (the uuid path — unchanged);
+        #   * otherwise the value is treated as a NAME and resolved via
+        #     ``get_by_name(project_id, name, generation=0)`` — the
+        #     clone service only ever creates generation 0
+        #     (``ensure_auto_load_skills_sync`` passes generation=0
+        #     explicitly), so generation 0 is the production address;
+        #   * when neither resolves, the raw value flows through
+        #     UNCHANGED so the pre-existing not-found soft-fail path
+        #     still owns the outcome.
+        #
+        # The RESOLVED uuid is what lands in the usage/feedback row and
+        # what the counter bumps target — the name is NEVER written as
+        # a skill_id (it would fork the ledger key space).
+        resolved_skill_row = None
+        raw_skill_ref = str(skill_id or "")
+        if raw_skill_ref:
+            resolved_skill_row = await asyncio.to_thread(
+                self.skill_repo.get, raw_skill_ref
+            )
+            if resolved_skill_row is None:
+                resolved_skill_row = await asyncio.to_thread(
+                    self.skill_repo.get_by_name,
+                    project_id,
+                    raw_skill_ref,
+                    0,
+                )
+                if resolved_skill_row is not None:
+                    logger.info(
+                        "SkillMetricsService.record_feedback: resolved "
+                        "skill NAME %r -> id=%s (project=%s)",
+                        raw_skill_ref,
+                        resolved_skill_row.id,
+                        project_id,
+                    )
+                    skill_id = resolved_skill_row.id
         applied_bool: Optional[bool] = (
             bool(applied) if applied is not None else None
         )

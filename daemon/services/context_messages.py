@@ -1858,7 +1858,19 @@ async def _build_auto_load_block(
     for _skill in al_skills:
         _content = (getattr(_skill, "content", "") or "").strip()
         if _content:
-            al_sections.append(_content)
+            # F7(b) (2026-11-26): the auto-load TEXT used to print the
+            # skill bodies with NO id and NO name — the ids rode ONLY
+            # in ``additional_kwargs["auto_load_skill_ids"]`` (a
+            # machine-side dedup channel the agent never reads), so an
+            # agent asked to give feedback on an auto-loaded skill had
+            # no consumable id to name. Render BOTH inline (house
+            # style: ``skill_injection_service._render`` — "📋
+            # **Skill: {name}** (id: {id}, ...)"), ahead of the body.
+            _al_name = (getattr(_skill, "name", "") or "").strip()
+            _al_id = getattr(_skill, "id", None)
+            _al_label = _al_name or str(_al_id or "")
+            _al_header = f"\U0001f4cb **Skill: {_al_label}** (id: {_al_id})"
+            al_sections.append(f"{_al_header}\n\n{_content}")
     if not al_sections:
         return None
     al_body = "\n\n---\n\n".join(al_sections)

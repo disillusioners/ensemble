@@ -1863,7 +1863,11 @@ Returns:
         — returns a deterministic string the agent loop can render.
 
         Args:
-            skill_id: The skill's UUID4 identifier, a ``pf:<ns>:<name>``
+            skill_id: The skill's UUID4 identifier, a bare skill NAME
+                (resolved to its generation-0 row via
+                ``SkillRepository.get_by_name(project_id, name, 0)`` —
+                the project scope comes from the originating
+                instance), a ``pf:<ns>:<name>``
                 project-file address, or the ``pf-<hex16>`` pseudo-id
                 the injection path renders for a file skill.
             applied: ``True`` if the skill was directly useful, ``False``
@@ -2007,7 +2011,15 @@ missing or the lookup fails). The metrics service treats ``None``
 and ``""`` symmetrically for both fields.
 
 Args:
-    skill_id: The skill's UUID4 identifier.
+    skill_id: The skill's UUID4 identifier, a bare skill NAME, or a
+        ``pf:<ns>:<name>`` project-file address (or the
+        ``pf-<hex16>`` pseudo-id the injection path renders). A bare
+        NAME is resolved to the skill row's uuid at the service
+        layer: ``SkillRepository.get_by_name(project_id, name,
+        generation=0)`` (generation 0 is the only generation the
+        clone-on-miss path creates; the project scope comes from
+        the originating instance). The RESOLVED uuid — never the
+        name — is what lands in the usage/feedback record.
     applied: ``True`` if the skill was directly useful, ``False``
         if it was not relevant or unhelpful, ``None`` (default) if
         the caller is unsure and is leaving a note only.
