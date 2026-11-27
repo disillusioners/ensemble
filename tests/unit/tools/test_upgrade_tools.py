@@ -62,6 +62,7 @@ from daemon.tools import upgrade_journal as uj
 from daemon.tools.job_queue import create_job_tools
 from daemon.tools.upgrade_tools import create_upgrade_tools
 from tests.unit.tools.test_upgrade_db_preflight import (
+    _ARTIFACT_NEWEST,
     build_registry_engine,
     insert_registry_row,
 )
@@ -3745,6 +3746,78 @@ class TestArmPreflightDbPreflight:
         # wording here — that assertion belongs to the hermetic module's shape
         # check, which does not depend on the driver's SQLSTATE).
         assert " reason=db-preflight-registry-unavailable " in refused[0]["detail"]
+
+    # ── (F1) arm-path MODE gate (real coverage hole) ────────────────────────
+
+    async def test_arm_refuses_full_dump_under_lock_releases_lock(
+        self, live_harness, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """F1 — REAL COVERAGE HOLE: the ARM-PATH mode gate has a node.
+
+        An ARMED call with ``db_preflight='full-dump'`` is refused by the mode
+        gate, which is the FIRST action inside ``evaluate_db_preflight`` (before
+        the env gate and before any registry read), so NO registry row is needed
+        and the mock engine is never touched. The mode gate fires in EVERY
+        environment, so it refuses here regardless of env.
+
+        Asserts: refusal reason, nonce intact (consumed_at None, pending_op
+        None, rollback.lock.d ABSENT, markers empty), a ``db_preflight_refused``
+        history row carrying the token, and no D3 record.
+        """
+        live = live_harness
+        self._real_seam(monkeypatch)
+
+        run_id, _nonce, grouped = await TestLiveThreeFactorGate._mint_nonce(live)
+        TestLiveThreeFactorGate._stamp_window(
+            live, source="api", msg_id="m-full-dump-arm", content=grouped
+        )
+        out = await live["tools"]["system_upgrade"].ainvoke(
+            {"target_env": "live", "version": "1.2.3", "dry_run": False,
+             "user_confirmed": True, "nonce": grouped,
+             "db_preflight": "full-dump"}
+        )
+
+        assert _refusal_reason(out) == "db-preflight-full-dump-unavailable", out
+        TestArmPreflightBeforeBurn._assert_nonce_intact(live, run_id)
+        refused = [
+            entry for entry in self._history_events(live["install"])
+            if entry["event"] == "db_preflight_refused"
+        ]
+        assert refused, self._history_events(live["install"])
+        assert "token=db-preflight-full-dump-unavailable" in refused[0]["detail"]
+        assert uj.journal_read(live["install"])["db_preflight"] is None
+
+    # ── (F5) matrix (b)(3) arm-path clause (integrity flip) ───────────────
+
+    async def test_arm_refuses_broken_newest_releases_lock_and_rows(
+        self, live_harness, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """F5 — matrix (b)(3) requires the integrity-flip refusal to append
+        ``db_preflight_refused`` on the ARM path. A real registry row with
+        ``integrity_ok`` false, driven through the REAL verdict on the ARM
+        path, refuses ``db-preflight-artifact-broken``; the artifact is NAMED
+        in the refusal text; nonce intact, lock released, ``db_preflight_refused``
+        row present, and the ``db_preflight`` record is NOT mutated to
+        ``skipped`` (absent/None — a refusal writes no D3 record).
+        """
+        live = live_harness
+        self._real_seam(monkeypatch)
+        engine = build_registry_engine(tmp_path, tag="broken")
+        insert_registry_row(engine, integrity_ok=False)
+        self._wire_engine(live, engine)
+
+        run_id, out = await TestArmPreflightBeforeBurn._armed_call(live)
+
+        assert _refusal_reason(out) == "db-preflight-artifact-broken", out
+        TestArmPreflightBeforeBurn._assert_nonce_intact(live, run_id)
+        refused = [
+            entry for entry in self._history_events(live["install"])
+            if entry["event"] == "db_preflight_refused"
+        ]
+        assert refused, self._history_events(live["install"])
+        assert "token=db-preflight-artifact-broken" in refused[0]["detail"]
+        assert _ARTIFACT_NEWEST in refused[0]["detail"]
+        assert uj.journal_read(live["install"])["db_preflight"] is None
 
     # ── (M2) the environment matrix ────────────────────────────────────────
 

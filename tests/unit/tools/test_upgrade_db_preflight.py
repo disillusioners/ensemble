@@ -288,8 +288,9 @@ async def test_masking_newest_broken_refuses_naming_newest(
     ``integrity_ok IS TRUE`` is asserted on THAT row.
 
     MUTATION PROOF (same node): the heartbeat VIEW — the historical, forbidden
-    read — is queried directly and shown to return the OLDER row, so a
-    view-based implementation would PASS here and this node would go RED.
+    read — is queried directly and shown to return the OLDER (good) row, so a
+    view-based implementation would pass the integrity check (no refusal) and
+    this node's refusal assertion would go RED.
     """
     newest_finished = datetime(2026, 11, 26, 17, 4, 41)
     insert_registry_row(registry, artifact=_ARTIFACT_NEWEST, finished_at=newest_finished, integrity_ok=False)
@@ -394,6 +395,10 @@ async def test_skip_does_not_fire_when_aged_past_bound(
     first = await _evaluate(registry, install)
     assert first.verdict == udp.VERDICT_VALIDATED, first.detail
     _record(install, first)
+
+    # SHIPPED bound explicit (env-independent): the module global is read
+    # at call time, so pin it here regardless of ambient env.
+    monkeypatch.setattr(udp, "DB_PREFLIGHT_MAX_AGE_S", 172800)
 
     # ── LEG 1: aged past the SHIPPED bound with a MATCHING remembered identity.
     aged_moment = _utc_now() - timedelta(hours=50)
