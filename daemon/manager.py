@@ -8852,6 +8852,11 @@ class InstanceManager:
                     if _raw_burst_window is not None
                     else DEFAULT_FIX_BURST_WINDOW_SECONDS
                 ),
+                # F3 (2026-11-26): the FIX servability gate reads the
+                # target skill row (refusing an admission against a
+                # deactivated skill) — wire the manager's repo so the
+                # gate is LIVE instead of degraded-fail-open.
+                skill_repo=getattr(self, "_skill_repo", None),
             )
             # Round-2 S4: log the RESOLVED evolution-lane state, not the
             # bare config default. The per-call admission gate resolves

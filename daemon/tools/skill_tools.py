@@ -55,7 +55,10 @@ from daemon.services.project_skill_source.model import (
 from daemon.services.project_skill_source.service import (
     ProjectSkillBodyUnavailable,
 )
-from daemon.services.skill_job_dispatcher import SkillFixBurstCapRefused
+from daemon.services.skill_job_dispatcher import (
+    SkillFixBurstCapRefused,
+    SkillNonServableTargetRefused,
+)
 from daemon.services.skill_search_service import _bm25_rank
 from ._schema_registry import tool
 from ._tool_registry import register_tool_category
@@ -1468,6 +1471,9 @@ Note:
         # refusal, not a dispatcher fault. It is caught STRUCTURALLY,
         # BEFORE the blanket ``except Exception`` below.
         burst_cap_refusal: SkillFixBurstCapRefused | None = None
+        # F3 (2026-11-26): the non-servable-target refusal is likewise a
+        # DESIGNED refusal, caught structurally before the blanket catch.
+        non_servable_refusal: SkillNonServableTargetRefused | None = None
         if dispatcher is not None:
             dispatch_method = getattr(dispatcher, "dispatch_fix", None)
             if dispatch_method is not None and callable(dispatch_method):
@@ -1514,6 +1520,21 @@ Note:
                         e,
                     )
                     burst_cap_refusal = e
+                except SkillNonServableTargetRefused as e:
+                    # F3 (2026-11-26) — the DESIGNED non-servable-target
+                    # refusal, caught STRUCTURALLY before the blanket
+                    # catch (same discipline as the burst cap above).
+                    # The lane is ON — the TARGET (a deactivated skill)
+                    # refused. NO job exists and NOTHING will pick it
+                    # up; the stable token travels to the agent exactly
+                    # like the REST route's ``e.reason`` envelope.
+                    logger.warning(
+                        "skill_fix non-servable target refused for "
+                        "skill %s: %s",
+                        skill_id,
+                        e,
+                    )
+                    non_servable_refusal = e
                 except Exception as e:
                     logger.warning(
                         "skill_fix dispatcher raised for skill %s: %s",
@@ -1622,6 +1643,24 @@ Note:
                 "REFUSED at dispatch — NO skill-keeper job was created "
                 "and NOTHING will be picked up. This message is the only "
                 "record of the request."
+            )
+        elif non_servable_refusal is not None:
+            # F3 (2026-11-26): the TARGET skill is not servable (it was
+            # deactivated — retired by an A/B resolution or an operator
+            # deactivation). The lane is ON — the TARGET refused. This
+            # is a first-class refusal, NOT a dropped job: NO job was
+            # created, NOTHING will be picked up, and the stable token
+            # travels to the agent (the REST route reads the same
+            # ``e.reason``).
+            lines.append("")
+            lines.append(
+                "\u26d4 NOT dispatched: the target skill is NOT SERVABLE "
+                "(it was deactivated — is_active=False; "
+                f"reason={non_servable_refusal.reason}). The evolution "
+                "lane refuses FIX admissions against a deactivated "
+                "skill — NO skill-keeper job was created and NOTHING "
+                "will be picked up. If the skill should be fixable, "
+                "re-activate it first."
             )
         elif persisted_job_id is not None:
             # F-G2.1 — the dispatch raised, but the row WAS persisted:

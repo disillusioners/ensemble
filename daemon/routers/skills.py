@@ -90,6 +90,7 @@ from fastapi.responses import JSONResponse
 from daemon.services.skill_job_dispatcher import (
     SkillFixBurstCapRefused,
     SkillJobDispatcher,
+    SkillNonServableTargetRefused,
 )
 from daemon.services.project_skill_source.model import ADDRESS_PREFIX
 from daemon.services.skill_store_service import SkillStoreService
@@ -1398,9 +1399,10 @@ async def post_fix(
         status for a cap refusal and is never a 5xx).
 
     Raises:
-        HTTPException: 400 on ``ValueError``; 429 on a burst-cap
-            refusal; 503 when the lane is gated off (``job_id is
-            None``); 500 on unexpected failure.
+        HTTPException: 400 on ``ValueError``; 409 on a non-servable-
+            target refusal (F3 — the target skill is deactivated);
+            429 on a burst-cap refusal; 503 when the lane is gated
+            off (``job_id is None``); 500 on unexpected failure.
     """
     # A14 (architect, MUST, 2026-10-31 — P7 hole): ``pf:`` addresses
     # are REFUSED before any dispatch. This endpoint dispatches with
@@ -1481,6 +1483,21 @@ async def post_fix(
                 # M11 — the reason is READ from the refusal class, never
                 # hard-coded here: one token per concept, and the route
                 # cannot drift from the class.
+                "reason": e.reason,
+            },
+        )
+    except SkillNonServableTargetRefused as e:
+        # F3 (2026-11-26) — the TARGET skill is not servable (it was
+        # deactivated — is_active=False). The lane is ON — the TARGET
+        # refused the admission. 409 Conflict is the truthful status:
+        # the request conflicts with the target's current state (and
+        # is NOT retryable as-is, unlike the 429 cap refusal). The
+        # reason token is READ from the refusal class (M11 — one token
+        # per concept, never a hard-coded literal here).
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": str(e),
                 "reason": e.reason,
             },
         )

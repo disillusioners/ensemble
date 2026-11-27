@@ -333,12 +333,45 @@ class SkillFixBurstCapRefused(SkillLaneRefused):
     #: The stable token the REST route returns in the refusal envelope.
     reason = "fix_burst_cap"
 
-    def __init__(self, message: str) -> None:
+    def __init__(
+        self,
+        message: str) -> None:
         """Build the refusal.
 
         Args:
             message: The agent-facing refusal text. It MUST keep the
                 ``refused: burst cap`` prefix (the pins assert it).
+        """
+        super().__init__(type(self).reason, message)
+
+
+class SkillNonServableTargetRefused(SkillLaneRefused):
+    """Raised when a FIX admission names a NON-SERVABLE target (F3).
+
+    The evolution lane refuses a FIX (or any Tier-3 mutation admission)
+    against a skill row whose ``is_active`` is ``False`` — a
+    deactivated skill is out of the serving surface, so evolving it
+    would resurrect a variant the operator (or a resolution) retired.
+    Like the burst cap, this refusal MUST NOT be silent and MUST NOT
+    masquerade as the generic "lane disabled" refusal: the lane is ON —
+    the TARGET refused.
+
+    The ``skill_fix`` tool renders the exception message in its
+    envelope and the REST route reads the stable token off the CLASS
+    (``e.reason``) — one token per concept (M11), the route never
+    hard-codes a literal, so the two can never drift.
+    """
+
+    #: The stable token the REST route returns in the refusal envelope
+    #: and an operator greps the daemon journal for.
+    reason = "non_servable_target"
+
+    def __init__(self, message: str) -> None:
+        """Build the refusal.
+
+        Args:
+            message: The agent-facing refusal text. It MUST keep the
+                ``refused: non-servable target`` prefix.
         """
         super().__init__(type(self).reason, message)
 
@@ -382,6 +415,7 @@ class SkillJobDispatcher:
         fix_burst_cap: int = DEFAULT_FIX_BURST_CAP,
         fix_burst_window_seconds: int = DEFAULT_FIX_BURST_WINDOW_SECONDS,
         anomaly_reporter: Any = None,
+        skill_repo: Any = None,
     ) -> None:
         """Store the job service and queue repository.
 
@@ -415,6 +449,14 @@ class SkillJobDispatcher:
                 (the ``AnomalyService.accept_report`` shape). When
                 omitted, the reporter is resolved late-bound from the
                 job service — the cap still announces itself.
+            skill_repo: Optional ``SkillRepository`` — the F3 FIX
+                servability gate reads the target skill row through it.
+                When omitted (a test double, a direct construction),
+                the gate DEGRADES fail-open: the admission proceeds,
+                the degraded posture is logged at WARNING + written to
+                the sink, and the execution-time guard in
+                ``SkillEvolutionService._evolve_fix`` remains the
+                backstop.
         """
         self._job_service = job_service
         self._queue_repo = queue_repo
@@ -452,6 +494,10 @@ class SkillJobDispatcher:
                 self._fix_burst_window_seconds,
             )
         self._anomaly_reporter = anomaly_reporter
+        # F3 — the FIX servability gate reads the target skill row
+        # through this repo. None ⇒ the gate degrades fail-open (the
+        # execution-time guard in _evolve_fix stays the backstop).
+        self._skill_repo = skill_repo
         # (normalized_project_id, skill_id) -> monotonic timestamp of
         # the last ACCEPTED FIX admission. RAM-only by design: it is
         # a rate limiter, not durable state; a daemon restart resets
@@ -817,6 +863,138 @@ class SkillJobDispatcher:
         )
         return SkillFixBurstCapRefused(message)
 
+    async def _check_fix_target_servable(
+        self,
+        skill_id: str,
+        *,
+        run_id: str | None = None,
+    ) -> SkillNonServableTargetRefused | None:
+        """F3 — refuse a FIX admission against a NON-SERVABLE target.
+
+        The FIX front door (the ``skill_fix`` tool, the admin
+        ``POST /api/skills/{id}/fix`` endpoint, the trigger engine's
+        ``evolve_fix`` follow-through) funnels EVERY admission through
+        :meth:`enqueue_evolution` forwarding the raw ``skill_id`` —
+        no layer loaded the skill row, so a DEACTIVATED skill
+        (``is_active=False`` — retired by an A/B resolution or an
+        operator deactivation) was admissible and the keeper would
+        evolve a variant outside the serving surface. This gate
+        introduces the row read at the ONE chokepoint all those
+        producers share.
+
+        The refusal is HUMAN-VISIBLE, not a silent drop and not a
+        "dropped job": a WARNING log line (the greppable
+        ``reason=non_servable_target`` token), an admission-refusal
+        counter under its OWN token, a sink record, and an anomaly row
+        through the daemon-side ``accept_report`` path — the same
+        mechanism the burst cap uses.
+
+        FAIL-OPEN on an infrastructure gap (no skill repo wired, the
+        row read raised): the admission proceeds, the degraded posture
+        is logged at WARNING + written to the sink, and the
+        execution-time guard in ``SkillEvolutionService._evolve_fix``
+        stays the backstop (it refuses the mutation with a skip
+        envelope at execution).
+
+        Returns:
+            The refusal exception to raise, or ``None`` when the
+            admission may proceed (target servable, or the gate is
+            degraded).
+        """
+        repo = self._skill_repo
+        reader = getattr(repo, "get", None)
+        if repo is None or not callable(reader):
+            logger.warning(
+                "SkillJobDispatcher: no skill repository is wired — the "
+                "F3 FIX servability gate is DEGRADED (fail-open) for "
+                "skill %s; the execution-time guard remains the "
+                "backstop",
+                skill_id[:8] if isinstance(skill_id, str) else skill_id,
+            )
+            observability.append_run_record(
+                observability.build_run_record(
+                    stage="admission",
+                    run_id=run_id,
+                    outcome="servability_gate_degraded",
+                    extra={
+                        "skill_id": skill_id,
+                        "degraded_reason": "no_skill_repo",
+                    },
+                )
+            )
+            return None
+        try:
+            skill = await asyncio.to_thread(reader, skill_id)
+        except Exception as read_err:  # noqa: BLE001 — fail-open
+            logger.warning(
+                "SkillJobDispatcher: FIX servability read failed (%s: %s) "
+                "— FAIL-OPEN (the admission proceeds; the execution-time "
+                "guard still applies)",
+                type(read_err).__name__, read_err,
+            )
+            observability.append_run_record(
+                observability.build_run_record(
+                    stage="admission",
+                    run_id=run_id,
+                    outcome="servability_check_error",
+                    extra={
+                        "skill_id": skill_id,
+                        "error": f"{type(read_err).__name__}: {read_err}",
+                    },
+                )
+            )
+            return None
+        if skill is None:
+            # Unknown target: NOT this gate's refusal — the downstream
+            # flow already handles a missing skill id (the keeper job
+            # fails loudly on read; the service raises ValueError).
+            return None
+        if getattr(skill, "is_active", True):
+            return None
+
+        short_id = skill_id[:8] if isinstance(skill_id, str) else skill_id
+        status = getattr(skill, "status", None)
+        message = (
+            f"refused: non-servable target — skill {short_id} is NOT "
+            f"servable (is_active=False, status={status!r}). The "
+            "evolution lane does not admit FIX jobs against a "
+            "deactivated skill. NO skill-keeper job was created."
+        )
+        logger.warning(
+            "SkillJobDispatcher.enqueue_evolution: FIX admission REFUSED "
+            "(reason=non_servable_target) for skill %s — target row "
+            "is_active=False (status=%r). NO skill-keeper job was "
+            "created.",
+            short_id,
+            status,
+        )
+        observability.record_admission_refusal("non_servable_target")
+        observability.append_run_record(
+            observability.build_run_record(
+                stage="admission",
+                run_id=run_id,
+                outcome="refused",
+                refusal_reason="non_servable_target",
+                extra={
+                    "skill_id": skill_id,
+                    "skill_is_active": False,
+                    "skill_status": status,
+                },
+            )
+        )
+        await observability.emit_lane_anomaly(
+            category=observability.CATEGORY_LANE_DEVIATION,
+            description=message,
+            severity="minor",
+            suspected_cause=(
+                "FIX admission against a deactivated skill (retired by "
+                "an A/B resolution or an operator deactivation)"
+            ),
+            job_service=self._job_service,
+            reporter=self._anomaly_reporter,
+        )
+        return SkillNonServableTargetRefused(message)
+
     async def enqueue_analysis(
         self,
         project_id: str | None,
@@ -978,6 +1156,24 @@ class SkillJobDispatcher:
         normalized_project_id = normalize_project_id(project_id)
         is_fix = evolution_type == EVOLUTION_TYPE_FIX
         cooldown_key = (normalized_project_id, skill_id)
+
+        # ── 1b. FIX target servability (F3 — 2026-11-26) ────────────
+        # The FIX front door forwarded the raw ``skill_id`` with NO
+        # row read at ANY layer, so a DEACTIVATED skill was admissible.
+        # This gate introduces the read at the ONE chokepoint every
+        # producer shares (tool / REST / trigger engine). RAISES (it
+        # does not return ``None``): the generic ``None`` path renders
+        # as "the lane is disabled" in the ``skill_fix`` envelope,
+        # which would be a lie — the lane is ON, the TARGET refused.
+        # Scoped to FIX admissions: DERIVED is spawned by the keeper
+        # FROM an already-loaded (active) skill row, and CAPTURED has
+        # its own enqueue path.
+        if is_fix:
+            servability_refusal = await self._check_fix_target_servable(
+                skill_id, run_id=run_id,
+            )
+            if servability_refusal is not None:
+                raise servability_refusal
 
         if is_fix and self._fix_cooldown_seconds > 0:
             now = time.monotonic()

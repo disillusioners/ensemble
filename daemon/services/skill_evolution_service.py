@@ -795,6 +795,52 @@ class SkillEvolutionService:
             ``ab_test_group``, ``skipped``. When the guard fires
             the dict carries ``skipped=True`` and a ``reason``.
         """
+        # F3 GUARD (2026-11-26) — a NON-SERVABLE source is refused
+        # BEFORE the A/B guard: a deactivated skill (``is_active=False``
+        # — retired by an A/B resolution or an operator deactivation)
+        # is outside the serving surface and must not be evolved back
+        # into existence through the plain FIX path. The admission-side
+        # twin lives in ``SkillJobDispatcher._check_fix_target_servable``
+        # (the dispatched routes); THIS is the inline/execution-time
+        # half — the ``skill_evolve`` tool path arrives here WITHOUT a
+        # dispatcher admission, and an admitted job re-reads the row
+        # state at execution (the row may have flipped between
+        # admission and execution). House shape: skip-envelope dict +
+        # execution-refusal counter + sink record (mirrors the
+        # ``ab_guard`` refusal below). The SANCTIONED CORRECTIVE path
+        # keeps its pass-through, exactly like the sibling guard.
+        if not getattr(skill, "is_active", True) and not corrective:
+            skill_id_val = getattr(skill, "id", None)
+            logger.warning(
+                f"[SkillEvolution] Refusing FIX on skill "
+                f"id={skill_id_val}: target is NOT SERVABLE "
+                f"(is_active=False, reason=non_servable_target)"
+            )
+            observability.record_execution_refusal("non_servable_target")
+            observability.append_run_record(
+                observability.build_run_record(
+                    stage="execution",
+                    run_id=observability.new_run_id(),
+                    agent_id=None,
+                    prompt_source="_evolve_fix",
+                    outcome="refused",
+                    refusal_reason="non_servable_target",
+                    extra={
+                        "skill_id": skill_id_val,
+                        "skill_status": getattr(skill, "status", None),
+                    },
+                )
+            )
+            return {
+                "skipped": True,
+                "reason": (
+                    "skill is not servable (is_active=False) — the "
+                    "plain FIX path refuses a deactivated source "
+                    "(reason=non_servable_target)"
+                ),
+                "skill_id": skill_id_val,
+            }
+
         # GUARD FIRST — never mutate a skill that's already in
         # an active A/B test (would create nested A/B tests) — EXCEPT
         # through the SANCTIONED CORRECTIVE path (D2a, 2026-11-17):
