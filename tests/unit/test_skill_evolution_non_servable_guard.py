@@ -174,6 +174,17 @@ class _RaisingSkillRepo:
         raise RuntimeError("db down")
 
 
+class _AttributeLessSkillRepo:
+    """A repo whose row read returns a skill row WITHOUT ``is_active``.
+
+    The FIX 8 leg: a MISSING ``is_active`` attribute is UNKNOWN (a model
+    rename), not "servable".
+    """
+
+    def get(self, skill_id):
+        return SimpleNamespace(id=skill_id, status="active")
+
+
 class _RecordingReporter:
     def __init__(self) -> None:
         self.calls: list[dict] = []
@@ -213,7 +224,7 @@ def _sink_records(tmp_path):
 class TestDispatcherAdmissionGate:
     @pytest.mark.asyncio
     async def test_fix_against_a_deactivated_skill_is_refused(
-        self, skill_repo, tmp_path
+        self, skill_repo, tmp_path, caplog
     ):
         """The typed refusal fires; NO job row is minted; the signal lands."""
         reporter = _RecordingReporter()
@@ -223,10 +234,11 @@ class TestDispatcherAdmissionGate:
             skill_repo, name="f3-dead", is_active=False, status="inactive"
         )
 
-        with pytest.raises(SkillNonServableTargetRefused) as excinfo:
-            await dispatcher.enqueue_evolution(
-                PROJECT, dead.id, EVOLUTION_TYPE_FIX, "fix it"
-            )
+        with caplog.at_level(logging.WARNING):
+            with pytest.raises(SkillNonServableTargetRefused) as excinfo:
+                await dispatcher.enqueue_evolution(
+                    PROJECT, dead.id, EVOLUTION_TYPE_FIX, "fix it"
+                )
 
         # The stable token — the SAME one the REST route returns.
         assert excinfo.value.reason == "non_servable_target"
@@ -253,6 +265,31 @@ class TestDispatcherAdmissionGate:
         assert any(r.get("stage") == "admission" for r in refusal_records)
         assert len(reporter.calls) == 1, "the refusal must announce ONE anomaly"
         assert "non-servable target" in reporter.calls[0]["description"]
+
+        # FIX 6 (tidier M3): the REST-path F3 refusal carries the HOUSE
+        # ``refused:`` prefix — the SAME shape the burst cap logs
+        # (``logger.warning("SkillJobDispatcher.enqueue_evolution: %s",
+        # message)`` with a ``refused: burst cap …`` message), so a
+        # ``refused:``-prefix count catches BOTH refusal paths.
+        refusal_logs = [
+            r.getMessage()
+            for r in caplog.records
+            if "refused:" in r.getMessage()
+        ]
+        assert refusal_logs, (
+            "the F3 refusal must log the house 'refused:' prefix — got "
+            f"{[r.getMessage() for r in caplog.records]!r}"
+        )
+        assert any(
+            m.startswith(
+                "SkillJobDispatcher.enqueue_evolution: refused: "
+                "non-servable target"
+            )
+            for m in refusal_logs
+        ), (
+            "the refusal log line must carry the burst-cap house shape "
+            f"— got {refusal_logs!r}"
+        )
 
     @pytest.mark.asyncio
     async def test_fix_against_an_active_skill_is_admitted(
@@ -345,6 +382,14 @@ class TestDispatcherAdmissionGate:
             f"read failure — got {[r.getMessage() for r in caplog.records]!r}"
         )
         assert any("FAIL-OPEN" in r.getMessage() for r in read_error_warnings)
+        # FIX 6 (tidier L16): the read-failed WARNING NAMES the skill —
+        # the same ``[:8]`` shortening the no-repo degraded leg uses.
+        assert all(
+            live.id[:8] in r.getMessage() for r in read_error_warnings
+        ), (
+            "the read-failed WARNING must name the skill — got "
+            f"{[r.getMessage() for r in read_error_warnings]!r}"
+        )
         records = _sink_records(tmp_path)
         error_records = [
             r for r in records if r.get("outcome") == "servability_check_error"
@@ -366,6 +411,80 @@ class TestDispatcherAdmissionGate:
 
         # (d) NO anomaly row — the fail-open path announces no refusal.
         assert reporter.calls == []
+
+    @pytest.mark.asyncio
+    async def test_missing_is_active_attribute_degrades_fail_open_and_is_recorded(
+        self, skill_repo, tmp_path, caplog
+    ):
+        """A MISSING ``is_active`` attribute is UNKNOWN — NOT servable.
+
+        FIX 8 (tidier L1): ``getattr(skill, "is_active", True)`` defaulted
+        to SERVABLE when the attribute was missing, so a model rename
+        silently DISARMED the F3 gate with NO signal. UNKNOWN now takes the
+        EXISTING degraded path — fail open AND RECORDED (a WARNING naming
+        the skill + a ``servability_gate_degraded`` admission run record),
+        the same shape the no-repo leg uses. ONLY an attribute that is
+        PRESENT and falsy means "deactivated/refuse".
+        """
+        dispatcher = _make_dispatcher(_AttributeLessSkillRepo())
+        target_id = str(uuid.uuid4())
+
+        with caplog.at_level(logging.WARNING):
+            job_id = await dispatcher.enqueue_evolution(
+                PROJECT, target_id, EVOLUTION_TYPE_FIX, "fix it"
+            )
+
+        # (a) FAIL-OPEN: the admission proceeds (the execution-time guard
+        # stays the backstop).
+        assert job_id == "job-001"
+        assert len(dispatcher._job_service.enqueued) == 1
+
+        # (b) RECORDED: a WARNING names the skill + the UNKNOWN posture.
+        degraded_warnings = [
+            r.getMessage()
+            for r in caplog.records
+            if "DEGRADED" in r.getMessage()
+        ]
+        assert degraded_warnings, (
+            "a missing 'is_active' attribute must log a WARNING — got "
+            f"{[r.getMessage() for r in caplog.records]!r}"
+        )
+        assert any(target_id[:8] in m for m in degraded_warnings), (
+            "the degraded WARNING must name the skill — got "
+            f"{degraded_warnings!r}"
+        )
+        assert any("UNKNOWN" in m for m in degraded_warnings), (
+            "the degraded WARNING must state the UNKNOWN posture — got "
+            f"{degraded_warnings!r}"
+        )
+
+        # (c) The sink carries the degraded-posture admission record.
+        records = _sink_records(tmp_path)
+        degraded_records = [
+            r
+            for r in records
+            if r.get("outcome") == "servability_gate_degraded"
+        ]
+        assert degraded_records, (
+            "the missing-attribute degradation must leave a sink record — "
+            f"got {records!r}"
+        )
+        assert any(
+            r.get("degraded_reason") == "missing_is_active_attribute"
+            for r in degraded_records
+        ), (
+            "the degraded record must name the missing attribute — got "
+            f"{degraded_records!r}"
+        )
+
+        # (d) A degraded posture is NOT a refusal — the admission-refusal
+        # counter stays untouched.
+        assert (
+            observability.counters().admission_refusals.get(
+                "non_servable_target"
+            )
+            is None
+        )
 
 
 # ── Chokepoint 2 — the service execution guard (_evolve_fix) ──────────────
@@ -536,3 +655,188 @@ class TestRestRendering:
         detail = response.json()["detail"]
         assert detail["reason"] == "non_servable_target"
         assert "non-servable target" in detail["error"]
+
+
+# ── The F7 metrics-service follow-up legs (soft-fail + name key) ──────────
+#
+# PLACEMENT NOTE (DIVERGED): these pins exercise
+# ``SkillMetricsService.record_feedback`` — the F7 lane's surface. Their
+# thematically correct home is ``tests/unit/test_skill_feedback_by_name.py``
+# (the F7 pin file), which THIS LANE DOES NOT OWN. They live here because
+# this is the only test file this lane owns; the wave-C lane should
+# relocate them to the F7 pin file.
+
+
+class _FakeMetricsConfig:
+    ab_sample_size = 10
+    ab_min_difference = 0.15
+    max_extensions = 3
+
+
+class _FakeInstanceRepo:
+    def get(self, instance_id):
+        return None
+
+
+class _RaiseOnceSkillRepo:
+    """Raises on the FIRST ``get`` — the F7 resolution soft-fail leg.
+
+    The raise is scoped to the FIRST call so the pin DISCRIMINATES: the
+    F7 RESOLUTION read is the one that raises, and the later
+    ``_do_feedback`` reads behave normally — so the ``_do_feedback``
+    ``except`` wrapper cannot mask a missing guard on the resolution
+    reads (pre-fix, the raise propagated straight out of
+    ``record_feedback`` and this pin ERRORED).
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.get_calls = 0
+
+    def get(self, skill_id):
+        self.get_calls += 1
+        if self.get_calls == 1:
+            raise RuntimeError("db down")
+        return self._inner.get(skill_id)
+
+    def get_by_name(self, project_id, name, generation=0):
+        return self._inner.get_by_name(project_id, name, generation)
+
+
+@pytest.fixture
+def metrics_service(engine, skill_repo):
+    from daemon.repositories.skill.repository import (
+        SkillABTestRepository,
+        SkillTriggerRepository,
+        SkillUsageRepository,
+    )
+    from daemon.services.skill_metrics_service import SkillMetricsService
+
+    return SkillMetricsService(
+        usage_repo=SkillUsageRepository(engine),
+        skill_repo=skill_repo,
+        trigger_repo=SkillTriggerRepository(engine),
+        ab_test_repo=SkillABTestRepository(engine),
+        config=_FakeMetricsConfig(),
+        instance_repo=_FakeInstanceRepo(),
+    )
+
+
+class TestMetricsServiceResolution:
+    @pytest.mark.asyncio
+    async def test_raising_resolution_read_soft_fails_without_propagating(
+        self, metrics_service, skill_repo, caplog
+    ):
+        """FIX 2 (tidier M4): F7's resolution reads are INSIDE the soft-fail
+        guard — a raising repo read must NOT propagate out of
+        ``record_feedback``; it logs a WARNING and the pre-existing
+        not-found soft-fail path owns the outcome."""
+        repo = _RaiseOnceSkillRepo(skill_repo)
+        metrics_service.skill_repo = repo
+
+        with caplog.at_level(logging.WARNING):
+            ok = await metrics_service.record_feedback(
+                skill_id="name-that-raises",
+                instance_id="inst-f7-raise",
+                agent_id="a",
+                project_id=PROJECT,
+                applied=True,
+                note="",
+            )
+
+        # (a) NO PROPAGATION: the call RETURNED. Pre-fix the raise escaped
+        # ``record_feedback`` and this line never ran.
+        assert ok is False
+        # (b) The resolution read is the one that raised.
+        assert repo.get_calls >= 1
+
+        # (c) A WARNING names the resolution failure + the fall-through.
+        resolution_warnings = [
+            r.getMessage()
+            for r in caplog.records
+            if "name resolution failed" in r.getMessage()
+        ]
+        assert resolution_warnings, (
+            "a raising resolution read must log a WARNING — got "
+            f"{[r.getMessage() for r in caplog.records]!r}"
+        )
+        assert any(
+            "falling through with the raw reference" in m
+            for m in resolution_warnings
+        ), (
+            "the WARNING must state the fall-through posture — got "
+            f"{resolution_warnings!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_global_scope_name_lookup_resolves_the_row(
+        self, metrics_service, skill_repo
+    ):
+        """FIX 7 (tidier deferred #5): the NAME-LOOKUP KEY now MATCHES the
+        USAGE-RECORD KEY — a global-scope (``None``) caller resolves the
+        row (and records the RESOLVED uuid) instead of silently missing."""
+        skill = skill_repo.create(
+            name="global-scope-skill",
+            description="d",
+            content="c",
+            project_id="",  # ← the usage-record key for the global scope
+            generation=0,
+        )
+        inst = "inst-f7-global"
+
+        ok = await metrics_service.record_feedback(
+            skill_id="global-scope-skill",  # ← the NAME, not the uuid
+            instance_id=inst,
+            agent_id="a",
+            project_id=None,  # ← global scope
+            applied=True,
+            note="by name",
+        )
+
+        assert ok is True, (
+            "the global-scope name lookup must resolve the row — it "
+            "silently missed before FIX 7"
+        )
+        rec = metrics_service.usage_repo.get_latest_for_skill_instance(
+            skill_id=skill.id, instance_id=inst
+        )
+        assert rec is not None
+        assert rec.skill_id == skill.id, (
+            "the resolved UUID must be recorded — never the name"
+        )
+        # The usage row's project key is the SAME expression the name
+        # lookup used (the global scope's "" form).
+        assert rec.project_id == ""
+        assert skill_repo.get(skill.id).total_applied == 1
+
+    @pytest.mark.asyncio
+    async def test_null_scoped_global_row_still_resolves_by_name(
+        self, metrics_service, skill_repo
+    ):
+        """FIX 7 compatibility: a skill row that stores NULL in
+        ``Skill.project_id`` (the OTHER representation of "global") still
+        resolves by name — the pre-fix behaviour is preserved."""
+        skill = skill_repo.create(
+            name="null-scoped-skill",
+            description="d",
+            content="c",
+            project_id=None,
+            generation=0,
+        )
+        inst = "inst-f7-null-scope"
+
+        ok = await metrics_service.record_feedback(
+            skill_id="null-scoped-skill",
+            instance_id=inst,
+            agent_id="a",
+            project_id=None,
+            applied=True,
+            note="by name",
+        )
+
+        assert ok is True
+        rec = metrics_service.usage_repo.get_latest_for_skill_instance(
+            skill_id=skill.id, instance_id=inst
+        )
+        assert rec is not None
+        assert rec.skill_id == skill.id

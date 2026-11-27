@@ -1210,7 +1210,7 @@ class SkillMetricsService:
         #   * a value that resolves to a row via ``get()`` is used
         #     AS-IS (the uuid path — unchanged);
         #   * otherwise the value is treated as a NAME and resolved via
-        #     ``get_by_name(project_id, name, generation=0)`` — the
+        #     ``get_by_name(usage_project_id, name, generation=0)`` — the
         #     clone service only ever creates generation 0
         #     (``ensure_auto_load_skills_sync`` passes generation=0
         #     explicitly), so generation 0 is the production address;
@@ -1221,28 +1221,71 @@ class SkillMetricsService:
         # The RESOLVED uuid is what lands in the usage/feedback row and
         # what the counter bumps target — the name is NEVER written as
         # a skill_id (it would fork the ledger key space).
+        #
+        # FIX 2 (2026-11-27): BOTH resolution reads sit INSIDE a
+        # soft-fail guard. F7 introduced a SECOND propagation style for
+        # the SAME failure class: the two ``asyncio.to_thread`` reads
+        # below sat BEFORE ``_do_feedback``'s ``except Exception``
+        # wrapper, so a raising repo read PROPAGATED out of
+        # ``record_feedback`` instead of soft-failing. The guard keeps
+        # the house contract: a raising read logs a WARNING, the
+        # resolved row stays ``None``, and the pre-existing not-found
+        # soft-fail path owns the outcome (the raw reference flows
+        # through UNCHANGED).
+        #
+        # FIX 7 (2026-11-27): the NAME-LOOKUP KEY now MATCHES the
+        # USAGE-RECORD KEY. The usage row is written with
+        # ``usage_project_id`` (``project_id or ""`` — the column is NOT
+        # NULL), while the name lookup used the RAW ``project_id``:
+        # ``None`` and ``""`` are DIFFERENT lookup keys
+        # (``Skill.project_id`` is NULL-able — a global skill row stores
+        # NULL — while the usage row stores ``""``), so a global-scope
+        # (``None``) name lookup SILENTLY MISSED the row it was about to
+        # write. Both sides now use the SAME expression.
         resolved_skill_row = None
         raw_skill_ref = str(skill_id or "")
         if raw_skill_ref:
-            resolved_skill_row = await asyncio.to_thread(
-                self.skill_repo.get, raw_skill_ref
-            )
-            if resolved_skill_row is None:
+            try:
                 resolved_skill_row = await asyncio.to_thread(
-                    self.skill_repo.get_by_name,
-                    project_id,
-                    raw_skill_ref,
-                    0,
+                    self.skill_repo.get, raw_skill_ref
                 )
-                if resolved_skill_row is not None:
-                    logger.info(
-                        "SkillMetricsService.record_feedback: resolved "
-                        "skill NAME %r -> id=%s (project=%s)",
+                if resolved_skill_row is None:
+                    resolved_skill_row = await asyncio.to_thread(
+                        self.skill_repo.get_by_name,
+                        usage_project_id,
                         raw_skill_ref,
-                        resolved_skill_row.id,
-                        project_id,
+                        0,
                     )
-                    skill_id = resolved_skill_row.id
+                    if resolved_skill_row is None and project_id is None:
+                        # COMPATIBILITY (FIX 7): a GLOBAL skill row stores
+                        # NULL in ``Skill.project_id`` while the usage
+                        # record stores ``""`` — the two key spaces differ
+                        # for the GLOBAL case ONLY (``project_id`` is
+                        # None ⇒ the usage key is ``""``). Retry with the
+                        # RAW key so a NULL-scoped global row still
+                        # resolves by name (the pre-fix behaviour).
+                        resolved_skill_row = await asyncio.to_thread(
+                            self.skill_repo.get_by_name,
+                            project_id,
+                            raw_skill_ref,
+                            0,
+                        )
+            except Exception as exc:  # noqa: BLE001 — soft-fail
+                logger.warning(
+                    f"SkillMetricsService.record_feedback: skill name "
+                    f"resolution failed ({type(exc).__name__}: {exc}) — "
+                    f"falling through with the raw reference"
+                )
+                resolved_skill_row = None
+            if resolved_skill_row is not None:
+                logger.info(
+                    "SkillMetricsService.record_feedback: resolved "
+                    "skill NAME %r -> id=%s (project=%s)",
+                    raw_skill_ref,
+                    resolved_skill_row.id,
+                    usage_project_id,
+                )
+                skill_id = resolved_skill_row.id
         applied_bool: Optional[bool] = (
             bool(applied) if applied is not None else None
         )

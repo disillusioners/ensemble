@@ -83,6 +83,14 @@ _SWITCH_ON_TOKENS = frozenset({"1", "true", "yes", "on"})
 _SWITCH_OFF_TOKENS = frozenset({"0", "false", "no", "off"})
 
 
+# Sentinel for a MISSING attribute on a skill row. ``getattr(skill,
+# "is_active", True)`` silently ARMED the F3 servability gate on a model
+# rename (the attribute vanishes → the default says "servable" → the guard
+# is disarmed with NO signal). A missing attribute is UNKNOWN, not
+# servable — see ``_check_fix_target_servable``.
+_MISSING = object()
+
+
 def _resolve_switch(env_name: str, configured_default: bool = False) -> bool:
     """Resolve a kill-switch env var against the SHARED token sets.
 
@@ -883,9 +891,11 @@ class SkillJobDispatcher:
         producers share.
 
         The refusal is HUMAN-VISIBLE, not a silent drop and not a
-        "dropped job": a WARNING log line (the greppable
-        ``reason=non_servable_target`` token), an admission-refusal
-        counter under its OWN token, a sink record, and an anomaly row
+        "dropped job": a WARNING log line carrying the house
+        ``refused: non-servable target`` prefix (the SAME shape the
+        burst cap logs, so a ``refused:``-prefix count catches BOTH),
+        an admission-refusal counter under its OWN token
+        (``non_servable_target``), a sink record, and an anomaly row
         through the daemon-side ``accept_report`` path — the same
         mechanism the burst cap uses.
 
@@ -927,9 +937,10 @@ class SkillJobDispatcher:
             skill = await asyncio.to_thread(reader, skill_id)
         except Exception as read_err:  # noqa: BLE001 — fail-open
             logger.warning(
-                "SkillJobDispatcher: FIX servability read failed (%s: %s) "
-                "— FAIL-OPEN (the admission proceeds; the execution-time "
-                "guard still applies)",
+                "SkillJobDispatcher: FIX servability read failed for skill "
+                "%s (%s: %s) — FAIL-OPEN (the admission proceeds; the "
+                "execution-time guard still applies)",
+                skill_id[:8] if isinstance(skill_id, str) else skill_id,
                 type(read_err).__name__, read_err,
             )
             observability.append_run_record(
@@ -949,7 +960,39 @@ class SkillJobDispatcher:
             # flow already handles a missing skill id (the keeper job
             # fails loudly on read; the service raises ValueError).
             return None
-        if getattr(skill, "is_active", True):
+        # FIX 8 (2026-11-27): a MISSING ``is_active`` attribute is
+        # UNKNOWN — it is NOT servable. The old
+        # ``getattr(skill, "is_active", True)`` default silently ARMED
+        # this gate on a model rename (the attribute vanishes → the
+        # default says "servable" → the guard is disarmed with NO
+        # signal). UNKNOWN takes the EXISTING degraded posture — fail
+        # open AND RECORDED (a WARNING naming the skill + a
+        # ``servability_gate_degraded`` admission run record), the same
+        # shape the no-repo leg uses. ONLY an attribute that is PRESENT
+        # and falsy means "deactivated/refuse" — the attribute's own
+        # truthiness is unchanged from the pre-fix gate.
+        is_active_value = getattr(skill, "is_active", _MISSING)
+        if is_active_value is _MISSING:
+            logger.warning(
+                "SkillJobDispatcher: the F3 FIX servability gate is "
+                "DEGRADED (fail-open) for skill %s — the skill row has NO "
+                "'is_active' attribute (servability UNKNOWN); the "
+                "execution-time guard remains the backstop",
+                skill_id[:8] if isinstance(skill_id, str) else skill_id,
+            )
+            observability.append_run_record(
+                observability.build_run_record(
+                    stage="admission",
+                    run_id=run_id,
+                    outcome="servability_gate_degraded",
+                    extra={
+                        "skill_id": skill_id,
+                        "degraded_reason": "missing_is_active_attribute",
+                    },
+                )
+            )
+            return None
+        if is_active_value:
             return None
 
         short_id = skill_id[:8] if isinstance(skill_id, str) else skill_id
@@ -961,12 +1004,7 @@ class SkillJobDispatcher:
             "deactivated skill. NO skill-keeper job was created."
         )
         logger.warning(
-            "SkillJobDispatcher.enqueue_evolution: FIX admission REFUSED "
-            "(reason=non_servable_target) for skill %s — target row "
-            "is_active=False (status=%r). NO skill-keeper job was "
-            "created.",
-            short_id,
-            status,
+            "SkillJobDispatcher.enqueue_evolution: %s", message,
         )
         observability.record_admission_refusal("non_servable_target")
         observability.append_run_record(
