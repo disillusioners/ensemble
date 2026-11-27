@@ -4468,11 +4468,15 @@ never decides go/rollback).
             db_preflight_verdict = None
             try:
                 # (1a) PRE-WRITE TORN PROBE — defence-in-depth, RACE-WINDOW-
-                # ONLY: a journal torn at arm entry is refused PRE-lock as
-                # `journal-unavailable` (the _journal_read above), so this
-                # closes the read→slot window (a concurrent tear or a
-                # hand-edit in between). It precedes EVERY write of this
-                # block, ensure_extensions included.
+                # ONLY. The probe IS the `ensure_extensions` call below: it is
+                # the FIRST write of this block, it re-reads the journal, and a
+                # torn/absent/unparseable journal makes it raise `JournalTorn`
+                # BEFORE any further write of this block (no history row, no
+                # D3 record, no evidence append). A journal torn at arm ENTRY
+                # never reaches here at all — it is refused PRE-lock as
+                # `journal-unavailable` by the `_journal_read` above — so this
+                # only closes the read→slot window (a concurrent tear or a
+                # hand-edit in between).
                 uj.ensure_extensions(install_dir)
                 db_preflight_verdict = await udp.evaluate_db_preflight(
                     manager,
