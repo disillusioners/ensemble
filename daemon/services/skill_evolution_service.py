@@ -858,12 +858,16 @@ class SkillEvolutionService:
 
         Returns:
             Dict whose shape depends on the path — F6 (2026-11-26):
-            EVERY path additionally carries the EDIT CONTRACT keys
-            ``mode`` (``"surgical"`` / ``"full_regen"`` / ``"captured"``),
+            On every EVOLUTION path (FIX / DERIVED / CAPTURED) the
+            returned shape carries the EDIT CONTRACT keys ``mode``
+            (``"surgical"`` / ``"full_regen"`` / ``"captured"``),
             ``edits_applied``, ``edits_rejected``, ``edit_rejections``
             (list — always present) and ``partial_apply`` (bool) — so a
             caller can tell a COMPLETE evolution from a PARTIAL one by
-            the returned shape ALONE:
+            the returned shape ALONE. A GUARD-SKIP envelope
+            (``skipped=True``) is distinguishable BY ITS SKIP SHAPE
+            (``{"skipped": True, "reason": ..., "skill_id": ...}``)
+            and does NOT carry the edit-contract keys:
 
             * ``FIX``: ``{"new_skill_id", "old_skill_id",
               "ab_test_group", "skipped"}``.

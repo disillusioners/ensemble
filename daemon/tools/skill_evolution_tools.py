@@ -368,12 +368,16 @@ Args:
         with a persisted pair row).
 
 Returns:
-    JSON document describing the outcome. EVERY path carries the
-    EDIT CONTRACT keys — ``mode`` (``"surgical"`` / ``"full_regen"`` /
+    JSON document describing the outcome. On every EVOLUTION path
+    (FIX / DERIVED / CAPTURED) the returned shape carries the EDIT
+    CONTRACT keys — ``mode`` (``"surgical"`` / ``"full_regen"`` /
     ``"captured"``), ``edits_applied``, ``edits_rejected``,
     ``edit_rejections`` (list, always present) and ``partial_apply``
     (bool) — so a caller can tell a COMPLETE evolution from a PARTIAL
-    one by the returned shape ALONE. Path-specific keys:
+    one by the returned shape ALONE. A GUARD-SKIP envelope
+    (``{"skipped": True, "reason": ..., "skill_id": ...}``) is
+    distinguishable BY ITS SKIP SHAPE and does NOT carry the
+    edit-contract keys. Path-specific keys:
 
     * ``FIX`` → ``new_skill_id`` / ``old_skill_id`` / ``ab_test_group``
       / ``skipped``.
