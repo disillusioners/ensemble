@@ -606,6 +606,9 @@ def _git_commit_of_tree(anchor: Path | None) -> str:
     except (OSError, RuntimeError, ValueError):
         return "UNKNOWN (git metadata unreadable)"
 
+    # NOTE: this check is deliberately NOT wrapped in the metadata probe's
+    # try — ``_read_surface_context`` is the fail-safe boundary for any
+    # exception raised here (EACCES from Path.is_dir() propagates).
     if git_dir is None or not git_dir.is_dir():
         if git_marker:
             # A ``.git`` marker is present but its metadata is unreadable
@@ -659,7 +662,7 @@ def _resolve_git_ref(git_dir: Path, ref: str) -> str | None:
             continue
         try:
             text = (base / ref).read_text(encoding="utf-8", errors="replace").strip()
-        except OSError:
+        except (OSError, ValueError):
             continue
         if sha_re.fullmatch(text):
             return text
@@ -671,7 +674,7 @@ def _resolve_git_ref(git_dir: Path, ref: str) -> str | None:
             packed = (base / "packed-refs").read_text(
                 encoding="utf-8", errors="replace"
             )
-        except OSError:
+        except (OSError, ValueError):
             continue
         for line in packed.splitlines():
             line = line.strip()
@@ -696,19 +699,33 @@ def _read_surface_context(search_root: Path) -> str:
     ``[read surface]`` marker is NOT the cap-fired "⚠ Search incomplete"
     banner. Each line begins with ``---`` so existing tests that count
     result rows while skipping hint lines keep working unchanged.
+
+    The footer is BEST-EFFORT DISCLOSURE: it must never fail the search it
+    describes. Any exception from anchor/commit/caps resolution is turned
+    into ``commit: UNKNOWN (resolver error: <ExcName>)`` and the footer is
+    still emitted. The success path is byte-identical to the pre-fail-safe
+    footer.
     """
-    anchor = _trusted_scope_anchor()
-    subject = anchor or search_root
-    commit = _git_commit_of_tree(subject)
-    anchor_text = str(anchor) if anchor else "none (undeclared read scope)"
-    g = globals()
-    caps = (
-        f"file-count={g['WALK_MAX_FILE_COUNT']:,}; "
-        f"depth={g['WALK_MAX_DEPTH']}; "
-        f"wall-clock={g['WALK_TIMEOUT_SECONDS']:g}s; "
-        f"file-size={g['WALK_MAX_FILE_SIZE_BYTES'] / 1_048_576:.1f}MB; "
-        f"matches={g['WALK_MAX_MATCHES_PER_CALL']:,}"
-    )
+    anchor = None
+    anchor_text = "none (undeclared read scope)"
+    caps = "unavailable"
+    try:
+        anchor = _trusted_scope_anchor()
+        subject = anchor or search_root
+        commit = _git_commit_of_tree(subject)
+        if anchor:
+            anchor_text = str(anchor)
+        g = globals()
+        caps = (
+            f"file-count={g['WALK_MAX_FILE_COUNT']:,}; "
+            f"depth={g['WALK_MAX_DEPTH']}; "
+            f"wall-clock={g['WALK_TIMEOUT_SECONDS']:g}s; "
+            f"file-size={g['WALK_MAX_FILE_SIZE_BYTES'] / 1_048_576:.1f}MB; "
+            f"matches={g['WALK_MAX_MATCHES_PER_CALL']:,}"
+        )
+    except Exception as exc:
+        # A disclosure footer must never police the FS shape it describes.
+        commit = f"UNKNOWN (resolver error: {type(exc).__name__})"
     return (
         f"\n--- {READ_SURFACE_MARKER} search root: {search_root} | "
         f"anchor: {anchor_text} | commit: {commit} | caps: {caps}"

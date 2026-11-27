@@ -694,3 +694,88 @@ class TestRefusalLogging:
         assert "SCOPE_REFUSAL_LOG_LEVEL," in inst_factory_src
         assert uses_constant.search(inst_factory_src)
         assert "logger.info(" not in inst_factory_src
+
+
+# =============================================================================
+# (M1) fail-safe footer — a git-probe failure must NEVER fail the search
+# =============================================================================
+
+
+class TestReadSurfaceFailSafe:
+    def test_permission_error_at_git_dir_probe_keeps_glob_search_alive(
+        self, tmp_path, monkeypatch
+    ):
+        """EACCES from the UNGUARDED ``git_dir.is_dir()`` probe.
+
+        The first ``.git`` is_dir() probe (inside the metadata try) succeeds;
+        the second (outside it) raises. Without the fail-safe wrapper this
+        escapes into glob_files' outer except and turns a successful search
+        into ``ERROR: [Errno 13] Permission denied``.
+        """
+        anchor = tmp_path / "anchor"
+        (anchor / ".git").mkdir(parents=True)
+        (anchor / "inside.txt").write_text("inside\n", encoding="utf-8")
+        real_is_dir = Path.is_dir
+        calls = {"git_dir_probes": 0}
+
+        def _is_dir(self):
+            if self == anchor / ".git":
+                calls["git_dir_probes"] += 1
+                if calls["git_dir_probes"] == 2:
+                    raise PermissionError(13, "Permission denied")
+            return real_is_dir(self)
+
+        monkeypatch.setattr(Path, "is_dir", _is_dir)
+        result = fs.glob_files.invoke(
+            {"pattern": "*.txt", "path": str(anchor)}
+        )
+
+        assert calls["git_dir_probes"] == 2  # the exact unguarded seam fired
+        assert not result.startswith("ERROR:")
+        assert "inside.txt" in result
+        assert fs.READ_SURFACE_MARKER in result
+        assert "commit: UNKNOWN (resolver error: PermissionError)" in result
+
+    def test_probe_value_error_keeps_grep_search_alive(self, tmp_path, monkeypatch):
+        """The SECOND caller (grep_files) is protected too, with the ExcName."""
+        (tmp_path / "inside.txt").write_text("needle here\n", encoding="utf-8")
+
+        def _raising_probe(_subject):
+            raise ValueError("embedded null byte")
+
+        monkeypatch.setattr(fs, "_git_commit_of_tree", _raising_probe)
+        result = fs.grep_files.invoke(
+            {"pattern": "needle", "path": str(tmp_path)}
+        )
+
+        assert not result.startswith("ERROR:")
+        assert "needle here" in result
+        assert fs.READ_SURFACE_MARKER in result
+        assert "commit: UNKNOWN (resolver error: ValueError)" in result
+
+    def test_nul_byte_in_head_ref_degrades_without_raising(self, tmp_path):
+        """A NUL inside a loose-ref name makes read_text raise ValueError.
+
+        ``_resolve_git_ref`` must swallow it and fall through to the
+        packed-refs probe instead of letting it reach the tool's outer
+        except.
+        """
+        git_dir = tmp_path / ".git"
+        (git_dir / "refs" / "heads").mkdir(parents=True)
+        (git_dir / "HEAD").write_text("ref: refs/heads/\x00bad\n", encoding="utf-8")
+        assert fs._git_commit_of_tree(tmp_path) == "UNKNOWN (no commit resolved)"
+
+    def test_success_path_footer_is_byte_unchanged(self, tmp_path):
+        """The fail-safe wrapper adds a failure shape only — no happy-path drift."""
+        (tmp_path / "inside.txt").write_text("x\n", encoding="utf-8")
+        result = fs.glob_files.invoke({"pattern": "*.txt", "path": str(tmp_path)})
+        expected = (
+            f"\n--- {fs.READ_SURFACE_MARKER} search root: {tmp_path} | "
+            "anchor: none (undeclared read scope) | "
+            "commit: UNKNOWN (not a git checkout) | caps: "
+            f"file-count={fs.WALK_MAX_FILE_COUNT:,}; depth={fs.WALK_MAX_DEPTH}; "
+            f"wall-clock={fs.WALK_TIMEOUT_SECONDS:g}s; "
+            f"file-size={fs.WALK_MAX_FILE_SIZE_BYTES / 1_048_576:.1f}MB; "
+            f"matches={fs.WALK_MAX_MATCHES_PER_CALL:,}"
+        )
+        assert expected in result
