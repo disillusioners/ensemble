@@ -299,6 +299,70 @@ consumer invokes `bash stop-ensemble.sh` and lib.sh itself tests only `-f`,
 so the exec bit is not a runtime need; what kills the run is the MISSING
 file.
 
+### §F.1c Backup-artifact validation (promote-db-preflight-validation)
+
+The ceremony no longer dumps the live database per promote: the arm-time
+preflight VALIDATES the newest daily backup artifact instead. It reads the
+dump lane's own registry table (`public.dump_lane_artifacts`, lane
+`pgdumpall` — externally owned, written by the cluster-side read-only
+publisher) over the sanctioned pooled PostgreSQL channel and asserts, on the
+**newest row overall**: the publisher's own `integrity_ok` verdict, a
+non-zero byte count, and a `finished_at` inside the 48 h freshness bound
+(`ENSEMBLE_PROMOTE_DB_PREFLIGHT_MAX_AGE_S`). The bytes are never re-read,
+checksummed or restored — this is a metadata validation, never a byte-level
+one.
+
+**Live only (M2).** The registry lives in the live database, so dev/demo/
+sandbox have no such relation: there the validation is a documented no-op and
+the armed output says so EXPLICITLY (`db-preflight: SKIPPED-BY-ENV (self_env=<env>)`) —
+never a silent pass. **These are TWO DIFFERENT VERDICTS — tell them apart.**
+`SKIPPED-BY-ENV` means the environment is not live, so the check was bypassed;
+plain `SKIPPED` (`db-preflight: SKIPPED artifact=<name> age=<s>s bound=<s>s`) is
+reserved for the genuine identity-unchanged case — a LIVE check that DID run and
+found the newest artifact unchanged in identity (same artifact re-bound). Both
+are non-refusals, but only one of them means "the check actually ran."
+There is no kill-switch: a deliberate direct
+`ENSEMBLE_UPGRADE_LIVE=1 bash scripts/upgrade/promote.sh live` bypasses the
+whole validation (arm-path only, by design).
+
+**Every refusal is loud** — it aborts the arm BEFORE the nonce burns (the
+nonce is NOT spent and no `pending_op` is written), and an arm-path refusal
+writes a `db_preflight_refused` journal row under the held lock — the only
+audit trail for a live refusal (the generic `refusal` event is skipped on
+live).
+
+| Token | Condition | Operator action |
+|---|---|---|
+| `db-preflight-registry-unavailable` | the registry could not be read — EVERY cause listed below | read the artifact-less `reason=` detail: it names the cause, and each cause has its own action |
+| `db-preflight-no-backup` | zero rows for lane `pgdumpall` | the lane has published nothing — check the producer/publisher, then retry |
+| `db-preflight-artifact-broken` | the newest row's `integrity_ok` is not TRUE (names the artifact) | the lane's own verifier marks it broken — inspect that artifact before promoting |
+| `db-preflight-artifact-empty` | `bytes <= 0` (names the artifact) | a zero-byte artifact — the lane published nothing usable |
+| `db-preflight-artifact-stale` | `finished_at` is older than the bound (names artifact + age + bound) | wait for the next daily, or change the bound deliberately |
+| `db-preflight-journal-torn` | **RACE-WINDOW-ONLY** — the journal tore between the arm-time read and this check, or the check's own history write raised `JournalTorn` | a journal torn AT ARM ENTRY is refused earlier, pre-lock and nonce-unspent, as `journal-unavailable`; this token fires only inside that window (or on the check's own write) — repair `releases/state.json` |
+| `db-preflight-full-dump-unavailable` | the `full-dump` opt-in was requested | there is no VM-side dump leg — the ceremony validates the newest daily backup instead; the opt-in is refused at DRY-RUN time too, before any nonce is minted |
+| `db-preflight-mode-unknown` | an unrecognised `db_preflight` mode | the recognised modes are `validation-only` (the default when absent) and `full-dump` — likewise refused at dry-run time, before any nonce is minted |
+
+**The `db-preflight-registry-unavailable` causes — one DISTINCT `reason=`
+detail each** (the token is the same; the detail tells them apart, and each
+carries its own operator action):
+
+| Cause (the `reason=` detail) | Operator action |
+|---|---|
+| `relation absent` — the registry table is not there | the cluster-side publisher has not created the relation (or it was dropped) — the lane is not publishing; do NOT promote |
+| `insufficient privilege` — the SELECT raises `InsufficientPrivilegeError` for the engine role | the daemon's engine role must hold SELECT on the table (the read-only role does NOT) — a role change is a hard blocker |
+| `connect refused` — a NEW physical connection was refused (the registry DB sits at its cgroup ceiling) | the registry DB is out of connection slots / at its memory ceiling — free it, then retry |
+| `pool exhausted` — the pooled engine had no connection to check out | the daemon's pool is drained — the arm competes for connections; retry after the pressure clears |
+| `select timed out after 30.0s` — the client belt (`SELECT_CLIENT_TIMEOUT_S`) fired | the registry read did not answer within the client budget (the server-side `statement_timeout` is the real cap) — check the registry DB's responsiveness |
+| `statement timeout` — the server-side `statement_timeout` fired | the query exceeded the server budget — the registry is slow or locked |
+| `finished_at in the future beyond skew tolerance` — the row's timestamp is more than 300 s (`DB_PREFLIGHT_CLOCK_SKEW_TOLERANCE_S`) ahead of the daemon's clock | a clock skew or a mis-published timestamp — fix the clock (or the publisher); a row whose timestamp cannot be trusted is a registry-truth failure |
+| `registry row unreadable` / `<column> is NULL` — the newest row is missing a column or carries a NULL | the publisher's schema changed (the relation is externally owned, with no repo contract) — the check refuses loudly until the schema is understood |
+
+The validation is a METADATA validation: an artifact the publisher marked
+verified but that is actually corrupt WILL pass. A promote may run against a
+database whose last backup is up to the bound old — the ceremony discloses
+the effective data-loss age (artifact `finished_at` + age + bound) in its
+output.
+
 ### §F.2 USER-OWNED PRECONDITION (before the next ceremony)
 
 Either **(a) sync the pinned checkout** so its HEAD contains
