@@ -4802,7 +4802,16 @@ class TestF3GuardBypass:
 
         skill = _make_skill(skill_repo, project_id, "retired-bypass")
         skill_repo.deactivate(skill.id)
-        before_count = len(skill_repo.list(active_only=False))
+        # Project-scoped ROW TOTAL: ``SkillRepository.list()`` returns
+        # ``(items, total)`` — the SECOND element is the real row count
+        # over the filtered set (it ignores limit/offset), whereas
+        # ``len(items)`` is capped by ``limit=100`` and ``len(tuple)``
+        # is ALWAYS 2 (which made the old assertion vacuous).
+        # ``active_only=False`` keeps the DEACTIVATED row in scope —
+        # this test is ABOUT a deactivated skill.
+        _, before_total = skill_repo.list(
+            project_id=project_id, active_only=False
+        )
 
         observability.reset_counters()
         with patch.object(
@@ -4818,8 +4827,10 @@ class TestF3GuardBypass:
         assert result.get("refusal_reason") == "non_servable_target"
         # No new generation minted, no new ab_test_group.
         assert result.get("new_skill_id") is None
-        after_count = len(skill_repo.list(active_only=False))
-        assert after_count == before_count
+        _, after_total = skill_repo.list(
+            project_id=project_id, active_only=False
+        )
+        assert after_total == before_total
         # Refusal counter incremented.
         assert (
             observability.counters().execution_refusals.get(
