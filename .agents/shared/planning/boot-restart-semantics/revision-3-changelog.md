@@ -1,6 +1,6 @@
 # Revision 3 — Change Log
 
-**Artifact revised:** `.agents/shared/planning/boot-restart-semantics/architecture-recommendation.md` (1353 → **1527** lines) in `/home/nea/ensemble-src-wt-boot-restart-semantics` (branch `design/boot-restart-semantics` @ `d7c15d45f`).
+**Artifact revised:** `.agents/shared/planning/boot-restart-semantics/architecture-recommendation.md` (1353 → **1527** lines) in `/home/nea/ensemble-src-wt-boot-restart-semantics` (branch `design/boot-restart-semantics` @ `50a1a5254`, parent `origin/latest` `55c9d5a10`).
 **Revision date:** 2026-11-27. **Status:** DESIGN ONLY — no source edits, no live changes, no releases, no staging, no writes outside the two files this commission names.
 **Inputs:** (a) the fresh approver's **iteration-003** rejection — **14 blocking items (1…14)**; (b) the cycle-3 gate review — **6 MAJOR (M-1…M-6) + the MINOR set**; (c) the **approver notes / carried items**; (d) `review/round-2-review.md` and `revision-2-changelog.md` (read for context, not instructions).
 **How to read the pointers:** every "where fixed" is a **section anchor** into the revised design (e.g. *§1.5(a)*, *§6.2 B-5*), not a line number — the document will keep moving under further review, the anchors will not.
@@ -132,3 +132,37 @@ The **18** framed choices stand. What changed is that the body no longer answers
 - **Citation caveats recorded in the document:** uvicorn's `server.py` and asyncpg's `pool.py` were read from a **sibling venv** (the worktree has no `.venv`); the **version pins** are independently confirmed from `uv.lock` (uvicorn 0.41.0 at `:2378-2379`; asyncpg 0.31.0 at `:143-144`). The lane's pins are the **pushed** tip's; `518913da1` differs and is disclosed.
 - **Still UNVERIFIED after this revision:** the live exit status on a real stop (code-derived, not executed); the live boot-reconcile overrun; the `WAITING_CHILDREN` watchdog's compensation; the legacy `processing` population; the question-pause unpause source's re-derivability; the boot ordering of the orphan-JobItem sweep vs the deferred DELETE; the live journal, the readyz payloads and the live log (§8 items 1, 2, 4, 5, 6, 8 remain **human-run**).
 - **Fences held:** no daemon, test, boot smoke, promote/upgrade script, `systemctl` or `psql` was run; no `git fetch`; `/home/nea/ensemble-src` was never read for authority; no file in any staged tree, release directory or the lane worktree was written; **the only files written are this changelog and the revised design.**
+
+---
+
+## REVISION 3.1 - CLOSING TEXT PASS
+
+**Basis:** two independent APPROVE-WITH-CHANGES verdicts (0 critical; 6 MAJOR + 12 MINOR items) on revision 3 (`50a1a5254`). Every load-bearing code citation was re-opened in `/home/nea/ensemble-src-wt-boot-restart-semantics` (or `git show origin/fix/boot-purge-predicate-failclosed:...` for the lane branch). Text edits + one item move only; no new options, choices, or architecture scope added.
+
+### MAJOR items (6/6 landed)
+
+| Item | Code / doc verification | Fix applied |
+|---|---|---|
+| **MAJ-1** | §1.5(a) vs §1.1 / §1.5(a) TOCTOU block | Narrowed §1.5(a)'s PC-1b summary from "the only entry point to the half-purge" to "the only **evaluability** entry point to the half-purge (one of two entry points — the row-state TOCTOU window below is the second)". |
+| **MAJ-2** | §4.6 EC-16.2 vs §0.20(ii), §4.4, §7 | Struck `breaks any consumer that reads per_seam` from §4.6's EC-16.2 consequence cell and pointed directly to §0.20(ii) (no production consumer; only repo reader calls `hold.hold_snapshot()` directly). |
+| **MAJ-3** | `daemon/tools/upgrade_journal.py:2556-2576`, `:2659`, `:2662-2667`, `:2727-2740`, `:2762` | Added the fifth row to JT-3's table — **terminal-for-reconcile, wake-excluded: `txn_sweep_preflip`** (added to `_TERMINAL_EVENTS`, `10 → 11`, and to `WAKE_EXCLUDED_EVENTS`, `1 → 2`, so `_terminal_event_after` closes `pending_op` while `PROMOTE_WAKE_TERMINAL_EVENTS` stays unchanged) — leaving `pending_op_reconcile`, `txn_reclaim_stale`, `pending_op_expired_orphan` as labels only. Reconciled JT-3 prose, §6.2 B-11, and §6.3's lockstep test. |
+| **MAJ-4** | `daemon/tools/upgrade_journal.py:2563`, `daemon/tools/upgrade_tools.py:1502`, `:1989` | Replaced the terminal `"refusal"` journal-row recommendation with ONE new, **NON-terminal** event name **`journal_append_refused`** (belonging to NO terminal set — neither `_TERMINAL_EVENTS`, `_TERMINAL_OUTCOME_EVENTS`, nor any wake set) across **JT-1**, **§3.3(c)**, **§3.5 EC-14.2**, **§6.2 B-10**, and **§7 EC-14**, keeping the refusal sidecar (`releases/state.json.refusals.ndjson`) as the durable record. |
+| **MAJ-5** | `daemon/tools/upgrade_tools.py:1456`, `:1504`; `daemon/tools/upgrade_journal.py:2604`, `:2623`, `:2665-2667` | Classified **`restart`** explicitly in JT-3 (and §7 EC-13 / §6.3) as **restart-lane authoritative, promote-excluded**: excluded from `_TERMINAL_EVENTS` (never closes a promote `pending_op`), included in `_TERMINAL_OUTCOME_EVENTS` and `PROMOTE_WAKE_TERMINAL_EVENTS`, rendering `"restarted (intentional)"` for restart runs while excluded from promote-outcome precedence so a subsequent `restart` does not mask an earlier `commit`. |
+| **MAJ-6** | §6.0 S4 (`_terminal_event_after` + `WAKE_EXCLUDED_EVENTS` reader-decision change) | Moved **A-2** from **§6.1 (a)** to **§6.2 (b)** as **B-11** (next free `B-` number; `B-10` already taken), and propagated across §6.0 S4, §6.1 (A-1 dependency note, test-timing gate, Explicitly-NOT-in-(a) list), §6.2 (new B-11 row), §6.3 (`A-1 / B-11` verification row), §6.4 scorecard + reading (including retiring the false "(a) contributes display and vocabulary" claim), and Appendix A. Stated plainly that the (a) slot is **A-1, A-4, A-5, A-6, A-7, A-8** (A-3→B-10, A-2→B-11), and if the staged stack is already frozen nothing in (a) can ride it and all four commission items remain next-release work. EC-13 framing kept intact. |
+
+### MINOR items (12/12 landed)
+
+| Item | Code / doc verification | Fix applied |
+|---|---|---|
+| **m-1** | `daemon/tools/upgrade_tools.py:1262-1270` (`_probe_self`), `:1989` (`journal_history_append(..., "refusal", ...)`), `upgrade_journal.py:2537-2540` (stale comment) | Fixed the refusal-writer citation from `:1268` to `:1989` (noting `:1262-1270` is `_probe_self` and `upgrade_journal.py:2539` repeats a stale comment) in §0.20(i), JT-1, and §7 EC-14. |
+| **m-2** | §4.1 | Removed the duplicated phrase `"The docstring at the docstring at"` → `"The docstring at"`. |
+| **m-3** | §0.16 | Rewrote the garbled pin sentence plainly as: two known cardinality pins + two stronger full-tuple pins the design did not know. |
+| **m-4** | §3.4(3) vs EC-12.1 | Made §3.4(3) branch-aware on **EC-12** (with archive under EC-12.2/EC-12.3, archive-only under EC-12.4, operator-manual trimming without an archive under EC-12.1). |
+| **m-5** | §4.4 | Indented `deferred_now` / `deferred_total_this_boot` / `deferred_outcomes_this_boot` as sub-bullets under `Under EC-16.1`, leaving `Under EC-16.1`, `Under EC-16.2`, `Under EC-16.3` at the same nesting level under `PENDING EC-16`. |
+| **m-6** | §0.14 arithmetic | Corrected bounded MUST steps (`M`) to **≥ 80 s** of ceilings (60 + 10 + 10) and `D + P1 + M` to **≥ 150 s** (60 + 10 + 80) in §0.14, and propagated into SP-1, EC-11, and Appendix A. |
+| **m-7** | §1.1 status note | Aligned PC-1b with EC-3: aligned with EC-3.2/EC-3.3, **moot under EC-3.1** (boot aborts before either side runs), and **conflicts with EC-3.4** (degraded delete instead of disabling all sides). |
+| **m-8** | §2.5 & §6.2 B-6 | Made `last_exit` writes in §2.5 and §6.2 B-6 branch-aware on **EC-8** (`0` on clean stop / EC-8.3, non-zero crash code on EC-8.1 partial stop, dedicated code on EC-8.2 partial stop) so partial stops are not masked in `.launcher-state`. |
+| **m-9** | `revision-3-changelog.md:3` | Updated changelog header from `branch design/boot-restart-semantics @ d7c15d45f` to `branch design/boot-restart-semantics @ 50a1a5254, parent origin/latest 55c9d5a10`. |
+| **m-10** | `origin/fix/boot-purge-predicate-failclosed:daemon/repositories/message_queue/repository.py:184-216` (`_orphan_error_column_available`) | Pinned the belt-armed condition (`_orphan_error_column_available == True`) and added a positive control (`rowcount >= 1` when an unpreserved PENDING task's message is deleted) in §1.5(a), §6.2 B-1, and §6.3 B-1. |
+| **m-11** | `origin/fix/boot-purge-predicate-failclosed:daemon/manager.py:689` vs `:1693` & `daemon/api.py:311-345` | Added typed-guard asymmetry as **O10** in §1.3 and propagated into §1.9 EC-3.1 (and §7 EC-3): non-predicate DB errors in the task wipe already abort boot today. |
+| **m-12** | §4.6 EC-17.1 vs RA-5 | Aligned EC-17.1 wording from "the row stays open" to "left open at process death and closed at the next boot by the RA-5 owner as `outcome=unknown`". |
