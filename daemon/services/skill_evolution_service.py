@@ -2388,16 +2388,21 @@ class SkillEvolutionService:
         variants — the ``skills`` row counters the serving/feedback
         paths bump) AND pair age >= the stall timeout.
 
-        WHY NOT ``comparisons``: ``SkillABTest.comparisons`` is bumped
-        by exactly ONE site — ``increment_comparison`` — whose only
-        caller is the INJECTION/serving selector
-        (``skill_injection_service._select_ab_variant``). It is NOT
-        bumped by ``record_feedback`` / ``record_task_completion`` /
-        any feedback path, so a pair can carry real feedback traffic
-        with ``comparisons == 0`` (the live 98c3e028 shape). The old
-        ``comparisons == 0`` criterion therefore meant "never SERVED",
-        not "no traffic". A pair with traffic on EITHER arm is never
-        listed here.
+        WHY ``comparisons`` is now a (second) signal: ``SkillABTest.
+        comparisons`` is bumped by exactly ONE site —
+        ``increment_comparison`` — whose only caller is the
+        INJECTION/serving selector (``skill_injection_service.
+        _select_ab_variant``). It is NOT bumped by ``record_feedback``
+        / ``record_task_completion`` / any feedback path, so a pair
+        can carry real feedback traffic with ``comparisons == 0`` (the
+        live 98c3e028 shape). ``comparisons`` alone is therefore NOT
+        sufficient evidence of serving — a feedback-bearing pair can
+        have ``comparisons == 0``. Both-arms-zero remains the PRIMARY
+        signal (a pair with traffic on EITHER arm is never listed
+        here); ``comparisons == 0`` is a further NECESSARY condition,
+        not a sufficient one. Adding it makes the predicate strictly
+        MORE conservative: a pair with real traffic still has non-zero
+        arm counters and is still excluded.
 
         Absent arm row (row deleted / desynced): no counters exist, so
         the pair is NOT traffic-bearing by this predicate — it is
@@ -2450,19 +2455,35 @@ class SkillEvolutionService:
         return stalled
 
     def _pair_has_traffic(self, ab_test: Any) -> bool:
-        """F5 — the BOTH-ARMS-ZERO traffic predicate.
+        """F5 (M-1 follow-up) — the ONE shared traffic predicate.
 
-        A pair is traffic-bearing when EITHER arm's ``skills`` row
-        reports ``total_selections > 0`` OR ``total_applied > 0``. The
-        stall rule requires BOTH arms at ZERO on BOTH counters — an
-        either-arm-zero reading (e.g. "the OLD arm is idle ⇒ stalled")
-        would let a pair with real challenger traffic resolve.
+        A pair counts as stalled ONLY when BOTH arms have
+        ``total_selections == 0`` AND ``total_applied == 0`` (the
+        serving/feedback counters the arms' ``skills`` rows carry) —
+        that is a NECESSARY condition, not a sufficient one. The
+        pair's OWN ``comparisons`` counter is an ADDITIONAL, further
+        necessary traffic signal: a pair with ``comparisons != 0`` is
+        traffic-bearing (injection-side serving moved) and is therefore
+        NOT stalled.
 
         Counter source: :meth:`SkillRepository.get_arm_traffic` (the
         dedicated read-only counter surface). A MISSING arm row yields
-        no counters ⇒ not traffic-bearing here (the E-6 rule parks
-        such a pair downstream, so it can never resolve unverified).
+        no counters ⇒ not traffic-bearing on the arm side (the E-6
+        rule parks such a pair downstream, so it can never resolve
+        unverified).
+
+        ``comparisons`` alone is NOT sufficient evidence of serving —
+        a pair can carry feedback traffic with ``comparisons == 0``
+        (the live 98c3e028 shape) — so both-arms-zero remains the
+        PRIMARY signal and ``comparisons == 0`` is a further NECESSARY
+        condition, not a sufficient one. Adding ``comparisons`` makes
+        the predicate strictly MORE conservative: a pair with real
+        traffic still has non-zero arm counters and is still excluded.
         """
+        # The pair's own comparisons counter is a (second) traffic
+        # signal: injection-side serving moved ⇒ not stalled.
+        if int(getattr(ab_test, "comparisons", 0) or 0) != 0:
+            return True
         for attr in ("skill_id_old", "skill_id_new"):
             arm_id = str(getattr(ab_test, attr, "") or "")
             if not arm_id:
@@ -2495,12 +2516,13 @@ class SkillEvolutionService:
         Covers both stalled shapes with two explicit bases:
 
         * ``basis="stalled"`` — the ZERO-TRAFFIC stall. Enforced in
-          code (F5, 2026-11-26): BOTH ARMS at zero traffic —
-          ``total_selections == 0`` AND ``total_applied == 0`` on both
-          ``skills`` rows (the serving/feedback counters; NOT
-          ``SkillABTest.comparisons``, which only tracks injection-side
-          serving and stays 0 on a feedback-bearing pair) — AND age >=
-          ``ab_stall_timeout_days``. Winner by E-6 (newer GENERATION
+          code (F5, M-1 follow-up, 2026-11-27): BOTH ARMS at zero
+          traffic — ``total_selections == 0`` AND ``total_applied == 0``
+          on both ``skills`` rows (the serving/feedback counters) —
+          AND the pair's OWN ``comparisons == 0`` — AND age >=
+          ``ab_stall_timeout_days``. ``comparisons`` is a further
+          NECESSARY condition, not a sufficient one (a feedback-
+          bearing pair can carry comparisons == 0). Winner by E-6 (newer GENERATION
           NUMBER wins; never timestamps). Generation tie ⇒ PARK +
           SURFACE (anomaly row, no mutation). A defective-divert
           (``defective_arm_id``) may be supplied EXPLICITLY by the
@@ -2602,12 +2624,15 @@ class SkillEvolutionService:
             stall_timeout_days = float(
                 getattr(self._config, "ab_stall_timeout_days", 7.0) or 7.0
             )
-            # F5 (2026-11-26): the traffic signal is the ARMS' SERVING
-            # counters (``total_selections`` / ``total_applied`` on the
-            # ``skills`` rows), NOT ``SkillABTest.comparisons`` — the
-            # latter only tracks injection-side serving and stays 0 on
-            # a feedback-bearing pair (the 98c3e028 shape). A pair with
-            # traffic on EITHER arm is refused here — the SAME
+            # F5 (M-1 follow-up, 2026-11-27): the traffic signal is
+            # the ARMS' SERVING counters (``total_selections`` /
+            # ``total_applied`` on the ``skills`` rows) — the PRIMARY
+            # signal — PLUS the pair's OWN ``comparisons`` counter as
+            # a further NECESSARY condition (injection-side serving
+            # moved). ``comparisons`` alone is NOT sufficient (a
+            # feedback-bearing pair can carry comparisons == 0, the
+            # 98c3e028 shape), so both-arms-zero stays primary. A pair
+            # with traffic on EITHER arm is refused here — the SAME
             # BOTH-ARMS-ZERO predicate ``find_stalled_ab_tests`` uses
             # (both enforcement sites move together; changing only one
             # would let a traffic-bearing pair through the other).
@@ -2615,7 +2640,9 @@ class SkillEvolutionService:
                 raise ValueError(
                     f"stalled basis refused: ab_test_group "
                     f"{ab_test_group!r} is traffic-bearing "
-                    "(reason=traffic_bearing)"
+                    "(reason=traffic_bearing) — the pair's arms carry "
+                    "traffic (total_selections/total_applied) or its "
+                    "comparisons counter is non-zero"
                 )
             age_days = self._ab_pair_age_days(ab_test)
             if age_days < stall_timeout_days:
@@ -2708,15 +2735,16 @@ class SkillEvolutionService:
         # * CAS predicate: ``resolved_at IS NULL`` ALWAYS, plus
         #   ``comparisons = 0`` on the ``stalled`` basis (the
         #   zero-SERVING guard — a pair whose injection counter moved
-        #   since it was read loses the CAS). NOTE (F5, 2026-11-26):
-        #   the ADMISSION predicate for the stalled basis is the
-        #   BOTH-ARMS-ZERO traffic check above (the arms'
-        #   ``total_selections``/``total_applied``); the CAS's
-        #   ``comparisons = 0`` term is retained as a second,
-        #   independent exactly-once/serving guard — it is strictly
-        #   WEAKER than the traffic predicate (comparisons only tracks
-        #   injection-side serving), so it can never admit a pair the
-        #   traffic check refused.
+        #   since it was read loses the CAS). NOTE (F5, M-1 follow-up,
+        #   2026-11-27): the ADMISSION predicate now ALSO requires
+        #   ``comparisons == 0`` (the traffic predicate requires it),
+        #   so every traffic-admitted pair necessarily satisfies the
+        #   CAS's ``comparisons = 0`` term. The CAS term is therefore
+        #   NOT a second traffic gate — it is an independent
+        #   exactly-once / race-window guard for the interval between
+        #   the pair read and the CAS. A pair whose ``comparisons``
+        #   counter moved in that window loses the CAS even though it
+        #   passed admission.
         #   The ``defective_arm`` basis is an OPERATOR-named retirement
         #   of a possibly traffic-bearing pair, so it keeps the
         #   ``resolved_at IS NULL`` predicate alone; forcing

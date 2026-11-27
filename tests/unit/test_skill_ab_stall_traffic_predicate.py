@@ -415,3 +415,59 @@ class TestMissingArmDecision:
         assert survivor.status == "ab_testing"
         assert survivor.is_active is True
         assert ab_test_repo.get_by_group("g-missing-arm").resolved_at is None
+
+
+# ── M-1 follow-up: comparisons joins the ONE shared predicate ────────────
+
+
+class TestComparisonsJoinsPredicate:
+    @pytest.mark.asyncio
+    async def test_site_a_comparisons_nonzero_not_listed(
+        self, svc, skill_repo, ab_test_repo
+    ):
+        """A pair with comparisons=3 but BOTH arms at zero traffic is
+        NOT listed (comparisons is now a traffic signal too)."""
+        _make_pair(
+            skill_repo,
+            ab_test_repo,
+            group="g-cmp-site-a",
+            comparisons=3,
+            old_traffic=(0, 0),
+            new_traffic=(0, 0),
+        )
+
+        stalled = await svc.find_stalled_ab_tests()
+
+        assert all(
+            entry["ab_test_group"] != "g-cmp-site-a" for entry in stalled
+        ), f"comparisons!=0 pair must not be listed — got {stalled!r}"
+
+    @pytest.mark.asyncio
+    async def test_site_b_comparisons_nonzero_not_resolved(
+        self, svc, skill_repo, ab_test_repo
+    ):
+        """The same pair is REFUSED at the sanctioned resolver —
+        ValueError, NOTHING mutated."""
+        old, new = _make_pair(
+            skill_repo,
+            ab_test_repo,
+            group="g-cmp-site-b",
+            old_gen=0,
+            new_gen=1,
+            age_days=30.0,
+            comparisons=3,
+            old_traffic=(0, 0),
+            new_traffic=(0, 0),
+        )
+
+        with pytest.raises(ValueError):
+            await svc.resolve_ab_test_sanctioned(
+                "g-cmp-site-b", basis="stalled", reason="sweep",
+            )
+
+        for row_id in (old.id, new.id):
+            row = skill_repo.get(row_id)
+            assert row.status == "ab_testing"
+            assert row.is_active is True
+            assert row.ab_test_group == "g-cmp-site-b"
+        assert ab_test_repo.get_by_group("g-cmp-site-b").resolved_at is None
