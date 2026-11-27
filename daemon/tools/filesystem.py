@@ -49,6 +49,17 @@ READ_SCOPE_REFUSAL_EVENT = "read_scope_refusal"
 #: Same for the silent candidate drop (denied basenames / symlinks).
 READ_SCOPE_DROP_TOKEN = "READ_SCOPE_CANDIDATE_DROP"
 READ_SCOPE_DROP_EVENT = "read_scope_candidate_drop"
+#: Journal level for the scoped-refusal + candidate-drop lines.
+#:
+#: WHY WARNING, not INFO (MEASURED 2026-11-26 on the live install,
+#: v0.31.59, systemd unit ensemble-main.service): the live effective
+#: thresholds are root=INFO, `daemon`=INFO, journal handler=INFO, file
+#: handler=INFO — INFO sits EXACTLY ON THE FLOOR. If LOG_LEVEL_DAEMON or
+#: LOG_LEVEL is ever set to `warning`, INFO is erased from BOTH sinks and
+#: the failure this fix repairs (a refusal nobody can count) silently
+#: reappears. WARNING is the house refusal convention AND survives that
+#: tightening — strictly better on evidence, not merely on convention.
+SCOPE_REFUSAL_LOG_LEVEL: int = logging.WARNING
 #: Marker for the always-present read-surface disclosure block. Deliberately
 #: DISTINCT from "⚠ Search incomplete" (that banner means a cap FIRED).
 #: Each block line starts with "---" so existing result-line parsers that
@@ -507,15 +518,16 @@ def _trusted_scope_anchor() -> Path | None:
 
 
 def _log_scope_refusal(reason: str) -> tuple[None, str]:
-    """Log ONE scoped refusal at INFO and return the refusal tuple.
+    """Log ONE scoped refusal at WARNING and return the refusal tuple.
 
     Single choke point for all five authored refusal strings in
     :func:`_resolve_within_scope` — a refused call emits exactly one
     journal line, never one per check. Content is NEVER logged: only the
     agent id, tool name, and a short reason token.
     """
-    logger.info(
-        "%s agent=%s tool=%s reason=%s",
+    logger.log(
+        SCOPE_REFUSAL_LOG_LEVEL,
+        "read scope refused: %s agent=%s tool=%s reason=%s",
         READ_SCOPE_REFUSAL_TOKEN,
         current_caller_agent_id() or "unknown",
         current_read_tool_name(),
@@ -816,7 +828,8 @@ def _scope_filter_candidates(
         # F9: ONE journal line per CALL with the COUNT — never one line per
         # dropped file (a large tree could otherwise flood the journal).
         # No file NAMES or CONTENT are logged.
-        logger.info(
+        logger.log(
+            SCOPE_REFUSAL_LOG_LEVEL,
             "%s agent=%s tool=%s dropped=%d candidates=%d reason=denied-basename-or-symlink",
             READ_SCOPE_DROP_TOKEN,
             current_caller_agent_id() or "unknown",

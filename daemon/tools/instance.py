@@ -2533,6 +2533,7 @@ def _make_read_scope_aware(
     from .filesystem import (
         READ_SCOPE_REFUSAL_EVENT,
         READ_SCOPE_REFUSAL_TOKEN,
+        SCOPE_REFUSAL_LOG_LEVEL,
         declared_read_scope,
         reset_caller_agent_id,
         reset_current_read_tool_name,
@@ -2572,11 +2573,12 @@ def _make_read_scope_aware(
         if supplied_workdir is None or not str(supplied_workdir).strip():
             return None
         anchor = get_trusted_workdir()
-        # F9: ONE INFO line per refused call, with agent id, tool name and
+        # F9: ONE WARNING line per refused call, with agent id, tool name and
         # the reason. No file CONTENT is logged (and the workdir value is
         # deliberately omitted — the reason token is enough to count).
-        logger.info(
-            "%s agent=%s tool=%s reason=agent-supplied-workdir anchor=%s",
+        logger.log(
+            SCOPE_REFUSAL_LOG_LEVEL,
+            "read scope refused: %s agent=%s tool=%s reason=agent-supplied-workdir anchor=%s",
             READ_SCOPE_REFUSAL_TOKEN,
             agent_id or "unknown",
             tool_name,

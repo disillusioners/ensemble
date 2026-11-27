@@ -7,7 +7,7 @@ Covers the seven accepted sub-items of the skill-evolution R1 front-door fix:
 (c) ``grep_files(fixed_string=True)`` (literal mode, composed with
     ``whole_word`` / ``case_sensitive``; regex mode unchanged),
 (d) explicit tool-specific FILE-as-path refusals,
-(e) INFO journal lines for scoped refusals and the silent candidate drop.
+(e) WARNING journal lines for scoped refusals and the silent candidate drop.
 
 Hermetic: tmp_path trees only; ``git init`` here is a TEST fixture, not a
 daemon tool-layer subprocess. No DB, no network, no live install paths.
@@ -480,7 +480,7 @@ def _records(caplog, event: str):
 
 
 class TestRefusalLogging:
-    def test_instance_scope_refusal_logs_once_at_info(self, scope_env, caplog):
+    def test_instance_scope_refusal_logs_once_at_warning(self, scope_env, caplog):
         """The live-observed 'workdir argument' refusal, via the real factory."""
         from daemon.tools.instance import create_instance_tools
 
@@ -497,7 +497,7 @@ class TestRefusalLogging:
                 getattr(t, "name", None): t
                 for t in create_instance_tools(manager, "inst-f9", agent_id="skill-keeper")
             }
-            caplog.set_level(logging.INFO, logger="daemon.tools.instance")
+            caplog.set_level(logging.WARNING, logger="daemon.tools.instance")
             result = tools["grep_files"].invoke(
                 {"pattern": "x", "path": ".", "workdir": "/"}
             )
@@ -507,14 +507,14 @@ class TestRefusalLogging:
         records = _records(caplog, fs.READ_SCOPE_REFUSAL_EVENT)
         assert len(records) == 1, f"expected ONE refusal log line: {caplog.text}"
         rec = records[0]
-        assert rec.levelno == logging.INFO
+        assert rec.levelno == logging.WARNING
         assert fs.READ_SCOPE_REFUSAL_TOKEN in rec.getMessage()
         assert "agent=skill-keeper" in rec.getMessage()
         assert "tool=grep_files" in rec.getMessage()
         assert "reason=agent-supplied-workdir" in rec.getMessage()
 
-    def test_filesystem_scope_refusal_logs_once_at_info(self, scope_env, caplog):
-        caplog.set_level(logging.INFO, logger="daemon.tools.filesystem")
+    def test_filesystem_scope_refusal_logs_once_at_warning(self, scope_env, caplog):
+        caplog.set_level(logging.WARNING, logger="daemon.tools.filesystem")
         with scope_env("read_file") as anchor:
             result = fs.read_file.invoke(
                 {"path": str(anchor / "outside.txt"), "workdir": str(anchor)}
@@ -523,14 +523,14 @@ class TestRefusalLogging:
         records = _records(caplog, fs.READ_SCOPE_REFUSAL_EVENT)
         assert len(records) == 1, f"expected ONE refusal log line: {caplog.text}"
         rec = records[0]
-        assert rec.levelno == logging.INFO
+        assert rec.levelno == logging.WARNING
         assert fs.READ_SCOPE_REFUSAL_TOKEN in rec.getMessage()
         assert "agent=skill-keeper" in rec.getMessage()
         assert "tool=read_file" in rec.getMessage()
         assert "reason=" in rec.getMessage()
 
     def test_silent_candidate_drop_logged_once_with_count(self, scope_env, caplog, tmp_path):
-        caplog.set_level(logging.INFO, logger="daemon.tools.filesystem")
+        caplog.set_level(logging.WARNING, logger="daemon.tools.filesystem")
         with scope_env("glob_files") as anchor:
             (anchor / "ok.txt").write_text("fine\n", encoding="utf-8")
             (anchor / ".env").write_text(f"SECRET={CANARY}\n", encoding="utf-8")
@@ -548,7 +548,7 @@ class TestRefusalLogging:
         records = _records(caplog, fs.READ_SCOPE_DROP_EVENT)
         assert len(records) == 1, f"expected ONE drop log line: {caplog.text}"
         rec = records[0]
-        assert rec.levelno == logging.INFO
+        assert rec.levelno == logging.WARNING
         assert fs.READ_SCOPE_DROP_TOKEN in rec.getMessage()
         assert "dropped=3" in rec.getMessage()
         assert "agent=skill-keeper" in rec.getMessage()
@@ -561,3 +561,123 @@ class TestRefusalLogging:
             (anchor / "ok.txt").write_text("fine\n", encoding="utf-8")
             fs.glob_files.invoke({"pattern": "*", "path": "."})
         assert _records(caplog, fs.READ_SCOPE_DROP_EVENT) == []
+
+    def test_operator_count_regex_matches_both_refusals_not_the_drop(
+        self, scope_env, caplog
+    ):
+        """The mandated journalctl grep counts BOTH refusals, never the drop.
+
+        Proven gap (2026-11-26): the operator's
+        ``grep -cE ' - daemon\\.tools\\.(filesystem|instance) - (INFO|WARNING) - .*read scope'``
+        matched only 1 of 3 lines because the lowercase phrase ``read scope``
+        lived inside the filesystem refusal's ``reason=`` text by accident.
+        The phrase must be a property of the MESSAGE, so the live-observed
+        instance.py workdir refusal is counted too, while the candidate drop
+        (which has its own token + command) stays out of the refusal count.
+        """
+        import re
+
+        from daemon.tools.instance import create_instance_tools
+
+        operator_re = re.compile(
+            r" - daemon\.tools\.(filesystem|instance) - (INFO|WARNING) - .*read scope"
+        )
+        caplog.set_level(logging.WARNING, logger="daemon.tools.instance")
+        caplog.set_level(logging.WARNING, logger="daemon.tools.filesystem")
+
+        def _journal_line(rec):
+            # Same shape as `journalctl -o cat`: " - <logger> - <LEVEL> - <msg>".
+            return (
+                f" - {rec.name} - {logging.getLevelName(rec.levelno)} - "
+                f"{rec.getMessage()}"
+            )
+
+        # (i) the LIVE-OBSERVED instance.py agent-supplied-workdir refusal.
+        with scope_env("grep_files") as anchor:
+            manager = MagicMock()
+            manager.config = SimpleNamespace(llm=SimpleNamespace(allowed_models=[]))
+            meta = MagicMock()
+            meta.project_id = "proj-f9"
+            manager._instance_repository.get = MagicMock(return_value=meta)
+            project = MagicMock()
+            project.main_directory = str(anchor)
+            manager._project_repository.get = MagicMock(return_value=project)
+            tools = {
+                getattr(t, "name", None): t
+                for t in create_instance_tools(
+                    manager, "inst-f9", agent_id="skill-keeper"
+                )
+            }
+            inst_result = tools["grep_files"].invoke(
+                {"pattern": "x", "path": ".", "workdir": "/"}
+            )
+        assert inst_result.startswith("ERROR: read scope")
+
+        # (ii) the filesystem.py scoped-refusal.
+        with scope_env("read_file") as anchor:
+            fs_result = fs.read_file.invoke(
+                {"path": str(anchor / "outside.txt"), "workdir": str(anchor)}
+            )
+        assert fs_result.startswith("ERROR: read scope")
+
+        # (iii) the candidate drop — denied basename, no symlink needed.
+        with scope_env("glob_files") as anchor:
+            (anchor / "ok.txt").write_text("fine\n", encoding="utf-8")
+            (anchor / ".env").write_text(f"SECRET={CANARY}\n", encoding="utf-8")
+            drop_result = fs.glob_files.invoke({"pattern": "*", "path": "."})
+        assert "ok.txt" in drop_result
+
+        inst_lines = [
+            _journal_line(r)
+            for r in _records(caplog, fs.READ_SCOPE_REFUSAL_EVENT)
+            if r.name == "daemon.tools.instance"
+        ]
+        fs_lines = [
+            _journal_line(r)
+            for r in _records(caplog, fs.READ_SCOPE_REFUSAL_EVENT)
+            if r.name == "daemon.tools.filesystem"
+        ]
+        drop_lines = [
+            _journal_line(r) for r in _records(caplog, fs.READ_SCOPE_DROP_EVENT)
+        ]
+
+        assert len(inst_lines) == 1, f"instance refusal lines: {inst_lines}"
+        assert len(fs_lines) == 1, f"filesystem refusal lines: {fs_lines}"
+        assert len(drop_lines) == 1, f"candidate drop lines: {drop_lines}"
+
+        # BOTH refusals match the operator's count regex; the drop does NOT.
+        assert operator_re.search(inst_lines[0]), inst_lines[0]
+        assert operator_re.search(fs_lines[0]), fs_lines[0]
+        assert not operator_re.search(drop_lines[0]), drop_lines[0]
+
+        # Every refusal line carries the stable ALL-CAPS token.
+        assert fs.READ_SCOPE_REFUSAL_TOKEN in inst_lines[0]
+        assert fs.READ_SCOPE_REFUSAL_TOKEN in fs_lines[0]
+
+    def test_level_constant_is_single_warning_definition(self):
+        """ONE named constant, == WARNING, used at all three log sites."""
+        import inspect
+        import re
+
+        from daemon.tools import instance as inst
+
+        assert fs.SCOPE_REFUSAL_LOG_LEVEL == logging.WARNING
+
+        # The level is passed via the constant at every site (never a literal
+        # INFO/WARNING at a call site) and no bare logger.info() survives.
+        uses_constant = re.compile(r"logger\.log\(\s*SCOPE_REFUSAL_LOG_LEVEL,")
+
+        # filesystem.py: both sites use the constant, no bare logger.info.
+        fs_refusal_src = inspect.getsource(fs._log_scope_refusal)
+        assert uses_constant.search(fs_refusal_src)
+        assert "logger.info(" not in fs_refusal_src
+        fs_drop_src = inspect.getsource(fs._scope_filter_candidates)
+        assert uses_constant.search(fs_drop_src)
+        assert "logger.info(" not in fs_drop_src
+
+        # instance.py: imports the SAME constant from filesystem, uses it at
+        # its one refusal site, with no hardcoded INFO/literal level there.
+        inst_factory_src = inspect.getsource(inst._make_read_scope_aware)
+        assert "SCOPE_REFUSAL_LOG_LEVEL," in inst_factory_src
+        assert uses_constant.search(inst_factory_src)
+        assert "logger.info(" not in inst_factory_src
