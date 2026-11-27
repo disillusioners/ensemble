@@ -121,6 +121,19 @@ class TestAnchorCommitDisclosure:
         assert "commit: UNKNOWN (not a git checkout)" in result
         assert "⚠ Search incomplete" not in result
 
+    def test_offset_past_end_result_carries_the_footer(self, scope_env):
+        """m-5: the offset-past-end branch (a hit set that pagination
+        empties) carries the footer too — the ONE walk-tool return path
+        that was missing it."""
+        with scope_env("glob_files") as anchor:
+            (anchor / "inside.txt").write_text("inside\n", encoding="utf-8")
+            result = fs.glob_files.invoke(
+                {"pattern": "*.txt", "path": ".", "offset": 999}
+            )
+        assert "No files matching pattern: *.txt" in result
+        assert fs.READ_SURFACE_MARKER in result
+        assert f"search root: {anchor}" in result
+
     def test_grep_no_match_states_root_anchor_and_commit(self, scope_env):
         with scope_env("grep_files") as anchor:
             result = fs.grep_files.invoke(

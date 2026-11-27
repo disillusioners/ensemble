@@ -1554,8 +1554,11 @@ def glob_files(
 
         if not result:
             if truncation_notice:
-                return f"No files matching pattern: {pattern}{truncation_notice}"
-            return f"No files matching pattern: {pattern}"
+                return (
+                    f"No files matching pattern: {pattern}"
+                    f"{truncation_notice}{surface}"
+                )
+            return f"No files matching pattern: {pattern}{surface}"
 
         content = "\n".join(result)
 
