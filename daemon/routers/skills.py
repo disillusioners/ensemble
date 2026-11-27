@@ -1958,7 +1958,9 @@ async def list_stalled_ab_tests(
     """C2: list unresolved A/B pairs in the stalled shape.
 
     Read-only surfacing for the sweep + the post-promote
-    pending-wiring backlog: ``comparisons == 0`` AND age >=
+    pending-wiring backlog: BOTH ARMS at zero traffic
+    (``total_selections == 0`` AND ``total_applied == 0`` on both
+    variants) AND ``comparisons == 0``, AND age >=
     ``ab_stall_timeout_days``. Each entry carries the E-6 default
     winner (by GENERATION NUMBER) or a ``park_reason`` when the rule
     cannot decide. Never mutates.
