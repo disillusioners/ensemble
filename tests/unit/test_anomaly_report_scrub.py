@@ -241,8 +241,16 @@ PLANTED_TOOL_MESSAGE = (
 @pytest.fixture(autouse=True)
 def _scrubber_present(monkeypatch):
     """A value scrubber is present unless a leg says otherwise."""
+
+    class _PresentScrubber:
+        def is_effective(self) -> bool:
+            return True
+
+        def _current_rows(self):
+            return []
+
     monkeypatch.setattr(
-        anomaly_service, "get_process_scrubber", lambda: object(), raising=True
+        anomaly_service, "get_process_scrubber", lambda: _PresentScrubber(), raising=True
     )
 
 
@@ -842,14 +850,27 @@ class TestTheAcceptPathContract:
 
 # ── Iteration-2 pins (T-a..T-e + GAP-2) ──────────────────────────────
 import re as _re
+import uuid
 
 
 class _BrokenScrubber:
+    """Legacy-shaped (no probe, no load path) scrubber: ineffective under
+    the fail-closed legacy branch, effective only when that branch is
+    (incorrectly) restored. Exercises the H3 fail-closed contract.
+    """
+    pass
+
+
+class _ProbeFalseScrubber:
+    """Probe-present-but-false scrubber: exercises the
+    ``callable(probe) -> bool(probe()) == False`` branch of
+    ``_scrubber_effective`` (D2 coverage)."""
+
     def is_effective(self) -> bool:
         return False
 
     def _current_rows(self):
-        raise RuntimeError("store down")
+        return []
 
 
 class _ToctouScrubber:
@@ -914,7 +935,31 @@ class TestIteration2Pins:
             assert _re.match(r"__ENS_REDACTED__[0-9a-f]{12}__", tail), (
                 f"bisected token: {tail[:40]!r}"
             )
+        # H7: widen the bisect guard to cover the legacy handle prefix too,
+        # so a token swap leaves a *partial* forbidden token that this
+        # guard catches (the full-pattern search below cannot, because a
+        # bisected token never matches).
+        for m in _re.finditer(r"__ENS_SECRET", out):
+            tail = out[m.start():]
+            assert _re.match(r"__ENS_SECRET__[0-9a-f-]{36}__", tail), (
+                f"bisected legacy handle: {tail[:40]!r}"
+            )
         assert _re.search(r"__ENS_SECRET__[0-9a-f-]{36}__", out) is None, out
+        reset_process_registry()
+
+    # H1 (INV-3 storage-absolute): a supplied legacy marker is stripped
+    # on EVERY stored path, including when NO secret is registered (so
+    # the _anomaly_exact_scrub early-return hazard is covered).
+    def test_h1_supplied_legacy_marker_stripped(self) -> None:
+        from daemon.services.secret_persistence_scrub import reset_process_registry
+
+        reset_process_registry()
+        marker = "__ENS_SECRET__" + str(uuid.uuid4()) + "__"
+        content = "before " + marker + " after"
+        # No secret registered -> scrubber is None; strip must still fire.
+        out, _ = scrub_text(content, 1000, mark_truncated=False)
+        assert "__ENS_SECRET__" not in out, out
+        assert "before" in out and "after" in out, out
         reset_process_registry()
 
     # T-d
@@ -992,6 +1037,7 @@ class TestIteration2Pins:
             row = s.get(AnomalyReport, result.report_id)
             s.expunge(row)
         excerpt = row.excerpt
+        assert excerpt is not None
         if excerpt is not None:
             for i in range(len(secret) - 7):
                 gram = secret[i : i + 8]
@@ -1058,9 +1104,10 @@ class TestIteration2Pins:
         monkeypatch.setattr(_sps, "get_process_scrubber", lambda: _BrokenScrubber(), raising=True)
         monkeypatch.setattr(anomaly_service, "get_process_scrubber", lambda: _BrokenScrubber(), raising=True)
         out, _ = scrub_text("hello world", 100, mark_truncated=False)
-        from daemon.services.anomaly_service import SCRUB_UNAVAILABLE_PLACEHOLDER
+        from daemon.services.anomaly_service import scrub_unavailable_placeholder
 
-        assert out == SCRUB_UNAVAILABLE_PLACEHOLDER
+        assert out == scrub_unavailable_placeholder(len("hello world"))
+        assert "{n}" not in out
         reset_process_registry()
 
     # INV-2 closure pin: exception path yields placeholder, not plaintext.
@@ -1075,17 +1122,169 @@ class TestIteration2Pins:
         )
         raw = "supersecret-plaintext-payload"
         out, truncated = scrub_text(raw, 100, mark_truncated=False)
-        from daemon.services.anomaly_service import SCRUB_UNAVAILABLE_PLACEHOLDER
+        from daemon.services.anomaly_service import scrub_unavailable_placeholder
 
-        assert out == SCRUB_UNAVAILABLE_PLACEHOLDER, out
+        assert out == scrub_unavailable_placeholder(len(raw)), out
+        assert "{n}" not in out
         assert raw not in out
         assert truncated is True
+        reset_process_registry()
+
+    # H5: a secret whose plaintext equals REDACTED (a substring of the
+    # emitted token prefix) must not corrupt an already-emitted token,
+    # and its ordinary occurrences are still redacted.
+    def test_h5_secret_does_not_rescrub_inside_emitted_token(self) -> None:
+        from daemon.services.secret_persistence_scrub import register_secret_service, reset_process_registry
+        from sqlalchemy import create_engine
+        from sqlmodel import SQLModel
+        from daemon.services.secret_service import SecretService, SecretCipher
+        from cryptography.fernet import Fernet
+
+        reset_process_registry()
+        fernet_key = Fernet.generate_key().decode()
+        eng = create_engine("sqlite:///:memory:")
+        SQLModel.metadata.create_all(eng)
+        svc = SecretService(engine=eng, cipher=SecretCipher(encryption_key=fernet_key))
+        val_foo = "longsecretvalue"  # longer -> processed first, emits token containing REDACTED
+        val_redacted = "REDACTED"
+        id_foo = svc.store(name="foo", kind="generic", value=val_foo, actor="tester")["id"]
+        id_redacted = svc.store(name="redacted", kind="generic", value=val_redacted, actor="tester")["id"]
+        register_secret_service(svc)
+
+        import hashlib
+        token_foo = "__ENS_REDACTED__" + hashlib.sha256(id_foo.encode()).hexdigest()[:12] + "__"
+        content = val_foo + " " + val_redacted
+        out, _ = scrub_text(content, 1000, mark_truncated=False)
+        # foo's token must survive intact (not corrupted by the REDACTED pass).
+        assert token_foo in out, out
+        # REDACTED's ordinary occurrence is redacted (its token present).
+        token_redacted = "__ENS_REDACTED__" + hashlib.sha256(id_redacted.encode()).hexdigest()[:12] + "__"
+        assert token_redacted in out, out
+        reset_process_registry()
+
+    # D2: probe-present-but-false scrubber ⇒ withheld (fail-closed),
+    # both for authored fields and the excerpt.
+    def test_d2_probe_false_scrubber_withheld(self, monkeypatch) -> None:
+        import daemon.services.secret_persistence_scrub as _sps
+
+        monkeypatch.setattr(_sps, "get_process_scrubber", lambda: _ProbeFalseScrubber(), raising=True)
+        monkeypatch.setattr(anomaly_service, "get_process_scrubber", lambda: _ProbeFalseScrubber(), raising=True)
+        out, truncated = scrub_text("hello world", 100, mark_truncated=False)
+        from daemon.services.anomaly_service import scrub_unavailable_placeholder
+
+        assert out == scrub_unavailable_placeholder(len("hello world")), out
+        assert truncated is True
+        reset_process_registry()
+
+    async def test_d2_probe_false_excerpt_withheld(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(anomaly_service, "get_process_scrubber", lambda: _ProbeFalseScrubber(), raising=True)
+        from daemon.repositories.anomaly.models import AnomalyReport, AnomalyCluster
+        from sqlalchemy import create_engine
+        from sqlmodel import SQLModel
+        from daemon.services.anomaly_service import AnomalyService
+        from daemon.config import NestReportConfig
+
+        class _CM:
+            def __init__(self, msgs):
+                self.checkpointer = type("C", (), {"raw_saver": _FakeRawSaver(msgs)})()
+                self.metrics_query_provider = None
+                self._instance_repository = None
+                self._task_repo = None
+                self._job_queue_service = None
+                self._mission_record_service = None
+                self._wedge_capture_repository = None
+
+        from langchain_core.messages import ToolMessage
+
+        engine = create_engine(
+            f"sqlite:///{tmp_path / 'd2.db'}", connect_args={"check_same_thread": False}
+        )
+        SQLModel.metadata.create_all(
+            engine, tables=[AnomalyReport.__table__, AnomalyCluster.__table__]
+        )
+        tm = ToolMessage(content="ERROR: boom", tool_call_id="c1")
+        manager = _CM([tm])
+        service = AnomalyService(
+            engine, config=NestReportConfig(), manager=manager, offload=_passthrough
+        )
+        result = await service.accept_report(
+            agent_id="worker",
+            instance_id="inst-1",
+            category="tool-failure",
+            description="boom",
+            severity="major",
+        )
+        from sqlmodel import Session
+
+        with Session(engine) as s:
+            row = s.get(AnomalyReport, result.report_id)
+            s.expunge(row)
+        assert row.excerpt is None
+        reset_process_registry()
+
+    # D1: a supplied legacy marker in the raw category is stripped on
+    # every persisted site (strip-then-cap); benign categories round-trip.
+    async def test_d1_category_raw_strips_supplied_marker(self, tmp_path) -> None:
+        import uuid as _u
+        from daemon.repositories.anomaly.models import AnomalyReport, AnomalyCluster
+        from sqlalchemy import create_engine
+        from sqlmodel import SQLModel
+        from daemon.services.anomaly_service import AnomalyService
+        from daemon.config import NestReportConfig
+
+        class _CM:
+            def __init__(self, msgs):
+                self.checkpointer = type("C", (), {"raw_saver": _FakeRawSaver(msgs)})()
+                self.metrics_query_provider = None
+                self._instance_repository = None
+                self._task_repo = None
+                self._job_queue_service = None
+                self._mission_record_service = None
+                self._wedge_capture_repository = None
+
+        engine = create_engine(
+            f"sqlite:///{tmp_path / 'd1.db'}", connect_args={"check_same_thread": False}
+        )
+        SQLModel.metadata.create_all(
+            engine, tables=[AnomalyReport.__table__, AnomalyCluster.__table__]
+        )
+        marker = "__ENS_SECRET__" + str(_u.uuid4()) + "__"
+        category = "before " + marker + " after"
+        service = AnomalyService(
+            engine, config=NestReportConfig(), manager=_CM([]), offload=_passthrough
+        )
+        result = await service.accept_report(
+            agent_id="worker",
+            instance_id="inst-1",
+            category=category,
+            description="boom",
+            severity="major",
+        )
+        from sqlmodel import Session
+
+        with Session(engine) as s:
+            row = s.get(AnomalyReport, result.report_id)
+            s.expunge(row)
+        assert "__ENS_SECRET__" not in (row.category_raw or ""), row.category_raw
+        assert "before" in (row.category_raw or "") and "after" in (row.category_raw or ""), row.category_raw
+        assert len(row.category_raw or "") <= 64
+        # benign round-trip
+        result2 = await service.accept_report(
+            agent_id="worker",
+            instance_id="inst-1",
+            category="tool failure",
+            description="boom",
+            severity="major",
+        )
+        with Session(engine) as s:
+            row2 = s.get(AnomalyReport, result2.report_id)
+            s.expunge(row2)
+        assert row2.category_raw == "tool failure", row2.category_raw
         reset_process_registry()
 
     # DEFECT-3 pin: withheld case distinguishable from cap cut by stored text.
     def test_inv4_withheld_distinguishable_from_cap_cut(self, monkeypatch) -> None:
         import daemon.services.secret_persistence_scrub as _sps
-        from daemon.services.anomaly_service import SCRUB_UNAVAILABLE_PLACEHOLDER
 
         # cap-cut case (no registered scrubber -> normal path)
         out_cut, _ = scrub_text("x" * 500, 200, mark_truncated=True)
@@ -1095,7 +1294,10 @@ class TestIteration2Pins:
         monkeypatch.setattr(_sps, "get_process_scrubber", lambda: _BrokenScrubber(), raising=True)
         monkeypatch.setattr(anomaly_service, "get_process_scrubber", lambda: _BrokenScrubber(), raising=True)
         out_withheld, _ = scrub_text("hello world", 100, mark_truncated=True)
-        assert out_withheld == SCRUB_UNAVAILABLE_PLACEHOLDER
+        from daemon.services.anomaly_service import scrub_unavailable_placeholder
+
+        assert out_withheld == scrub_unavailable_placeholder(len("hello world"))
+        assert "{n}" not in out_withheld
         assert out_withheld != out_cut
         assert "withheld" in out_withheld or "unavailable" in out_withheld
         reset_process_registry()

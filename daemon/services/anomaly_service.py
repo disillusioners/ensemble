@@ -155,6 +155,10 @@ from daemon.services.job_queue_service import DISPATCH_CHAIN_KEY
 from daemon.services.secret_persistence_scrub import (
     get_process_scrubber,
 )
+from daemon.services.secret_service import (
+    ENS_SECRET_MARKER_PREFIX,
+    ENS_SECRET_MARKER_SUFFIX,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -262,9 +266,16 @@ TRUNCATION_MARKER_SHORT = "[TRUNCATED]"
 #: secret) holds even during a store outage. The report still
 #: persists; only the field is withheld (mirrors the excerpt path's
 #: withhold posture).
-SCRUB_UNAVAILABLE_PLACEHOLDER = (
-    "[REDACTED: secret scrub unavailable; field withheld]"
+SCRUB_UNAVAILABLE_PLACEHOLDER_TEMPLATE = (
+    "[REDACTED: secret scrub unavailable; field withheld; original {n} chars]"
 )
+
+
+def scrub_unavailable_placeholder(n: int) -> str:
+    """Format the withheld-field placeholder with the PRE-scrub length."""
+    return SCRUB_UNAVAILABLE_PLACEHOLDER_TEMPLATE.format(n=n)
+
+
 
 #: Non-resolvable redaction token emitted by the anomaly scrub path
 #: (R1). Replaces registered-secret plaintext in stored anomaly text.
@@ -277,6 +288,16 @@ ENS_REDACTED_TOKEN_PREFIX = "__ENS_REDACTED__"
 ENS_REDACTED_TOKEN_SUFFIX = "__"
 ENS_REDACTED_TOKEN_RE = re.compile(
     re.escape(ENS_REDACTED_TOKEN_PREFIX) + r"[0-9a-f]{12}" + re.escape(ENS_REDACTED_TOKEN_SUFFIX)
+)
+
+#: Non-anchored pattern for stripping AGENT-SUPPLIED legacy redeemable
+#: markers (``__ENS_SECRET__<uuid4>__``) from stored anomaly text (H1).
+#: Built from the same constants as ``ENS_SECRET_MARKER_RE`` but WITHOUT
+#: the ``^...$`` anchors so ``re.sub`` replaces every occurrence.
+LEGACY_SECRET_MARKER_RE = re.compile(
+    re.escape(ENS_SECRET_MARKER_PREFIX)
+    + r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    + re.escape(ENS_SECRET_MARKER_SUFFIX)
 )
 
 #: Honest-accounting marker variants. ``{raw}`` = pre-scrub length,
@@ -664,9 +685,17 @@ def _anomaly_exact_scrub(text: str, *, actor: str) -> str:
     Fail-closed (INV-2): any failure to load / probe the scrubber (or
     an ineffective/unloadable store) raises ``_ScrubUnavailableError``
     instead of returning the text unchanged. The caller (``scrub_text``)
-    maps that sentinel to ``SCRUB_UNAVAILABLE_PLACEHOLDER``. Returning
+    maps that sentinel to ``scrub_unavailable_placeholder(n)``. Returning
     the raw text on a store drop is forbidden - it would leak plaintext.
     """
+    # H1 (INV-3 STORAGE-ABSOLUTE): strip every AGENT-SUPPLIED legacy
+    # redeemable marker (``__ENS_SECRET__<uuid4>__``) from the text
+    # BEFORE any early return / storage. Runs on every stored path
+    # because all of them funnel through ``_anomaly_exact_scrub`` via
+    # ``scrub_text``. An anchored/fullmatch-only pattern would be a
+    # silent no-op here; ``LEGACY_SECRET_MARKER_RE`` is non-anchored.
+    text = LEGACY_SECRET_MARKER_RE.sub("[marker-stripped]", text)
+
     # Resolve through the scrubber module so the (possibly
     # monkeypatched) anomaly_service.get_process_scrubber binding does
     # not mask a registered real scrubber (the autouse test fixture
@@ -695,21 +724,33 @@ def _anomaly_exact_scrub(text: str, *, actor: str) -> str:
         raise _ScrubUnavailableError("pair extraction failed") from None
     if not pairs:
         return text
-    result = text
-    for secret_id, plaintext in pairs:
-        if not plaintext or plaintext not in result:
+    # H5 (idempotency): build a token per secret, then substitute in a
+    # SINGLE pass over the original text. A multi-pass ``str.replace``
+    # loop re-scans already-emitted tokens, so a secret whose plaintext
+    # equals ``REDACTED`` (a substring of the token prefix) or a 12-hex
+    # digest interior could fire INSIDE an emitted token and corrupt it.
+    # ``re.sub`` does not re-scan replacement text, so emitted tokens
+    # are never touched. Longest plaintext first for alternation priority.
+    token_by_plain: dict[str, str] = {}
+    patterns: list[str] = []
+    for secret_id, plaintext in sorted(pairs, key=lambda p: -len(p[1])):
+        if not plaintext:
             continue
-        # Token seed is the secret id (a UUID), never the plaintext
-        # (a plaintext seed would be an offline verification oracle for
-        # low-entropy secrets). An empty id falls back to a constant
-        # label, never to the plaintext.
         seed = secret_id if secret_id else "redacted"
         token = (
             ENS_REDACTED_TOKEN_PREFIX
             + hashlib.sha256(seed.encode("utf-8", "replace")).hexdigest()[:12]
             + ENS_REDACTED_TOKEN_SUFFIX
         )
-        result = result.replace(plaintext, token)
+        if plaintext not in token_by_plain:
+            token_by_plain[plaintext] = token
+        patterns.append(re.escape(plaintext))
+    if not patterns:
+        return text
+    compiled = re.compile("|".join(patterns))
+    result = compiled.sub(
+        lambda m: token_by_plain.get(m.group(0), m.group(0)), text
+    )
     return result
 
 
@@ -717,10 +758,10 @@ def _scrubber_effective(scrubber: object) -> bool:
     """Whether ``scrubber`` can be trusted to scrub right now (INV-5).
 
     Presence alone is NOT enough: the store must be reachable AND its
-    scrub set loaded. A dumb mock with no effectiveness probe (the
-    legacy autouse fixture shape) is treated as effective for
-    backward compatibility; a real ``SecretPersistenceScrubber`` is
-    probed via ``is_effective``. Any probe failure => ineffective.
+    scrub set loaded. A scrubber exposing neither an effectiveness
+    probe nor a load path is treated as INEFFECTIVE (fail closed);
+    a real ``SecretPersistenceScrubber`` is probed via
+    ``is_effective``. Any probe failure => ineffective.
     """
     if scrubber is None:
         return False
@@ -730,9 +771,10 @@ def _scrubber_effective(scrubber: object) -> bool:
             return bool(probe())
         except Exception:  # noqa: BLE001
             return False
-    # Legacy / mock scrubber without a probe.
+    # Fail closed (H3): a scrubber exposing neither an effectiveness
+    # probe nor a load path cannot be trusted; treat as ineffective.
     if not hasattr(scrubber, "_current_rows"):
-        return True
+        return False
     # Probe via the load path; a store failure is recorded on the
     # scrubber itself rather than raised.
     try:
@@ -793,7 +835,7 @@ def scrub_text(
         Semantics of ``truncated`` (DEFECT-3): the flag means "the
         stored value is NOT the authored whole" — either a cap cut
         attached a loud marker, OR the field was WITHHELD (scrubber
-        unavailable) and replaced with ``SCRUB_UNAVAILABLE_PLACEHOLDER``.
+        unavailable) and replaced with ``scrub_unavailable_placeholder(n)``.
         A withheld field is distinguishable from a cap cut by its stored
         TEXT (the placeholder names the reason), not by this flag. This
         keeps the envelope's truncated flag a single "not-the-whole"
@@ -818,14 +860,14 @@ def scrub_text(
     if _real_scrubber is not None and not _scrubber_effective(
         _real_scrubber
     ):
-        return (SCRUB_UNAVAILABLE_PLACEHOLDER, True)
+        return (scrub_unavailable_placeholder(original_len), True)
     # 1. Exact-match scrub on the FULL text (no cap). Fail-closed
     #    (INV-2): a store drop mid-scrub surfaces as
     #    _ScrubUnavailableError -> withheld placeholder, never plaintext.
     try:
         exact_scrubbed = _anomaly_exact_scrub(source, actor=actor)
     except Exception:  # noqa: BLE001 — fail closed (INV-2)
-        return (SCRUB_UNAVAILABLE_PLACEHOLDER, True)
+        return (scrub_unavailable_placeholder(original_len), True)
     # 2. Shape redaction on the full text (NO cap).
     masked = redact_secret_shapes(exact_scrubbed, limit=10**9)
     shaped = redact_exc_str(masked, limit=10**9)
@@ -1047,7 +1089,11 @@ class AnomalyService:
         severity_value = self.normalize_severity(severity)
 
         canonical, fold_notice = self.normalize_category(category)
-        raw_category = category[:CATEGORY_RAW_MAX_CHARS]
+        # D1: strip supplied legacy markers FIRST (on the full string),
+        # then cap — the reverse order can leave a bisected marker prefix.
+        raw_category = LEGACY_SECRET_MARKER_RE.sub(
+            "[marker-stripped]", category
+        )[:CATEGORY_RAW_MAX_CHARS]
 
         # ── 0b. RATE LIMITS (R5b + AM-4 + AM-9 + F-1 + N4) — BEFORE any
         #    harvest. A refused report harvests NOTHING (no transcript
@@ -1341,7 +1387,9 @@ class AnomalyService:
             parent_chain=[],
             parent_chain_agents=[],
             category=(self.normalize_category(category))[0],
-            category_raw=category[:CATEGORY_RAW_MAX_CHARS],
+            category_raw=LEGACY_SECRET_MARKER_RE.sub(
+                "[marker-stripped]", category
+            )[:CATEGORY_RAW_MAX_CHARS],
             severity=severity,
             description=scrub_text(
                 description,

@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The truncation marker now reports the pre-scrub length; the redaction-expansion case names both the pre-scrub and post-redaction lengths distinctly. A post-scrub length is never labelled "original".
 - The payload cut is token-aware so a redaction token is never bisected.
 - Iteration-3 follow-up: the exact-scrub fail-open window is closed — a store drop between the effectiveness check and the scrub now raises a private sentinel and surfaces as `SCRUB_UNAVAILABLE_PLACEHOLDER` instead of leaking plaintext (INV-2). The `truncated` flag means "stored value is not the authored whole" (cap cut OR withheld); a withheld field is distinguishable from a cap cut by its stored text (the placeholder names the reason).
+- Iteration-3 hygiene (H6): after a scrub-store failure `_loaded_at` is stamped (`secret_persistence_scrub.py:483-486`, TTL gate :442, `DEFAULT_ID_SET_TTL_SECONDS = 60.0`), so recovery is NOT re-probed for up to `ttl_seconds=60`: authored fields are withheld (fail-closed) for up to 60 s after a blip. (Operator note; not in `agents/ari/tools_note.md`.)
 
 ## [v0.31.58] — 2026-11-25
 

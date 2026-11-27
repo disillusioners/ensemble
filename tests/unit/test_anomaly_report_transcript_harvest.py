@@ -134,8 +134,16 @@ def _scrubber_present(monkeypatch):
     message was selected.
     """
     monkeypatch.setattr(
-        anomaly_service, "get_process_scrubber", lambda: object(), raising=True
+        anomaly_service, "get_process_scrubber", lambda: _PresentScrubber(), raising=True
     )
+
+
+class _PresentScrubber:
+    def is_effective(self) -> bool:
+        return True
+
+    def _current_rows(self):
+        return []
 
 
 class TestTheReadCap:
@@ -338,7 +346,7 @@ class TestThePersistedExcerpt:
         self, tmp_path, monkeypatch
     ) -> None:
         monkeypatch.setattr(
-            anomaly_service, "get_process_scrubber", lambda: object(), raising=True
+            anomaly_service, "get_process_scrubber", lambda: _PresentScrubber(), raising=True
         )
         engine = create_engine(
             f"sqlite:///{tmp_path / 'anomaly_harvest.db'}",
@@ -373,7 +381,7 @@ class TestThePersistedExcerpt:
         self, tmp_path, monkeypatch
     ) -> None:
         monkeypatch.setattr(
-            anomaly_service, "get_process_scrubber", lambda: object(), raising=True
+            anomaly_service, "get_process_scrubber", lambda: _PresentScrubber(), raising=True
         )
         engine = create_engine(
             f"sqlite:///{tmp_path / 'anomaly_harvest_negative.db'}",
