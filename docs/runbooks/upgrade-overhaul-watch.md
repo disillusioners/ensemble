@@ -314,8 +314,14 @@ one.
 
 **Live only (M2).** The registry lives in the live database, so dev/demo/
 sandbox have no such relation: there the validation is a documented no-op and
-the armed output says so EXPLICITLY (`db-preflight: SKIPPED (self_env=…)`) —
-never a silent pass. There is no kill-switch: a deliberate direct
+the armed output says so EXPLICITLY (`db-preflight: SKIPPED-BY-ENV (self_env=<env>)`) —
+never a silent pass. **These are TWO DIFFERENT VERDICTS — tell them apart.**
+`SKIPPED-BY-ENV` means the environment is not live, so the check was bypassed;
+plain `SKIPPED` (`db-preflight: SKIPPED artifact=<name> age=<s>s bound=<s>s`) is
+reserved for the genuine identity-unchanged case — a LIVE check that DID run and
+found the newest artifact unchanged in identity (same artifact re-bound). Both
+are non-refusals, but only one of them means "the check actually ran."
+There is no kill-switch: a deliberate direct
 `ENSEMBLE_UPGRADE_LIVE=1 bash scripts/upgrade/promote.sh live` bypasses the
 whole validation (arm-path only, by design).
 
