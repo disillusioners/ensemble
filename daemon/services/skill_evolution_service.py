@@ -2426,7 +2426,7 @@ class SkillEvolutionService:
         stalled: list[dict] = []
         for test in tests or []:
             comparisons = int(getattr(test, "comparisons", 0) or 0)
-            if self._pair_has_traffic(test):
+            if await self._pair_has_traffic(test):
                 # Traffic-bearing on at least one arm — normal pair,
                 # never ours (F5: the stall rule must not pick winners
                 # on pairs that were actually served / applied).
@@ -2454,7 +2454,7 @@ class SkillEvolutionService:
             )
         return stalled
 
-    def _pair_has_traffic(self, ab_test: Any) -> bool:
+    async def _pair_has_traffic(self, ab_test: Any) -> bool:
         """F5 (M-1 follow-up) — the ONE shared traffic predicate.
 
         A pair counts as stalled ONLY when BOTH arms have
@@ -2479,6 +2479,10 @@ class SkillEvolutionService:
         condition, not a sufficient one. Adding ``comparisons`` makes
         the predicate strictly MORE conservative: a pair with real
         traffic still has non-zero arm counters and is still excluded.
+
+        The DB read runs off the event loop via ``asyncio.to_thread``
+        (house convention) — ``get_arm_traffic`` itself stays
+        synchronous and read-only.
         """
         # The pair's own comparisons counter is a (second) traffic
         # signal: injection-side serving moved ⇒ not stalled.
@@ -2488,7 +2492,9 @@ class SkillEvolutionService:
             arm_id = str(getattr(ab_test, attr, "") or "")
             if not arm_id:
                 continue
-            counters = self._skill_repo.get_arm_traffic(arm_id)
+            counters = await asyncio.to_thread(
+                self._skill_repo.get_arm_traffic, arm_id
+            )
             if counters is None:
                 # Missing arm row — no traffic RECORD. Deliberate:
                 # stalled-eligible at the predicate; _e6_winner parks
@@ -2636,7 +2642,7 @@ class SkillEvolutionService:
             # BOTH-ARMS-ZERO predicate ``find_stalled_ab_tests`` uses
             # (both enforcement sites move together; changing only one
             # would let a traffic-bearing pair through the other).
-            if self._pair_has_traffic(ab_test):
+            if await self._pair_has_traffic(ab_test):
                 raise ValueError(
                     f"stalled basis refused: ab_test_group "
                     f"{ab_test_group!r} is traffic-bearing "
