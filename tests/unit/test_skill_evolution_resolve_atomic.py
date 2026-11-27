@@ -275,6 +275,25 @@ class TestResolveAtomicCAS:
         assert winner_row.is_active is True
         assert winner_row.ab_test_group is None
 
+    def test_winner_reactivated_when_previously_deactivated(
+        self, skill_repo, ab_test_repo
+    ):
+        """B2 pin: resolve_atomic must set winner.is_active=True even when
+        the winner entered the pair deactivated (is_active=False)."""
+        old, new, _row = _make_pair(skill_repo, ab_test_repo)
+        # Pre-deactivate the winner (challenger entered via deactivate-heavy flow).
+        skill_repo.update(new.id, is_active=False)
+        assert skill_repo.get(new.id).is_active is False
+
+        won = ab_test_repo.resolve_atomic("ab-atomic", new.id, old.id)
+        assert won is True
+
+        winner_row = skill_repo.get(new.id)
+        loser_row = skill_repo.get(old.id)
+        assert winner_row.is_active is True
+        assert winner_row.status == "active"
+        assert loser_row.is_active is False
+
     def test_winner_and_loser_are_each_written_exactly_once(
         self, skill_repo, ab_test_repo, engine, _skill_write_spy
     ):
