@@ -2,8 +2,10 @@
 
 The sweep is the periodic leg of the ONE sanctioned resolution
 mechanism (user ruling E-6 + orchestrator Q1). It finds zero-traffic
-A/B pairs (comparisons == 0 AND age >= ``ab_stall_timeout_days``),
-resolves the E-6-unambiguous ones, and parks + surfaces the rest.
+A/B pairs (F5, 2026-11-26: BOTH ARMS at zero traffic —
+``total_selections == 0`` AND ``total_applied == 0`` on both skill
+rows — AND age >= ``ab_stall_timeout_days``), resolves the
+E-6-unambiguous ones, and parks + surfaces the rest.
 
 This pack pins the sweep's BEHAVIOUR:
 
@@ -15,8 +17,10 @@ This pack pins the sweep's BEHAVIOUR:
 * one tie park — a generation tie parks (no winner guessed);
 * per-item isolation — one failing pair never stops the batch;
 * never-raising — a raising service never breaks the maintenance loop;
-* comparisons > 0 refusal — traffic-bearing pairs are never listed
-  (the sweep must not pick winners on normal pairs).
+* traffic-bearing refusal — a pair with serving traffic on its ARMS
+  is never listed (the sweep must not pick winners on normal pairs).
+  F5: the signal is the arms' counters, not ``comparisons`` (which
+  only tracks injection-side serving).
 
 FULL-BOOT INTEGRATION IS DISCLOSED-UNVERIFIED: this pack drives the
 wrapper directly (the maintenance service's boot-time registration and
@@ -221,7 +225,7 @@ class TestSweepBehaviour:
 
 
 class TestSweepPredicate:
-    """comparisons > 0 ⇒ NEVER listed (normal pairs are untouchable)."""
+    """Traffic-bearing ⇒ NEVER listed (normal pairs are untouchable)."""
 
     @pytest.mark.asyncio
     async def test_traffic_bearing_pairs_are_not_listed(self):
@@ -290,6 +294,18 @@ class TestSweepPredicate:
             row.comparisons = 3
             session.add(row)
             session.commit()
+
+        # F5 (2026-11-26) — the traffic signal moved from
+        # ``SkillABTest.comparisons`` (injection-only) to the ARMS'
+        # serving counters. The pair above stays old and keeps
+        # comparisons=3 (incidental); the TRAFFIC now lives on the
+        # arm rows, exactly as production writes it
+        # (``increment_counter`` via the serving/feedback paths).
+        # Fixture change is REQUIRED by the criterion change: the old
+        # fixture modelled "traffic" with comparisons alone, which the
+        # new predicate deliberately no longer treats as traffic.
+        skill_repo.increment_counter(old.id, "total_selections", 2)
+        skill_repo.increment_counter(old.id, "total_applied", 2)
 
         stalled = await svc.find_stalled_ab_tests()
         assert all(

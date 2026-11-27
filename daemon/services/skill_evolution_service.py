@@ -2242,17 +2242,35 @@ class SkillEvolutionService:
     ) -> list[dict]:
         """List unresolved A/B pairs in the stalled shape.
 
-        STALLED = ``comparisons == 0`` (zero genuine injections — the
-        counter only bumps on real variant routing) AND pair age >= the
-        stall timeout. Traffic-bearing pairs (``comparisons > 0``) are
-        NEVER listed — the mechanism must not pick winners on normal
-        pairs.
+        STALLED (F5, 2026-11-26) = **BOTH ARMS have zero traffic**
+        (``total_selections == 0`` AND ``total_applied == 0`` on BOTH
+        variants — the ``skills`` row counters the serving/feedback
+        paths bump) AND pair age >= the stall timeout.
+
+        WHY NOT ``comparisons``: ``SkillABTest.comparisons`` is bumped
+        by exactly ONE site — ``increment_comparison`` — whose only
+        caller is the INJECTION/serving selector
+        (``skill_injection_service._select_ab_variant``). It is NOT
+        bumped by ``record_feedback`` / ``record_task_completion`` /
+        any feedback path, so a pair can carry real feedback traffic
+        with ``comparisons == 0`` (the live 98c3e028 shape). The old
+        ``comparisons == 0`` criterion therefore meant "never SERVED",
+        not "no traffic". A pair with traffic on EITHER arm is never
+        listed here.
+
+        Absent arm row (row deleted / desynced): no counters exist, so
+        the pair is NOT traffic-bearing by this predicate — it is
+        listed, and the E-6 winner rule downstream PARKS it with
+        ``stalled_variant_row_missing`` (never crowns, never resolves).
+        This is DELIBERATE: the anomaly stays SURFACED instead of
+        silently skipped.
 
         Returns:
             List of ``{"ab_test_group", "age_days", "skill_id_old",
-            "skill_id_new", "e6_winner_id", "park_reason"}`` entries —
-            ``e6_winner_id`` is ``None`` with a ``park_reason`` when
-            the E-6 rule cannot decide (generation tie / missing row).
+            "skill_id_new", "comparisons", "e6_winner_id",
+            "park_reason"}`` entries — ``e6_winner_id`` is ``None``
+            with a ``park_reason`` when the E-6 rule cannot decide
+            (generation tie / missing row).
         """
         if stall_timeout_days is None:
             stall_timeout_days = float(
@@ -2262,8 +2280,11 @@ class SkillEvolutionService:
         stalled: list[dict] = []
         for test in tests or []:
             comparisons = int(getattr(test, "comparisons", 0) or 0)
-            if comparisons != 0:
-                continue  # traffic-bearing — normal pair, not ours
+            if self._pair_has_traffic(test):
+                # Traffic-bearing on at least one arm — normal pair,
+                # never ours (F5: the stall rule must not pick winners
+                # on pairs that were actually served / applied).
+                continue
             age_days = self._ab_pair_age_days(test)
             if age_days < stall_timeout_days:
                 continue
@@ -2287,6 +2308,37 @@ class SkillEvolutionService:
             )
         return stalled
 
+    def _pair_has_traffic(self, ab_test: Any) -> bool:
+        """F5 — the BOTH-ARMS-ZERO traffic predicate.
+
+        A pair is traffic-bearing when EITHER arm's ``skills`` row
+        reports ``total_selections > 0`` OR ``total_applied > 0``. The
+        stall rule requires BOTH arms at ZERO on BOTH counters — an
+        either-arm-zero reading (e.g. "the OLD arm is idle ⇒ stalled")
+        would let a pair with real challenger traffic resolve.
+
+        Counter source: :meth:`SkillRepository.get_arm_traffic` (the
+        dedicated read-only counter surface). A MISSING arm row yields
+        no counters ⇒ not traffic-bearing here (the E-6 rule parks
+        such a pair downstream, so it can never resolve unverified).
+        """
+        for attr in ("skill_id_old", "skill_id_new"):
+            arm_id = str(getattr(ab_test, attr, "") or "")
+            if not arm_id:
+                continue
+            counters = self._skill_repo.get_arm_traffic(arm_id)
+            if counters is None:
+                # Missing arm row — no traffic RECORD. Deliberate:
+                # stalled-eligible at the predicate; _e6_winner parks
+                # it (stalled_variant_row_missing) before any mutation.
+                continue
+            if (
+                int(counters.get("total_selections", 0) or 0) > 0
+                or int(counters.get("total_applied", 0) or 0) > 0
+            ):
+                return True
+        return False
+
     async def resolve_ab_test_sanctioned(
         self,
         ab_test_group: str,
@@ -2302,7 +2354,11 @@ class SkillEvolutionService:
         Covers both stalled shapes with two explicit bases:
 
         * ``basis="stalled"`` — the ZERO-TRAFFIC stall. Enforced in
-          code: ``comparisons == 0`` AND age >=
+          code (F5, 2026-11-26): BOTH ARMS at zero traffic —
+          ``total_selections == 0`` AND ``total_applied == 0`` on both
+          ``skills`` rows (the serving/feedback counters; NOT
+          ``SkillABTest.comparisons``, which only tracks injection-side
+          serving and stays 0 on a feedback-bearing pair) — AND age >=
           ``ab_stall_timeout_days``. Winner by E-6 (newer GENERATION
           NUMBER wins; never timestamps). Generation tie ⇒ PARK +
           SURFACE (anomaly row, no mutation). A defective-divert
@@ -2325,7 +2381,9 @@ class SkillEvolutionService:
         ``resolved_at``.
 
         NEVER fires on normal (traffic-bearing) pairs: the stalled
-        basis is gated by the stall predicate, and the defective basis
+        basis is gated by the BOTH-ARMS-ZERO traffic predicate
+        (F5 — either arm's ``total_selections``/``total_applied``
+        above zero refuses), and the defective basis
         requires an explicit operator assertion. ``reason`` is
         REQUIRED (auditable provenance).
 
@@ -2403,11 +2461,20 @@ class SkillEvolutionService:
             stall_timeout_days = float(
                 getattr(self._config, "ab_stall_timeout_days", 7.0) or 7.0
             )
-            if comparisons != 0:
+            # F5 (2026-11-26): the traffic signal is the ARMS' SERVING
+            # counters (``total_selections`` / ``total_applied`` on the
+            # ``skills`` rows), NOT ``SkillABTest.comparisons`` — the
+            # latter only tracks injection-side serving and stays 0 on
+            # a feedback-bearing pair (the 98c3e028 shape). A pair with
+            # traffic on EITHER arm is refused here — the SAME
+            # BOTH-ARMS-ZERO predicate ``find_stalled_ab_tests`` uses
+            # (both enforcement sites move together; changing only one
+            # would let a traffic-bearing pair through the other).
+            if self._pair_has_traffic(ab_test):
                 raise ValueError(
                     f"stalled basis refused: ab_test_group "
-                    f"{ab_test_group!r} has comparisons={comparisons} "
-                    "(traffic-bearing — normal resolution paths only)"
+                    f"{ab_test_group!r} is traffic-bearing "
+                    "(reason=traffic_bearing)"
                 )
             age_days = self._ab_pair_age_days(ab_test)
             if age_days < stall_timeout_days:
@@ -2494,13 +2561,21 @@ class SkillEvolutionService:
         # — and two concurrent resolvers could interleave their
         # mutations.
         #
-        # They now run inside ONE transaction behind a compare-and-set
+        #    They now run inside ONE transaction behind a compare-and-set
         # claim on the pair row:
         #
         # * CAS predicate: ``resolved_at IS NULL`` ALWAYS, plus
         #   ``comparisons = 0`` on the ``stalled`` basis (the
-        #   zero-traffic guard — a pair whose counter moved since it
-        #   was read loses the CAS and is never resolved on traffic).
+        #   zero-SERVING guard — a pair whose injection counter moved
+        #   since it was read loses the CAS). NOTE (F5, 2026-11-26):
+        #   the ADMISSION predicate for the stalled basis is the
+        #   BOTH-ARMS-ZERO traffic check above (the arms'
+        #   ``total_selections``/``total_applied``); the CAS's
+        #   ``comparisons = 0`` term is retained as a second,
+        #   independent exactly-once/serving guard — it is strictly
+        #   WEAKER than the traffic predicate (comparisons only tracks
+        #   injection-side serving), so it can never admit a pair the
+        #   traffic check refused.
         #   The ``defective_arm`` basis is an OPERATOR-named retirement
         #   of a possibly traffic-bearing pair, so it keeps the
         #   ``resolved_at IS NULL`` predicate alone; forcing

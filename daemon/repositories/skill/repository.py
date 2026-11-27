@@ -555,6 +555,51 @@ class SkillRepository:
             stmt = select(Skill).where(Skill.ab_test_group == ab_test_group)
             return list(session.exec(stmt))
 
+    def get_arm_traffic(self, skill_id: str) -> dict[str, int] | None:
+        """Read ONE A/B arm's serving-TRAFFIC counters (F5).
+
+        READ-ONLY. Returns the skill row's live traffic counters —
+        ``total_selections`` and ``total_applied`` — the two columns
+        the serving/feedback paths bump through
+        :meth:`increment_counter` / :meth:`reset_counter`. This is a
+        DEDICATED COUNTER READ SURFACE for the stall predicate (there
+        was no aggregate/SUM reader over these columns anywhere in
+        ``daemon/``).
+
+        SINGLE SOURCE OF TRUTH: the method reads the ``skills`` ROW
+        directly on every call — no cache, no denormalized copy, no
+        second write path — so it can never drift from the columns the
+        writers bump. (``SkillRepository.get_ab_variants`` also carries
+        these columns, but it is a GROUP reader; the stall predicate
+        needs a declared, per-arm counter read.)
+
+        Args:
+            skill_id: The arm's skill id.
+
+        Returns:
+            ``{"skill_id", "total_selections", "total_applied"}`` when
+            the row exists, or ``None`` when it does not — a MISSING
+            row is "traffic UNKNOWN", deliberately distinct from
+            "zero traffic" (a non-existent default of 0 would let the
+            stall rule resolve a pair it cannot actually verify).
+            ``NULL`` counters on a present row are coerced to 0: the
+            schema declares both columns ``INTEGER NOT NULL DEFAULT 0``
+            (migration ``20260710_000001_create_skill_tables.sql``), so
+            a NULL is a schema-level impossibility, not a traffic
+            signal.
+        """
+        with Session(self.engine) as session:
+            row = session.get(Skill, skill_id)
+            if row is None:
+                return None
+            return {
+                "skill_id": skill_id,
+                "total_selections": int(
+                    getattr(row, "total_selections", 0) or 0
+                ),
+                "total_applied": int(getattr(row, "total_applied", 0) or 0),
+            }
+
     def get_active_variant(
         self,
         project_id: Optional[str],

@@ -4176,7 +4176,7 @@ class TestSanctionedResolution:
 
     def _make_stalled_pair(
         self, skill_repo, ab_test_repo, project_id, *, age_days=10.0,
-        comparisons=0, old_gen=1, new_gen=2,
+        comparisons=0, arm_traffic=0, old_gen=1, new_gen=2,
     ):
         import uuid as _uuid
 
@@ -4209,6 +4209,24 @@ class TestSanctionedResolution:
             obj.comparisons = comparisons
             session.add(obj)
             session.commit()
+        # F5 (2026-11-26): the stall predicate's traffic signal is the
+        # ARMS' serving counters (``total_selections`` /
+        # ``total_applied``), NOT ``SkillABTest.comparisons``
+        # (injection-only; stays 0 on a feedback-bearing pair).
+        # ``arm_traffic`` models the production relationship
+        # explicitly — the old fixtures expressed "traffic" through
+        # ``comparisons`` alone, which the new criterion deliberately
+        # no longer treats as traffic. Passing both keeps the
+        # pre-F5 tests' INTENT (a traffic-bearing pair is never
+        # stalled/resolved) intact under the new signal.
+        if arm_traffic:
+            for row in (old, new):
+                skill_repo.increment_counter(
+                    row.id, "total_selections", arm_traffic
+                )
+                skill_repo.increment_counter(
+                    row.id, "total_applied", arm_traffic
+                )
         return group, old, new
 
     @pytest.mark.asyncio
@@ -4449,9 +4467,17 @@ class TestSanctionedResolution:
     async def test_stalled_basis_refuses_traffic_bearing_pair(
         self, evolution_service, skill_repo, ab_test_repo, project_id
     ):
-        """comparisons > 0 ⇒ NEVER (normal pairs are untouchable)."""
+        """Arm traffic > 0 ⇒ NEVER (normal pairs are untouchable).
+
+        F5 (2026-11-26): the traffic signal is the ARMS' serving
+        counters (``total_selections``/``total_applied``), not
+        ``comparisons``. This pin models the LIVE 98c3e028 shape —
+        ``comparisons == 0`` YET both arms carry sel=2/app=2 — and
+        asserts the sanctioned resolver REFUSES it (Site B).
+        """
         group, old, new = self._make_stalled_pair(
-            skill_repo, ab_test_repo, project_id, comparisons=3
+            skill_repo, ab_test_repo, project_id,
+            comparisons=0, arm_traffic=2,
         )
         with pytest.raises(ValueError, match="traffic-bearing"):
             await evolution_service.resolve_ab_test_sanctioned(
@@ -4510,8 +4536,10 @@ class TestSanctionedResolution:
         stalled_group, _o, _n = self._make_stalled_pair(
             skill_repo, ab_test_repo, project_id
         )
+        # F5: traffic is modelled on the ARM ROWS (the serving
+        # counters), not on ``comparisons`` — the criterion moved.
         traffic_group, _o2, _n2 = self._make_stalled_pair(
-            skill_repo, ab_test_repo, project_id, comparisons=2
+            skill_repo, ab_test_repo, project_id, arm_traffic=2
         )
         fresh_group, _o3, _n3 = self._make_stalled_pair(
             skill_repo, ab_test_repo, project_id, age_days=0.5
