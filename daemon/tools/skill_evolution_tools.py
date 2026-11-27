@@ -211,7 +211,20 @@ async def _invoke_service(manager, service_name, method_name, *args, **kwargs):
         # own JSON-safe envelope (same edit-contract keys as a
         # success), so the caller can tell a COMPLETE evolution from a
         # PARTIAL one from a REFUSED one by the returned shape ALONE.
-        return json.dumps(e.to_payload(), default=str, indent=2)
+        # F6 follow-up (M2): the refusal is also LOGGED here at the TOOL
+        # boundary, with the SAME house marker as the service-side line,
+        # so a refused:/REFUSED-style count sees both halves. Log-only:
+        # the structured envelope returned below is byte-for-byte the
+        # same as before (payload is e.to_payload(), just bound once).
+        payload = e.to_payload()
+        logger.warning(
+            "[SkillEvolution] surgical evolution REFUSED "
+            "(reason=%s) skill=%s edits_rejected=%d",
+            payload.get("reason", "no_applicable_edits"),
+            args[0] if args else None,
+            e.edits_rejected,
+        )
+        return json.dumps(payload, default=str, indent=2)
     except Exception as e:
         return f"ERROR: {service_name}.{method_name} failed: {e}"
 

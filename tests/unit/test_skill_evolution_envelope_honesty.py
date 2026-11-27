@@ -336,6 +336,56 @@ class TestRefusedShapeIsStructured:
         )
 
     @pytest.mark.asyncio
+    async def test_tool_boundary_logs_refusal_at_warning(self, caplog):
+        """M2: the TOOL-boundary ``_invoke_service`` handler logs the
+        surgical refusal with the SAME house marker as the service-side
+        line. The service is mocked to raise directly, so the real
+        service-side logger never fires — any marker record here can
+        ONLY have come from the tool boundary."""
+        from daemon.tools.skill_evolution_tools import (
+            create_skill_evolution_tools,
+        )
+
+        caplog.set_level(logging.WARNING)
+        manager = MagicMock()
+        service = MagicMock()
+
+        async def _raise(*args, **kwargs):
+            raise EvolutionEditRejected(
+                ["edits[0]: anchor 'NOPE' not found"], edits_rejected=1
+            )
+
+        service.evolve_skill = _raise
+        manager._skill_evolution_service = service
+        manager.is_skill_evolution_lane_enabled = MagicMock(return_value=True)
+        tools = {
+            t.name: t
+            for t in create_skill_evolution_tools(manager, INSTANCE_ID)
+        }
+
+        out = await tools["skill_evolve"].ainvoke(
+            {
+                "skill_id": "sk-1",
+                "evolution_type": "FIX",
+                "direction": "fix it",
+            }
+        )
+        # Behaviour unchanged: the structured refusal envelope still
+        # comes back (the log line must not alter the return value).
+        assert json.loads(out)["reason"] == "no_applicable_edits"
+
+        # The refusal is LOGGED at WARNING at the TOOL boundary too.
+        assert any(
+            r.levelname == "WARNING"
+            and "surgical evolution REFUSED" in r.getMessage()
+            and "no_applicable_edits" in r.getMessage()
+            for r in caplog.records
+        ), (
+            "expected a tool-boundary WARNING log for the surgical "
+            f"refusal — got {[r.getMessage() for r in caplog.records]!r}"
+        )
+
+    @pytest.mark.asyncio
     async def test_tool_lane_renders_the_structured_json_not_prose(self):
         """``_invoke_service`` serialises the refusal payload — an agent
         reads JSON keys, not ``ERROR: ...`` prose."""
