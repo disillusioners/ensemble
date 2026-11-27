@@ -414,3 +414,50 @@ class TestDocumentedShape:
         assert "_captured_envelope(" in src
         assert '"partial_apply": rejected > 0' in src
         assert '"partial_apply": False' in src
+
+
+# ── DERIVED behavioural shape pin (F6 follow-up, m-7) ─────────────────────
+
+
+class TestDerivedEnvelopeShape:
+    @pytest.mark.asyncio
+    async def test_derived_surgical_carries_the_full_edit_contract(
+        self, svc, skill_repo
+    ):
+        parent = _make_skill(skill_repo)
+        script = json.dumps(
+            {"edits": [{"op": "replace", "anchor": "beta", "replacement": "BETA"}]}
+        )
+        with patch.object(svc, "_call_llm", AsyncMock(return_value=script)):
+            result = await svc.evolve_skill(parent.id, "DERIVED", "derive")
+
+        assert EDIT_CONTRACT_KEYS <= set(result)
+        assert result["mode"] in ("surgical", "full_regen")
+        assert isinstance(result["edits_applied"], int)
+        assert result["edits_applied"] >= 0
+        assert isinstance(result["edits_rejected"], int)
+        assert result["edits_rejected"] >= 0
+        assert isinstance(result["edit_rejections"], list)
+        if result["edits_rejected"] == 0:
+            assert result["partial_apply"] is False
+        else:
+            assert result["partial_apply"] is True
+        assert "new_skill_id" in result
+        assert "parent_ids" in result
+        assert isinstance(result["parent_ids"], list)
+        assert len(result["parent_ids"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_derived_surgical_exact_counts(self, svc, skill_repo):
+        parent = _make_skill(skill_repo)
+        script = json.dumps(
+            {"edits": [{"op": "replace", "anchor": "beta", "replacement": "BETA"}]}
+        )
+        with patch.object(svc, "_call_llm", AsyncMock(return_value=script)):
+            result = await svc.evolve_skill(parent.id, "DERIVED", "derive")
+
+        assert result["mode"] == "surgical"
+        assert result["edits_applied"] == 1
+        assert result["edits_rejected"] == 0
+        assert result["edit_rejections"] == []
+        assert result["partial_apply"] is False
