@@ -61,7 +61,9 @@ refusal, NO journal row, NO record write; the caller SURFACES the skip in
 the armed output (never a silent pass). There is deliberately NO
 kill-switch: the direct shell path is already the documented escape (F1).
 
-`db_preflight` (this module — promote-time backup-artifact validation) is UNRELATED to the boot-time `_boot_db_preflight` (`daemon/__main__.py:215`, a DB-connectivity probe) — name proximity only, no shared state.
+`db_preflight` (this module — promote-time backup-artifact validation) is UNRELATED to
+the boot-time `_boot_db_preflight` (a DB-connectivity probe) in `daemon/__main__.py`
+— name proximity only, no shared state.
 
 TORN JOURNALS: reading the remembered record goes through
 ``upgrade_journal.journal_read`` — a torn (or absent, or unparseable)
@@ -169,7 +171,6 @@ _PG_SQLSTATE_HINTS = {
     "42501": "insufficient privilege",
     "42703": "schema changed (column absent)",
     "3F000": "schema absent",
-    "57014": "statement timeout",
 }
 
 
@@ -199,9 +200,15 @@ def identity_fields(
     The three lines below are decisions.md §Identity tuple + fingerprint
     formula VERBATIM — the fingerprint is the contract, not a paraphrase.
     """
-    finished_at_utc = finished_at.astimezone(timezone.utc) if finished_at.tzinfo else finished_at.replace(tzinfo=timezone.utc)
+    finished_at_utc = (
+    finished_at.astimezone(timezone.utc)
+    if finished_at.tzinfo
+    else finished_at.replace(tzinfo=timezone.utc)
+)
     finished_at_iso = finished_at_utc.isoformat().replace("+00:00", "Z")
-    fingerprint_sha256 = sha256(json.dumps([lane, artifact, bytes, finished_at_iso], separators=(",", ":")).encode()).hexdigest()
+    fingerprint_sha256 = sha256(
+    json.dumps([lane, artifact, bytes, finished_at_iso], separators=(",", ":")).encode()
+).hexdigest()
     return finished_at_utc, finished_at_iso, fingerprint_sha256
 
 
@@ -298,7 +305,7 @@ def _artifact_bearing(token: str, artifact: str, age_s: int, bound_s: int) -> st
     return f"token={token} artifact={artifact} age={age_s}s bound={bound_s}s"
 
 
-def _artifact_less(token: str, free_text: str) -> str:
+def artifact_less(token: str, free_text: str) -> str:
     """The artifact-less refusal detail — the ``reason=`` value LEADS with the
     token (post-approval note N1: ``upgrade_journal._reason_token`` extracts
     the FIRST run after ``reason=``, so a free-text first word would hide the
@@ -364,7 +371,7 @@ def mode_gate_refusal(mode: str | None) -> DbPreflightVerdict | None:
     if mode == "full-dump":
         return DbPreflightVerdict.refusal(
             TOK_FULL_DUMP_UNAVAILABLE,
-            _artifact_less(
+            artifact_less(
                 TOK_FULL_DUMP_UNAVAILABLE,
                 "full-dump requested but no VM-side dump leg exists — the "
                 "ceremony validates the newest daily backup artifact instead "
@@ -374,7 +381,7 @@ def mode_gate_refusal(mode: str | None) -> DbPreflightVerdict | None:
     if mode not in DB_PREFLIGHT_MODES:
         return DbPreflightVerdict.refusal(
             TOK_MODE_UNKNOWN,
-            _artifact_less(
+            artifact_less(
                 TOK_MODE_UNKNOWN,
                 f"unrecognised db_preflight mode {mode!r} — the recognised "
                 "modes are validation-only (the default when absent) and "
@@ -439,10 +446,14 @@ def _run_select(manager: InstanceManager) -> dict[str, Any] | None:
     distinct causes (see :func:`registry_failure_detail`).
     """
     engine = manager.engine
+    # The plan considered a real-Postgres-engine production guard here and chose
+    # the harness seam instead.
     with engine.begin() as conn:
         # Per-tx statement_timeout inside this transaction only (NOT
         # engine-wide connect_args) — PostgreSQL only; SQLite has no
-        # ``SET LOCAL statement_timeout`` (the ens_db_tools precedent).
+        # ``SET LOCAL statement_timeout``. The other copy of this block
+        # lives in daemon/tools/ens_db_tools.py (the `statement_timeout`
+        # sites) — keep the two in sync; do not extract a shared helper.
         if engine.url.get_backend_name().startswith("postgres"):
             conn.execute(
                 text(f"SET LOCAL statement_timeout = {int(SELECT_TX_STATEMENT_TIMEOUT_MS)}")
@@ -512,6 +523,12 @@ async def evaluate_db_preflight(
 
     READS ONLY: it writes nothing, takes no lock and spawns nothing. The
     caller journals, records and refuses.
+
+    WARNING: this function PROPAGATES ``JournalTorn`` out of the seam (via
+    ``upgrade_journal.journal_read``), unlike every other failure, which
+    becomes a refusal. Any caller that omits the ``except uj.JournalTorn``
+    arm turns a torn journal into an UNHANDLED EXCEPTION. Callers MUST
+    carry that arm.
     """
     mode_refusal = mode_gate_refusal(mode)
     if mode_refusal is not None:
@@ -531,7 +548,6 @@ async def evaluate_db_preflight(
 
     data = uj.journal_read(install_dir)  # JournalTorn propagates (caller maps it)
     remembered = data.get("db_preflight")
-    remembered = remembered if isinstance(remembered, dict) else None
 
     try:
         raw = await fetch_newest_artifact(manager)
@@ -544,12 +560,12 @@ async def evaluate_db_preflight(
         )
         return DbPreflightVerdict.refusal(
             TOK_REGISTRY_UNAVAILABLE,
-            _artifact_less(TOK_REGISTRY_UNAVAILABLE, registry_failure_detail(exc)),
+            artifact_less(TOK_REGISTRY_UNAVAILABLE, registry_failure_detail(exc)),
         )
     if raw is None:
         return DbPreflightVerdict.refusal(
             TOK_NO_BACKUP,
-            _artifact_less(
+            artifact_less(
                 TOK_NO_BACKUP,
                 f"zero rows for lane {DB_PREFLIGHT_LANE} in "
                 "public.dump_lane_artifacts",
@@ -564,7 +580,7 @@ async def evaluate_db_preflight(
     if missing:
         return DbPreflightVerdict.refusal(
             TOK_REGISTRY_UNAVAILABLE,
-            _artifact_less(
+            artifact_less(
                 TOK_REGISTRY_UNAVAILABLE,
                 f"registry row unreadable (columns absent from the fetched "
                 f"newest row: {', '.join(missing)})",
@@ -574,7 +590,7 @@ async def evaluate_db_preflight(
         if raw[column] is None:
             return DbPreflightVerdict.refusal(
                 TOK_REGISTRY_UNAVAILABLE,
-                _artifact_less(
+                artifact_less(
                     TOK_REGISTRY_UNAVAILABLE,
                     f"{column} is NULL on the newest row (externally-owned "
                     "schema violation)",
@@ -592,7 +608,7 @@ async def evaluate_db_preflight(
         if not isinstance(value, expected):
             return DbPreflightVerdict.refusal(
                 TOK_REGISTRY_UNAVAILABLE,
-                _artifact_less(
+                artifact_less(
                     TOK_REGISTRY_UNAVAILABLE,
                     f"{column} has an unexpected type ({type(value).__name__}) "
                     "on the newest row (externally-owned schema change)",
@@ -601,7 +617,7 @@ async def evaluate_db_preflight(
     if isinstance(size_bytes, bool) or not isinstance(size_bytes, int):
         return DbPreflightVerdict.refusal(
             TOK_REGISTRY_UNAVAILABLE,
-            _artifact_less(
+            artifact_less(
                 TOK_REGISTRY_UNAVAILABLE,
                 f"bytes has an unexpected type ({type(size_bytes).__name__}) "
                 "on the newest row (externally-owned schema change)",
@@ -662,7 +678,7 @@ async def evaluate_db_preflight(
     if raw_age_s < -DB_PREFLIGHT_CLOCK_SKEW_TOLERANCE_S:
         return DbPreflightVerdict.refusal(
             TOK_REGISTRY_UNAVAILABLE,
-            _artifact_less(
+            artifact_less(
                 TOK_REGISTRY_UNAVAILABLE,
                 "finished_at in the future beyond skew tolerance "
                 f"(age={int(raw_age_s)}s tolerance={DB_PREFLIGHT_CLOCK_SKEW_TOLERANCE_S}s)",

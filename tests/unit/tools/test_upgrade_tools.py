@@ -3378,6 +3378,13 @@ class TestArmPreflightDbPreflight:
             if isinstance(entry, dict) and str(entry.get("event", "")).startswith("db_preflight")
         ]
 
+    def _refused_rows(self, install: Path) -> list[dict]:
+        return [
+            entry
+            for entry in self._history_events(install)
+            if entry.get("event") == "db_preflight_refused"
+        ]
+
     # ── (α) the ORDERING pin ───────────────────────────────────────────────
 
     async def test_db_preflight_runs_after_lock_acquire_before_nonce_burn(
@@ -3651,10 +3658,7 @@ class TestArmPreflightDbPreflight:
         assert _refusal_reason(out) == "db-preflight-registry-unavailable", out
         assert "system_upgrade failed:" not in out, out
         TestArmPreflightBeforeBurn._assert_nonce_intact(live, run_id)
-        refused = [
-            entry for entry in self._history_events(live["install"])
-            if entry["event"] == "db_preflight_refused"
-        ]
+        refused = self._refused_rows(live["install"])
         assert refused, self._history_events(live["install"])
         assert "token=db-preflight-registry-unavailable" in refused[0]["detail"]
         assert "unexpected RuntimeError" in refused[0]["detail"]
@@ -3687,10 +3691,7 @@ class TestArmPreflightDbPreflight:
 
         TestArmPreflightBeforeBurn._assert_nonce_intact(live, run_id)
         assert not (live["install"] / "releases" / "rollback.lock.d").exists()
-        refused = [
-            entry for entry in self._history_events(live["install"])
-            if entry["event"] == "db_preflight_refused"
-        ]
+        refused = self._refused_rows(live["install"])
         assert refused, self._history_events(live["install"])
         assert "token=db-preflight-registry-unavailable" in refused[0]["detail"]
         assert "interrupted" in refused[0]["detail"]
@@ -3711,10 +3712,7 @@ class TestArmPreflightDbPreflight:
 
         assert _refusal_reason(out) == "db-preflight-no-backup", out
         TestArmPreflightBeforeBurn._assert_nonce_intact(live, run_id)
-        refused = [
-            entry for entry in self._history_events(live["install"])
-            if entry["event"] == "db_preflight_refused"
-        ]
+        refused = self._refused_rows(live["install"])
         assert refused, self._history_events(live["install"])
         assert "token=db-preflight-no-backup" in refused[0]["detail"]
         assert uj.journal_read(live["install"])["db_preflight"] is None
@@ -3734,10 +3732,7 @@ class TestArmPreflightDbPreflight:
 
         assert _refusal_reason(out) == "db-preflight-registry-unavailable", out
         TestArmPreflightBeforeBurn._assert_nonce_intact(live, run_id)
-        refused = [
-            entry for entry in self._history_events(live["install"])
-            if entry["event"] == "db_preflight_refused"
-        ]
+        refused = self._refused_rows(live["install"])
         assert refused, self._history_events(live["install"])
         assert "token=db-preflight-registry-unavailable" in refused[0]["detail"]
         # The CAUSE is named but driver-specific: PostgreSQL reports 42P01
@@ -3780,10 +3775,7 @@ class TestArmPreflightDbPreflight:
 
         assert _refusal_reason(out) == "db-preflight-full-dump-unavailable", out
         TestArmPreflightBeforeBurn._assert_nonce_intact(live, run_id)
-        refused = [
-            entry for entry in self._history_events(live["install"])
-            if entry["event"] == "db_preflight_refused"
-        ]
+        refused = self._refused_rows(live["install"])
         assert refused, self._history_events(live["install"])
         assert "token=db-preflight-full-dump-unavailable" in refused[0]["detail"]
         assert uj.journal_read(live["install"])["db_preflight"] is None
@@ -3811,10 +3803,7 @@ class TestArmPreflightDbPreflight:
 
         assert _refusal_reason(out) == "db-preflight-artifact-broken", out
         TestArmPreflightBeforeBurn._assert_nonce_intact(live, run_id)
-        refused = [
-            entry for entry in self._history_events(live["install"])
-            if entry["event"] == "db_preflight_refused"
-        ]
+        refused = self._refused_rows(live["install"])
         assert refused, self._history_events(live["install"])
         assert "token=db-preflight-artifact-broken" in refused[0]["detail"]
         assert _ARTIFACT_NEWEST in refused[0]["detail"]

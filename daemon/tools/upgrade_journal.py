@@ -789,6 +789,9 @@ def ensure_extensions(install_dir: Path) -> dict[str, Any]:
     ``JOURNAL_EMPTY`` rollback bucket, whose counter must survive the
     restart it meters). New top-level keys are invisible to lib.sh's
     field-targeted splice (ADR-034), so the shell lane is unaffected.
+
+    promote-db-preflight-validation (D3): also ensures ``db_preflight``
+    (default ``None`` — the remembered backup-artifact identity).
     """
     data = journal_read(install_dir)
     changed = False
@@ -812,7 +815,7 @@ def ensure_extensions(install_dir: Path) -> dict[str, Any]:
         changed = True
     if "db_preflight" not in data:
         # promote-db-preflight-validation (D3): the REMEMBERED backup-artifact
-        # identity — the SEVENTH extension key. Seeded as the ``None``
+        # identity — the extension key. Seeded as the ``None``
         # placeholder (the ``pending_op``/``pending_restart`` shape), NOT the
         # ``pending_wakes`` ``{}`` shape: the written value is the ONE
         # compact object (:func:`record_db_preflight`).

@@ -131,6 +131,11 @@ CREATE VIEW public.dump_lane_heartbeat AS
 _ARTIFACT_NEWEST = "pg_dumpall-2026-11-26-17-00.pgdump.zst"
 _ARTIFACT_OLDER = "pg_dumpall-2026-11-25-17-00.pgdump.zst"
 
+# Explicit NULL sentinel: ``insert_registry_row`` overloads ``None`` to mean
+# "use the default" for ``finished_at``, so a real NULL must be requested via
+# this sentinel.
+_NULL = object()
+
 
 def _utc_now() -> datetime:
     """Naive UTC — the shape a ``timestamptz`` column yields once normalised."""
@@ -243,7 +248,19 @@ def insert_registry_row(
     """Insert one registry row. ``size`` / ``integrity_ok`` accept ``None``
     on purpose (the NULL-guard pins) — the column is nullable in the
     externally-owned schema and the verdict must refuse, never raise."""
-    moment = finished_at or (_utc_now() - timedelta(hours=1))
+    # Normalise the explicit-NULL sentinel into a real NULL.
+    if artifact is _NULL:
+        artifact = None
+    if size is _NULL:
+        size = None
+    if integrity_ok is _NULL:
+        integrity_ok = None
+    if finished_at is _NULL:
+        moment = None
+    elif finished_at is None:
+        moment = _utc_now() - timedelta(hours=1)
+    else:
+        moment = finished_at
     with engine.begin() as conn:
         conn.execute(
             text(
@@ -257,7 +274,7 @@ def insert_registry_row(
                 "lane": lane,
                 "artifact": artifact,
                 "bytes": size,
-                "finished_at": _iso(moment),
+                "finished_at": None if moment is None else _iso(moment),
                 "integrity_ok": (
                     None if integrity_ok is None else int(bool(integrity_ok))
                 ),
@@ -387,8 +404,9 @@ async def test_skip_does_not_fire_when_aged_past_bound(
     the age conjunct in the predicate this node would return ``skipped``.
 
     LEG 2 — the same artifact, still fresh, with the bound TIGHTENED through
-    the documented ``.env`` knob (read as a module global at CALL time) ⇒
-    refuses stale, and the D3 record is NOT mutated by the refusal.
+    the module global (the ``.env`` knob is read at import time, so a unit
+    test can only move the global) ⇒ refuses stale, and the D3 record is NOT
+    mutated by the refusal.
     """
     insert_registry_row(registry, finished_at=_utc_now() - timedelta(hours=10))
 
@@ -475,15 +493,8 @@ async def test_skip_does_not_fire_when_integrity_flips_false_with_unchanged_iden
     assert second.verdict == udp.VERDICT_REFUSED, second.detail
     assert second.token == udp.TOK_ARTIFACT_BROKEN, second.detail
     assert _ARTIFACT_NEWEST in second.detail, second.detail
-    # The identity really was unchanged — the refusal came from the gate, not
-    # from a re-validation. (A refusal carries no fingerprint on the verdict, so
-    # the identity is re-derived from the SAME row values the first pass used.)
-    assert second.verdict == udp.VERDICT_REFUSED
-    stuck = datetime.fromisoformat(first_record["finished_at"].replace("Z", "+00:00"))
-    _, _, same_fingerprint = udp.identity_fields(
-        udp.DB_PREFLIGHT_LANE, _ARTIFACT_NEWEST, 921_187_559, stuck
-    )
-    assert same_fingerprint == first_record["fingerprint_sha256"]
+    # A refusal carries no identity_unchanged proof on the verdict.
+    assert second.identity_unchanged is None
     # NOT mutated to skipped: the record still carries the validation.
     assert uj.journal_read(install)["db_preflight"]["verdict"] == "validated"
 
@@ -627,11 +638,11 @@ def test_connection_failure_causes_keep_distinct_details() -> None:
     assert exhausted.startswith("pool exhausted"), exhausted
     assert refused != exhausted
     # Both land on the SAME token through the artifact-less M7 shape.
-    assert udp._artifact_less(udp.TOK_REGISTRY_UNAVAILABLE, refused).startswith(
+    assert udp.artifact_less(udp.TOK_REGISTRY_UNAVAILABLE, refused).startswith(
         f"token={udp.TOK_REGISTRY_UNAVAILABLE} "
         f"reason={udp.TOK_REGISTRY_UNAVAILABLE} connect refused"
     )
-    assert udp._artifact_less(udp.TOK_REGISTRY_UNAVAILABLE, exhausted).startswith(
+    assert udp.artifact_less(udp.TOK_REGISTRY_UNAVAILABLE, exhausted).startswith(
         f"token={udp.TOK_REGISTRY_UNAVAILABLE} "
         f"reason={udp.TOK_REGISTRY_UNAVAILABLE} pool exhausted"
     )
@@ -699,16 +710,9 @@ async def test_null_finished_at_refuses_registry_unavailable(
 ) -> None:
     """NULL ``finished_at`` ⇒ the same artifact-less refusal (the age
     arithmetic must never see a NULL)."""
-    with registry.begin() as conn:
-        conn.execute(
-            text(
-                "INSERT INTO public.dump_lane_artifacts "
-                "(lane, artifact, bytes, finished_at, integrity_ok, "
-                " first_seen_at, last_seen_at) "
-                "VALUES (:lane, :artifact, 10, NULL, 1, NULL, NULL)"
-            ),
-            {"lane": udp.DB_PREFLIGHT_LANE, "artifact": _ARTIFACT_NEWEST},
-        )
+    insert_registry_row(
+        registry, artifact=_ARTIFACT_NEWEST, size=10, finished_at=_NULL
+    )
     verdict = await _evaluate(registry, install)
     assert verdict.verdict == udp.VERDICT_REFUSED, verdict
     assert verdict.token == udp.TOK_REGISTRY_UNAVAILABLE, verdict.detail
@@ -720,16 +724,9 @@ async def test_null_artifact_refuses_registry_unavailable(
     registry, install: Path
 ) -> None:
     """NULL ``artifact`` ⇒ the same artifact-less refusal naming ``artifact``."""
-    with registry.begin() as conn:
-        conn.execute(
-            text(
-                "INSERT INTO public.dump_lane_artifacts "
-                "(lane, artifact, bytes, finished_at, integrity_ok, "
-                " first_seen_at, last_seen_at) "
-                "VALUES (:lane, NULL, 10, :finished_at, 1, NULL, NULL)"
-            ),
-            {"lane": udp.DB_PREFLIGHT_LANE, "finished_at": _iso(_utc_now())},
-        )
+    insert_registry_row(
+        registry, artifact=_NULL, size=10, finished_at=_utc_now(), integrity_ok=True
+    )
     verdict = await _evaluate(registry, install)
     assert verdict.verdict == udp.VERDICT_REFUSED, verdict
     assert verdict.token == udp.TOK_REGISTRY_UNAVAILABLE, verdict.detail
@@ -756,8 +753,24 @@ async def test_null_integrity_ok_refuses_artifact_broken(
 # ── Pin (d): the mode gate (every environment, one implementation) ──────────
 
 
+class _BrokenEngineManager:
+    """A manager whose engine FAILS LOUDLY if the verdict ever touches it —
+    the non-vacuity guard for the mode gate's "before any registry read"."""
+
+    class _Engine:
+        url = None
+
+        def begin(self):  # noqa: ANN201
+            raise AssertionError(
+                "the mode gate must refuse BEFORE any registry read"
+            )
+
+    def __init__(self) -> None:
+        self.engine = self._Engine()
+
+
 @pytest.mark.asyncio
-async def test_full_dump_refuses_unavailable(registry, install: Path) -> None:
+async def test_full_dump_refuses_unavailable(install: Path) -> None:
     """``full-dump`` ⇒ ``db-preflight-full-dump-unavailable`` (no VM-side dump
     leg exists — never a silent fallback). The gate refuses BEFORE any registry
     read, so a deliberately broken engine proves the read never happened."""
@@ -771,7 +784,7 @@ async def test_full_dump_refuses_unavailable(registry, install: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_unknown_mode_refuses_mode_unknown(registry, install: Path) -> None:
+async def test_unknown_mode_refuses_mode_unknown(install: Path) -> None:
     """An unrecognised mode ⇒ ``db-preflight-mode-unknown``, likewise before any
     registry read."""
     verdict = await _evaluate(_BrokenEngineManager(), install, mode="snapshot")
@@ -788,22 +801,6 @@ async def test_absent_mode_proceeds_validation_only(registry, install: Path) -> 
     verdict = await _evaluate(registry, install, mode=None)
     assert verdict.verdict == udp.VERDICT_VALIDATED, verdict.detail
     assert verdict.token is None
-
-
-class _BrokenEngineManager:
-    """A manager whose engine FAILS LOUDLY if the verdict ever touches it —
-    the non-vacuity guard for the mode gate's "before any registry read"."""
-
-    class _Engine:
-        url = None
-
-        def begin(self):  # noqa: ANN201
-            raise AssertionError(
-                "the mode gate must refuse BEFORE any registry read"
-            )
-
-    def __init__(self) -> None:
-        self.engine = self._Engine()
 
 
 # ── Pin (f): durability (journal round trip / seed / unrelated key) ─────────

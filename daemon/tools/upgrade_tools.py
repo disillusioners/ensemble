@@ -4478,7 +4478,8 @@ never decides go/rollback).
             )
             db_preflight_verdict = None
             try:
-                # (1a) PRE-WRITE TORN PROBE — defence-in-depth, RACE-WINDOW-
+                # LEGEND: bare (N) = the T3 write steps; (1c)(N) = the
+                # exception-ladder arms. Both label spaces appear in this block.
                 # ONLY. The probe IS the `ensure_extensions` call below: it is
                 # the FIRST write of this block, it re-reads the journal, and a
                 # torn/absent/unparseable journal makes it raise `JournalTorn`
@@ -4488,6 +4489,9 @@ never decides go/rollback).
                 # `journal-unavailable` by the `_journal_read` above — so this
                 # only closes the read→slot window (a concurrent tear or a
                 # hand-edit in between).
+                # UNIQUE EFFECT of this probe: the `db_preflight` seed. The verdict
+                # function's own `journal_read` raises `JournalTorn` before any write,
+                # so the refusal outcome is identical either way.
                 uj.ensure_extensions(install_dir)
                 db_preflight_verdict = await udp.evaluate_db_preflight(
                     manager,
@@ -4603,15 +4607,14 @@ never decides go/rollback).
                     type(exc).__name__,
                     exc,
                 )
-                db_preflight_write_failed = (
-                    f"token={udp.TOK_REGISTRY_UNAVAILABLE} "
-                    f"reason={udp.TOK_REGISTRY_UNAVAILABLE} check write failed "
-                    f"({type(exc).__name__})"
+                db_preflight_write_failed_detail = udp.artifact_less(
+                    udp.TOK_REGISTRY_UNAVAILABLE,
+                    f"check write failed ({type(exc).__name__})",
                 )
                 return _refusal(
                     label,
                     udp.TOK_REGISTRY_UNAVAILABLE,
-                    f"arm preflight: {db_preflight_write_failed} — nonce NOT "
+                    f"arm preflight: {db_preflight_write_failed_detail} — nonce NOT "
                     "burned (the arm simply did not happen; nothing consumed)",
                 )
             except Exception as exc:  # noqa: BLE001 — fail-closed, never raises
@@ -4621,10 +4624,9 @@ never decides go/rollback).
                 # CLOSED: the best-effort row first (its own failure is
                 # logged, never raised), the nonce unspent, no pending_op, and
                 # the lock released by the belt.
-                db_preflight_unexpected = (
-                    f"token={udp.TOK_REGISTRY_UNAVAILABLE} "
-                    f"reason={udp.TOK_REGISTRY_UNAVAILABLE} unexpected "
-                    f"{type(exc).__name__} before handoff"
+                db_preflight_unexpected_detail = udp.artifact_less(
+                    udp.TOK_REGISTRY_UNAVAILABLE,
+                    f"unexpected {type(exc).__name__} before handoff",
                 )
                 logger.warning(
                     "upgrade_tools: backup-artifact check raised %s — failing "
@@ -4633,12 +4635,12 @@ never decides go/rollback).
                     exc,
                 )
                 _db_preflight_refused_row_best_effort(
-                    install_dir, db_preflight_unexpected
+                    install_dir, db_preflight_unexpected_detail
                 )
                 return _refusal(
                     label,
                     udp.TOK_REGISTRY_UNAVAILABLE,
-                    f"arm preflight: {db_preflight_unexpected} — nonce NOT "
+                    f"arm preflight: {db_preflight_unexpected_detail} — nonce NOT "
                     "burned (the arm simply did not happen; nothing consumed)",
                 )
             except BaseException as exc:  # noqa: BLE001 — NEVER swallowed
@@ -4647,13 +4649,12 @@ never decides go/rollback).
                 # "never BaseException" rider) — the best-effort row first,
                 # then the cancellation PROPAGATES; the belt releases the lock
                 # as it unwinds.
-                db_preflight_interrupted = (
-                    f"token={udp.TOK_REGISTRY_UNAVAILABLE} "
-                    f"reason={udp.TOK_REGISTRY_UNAVAILABLE} interrupted "
-                    f"({type(exc).__name__}) before handoff"
+                db_preflight_interrupted_detail = udp.artifact_less(
+                    udp.TOK_REGISTRY_UNAVAILABLE,
+                    f"interrupted ({type(exc).__name__}) before handoff",
                 )
                 _db_preflight_refused_row_best_effort(
-                    install_dir, db_preflight_interrupted
+                    install_dir, db_preflight_interrupted_detail
                 )
                 raise
             finally:
