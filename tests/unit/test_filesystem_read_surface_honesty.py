@@ -11,6 +11,13 @@ Covers the seven accepted sub-items of the skill-evolution R1 front-door fix:
 
 Hermetic: tmp_path trees only; ``git init`` here is a TEST fixture, not a
 daemon tool-layer subprocess. No DB, no network, no live install paths.
+
+F-1 follow-up (honesty of the UNKNOWN REASON): ``_git_commit_of_tree``
+returns ``UNKNOWN (not a git checkout)`` only when the anchor really
+carries NO ``.git`` marker. Every other failure mode — an unborn HEAD
+from a fresh ``git init``, a broken ``gitdir:`` link, a garbage loose
+ref, an unreadable HEAD — is a CHECKOUT whose commit could not be
+resolved, and each must say so.
 """
 
 from __future__ import annotations
@@ -195,6 +202,140 @@ class TestAnchorCommitDisclosure:
         assert fs._git_commit_of_tree(repo) == (
             f"{sha[:12]} (12-char short HEAD sha)"
         )
+
+
+# =============================================================================
+# (f) F-1 — the UNKNOWN reason must stay TRUE about the anchor
+# =============================================================================
+
+
+class TestUnknownCommitReasonDifferentiation:
+    """``UNKNOWN (not a git checkout)`` is a STATEMENT about the anchor.
+
+    It is only true when the anchor carries NO ``.git`` marker at all.
+    A fresh ``git init`` (unborn HEAD), a worktree ``.git`` file whose
+    ``gitdir:`` target is missing, a loose ref holding garbage and an
+    unreadable HEAD are all CHECKOUTS whose commit could not be
+    resolved — reporting them as "not a git checkout" tells a scoped
+    agent something factually false about its own tree.
+    """
+
+    @pytest.mark.skipif(not _git_available(), reason="git binary unavailable")
+    def test_unborn_head_reports_no_commit_resolved(self, tmp_path):
+        """A fresh ``git init`` with ZERO commits IS a git checkout."""
+        repo = tmp_path / "unborn"
+        repo.mkdir()
+        _git("init", "-q", cwd=repo)
+        assert (repo / ".git").is_dir()  # it IS a checkout
+        result = fs._git_commit_of_tree(repo)
+        assert result == "UNKNOWN (no commit resolved)"
+        assert "not a git checkout" not in result
+
+    def test_broken_gitdir_link_is_not_reported_as_not_a_checkout(self, tmp_path):
+        """A worktree ``.git`` FILE whose ``gitdir:`` target does not exist."""
+        worktree = tmp_path / "broken-link"
+        worktree.mkdir()
+        (worktree / ".git").write_text("gitdir: ../missing-gitdir\n", encoding="utf-8")
+        result = fs._git_commit_of_tree(worktree)
+        assert result == "UNKNOWN (git metadata unreadable)"
+        assert "not a git checkout" not in result
+
+    def test_malformed_git_file_is_not_reported_as_not_a_checkout(self, tmp_path):
+        """A ``.git`` FILE that is not a ``gitdir:`` link at all."""
+        worktree = tmp_path / "malformed-link"
+        worktree.mkdir()
+        (worktree / ".git").write_text("garbage\n", encoding="utf-8")
+        result = fs._git_commit_of_tree(worktree)
+        assert result == "UNKNOWN (git metadata unreadable)"
+        assert "not a git checkout" not in result
+
+    def test_unresolvable_gitdir_target_reports_metadata_unreadable(self, tmp_path):
+        """The ``.git`` PROBE itself raises (gitdir target cannot resolve)."""
+        worktree = tmp_path / "unresolvable-gitdir"
+        worktree.mkdir()
+        # An embedded NUL makes the gitdir target unresolvable ⇒ the
+        # ``gitdir:`` probe raises ValueError inside the metadata probe.
+        (worktree / ".git").write_text(
+            "gitdir: /tmp/\x00f9-missing-gitdir\n", encoding="utf-8"
+        )
+        result = fs._git_commit_of_tree(worktree)
+        assert result == "UNKNOWN (git metadata unreadable)"
+        assert "not a git checkout" not in result
+
+    def test_garbage_loose_ref_reports_no_commit_resolved(self, tmp_path):
+        """HEAD names a ref whose loose file holds a non-sha."""
+        repo = tmp_path / "garbage-ref"
+        (repo / ".git" / "refs" / "heads").mkdir(parents=True)
+        (repo / ".git" / "HEAD").write_text("ref: refs/heads/x\n", encoding="utf-8")
+        (repo / ".git" / "refs" / "heads" / "x").write_text("not-a-sha\n", encoding="utf-8")
+        result = fs._git_commit_of_tree(repo)
+        assert result == "UNKNOWN (no commit resolved)"
+        assert "not a git checkout" not in result
+
+    def test_unreadable_head_reports_head_unreadable(self, tmp_path):
+        """The git dir is found but its HEAD file cannot be read."""
+        repo = tmp_path / "head-unreadable"
+        (repo / ".git").mkdir(parents=True)
+        (repo / ".git" / "HEAD").mkdir()  # a DIRECTORY ⇒ read_text raises OSError
+        result = fs._git_commit_of_tree(repo)
+        assert result == "UNKNOWN (HEAD unreadable)"
+        assert "not a git checkout" not in result
+
+    def test_unresolvable_anchor_path_reports_anchor_path_unresolvable(self):
+        """The ANCHOR PATH itself cannot be resolved (embedded NUL byte)."""
+        result = fs._git_commit_of_tree("/tmp/\x00f9-unresolvable-anchor")
+        assert result == "UNKNOWN (anchor path unresolvable)"
+        assert "not a git checkout" not in result
+
+    def test_non_git_dir_still_reports_not_a_git_checkout(self, tmp_path):
+        """The TRUE negative survives: no ``.git`` marker at all."""
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        assert fs._git_commit_of_tree(plain) == "UNKNOWN (not a git checkout)"
+
+    @pytest.mark.skipif(not _git_available(), reason="git binary unavailable")
+    def test_distinct_failure_modes_carry_distinct_reasons(self, tmp_path):
+        """No two different failure modes collapse onto one reason."""
+        unborn = tmp_path / "unborn"
+        unborn.mkdir()
+        _git("init", "-q", cwd=unborn)
+
+        broken = tmp_path / "broken-link"
+        broken.mkdir()
+        (broken / ".git").write_text("gitdir: ../missing-gitdir\n", encoding="utf-8")
+
+        garbage = tmp_path / "garbage-ref"
+        (garbage / ".git" / "refs" / "heads").mkdir(parents=True)
+        (garbage / ".git" / "HEAD").write_text("ref: refs/heads/x\n", encoding="utf-8")
+        (garbage / ".git" / "refs" / "heads" / "x").write_text("not-a-sha\n", encoding="utf-8")
+
+        unreadable = tmp_path / "head-unreadable"
+        (unreadable / ".git").mkdir(parents=True)
+        (unreadable / ".git" / "HEAD").mkdir()
+
+        plain = tmp_path / "plain"
+        plain.mkdir()
+
+        results = {
+            "unborn": fs._git_commit_of_tree(unborn),
+            "broken_gitdir": fs._git_commit_of_tree(broken),
+            "garbage_ref": fs._git_commit_of_tree(garbage),
+            "unreadable_head": fs._git_commit_of_tree(unreadable),
+            "plain": fs._git_commit_of_tree(plain),
+        }
+        assert results["unborn"] == "UNKNOWN (no commit resolved)"
+        assert results["broken_gitdir"] == "UNKNOWN (git metadata unreadable)"
+        assert results["garbage_ref"] == "UNKNOWN (no commit resolved)"
+        assert results["unreadable_head"] == "UNKNOWN (HEAD unreadable)"
+        assert results["plain"] == "UNKNOWN (not a git checkout)"
+        # "not a git checkout" is reserved for the ONE truly-non-checkout
+        # fixture — it must not leak onto any of the other four.
+        leaks = [
+            name
+            for name, reason in results.items()
+            if reason == "UNKNOWN (not a git checkout)" and name != "plain"
+        ]
+        assert leaks == [], results
 
 
 # =============================================================================

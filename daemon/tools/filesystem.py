@@ -542,22 +542,45 @@ def _git_commit_of_tree(anchor: Path | None) -> str:
     ``ref: refs/...`` resolved from loose refs then ``packed-refs``
     (including a linked worktree's ``commondir``).
 
-    Returns a short, greppable string. An absent/unreadable checkout is
-    reported HONESTLY as UNKNOWN — never silently omitted.
+    Returns a short, greppable string. The commit is NEVER silently
+    omitted — every path emits a ``commit: …`` clause. The UNKNOWN
+    REASON is differentiated so that it stays factually TRUE about the
+    anchor (an "UNKNOWN (not a git checkout)" reason is only ever used
+    when the anchor really carries no ``.git`` marker):
+
+    * ``UNKNOWN (no trusted anchor)``        — no anchor was supplied.
+    * ``UNKNOWN (anchor path unresolvable)`` — the anchor path itself
+      could not be resolved (OSError/RuntimeError/ValueError).
+    * ``UNKNOWN (git metadata unreadable)``  — a ``.git`` marker EXISTS
+      but its metadata could not be opened: the probe raised (e.g.
+      permission denied), or a worktree ``gitdir:`` link points at a
+      missing / non-directory target.
+    * ``UNKNOWN (not a git checkout)``       — the anchor carries NO
+      ``.git`` marker at all: genuinely not a checkout.
+    * ``UNKNOWN (HEAD unreadable)``          — the git dir was found but
+      its HEAD file could not be read.
+    * ``UNKNOWN (no commit resolved)``       — HEAD was read but no
+      commit could be resolved (unborn HEAD from a fresh ``git init``,
+      a loose ref holding garbage, a missing ref / no refs at all).
     """
     if anchor is None:
         return "UNKNOWN (no trusted anchor)"
     try:
         anchor = Path(anchor).expanduser().resolve()
     except (OSError, RuntimeError, ValueError):
-        return "UNKNOWN (not a git checkout)"
+        return "UNKNOWN (anchor path unresolvable)"
 
     git_path = anchor / ".git"
     git_dir: Path | None = None
+    # A ``.git`` marker EXISTS ⇒ the anchor LOOKS like a checkout, so a
+    # failure to open its metadata must NOT be reported as "not a checkout".
+    git_marker = False
     try:
         if git_path.is_dir():
             git_dir = git_path
+            git_marker = True
         elif git_path.is_file():
+            git_marker = True
             raw = git_path.read_text(encoding="utf-8", errors="replace").strip()
             if raw.startswith("gitdir:"):
                 pointed = Path(raw[len("gitdir:"):].strip()).expanduser()
@@ -567,10 +590,15 @@ def _git_commit_of_tree(anchor: Path | None) -> str:
         elif (anchor / "HEAD").is_file() and (anchor / "objects").is_dir():
             # Defensive: the anchor itself is a git dir (bare-ish shape).
             git_dir = anchor
+            git_marker = True
     except (OSError, RuntimeError, ValueError):
-        return "UNKNOWN (not a git checkout)"
+        return "UNKNOWN (git metadata unreadable)"
 
     if git_dir is None or not git_dir.is_dir():
+        if git_marker:
+            # A ``.git`` marker is present but its metadata is unreadable
+            # (e.g. a worktree ``.git`` file pointing at a missing gitdir).
+            return "UNKNOWN (git metadata unreadable)"
         return "UNKNOWN (not a git checkout)"
 
     try:
@@ -578,7 +606,7 @@ def _git_commit_of_tree(anchor: Path | None) -> str:
             encoding="utf-8", errors="replace"
         ).strip()
     except OSError:
-        return "UNKNOWN (not a git checkout)"
+        return "UNKNOWN (HEAD unreadable)"
 
     sha: str | None = None
     if head.startswith("ref: "):
@@ -586,7 +614,7 @@ def _git_commit_of_tree(anchor: Path | None) -> str:
     elif re.fullmatch(r"[0-9a-fA-F]{7,40}", head):
         sha = head
     if not sha:
-        return "UNKNOWN (not a git checkout)"
+        return "UNKNOWN (no commit resolved)"
     return f"{sha[:12]} (12-char short HEAD sha)"
 
 
