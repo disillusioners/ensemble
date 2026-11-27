@@ -229,8 +229,9 @@ class TestSweepPredicate:
 
     @pytest.mark.asyncio
     async def test_traffic_bearing_pairs_are_not_listed(self):
-        """Service-level predicate: a pair with comparisons > 0 is not
-        stalled, even when it is old."""
+        """Service-level predicate: a pair whose arms carry serving
+        traffic (increment_counter) is not stalled, even when it is
+        old and comparisons == 0."""
         from daemon.repositories.skill.repository import (
             SkillABTestRepository,
             SkillRepository,
@@ -291,19 +292,14 @@ class TestSweepPredicate:
             row.created_at = (
                 datetime.now(timezone.utc) - timedelta(days=30)
             ).isoformat()
-            row.comparisons = 3
+            row.comparisons = 0
             session.add(row)
             session.commit()
 
-        # F5 (2026-11-26) — the traffic signal moved from
-        # ``SkillABTest.comparisons`` (injection-only) to the ARMS'
-        # serving counters. The pair above stays old and keeps
-        # comparisons=3 (incidental); the TRAFFIC now lives on the
-        # arm rows, exactly as production writes it
-        # (``increment_counter`` via the serving/feedback paths).
-        # Fixture change is REQUIRED by the criterion change: the old
-        # fixture modelled "traffic" with comparisons alone, which the
-        # new predicate deliberately no longer treats as traffic.
+        # FIX 3 (M13) — comparisons is 0 (the live 98c3e028
+        # shape): the arm counters alone must carry the refusal. If the
+        # arm-traffic check is removed/broken, this test goes GREEN for
+        # the wrong reason, so row.comparisons is pinned to 0.
         skill_repo.increment_counter(old.id, "total_selections", 2)
         skill_repo.increment_counter(old.id, "total_applied", 2)
 

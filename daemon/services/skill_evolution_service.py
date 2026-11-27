@@ -974,7 +974,36 @@ class SkillEvolutionService:
         # execution-refusal counter + sink record (mirrors the
         # ``ab_guard`` refusal below). The SANCTIONED CORRECTIVE path
         # keeps its pass-through, exactly like the sibling guard.
-        if not getattr(skill, "is_active", True) and not corrective:
+        _skill_has_is_active = hasattr(skill, "is_active")
+        if not _skill_has_is_active and not corrective:
+            # FIX 8 (H1 service half): a MISSING attribute is UNKNOWN,
+            # not "servable". Take the DEGRADED path (fail-open AND
+            # RECORDED: WARNING + run record) — never the silent
+            # servable path. The execution-time guard is not a
+            # backstop here; we proceed (fail-open) but record.
+            skill_id_val = getattr(skill, "id", None)
+            logger.warning(
+                "[SkillEvolution] F3 servability gate DEGRADED "
+                "(fail-open): skill %s has no 'is_active' attribute "
+                "(UNKNOWN) — proceeding; the row state is re-read at "
+                "execution",
+                skill_id_val,
+            )
+            observability.append_run_record(
+                observability.build_run_record(
+                    stage="execution",
+                    run_id=observability.new_run_id(),
+                    agent_id=None,
+                    prompt_source="_evolve_fix",
+                    outcome="servability_gate_degraded",
+                    extra={
+                        "skill_id": skill_id_val,
+                        "degraded_reason": "missing_is_active_attribute",
+                    },
+                )
+            )
+            # fall through (fail-open): do NOT refuse
+        elif not getattr(skill, "is_active", True) and not corrective:
             skill_id_val = getattr(skill, "id", None)
             logger.warning(
                 f"[SkillEvolution] Refusing FIX on skill "
@@ -1003,6 +1032,7 @@ class SkillEvolutionService:
                     "plain FIX path refuses a deactivated source "
                     "(reason=non_servable_target)"
                 ),
+                "refusal_reason": "non_servable_target",
                 "skill_id": skill_id_val,
             }
 
@@ -1980,6 +2010,57 @@ class SkillEvolutionService:
             )
         return cas_won
 
+    # FIX 5 (H1) — collapsed CAS commit-tail helpers (behaviour-neutral).
+    # Single source of truth for the cas_lost / resolved envelopes so
+    # the four CAS sites cannot drift apart. Key sets are reproduced
+    # EXACTLY from the pre-edit literals (extension_count only where
+    # the original carried it; basis/parked only where the original
+    # carried them).
+    def _cas_lost_result(
+        self,
+        extension_count: Optional[int] = None,
+        *,
+        basis: Optional[str] = None,
+        parked: Optional[bool] = None,
+    ) -> dict:
+        result: dict = {
+            "resolved": False,
+            "winner_id": None,
+            "loser_id": None,
+            "reason": "cas_lost",
+        }
+        if extension_count is not None:
+            result["extension_count"] = extension_count
+        if basis is not None:
+            result["basis"] = basis
+        if parked is not None:
+            result["parked"] = parked
+        return result
+
+    def _resolved_result(
+        self,
+        winner_id: Any,
+        loser_id: Any,
+        reason: str,
+        extension_count: Optional[int] = None,
+        *,
+        basis: Optional[str] = None,
+        parked: Optional[bool] = None,
+    ) -> dict:
+        result: dict = {
+            "resolved": True,
+            "winner_id": winner_id,
+            "loser_id": loser_id,
+            "reason": reason,
+        }
+        if extension_count is not None:
+            result["extension_count"] = extension_count
+        if basis is not None:
+            result["basis"] = basis
+        if parked is not None:
+            result["parked"] = parked
+        return result
+
     async def check_ab_test_resolution(
         self,
         ab_test_group: str,
@@ -2186,20 +2267,11 @@ class SkillEvolutionService:
                 ab_test_group, winner_id, loser_id,
             )
             if not cas_won:
-                return {
-                    "resolved": False,
-                    "winner_id": None,
-                    "loser_id": None,
-                    "reason": "cas_lost",
-                    "extension_count": extension_count,
-                }
-            return {
-                "resolved": True,
-                "winner_id": winner_id,
-                "loser_id": loser_id,
-                "reason": "forced_winner",
-                "extension_count": extension_count,
-            }
+                return self._cas_lost_result(extension_count=extension_count)
+            return self._resolved_result(
+                winner_id, loser_id, "forced_winner",
+                extension_count=extension_count,
+            )
 
         if comparisons < sample_size:
             return {
@@ -2249,20 +2321,11 @@ class SkillEvolutionService:
                 ab_test_group, winner_id, loser_id,
             )
             if not cas_won:
-                return {
-                    "resolved": False,
-                    "winner_id": None,
-                    "loser_id": None,
-                    "reason": "cas_lost",
-                    "extension_count": extension_count,
-                }
-            return {
-                "resolved": True,
-                "winner_id": winner_id,
-                "loser_id": loser_id,
-                "reason": "threshold_met",
-                "extension_count": extension_count,
-            }
+                return self._cas_lost_result(extension_count=extension_count)
+            return self._resolved_result(
+                winner_id, loser_id, "threshold_met",
+                extension_count=extension_count,
+            )
 
         # Path 3: out of extensions → force-resolve.
         if extension_count >= max_ext:
@@ -2289,20 +2352,11 @@ class SkillEvolutionService:
                 ab_test_group, winner_id, loser_id,
             )
             if not cas_won:
-                return {
-                    "resolved": False,
-                    "winner_id": None,
-                    "loser_id": None,
-                    "reason": "cas_lost",
-                    "extension_count": extension_count,
-                }
-            return {
-                "resolved": True,
-                "winner_id": winner_id,
-                "loser_id": loser_id,
-                "reason": "force_resolved_max_extensions",
-                "extension_count": extension_count,
-            }
+                return self._cas_lost_result(extension_count=extension_count)
+            return self._resolved_result(
+                winner_id, loser_id, "force_resolved_max_extensions",
+                extension_count=extension_count,
+            )
 
         # Path 4: extend.
         # Mirror guard (2026-11-17, leader ruling — Path 4): the SAME
@@ -2808,14 +2862,9 @@ class SkillEvolutionService:
                 "cas_lost",
                 {"winner_id": resolved_winner, "loser_id": resolved_loser},
             )
-            return {
-                "resolved": False,
-                "winner_id": None,
-                "loser_id": None,
-                "reason": "cas_lost",
-                "basis": basis,
-                "parked": False,
-            }
+            return self._cas_lost_result(
+                basis=basis, parked=False,
+            )
 
         _announce(
             outcome_reason,
@@ -2831,14 +2880,10 @@ class SkillEvolutionService:
             reason,
             actor,
         )
-        return {
-            "resolved": True,
-            "winner_id": resolved_winner,
-            "loser_id": resolved_loser,
-            "reason": outcome_reason,
-            "basis": basis,
-            "parked": False,
-        }
+        return self._resolved_result(
+            resolved_winner, resolved_loser, outcome_reason,
+            basis=basis, parked=False,
+        )
 
     # --------------------------------------------------------
     # Public API: read-only metrics for a skill
@@ -3797,6 +3842,12 @@ class SkillEvolutionService:
             # observability mechanism (mirrors the `_evolve_fix`
             # ab_guard shape: an execution-refusal counter + a sink
             # run record).
+            logger.warning(
+                "[SkillEvolution] surgical evolution REFUSED "
+                "(reason=no_applicable_edits) skill=%s edits_rejected=%d",
+                getattr(skill, "id", None),
+                rejected,
+            )
             observability.record_execution_refusal("no_applicable_edits")
             observability.append_run_record(
                 observability.build_run_record(

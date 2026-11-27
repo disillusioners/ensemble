@@ -40,6 +40,7 @@ NAMED MUTATION LEGS (each turns this file RED):
 from __future__ import annotations
 
 import json
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -284,8 +285,9 @@ class TestCapturedEnvelope:
 class TestRefusedShapeIsStructured:
     @pytest.mark.asyncio
     async def test_zero_applied_raise_carries_structured_reasons(
-        self, svc, skill_repo, tmp_path
+        self, svc, skill_repo, tmp_path, caplog
     ):
+        caplog.set_level(logging.WARNING)
         parent = _make_skill(skill_repo)
         script = json.dumps(
             {"edits": [{"op": "replace", "anchor": "NOPE", "replacement": "x"}]}
@@ -321,6 +323,17 @@ class TestRefusedShapeIsStructured:
             and r.get("skill_id") == parent.id
             for r in records
         ), f"the refusal must leave a sink record — got {records!r}"
+
+        # The refusal is also LOGGED at WARNING (refusal visibility).
+        assert any(
+            r.levelname == "WARNING"
+            and "surgical evolution REFUSED" in r.getMessage()
+            and "no_applicable_edits" in r.getMessage()
+            for r in caplog.records
+        ), (
+            "expected a WARNING log for the surgical refusal — got "
+            f"{[r.getMessage() for r in caplog.records]!r}"
+        )
 
     @pytest.mark.asyncio
     async def test_tool_lane_renders_the_structured_json_not_prose(self):
@@ -400,10 +413,12 @@ class TestDocumentedShape:
         )
 
     def test_every_tier3_result_shape_carries_the_contract(self):
-        """SOURCE-LEVEL guard: every return site in the three Tier-3
-        paths goes through a shape that supplies the edit contract —
-        the documented keys can never again be promised by a path that
-        does not return them."""
+        """SOURCE-LEVEL guard: asserts three substrings exist in the
+        SkillEvolutionService source — ``_captured_envelope(``,
+        ``"partial_apply": rejected > 0``, and
+        ``"partial_apply": False``. Does NOT prove per-return-site
+        conformance; structural AST walk was considered and rejected
+        as ambiguous (guard refusals and helper-spread returns)."""
         import inspect
 
         src = inspect.getsource(SkillEvolutionService)

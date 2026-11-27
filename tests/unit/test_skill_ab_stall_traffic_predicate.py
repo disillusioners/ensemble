@@ -198,9 +198,10 @@ class TestGetArmTrafficReader:
 
     def test_reader_is_read_only(self, skill_repo):
         row = _make_arm(skill_repo, name="reader-ro", generation=0)
-        before = skill_repo.get_arm_traffic(row.id)
+        before = skill_repo.get(row.id).model_dump()
         skill_repo.get_arm_traffic(row.id)
-        assert skill_repo.get_arm_traffic(row.id) == before
+        after = skill_repo.get(row.id).model_dump()
+        assert after == before
 
 
 # ── Site A — find_stalled_ab_tests EXCLUDES a traffic-bearing pair ────────
