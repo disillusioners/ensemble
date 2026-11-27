@@ -173,6 +173,15 @@ def _skill_write_spy(engine, request=None):
       reach the database exactly once (the pair-row UPDATE targets
       ``skillabtest`` and is filtered out by the table-name prefix).
 
+    The listeners close over a PLAIN counters dict, not over the spy
+    object, so the only strong reference to the spy is the caller's.
+    That makes ``weakref.finalize(spy, _cleanup)`` actually able to
+    fire when the spy is collected (a finalizer callback must not
+    reference the object it finalizes). The spy also exposes
+    ``on_flush`` / ``on_exec`` (the listener functions) and a
+    ``cleanup()`` method for deterministic teardown, plus
+    ``dirty`` / ``updates`` views of the same counters.
+
     The listeners are REMOVED in teardown (both of them) so they do
     not leak into the rest of the pytest session or into any later
     test that touches a SQLModel session.
@@ -180,18 +189,16 @@ def _skill_write_spy(engine, request=None):
     import daemon.repositories.skill.repository as repo_mod
     import weakref
 
-    class _Spy:
-        __slots__ = ('dirty', 'updates', 'cleanup', '__weakref__')
-        def __init__(self):
-            self.dirty = {}
-            self.updates = {}
-            self.cleanup = None
-    spy = _Spy()
+    # Plain counters dict — the listeners close over THIS, not over
+    # the spy object, so the spy stays collectable.
+    counters = {"dirty": {}, "updates": {}}
 
     def _on_flush(session, flush_context, instances):
         for obj in session.dirty:
             if isinstance(obj, Skill):
-                spy.dirty[obj.id] = spy.dirty.get(obj.id, 0) + 1
+                counters["dirty"][obj.id] = (
+                    counters["dirty"].get(obj.id, 0) + 1
+                )
 
     def _on_exec(conn, cursor, statement, parameters, context, executemany):
         if statement.lstrip().upper().startswith("UPDATE SKILLS"):
@@ -203,7 +210,9 @@ def _skill_write_spy(engine, request=None):
             elif isinstance(parameters, dict):
                 row_id = parameters.get("id")
             if row_id is not None:
-                spy.updates[row_id] = spy.updates.get(row_id, 0) + 1
+                counters["updates"][row_id] = (
+                    counters["updates"].get(row_id, 0) + 1
+                )
 
     def _cleanup():
         try:
@@ -215,6 +224,17 @@ def _skill_write_spy(engine, request=None):
         except Exception:  # noqa: BLE001
             pass
 
+    class _Spy:
+        __slots__ = (
+            "dirty", "updates", "on_flush", "on_exec", "cleanup",
+            "__weakref__",
+        )
+
+    spy = _Spy()
+    spy.dirty = counters["dirty"]
+    spy.updates = counters["updates"]
+    spy.on_flush = _on_flush
+    spy.on_exec = _on_exec
     spy.cleanup = _cleanup
 
     event.listens_for(repo_mod.Session, "before_flush")(_on_flush)
@@ -226,6 +246,7 @@ def _skill_write_spy(engine, request=None):
         weakref.finalize(spy, _cleanup)
 
     return spy
+
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -504,3 +525,29 @@ class TestSanctionedResolverUsesAtomicCAS:
         assert skill_repo.get(old.id).is_active is True
         assert skill_repo.get(new.id).ab_test_group == "ab-atomic"
 
+
+
+# ── FIX 8 regression pin — the session-global listener must NOT leak ──────
+
+
+class TestSpyTeardownRegressionPin:
+    def test_teardown_removes_session_global_before_flush_listener(
+        self, engine, _skill_write_spy
+    ):
+        import daemon.repositories.skill.repository as repo_mod
+        from sqlalchemy import event
+
+        spy = _skill_write_spy
+        # Registered while alive.
+        assert event.contains(
+            repo_mod.Session, "before_flush", spy.on_flush
+        ) is True
+        # Deterministic teardown (idempotent with the fixture's
+        # addfinalizer).
+        spy.cleanup()
+        assert event.contains(
+            repo_mod.Session, "before_flush", spy.on_flush
+        ) is False
+        assert event.contains(
+            engine, "before_cursor_execute", spy.on_exec
+        ) is False
