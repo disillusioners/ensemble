@@ -320,6 +320,47 @@ def _sanitize_note_text(note: str) -> str:
 # direction marker (the escape hatch), and even that path now sees
 # the FULL parent body (the 3000-char truncation is gone).
 
+#: F10 (2026-11-26): hard cap for ``SkillLineage.change_summary``.
+#:
+#: MEASURED COLUMN SPEC: ``daemon/repositories/skill/models.py:289``
+#: declares ``change_summary: str = Field(default="")`` — an AutoString
+#: with NO ``max_length`` — and the DB column is ``TEXT NOT NULL
+#: DEFAULT ''`` (migration ``20260710_000001_create_skill_tables.sql:38``),
+#: i.e. UNBOUNDED. The cap therefore MUST live in code (contrast:
+#: ``Skill.status`` carries ``max_length=32`` and
+#: ``Skill.ab_test_group`` ``max_length=64`` — bounded columns enforce
+#: their own).
+#:
+#: 200 is deliberately NARROWER than the sibling bounded string
+#: surfaces in this module (``_MAX_NOTE_CHARS`` = 300 for feedback
+#: notes; ``_MAX_PAYLOAD_DESCRIPTION_CHARS`` = 512 for skill
+#: descriptions): the change summary is a ONE-LINE human-facing label
+#: rendered beside every lineage edge in the lineage views — not a
+#: retrieval surface — and the FULL direction survives in the
+#: evolution job's metadata (the dispatcher stores it verbatim).
+_MAX_CHANGE_SUMMARY_CHARS = 200
+
+
+def _change_summary(prefix: str, direction: str) -> str:
+    """F10 (2026-11-26): the FIRST LINE of ``direction``, hard-capped.
+
+    ``change_summary`` used to carry the ENTIRE direction — which the
+    FIX dispatcher composes as ``issue_description`` + an appended
+    ``Suggested fix:`` block (arbitrarily long, multi-paragraph user
+    input) — into an UNBOUNDED TEXT column. The summary now keeps only
+    the first line, prefixed, capped at ``_MAX_CHANGE_SUMMARY_CHARS``
+    with an explicit ellipsis when truncated. The full direction is
+    NOT lost: ``SkillJobDispatcher.enqueue_evolution`` stores it
+    verbatim in the job metadata.
+    """
+    text = str(direction or "").strip()
+    first_line = text.splitlines()[0].strip() if text else ""
+    summary = f"{prefix}: {first_line}" if first_line else str(prefix)
+    if len(summary) > _MAX_CHANGE_SUMMARY_CHARS:
+        summary = summary[: _MAX_CHANGE_SUMMARY_CHARS - 1].rstrip() + "\u2026"
+    return summary
+
+
 #: Ops the surgical applier understands. Every op carries an
 #: ``anchor`` — an EXACT verbatim substring of the parent body that
 #: must occur EXACTLY ONCE (an ambiguous anchor is rejected, never
@@ -1062,7 +1103,7 @@ class SkillEvolutionService:
             self._lineage_repo.create,
             new_skill.id,
             skill.id,
-            change_summary=f"FIX: {direction}",
+            change_summary=_change_summary("FIX", direction),
             content_diff=self._compute_diff(skill.content, new_content),
         )
 
@@ -1204,7 +1245,7 @@ class SkillEvolutionService:
             self._lineage_repo.create,
             corrected.id,
             skill.id,
-            change_summary=f"CORRECTIVE FIX: {direction}",
+            change_summary=_change_summary("CORRECTIVE FIX", direction),
             content_diff=self._compute_diff(skill.content, new_content),
         )
 
@@ -1301,7 +1342,7 @@ class SkillEvolutionService:
             self._lineage_repo.create,
             new_skill.id,
             skill.id,
-            change_summary=f"DERIVED: {direction}",
+            change_summary=_change_summary("DERIVED", direction),
             content_diff=self._compute_diff(skill.content, new_content),
         )
 

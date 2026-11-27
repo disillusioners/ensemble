@@ -390,6 +390,19 @@ class TestMissingArmDecision:
         assert skill_repo.get(new.id) is None
         assert ab_test_repo.get_by_group("g-missing-arm") is not None
 
+        # SITE A: the pair IS listed (surfaced, not silently skipped) —
+        # a missing arm has no traffic RECORD, so it is not
+        # traffic-bearing; the E-6 rule supplies the park reason so the
+        # operator SEES the desync.
+        stalled = await svc.find_stalled_ab_tests()
+        entry = next(
+            (e for e in stalled if e["ab_test_group"] == "g-missing-arm"),
+            None,
+        )
+        assert entry is not None
+        assert entry["park_reason"] == "stalled_variant_row_missing"
+
+        # SITE B: the sanctioned resolver CANNOT resolve it — it parks.
         result = await svc.resolve_ab_test_sanctioned(
             "g-missing-arm", basis="stalled", reason="sweep",
         )
