@@ -2278,7 +2278,38 @@ class TestForcedWinnerResolvedAtGuard:
             "needs_more_data": False,
         }
 
+        # Spy on the atomic path vs the legacy three-transaction fan-out.
+        _orig_resolve_atomic = evolution_service._ab_test_repo.resolve_atomic
+        _calls = {"resolve_atomic": 0, "deactivate": 0, "resolve": 0, "update": 0}
+
+        def _spy_resolve_atomic(*a, **kw):
+            _calls["resolve_atomic"] += 1
+            return _orig_resolve_atomic(*a, **kw)
+
+        def _spy_deactivate(*a, **kw):
+            _calls["deactivate"] += 1
+            return None
+
+        def _spy_resolve(*a, **kw):
+            _calls["resolve"] += 1
+            return None
+
+        def _spy_update(*a, **kw):
+            _calls["update"] += 1
+            return None
+
+        evolution_service._ab_test_repo.resolve_atomic = _spy_resolve_atomic
+        evolution_service._skill_repo.deactivate = _spy_deactivate
+        evolution_service._ab_test_repo.resolve = _spy_resolve
+        evolution_service._skill_repo.update = _spy_update
+
         result = await evolution_service.check_ab_test_resolution(group)
+
+        # Behavioural pin: the atomic CAS path is the ONLY terminal mutation.
+        assert _calls["resolve_atomic"] == 1
+        assert _calls["deactivate"] == 0
+        assert _calls["resolve"] == 0
+        assert _calls["update"] == 0
 
         assert result["resolved"] is True
         assert result["winner_id"] == new.id   # higher completion rate
@@ -2390,7 +2421,37 @@ class TestForcedWinnerResolvedAtGuard:
             "needs_more_data": True,
         }
 
+        _orig_resolve_atomic2 = evolution_service._ab_test_repo.resolve_atomic
+        _calls2 = {"resolve_atomic": 0, "deactivate": 0, "resolve": 0, "update": 0}
+
+        def _spy_resolve_atomic2(*a, **kw):
+            _calls2["resolve_atomic"] += 1
+            return _orig_resolve_atomic2(*a, **kw)
+
+        def _spy_deactivate2(*a, **kw):
+            _calls2["deactivate"] += 1
+            return None
+
+        def _spy_resolve2(*a, **kw):
+            _calls2["resolve"] += 1
+            return None
+
+        def _spy_update2(*a, **kw):
+            _calls2["update"] += 1
+            return None
+
+        evolution_service._ab_test_repo.resolve_atomic = _spy_resolve_atomic2
+        evolution_service._skill_repo.deactivate = _spy_deactivate2
+        evolution_service._ab_test_repo.resolve = _spy_resolve2
+        evolution_service._skill_repo.update = _spy_update2
+
         result2 = await evolution_service.check_ab_test_resolution(group2)
+
+        # Behavioural pin: the atomic CAS path is the ONLY terminal mutation.
+        assert _calls2["resolve_atomic"] == 1
+        assert _calls2["deactivate"] == 0
+        assert _calls2["resolve"] == 0
+        assert _calls2["update"] == 0
 
         assert result2["resolved"] is True
         assert result2["reason"] == "force_resolved_max_extensions"
@@ -4723,6 +4784,106 @@ class TestCorrectiveFix:
         assert result["skipped"] is True
         assert "A/B testing" in result["reason"]
         mock_llm.assert_not_called()
+
+
+class TestF3GuardBypass:
+    """B1: corrective=True must NOT bypass the F3 servability guard for a
+    deactivated (is_active=False, status='inactive') skill."""
+
+    @pytest.mark.asyncio
+    async def test_deactivated_skill_corrective_is_refused(
+        self, evolution_service, skill_repo, project_id
+    ):
+        """A deactivated skill (is_active=False, status='inactive') with
+        corrective=True is refused with refusal_reason=non_servable_target:
+        no new generation, no new ab_test_group, row count unchanged,
+        refusal counter incremented."""
+        from daemon.services import skill_capture_observability as observability
+
+        skill = _make_skill(skill_repo, project_id, "retired-bypass")
+        skill_repo.deactivate(skill.id)
+        before_count = len(skill_repo.list(active_only=False))
+
+        observability.reset_counters()
+        with patch.object(
+            evolution_service,
+            "_call_llm",
+            AsyncMock(return_value='{"description": null, "edits": [{"op": "replace", "anchor": "content for retired-bypass", "replacement": "new content"}]}'),
+        ):
+            result = await evolution_service.evolve_skill(
+                skill.id, "FIX", "repair it", corrective=True
+            )
+
+        assert result["skipped"] is True
+        assert result.get("refusal_reason") == "non_servable_target"
+        # No new generation minted, no new ab_test_group.
+        assert result.get("new_skill_id") is None
+        after_count = len(skill_repo.list(active_only=False))
+        assert after_count == before_count
+        # Refusal counter incremented.
+        assert (
+            observability.counters().execution_refusals.get(
+                "non_servable_target", 0
+            )
+            == 1
+        )
+        # The deactivated skill is untouched.
+        after = skill_repo.get(skill.id)
+        assert after.is_active is False
+        assert after.status == "inactive"
+
+    @pytest.mark.asyncio
+    async def test_ab_testing_inactive_skill_corrective_not_refused(
+        self, evolution_service, skill_repo, ab_test_repo, project_id
+    ):
+        """Positive control: is_active=False + status='ab_testing' +
+        corrective=True is NOT refused by the F3 guard (legitimate
+        corrective case still works)."""
+        import uuid as _uuid
+
+        parent = _make_skill(skill_repo, project_id, "omega-pc", generation=1)
+        child = skill_repo.create(
+            name="omega-pc",
+            description="desc for omega-pc child",
+            content="content for omega-pc child",
+            project_id=project_id,
+            lineage_origin="evolved",
+            generation=2,
+        )
+        group = str(_uuid.uuid4())
+        for row in (parent, child):
+            skill_repo.update(
+                row.id, ab_test_group=group, status="ab_testing"
+            )
+        # Deactivate the child (is_active=False) but keep ab_testing status.
+        skill_repo.update(child.id, is_active=False)
+        ab_test_repo.create_ab_test(group, parent.id, child.id)
+
+        edit_script = json.dumps(
+            {
+                "description": "Omega-pc, corrected",
+                "edits": [
+                    {
+                        "op": "replace",
+                        "anchor": "content for omega-pc child",
+                        "replacement": "content for omega-pc child, fixed",
+                    }
+                ],
+            }
+        )
+        with patch.object(
+            evolution_service, "_call_llm",
+            AsyncMock(return_value=edit_script),
+        ):
+            result = await evolution_service.evolve_skill(
+                child.id, "FIX", "repair the defective generation",
+                corrective=True,
+            )
+
+        # Not refused by the F3 guard.
+        assert result.get("refusal_reason") != "non_servable_target"
+        # The corrective path ran (skipped False on success).
+        assert result["skipped"] is False
 
 
 class TestDuplicatedAnchorRejection:

@@ -980,7 +980,7 @@ class SkillEvolutionService:
         # ``ab_guard`` refusal below). The SANCTIONED CORRECTIVE path
         # keeps its pass-through, exactly like the sibling guard.
         _skill_has_is_active = hasattr(skill, "is_active")
-        if not _skill_has_is_active and not corrective:
+        if not _skill_has_is_active and not (corrective and getattr(skill, "status", None) == "ab_testing"):
             # FIX 8 (H1 service half): a MISSING attribute is UNKNOWN,
             # not "servable". Take the DEGRADED path (fail-open AND
             # RECORDED: WARNING + run record) — never the silent
@@ -1008,7 +1008,7 @@ class SkillEvolutionService:
                 )
             )
         # fall through (fail-open): do NOT refuse
-        elif not getattr(skill, "is_active", True) and not corrective:
+        elif not getattr(skill, "is_active", True) and not (corrective and getattr(skill, "status", None) == "ab_testing"):
             skill_id_val = getattr(skill, "id", None)
             logger.warning(
                 f"[SkillEvolution] Refusing FIX on skill "
