@@ -4319,6 +4319,73 @@ class TestSanctionedResolution:
         assert pair.winner_skill_id == new.id
         assert pair.resolved_at
 
+    @pytest.mark.asyncio
+    async def test_sanctioned_resolve_calls_resolve_atomic_exactly_once(
+        self, evolution_service, skill_repo, ab_test_repo, project_id
+    ):
+        """The SANCTIONED path must call ``resolve_atomic`` EXACTLY ONCE.
+
+        ``resolve_atomic`` is a CAS on ``resolved_at IS NULL``: a
+        SECOND call on the same group simply loses the CAS and returns
+        ``False`` with ZERO mutations. A doubled call is therefore
+        INVISIBLE to every end-state assertion — the terminal state
+        after two calls is byte-identical to the state after one.
+        Only a CALL-COUNT pin can see it.
+
+        The other two ``resolve_atomic`` call sites (:2004 the helper
+        ``_atomic_resolve_triple`` and :2424 the force-resolve path)
+        already carry ``== 1`` spies; the SANCTIONED path did not.
+
+        Mutation bar: duplicate the ``resolve_atomic`` call at the
+        sanctioned call site ⇒ the counter reads 2 ⇒ RED.
+        """
+        group, old, new = self._make_stalled_pair(
+            skill_repo, ab_test_repo, project_id
+        )
+
+        # Spy on the sanctioned path's atomic CAS: a CALL-THROUGH
+        # wrapper (NOT a replacing mock) so the real CAS still runs.
+        _repo = evolution_service._ab_test_repo
+        _orig_resolve_atomic = _repo.resolve_atomic
+        _calls = {"resolve_atomic": 0}
+
+        def _spy_resolve_atomic(*a, **kw):
+            _calls["resolve_atomic"] += 1
+            return _orig_resolve_atomic(*a, **kw)
+
+        _repo.resolve_atomic = _spy_resolve_atomic
+        try:
+            result = await evolution_service.resolve_ab_test_sanctioned(
+                group, basis="stalled",
+                reason="sweep: zero traffic for 10d",
+            )
+        finally:
+            # The spy was an INSTANCE attribute shadowing the
+            # repository's class-level method — deleting it restores
+            # the original binding exactly. No spy leaks past this
+            # node (teardown leak = the TestSpyTeardownRegressionPin
+            # concern).
+            del _repo.resolve_atomic
+
+        # Behavioural pin: EXACTLY ONE atomic CAS on the sanctioned
+        # path — not "at least one".
+        assert _calls["resolve_atomic"] == 1
+
+        # End state EXACTLY per spec (d) — mirrors the sibling nodes.
+        assert result["resolved"] is True
+        assert result["winner_id"] == new.id  # generation 2 > 1
+        assert result["loser_id"] == old.id
+        loser = skill_repo.get(old.id)
+        assert loser.status == "inactive"
+        assert loser.is_active is False
+        assert loser.ab_test_group == group  # RETAINED
+        winner = skill_repo.get(new.id)
+        assert winner.status == "active"
+        assert winner.ab_test_group is None  # cleared
+        pair = ab_test_repo.get_by_group(group)
+        assert pair.winner_skill_id == new.id
+        assert pair.resolved_at
+
     def _age_pair(self, ab_test_repo, group, *, age_days=10.0):
         """Age the pair row past the stall timeout (explicit timestamp)."""
         from sqlmodel import Session, select
