@@ -1,0 +1,70 @@
+=== BASE LEG — STEP 5 — FULL OVERLAID FILE AT BASE 5cc5912f7 (informative) ===
+
+=== RUN A: the STEP 5 command verbatim (--tb=no -rs) ===
+--- FULL OUTPUT ---
+
+[PROBE] sessionstart sys.path[0:5] = ['/home/nea/ensemble-src-wt-revive-gate-base', '/tmp', '/home/nea/ensemble-src-wt-revive-gate-base', '/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python314.zip', '/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14']
+
+[PROBE] daemon.__file__ = /home/nea/ensemble-src-wt-revive-gate-base/daemon/__init__.py
+[PROBE] daemon.__path__ = ['/home/nea/ensemble-src-wt-revive-gate-base/daemon']
+[PROBE] child_reports.__file__ = /home/nea/ensemble-src-wt-revive-gate-base/daemon/services/child_reports.py
+[PROBE] sys.path[0:5] = ['/home/nea/ensemble-src-wt-revive-gate-base', '/tmp', '/home/nea/ensemble-src-wt-revive-gate-base', '/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python314.zip', '/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14']
+..................................................FFFFF.FFFFFFFFFF       [100%]
+=============================== warnings summary ===============================
+../ensemble-src-wt-revive-wedge/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-revive-wedge/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+tests/unit/services/test_child_reports.py::TestReportIntegrityGuardStageIIIEnforcement::test_enforcement_evaluation_preserves_ordering
+tests/unit/services/test_child_reports.py::TestReportIntegrityGuardStageIIIEnforcement::test_flag_off_root_path_b_violation_report_is_inert
+  /home/nea/ensemble-src-wt-revive-wedge/.venv/lib/python3.14/site-packages/sqlmodel/orm/session.py:75: SAWarning: The engine provided as bind produced a connection that is already in a transaction. This is usually caused by a core event, such as 'engine_connect', that has left a transaction open. The effective join transaction mode used by this session is 'create_savepoint'. To silence this warning, do not leave transactions open
+    results = super().execute(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+15 failed, 51 passed, 3 warnings in 15.37s
+
+--- EXIT CODE: 1 ---
+
+=== RUN B: identical command with -rf (to capture FAILED node ids verbatim) ===
+--- FULL OUTPUT ---
+
+[PROBE] sessionstart sys.path[0:5] = ['/home/nea/ensemble-src-wt-revive-gate-base', '/tmp', '/home/nea/ensemble-src-wt-revive-gate-base', '/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python314.zip', '/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14']
+
+[PROBE] daemon.__file__ = /home/nea/ensemble-src-wt-revive-gate-base/daemon/__init__.py
+[PROBE] daemon.__path__ = ['/home/nea/ensemble-src-wt-revive-gate-base/daemon']
+[PROBE] child_reports.__file__ = /home/nea/ensemble-src-wt-revive-gate-base/daemon/services/child_reports.py
+[PROBE] sys.path[0:5] = ['/home/nea/ensemble-src-wt-revive-gate-base', '/tmp', '/home/nea/ensemble-src-wt-revive-gate-base', '/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python314.zip', '/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14']
+..................................................FFFFF.FFFFFFFFFF       [100%]
+=============================== warnings summary ===============================
+../ensemble-src-wt-revive-wedge/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-revive-wedge/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+tests/unit/services/test_child_reports.py::TestReportIntegrityGuardStageIIIEnforcement::test_enforcement_evaluation_preserves_ordering
+tests/unit/services/test_child_reports.py::TestReportIntegrityGuardStageIIIEnforcement::test_flag_off_root_path_b_violation_report_is_inert
+  /home/nea/ensemble-src-wt-revive-wedge/.venv/lib/python3.14/site-packages/sqlmodel/orm/session.py:75: SAWarning: The engine provided as bind produced a connection that is already in a transaction. This is usually caused by a core event, such as 'engine_connect', that has left a transaction open. The effective join transaction mode used by this session is 'create_savepoint'. To silence this warning, do not leave transactions open
+    results = super().execute(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/services/test_child_reports.py::TestReviveWedgeDecoupling::test_a_mint_suppressed_call_still_terminalizes_the_child[completed-anchor-A-anchor-A-i]
+FAILED tests/unit/services/test_child_reports.py::TestReviveWedgeDecoupling::test_a_mint_suppressed_call_still_terminalizes_the_child[processing-anchor-A-anchor-A-ii]
+FAILED tests/unit/services/test_child_reports.py::TestReviveWedgeDecoupling::test_a_mint_suppressed_call_still_terminalizes_the_child[ready-anchor-A-anchor-B-iv-ready]
+FAILED tests/unit/services/test_child_reports.py::TestReviveWedgeDecoupling::test_a_mint_suppressed_call_still_terminalizes_the_child[processing-anchor-A-anchor-B-iv-processing]
+FAILED tests/unit/services/test_child_reports.py::TestReviveWedgeDecoupling::test_the_suppress_outcome_reaches_the_b4_gate_on_a_completed_row
+FAILED tests/unit/services/test_child_reports.py::TestReviveWedgeDuplicateFreedom::test_an_explicit_revive_then_a_new_anchor_mints_a_second_report
+FAILED tests/unit/services/test_child_reports.py::TestReviveWedgeObservability::test_arm_b_suppression_emits_exactly_one_record_and_counts_only_a_loss[different-anchor-is-a-loss]
+FAILED tests/unit/services/test_child_reports.py::TestReviveWedgeObservability::test_arm_b_suppression_emits_exactly_one_record_and_counts_only_a_loss[same-anchor-loses-nothing]
+FAILED tests/unit/services/test_child_reports.py::TestReviveWedgeObservability::test_an_arm_a_only_suppression_emits_exactly_one_arm_a_record
+FAILED tests/unit/services/test_child_reports.py::TestReviveWedgeObservability::test_a_mint_over_a_retrying_obligation_emits_exactly_one_info_record
+FAILED tests/unit/services/test_child_reports.py::TestReviveWedgeObservability::test_no_retrying_record_without_an_obligation_or_on_a_suppression
+FAILED tests/unit/services/test_child_reports.py::TestReviveWedgeObservability::test_concurrent_counter_increments_lose_no_update
+FAILED tests/unit/services/test_child_reports.py::TestReviveWedgeObservability::test_a_defer_emits_no_suppress_record_and_leaves_the_counter_untouched[active_children]
+FAILED tests/unit/services/test_child_reports.py::TestReviveWedgeObservability::test_a_defer_emits_no_suppress_record_and_leaves_the_counter_untouched[pending_task]
+FAILED tests/unit/services/test_child_reports.py::TestReviveWedgeDirection1Canonical::test_revive_then_new_anchor_terminalizes_and_persists_report_injection
+15 failed, 51 passed, 3 warnings in 14.08s
+
+--- EXIT CODE: 1 ---
+
+--- COLLECTION COUNT after overlay: 66 (15 failed + 51 passed). No collection errors. No deselected. No skipped. ---
+--- NOTE: the 15 reds are EXPECTED at base (Direction-1 pin + the lane's other new pins). Not a gate failure. ---

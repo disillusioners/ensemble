@@ -1,0 +1,19 @@
+.........                                                                [100%]
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-revive-wedge/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+==================================== PASSES ====================================
+=========================== short test summary info ============================
+PASSED tests/unit/services/test_b4_child_report_obligation.py::TestB4StaticInvariants::test_dispatch_post_commit_has_b4_backstop
+PASSED tests/unit/services/test_b4_child_report_obligation.py::TestB4StaticInvariants::test_b4_uses_existing_facade_no_new_writer
+PASSED tests/unit/services/test_b4_child_report_obligation.py::TestB4BackstopBehavior::test_backstop_fires_on_idempotency_skip_when_completed
+PASSED tests/unit/services/test_b4_child_report_obligation.py::TestB4BackstopBehavior::test_backstop_does_not_fire_when_natural_path_emitted
+PASSED tests/unit/services/test_b4_child_report_obligation.py::TestB4BackstopBehavior::test_backstop_skips_when_no_parent
+PASSED tests/unit/services/test_b4_child_report_obligation.py::TestB4BackstopBehavior::test_backstop_skips_when_instance_not_completed
+PASSED tests/unit/services/test_b4_child_report_obligation.py::TestB4BackstopBehavior::test_backstop_skips_already_emitting_outcomes
+PASSED tests/unit/services/test_b4_child_report_obligation.py::TestB4DefaultValues::test_no_new_admission_state_writer
+PASSED tests/unit/services/test_b4_child_report_obligation.py::TestB4DefaultValues::test_no_new_env_flag
+9 passed, 1 warning in 0.53s

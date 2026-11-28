@@ -1,0 +1,48 @@
+................                                                         [100%]
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-revive-wedge/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+==================================== PASSES ====================================
+_____________ test_hold_re_arms_terminal_root_to_waiting_children ______________
+------------------------------ Captured log call -------------------------------
+WARNING  daemon.registry:registry.py:1589 Tool config validation: Agent 'maintenancer': deny entry 'git_commit' is neither a known category nor a known tool
+WARNING  daemon.services.child_reports:child_reports.py:3766 No assistant content found for instance root-com..., using empty content for completion check
+___________________ test_hold_running_root_no_write_no_churn ___________________
+------------------------------ Captured log call -------------------------------
+WARNING  daemon.services.child_reports:child_reports.py:3766 No assistant content found for instance root-run..., using empty content for completion check
+____________________ test_guard_count_failure_fails_to_skip ____________________
+------------------------------ Captured log call -------------------------------
+WARNING  daemon.services.child_reports:child_reports.py:4345 Instance root-com... terminal-row liveness COUNT failed (count-boom); keeping the idempotency skip (fail-to-skip posture)
+___________ test_full_arc_complete_revive_turn_ends_waiting_children ___________
+------------------------------ Captured log call -------------------------------
+WARNING  daemon.services.child_reports:child_reports.py:3766 No assistant content found for instance root-com..., using empty content for completion check
+__________________ test_hold_terminated_root_stays_terminated __________________
+------------------------------ Captured log call -------------------------------
+WARNING  daemon.services.child_reports:child_reports.py:3766 No assistant content found for instance root-ter..., using empty content for completion check
+_______________________ test_hold_heal_rereads_live_row ________________________
+------------------------------ Captured log call -------------------------------
+WARNING  daemon.services.child_reports:child_reports.py:3766 No assistant content found for instance root-com..., using empty content for completion check
+____________________ test_hold_non_rearmed_rereads_live_row ____________________
+------------------------------ Captured log call -------------------------------
+WARNING  daemon.services.child_reports:child_reports.py:3766 No assistant content found for instance root-run..., using empty content for completion check
+=========================== short test summary info ============================
+PASSED tests/unit/services/test_terminal_row_status_strand.py::test_chokepoint_flips_completed_to_running_before_graph_load
+PASSED tests/unit/services/test_terminal_row_status_strand.py::test_chokepoint_paused_exempt
+PASSED tests/unit/services/test_terminal_row_status_strand.py::test_chokepoint_non_terminal_no_write
+PASSED tests/unit/services/test_terminal_row_status_strand.py::test_hold_re_arms_terminal_root_to_waiting_children
+PASSED tests/unit/services/test_terminal_row_status_strand.py::test_hold_running_root_no_write_no_churn
+PASSED tests/unit/services/test_terminal_row_status_strand.py::test_guard_terminal_with_live_children_re_arms
+PASSED tests/unit/services/test_terminal_row_status_strand.py::test_guard_all_terminal_keeps_idempotency_skip
+PASSED tests/unit/services/test_terminal_row_status_strand.py::test_guard_error_row_with_live_children_re_arms
+PASSED tests/unit/services/test_terminal_row_status_strand.py::test_guard_count_failure_fails_to_skip
+PASSED tests/unit/services/test_terminal_row_status_strand.py::test_process_report_delivery_turn_reactivates_completed_root
+PASSED tests/unit/services/test_terminal_row_status_strand.py::test_full_arc_complete_revive_turn_ends_waiting_children
+PASSED tests/unit/services/test_terminal_row_status_strand.py::test_hold_terminated_root_stays_terminated
+PASSED tests/unit/services/test_terminal_row_status_strand.py::test_hold_heal_rereads_live_row
+PASSED tests/unit/services/test_terminal_row_status_strand.py::test_hold_non_rearmed_rereads_live_row
+PASSED tests/unit/services/test_terminal_row_status_strand.py::test_chokepoint_fail_open_on_revive_raise
+PASSED tests/unit/services/test_terminal_row_status_strand.py::test_chokepoint_preserves_attestation_counters
+16 passed, 1 warning in 5.61s

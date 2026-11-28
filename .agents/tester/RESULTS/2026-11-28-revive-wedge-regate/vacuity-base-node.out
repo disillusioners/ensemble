@@ -1,0 +1,23 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_ TestReviveWedgeDirection1Canonical.test_revive_then_new_anchor_terminalizes_and_persists_report_injection _
+tests/unit/services/test_child_reports.py:3273: in test_revive_then_new_anchor_terminalizes_and_persists_report_injection
+    assert not any(
+E   AssertionError: Direction-1: the idempotency_skip log line must NOT be emitted for a revived child completing under a new anchor
+E   assert not True
+E    +  where True = any(<generator object TestReviveWedgeDirection1Canonical.test_revive_then_new_anchor_terminalizes_and_persists_report_injection.<locals>.<genexpr> at 0x71ed8e23fae0>)
+------------------------------ Captured log call -------------------------------
+INFO     daemon.services.child_reports:child_reports.py:3683 Instance rw-child... parent_id=rw-leader, status=running
+INFO     daemon.services.child_reports:child_reports.py:4881 Instance rw-child... completed, sending report to parent rw-leade...
+INFO     daemon.services.child_reports:child_reports.py:5607 Bus-active: skipping inline cascade for parent rw-leade... — no inline status write; parent terminal transition completes when the PROCESS_REPORT task delivery completes (bus is state-machine only — it does not own completion and does not wake the parent)
+INFO     daemon.services.child_reports:child_reports.py:3683 Instance rw-child... parent_id=rw-leader, status=running
+INFO     daemon.services.child_reports:child_reports.py:4699 Instance rw-child... completion report skipped: reason=idempotency_skip
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /tmp/rw_vacuum/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/services/test_child_reports.py::TestReviveWedgeDirection1Canonical::test_revive_then_new_anchor_terminalizes_and_persists_report_injection
+1 failed, 1 warning in 1.33s

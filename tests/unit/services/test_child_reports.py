@@ -3226,3 +3226,136 @@ class TestReviveWedgeObservability:
         assert _rw_status(engine, _RW_CHILD) == (
             InstanceStatus.RUNNING.value
         )
+
+
+class TestReviveWedgeDirection1Canonical:
+    """Direction-1 pin — the CANONICAL revive-terminalizes shape.
+
+    Reproduces: child completes (1st lifecycle, its internal_report row
+    lands COMPLETED) → child is REVIVED from COMPLETED → child completes
+    AGAIN under a NEW anchor. At the pre-fix (wide) guard this hits the
+    mint guard and returns early with
+    ``completion report skipped: reason=idempotency_skip`` (no CAS, child
+    stuck ``running``). At the fixed tip the guard misses (ARM B narrows
+    COMPLETED out; ARM A needs the same anchor), so the regular mint
+    path runs: child terminalizes, a new report row is minted, and a
+    ``report_injections`` row is persisted.
+    """
+
+    def test_revive_then_new_anchor_terminalizes_and_persists_report_injection(
+        self, engine: Engine, rw_caplog,
+    ):
+        service = _build_child_reports_service(engine)
+        _rw_seed_parent(engine)
+        _rw_seed_child(engine)
+
+        # 1st lifecycle — mints the report AND stamps the child COMPLETED.
+        first = service._process_child_completion_db_sync(
+            instance_id=_RW_CHILD,
+            completed_message_id="anchor-1",
+            last_content="episode-1 report",
+        )
+        assert first.outcome == "regular_child_completed"
+        # The 1st lifecycle's report row lands COMPLETED (delivered).
+        _rw_set_report_status(engine, status=MessageStatus.COMPLETED.value)
+
+        # Explicit revive — what send_message does to a terminal child.
+        _rw_set_status(engine, _RW_CHILD, InstanceStatus.RUNNING.value)
+
+        # 2nd lifecycle under a NEW anchor.
+        second = service._process_child_completion_db_sync(
+            instance_id=_RW_CHILD,
+            completed_message_id="anchor-2",
+            last_content="episode-2 report",
+        )
+
+        # (a) the canonical log signature is NOT emitted.
+        assert not any(
+            "completion report skipped: reason=idempotency_skip"
+            in r.getMessage()
+            for r in rw_caplog.records
+        ), (
+            "Direction-1: the idempotency_skip log line must NOT be "
+            "emitted for a revived child completing under a new anchor"
+        )
+
+        # (b) the child instance row reaches COMPLETED (not stuck running).
+        assert second.outcome == "regular_child_completed", (
+            f"expected regular_child_completed, got {second.outcome!r}"
+        )
+        assert _rw_status(engine, _RW_CHILD) == (
+            InstanceStatus.COMPLETED.value
+        ), "a revived child must terminalize to COMPLETED"
+
+        # (c) a NEW report row is minted for the new anchor (1st remains).
+        assert _rw_report_sources(engine) == [
+            f"internal_report:{_RW_CHILD}:anchor-1",
+            f"internal_report:{_RW_CHILD}:anchor-2",
+        ], "the revived episode's report must reach the parent"
+
+        # (d) a report_injections row is PERSISTED for that child, with
+        # the SYNC_MINT provenance, AND it REACHES a terminal delivery
+        # state once the delivery pass runs. Authoritative state analysis:
+        # ReportInjectionState has NO literal ``completed`` member — its
+        # terminal states are INJECTED / TASK_DELIVERED (and FAILED
+        # dead-letter). The commission's "reaches completed" maps to the
+        # row settling to a terminal delivery state; it is the companion
+        # message_queue.completion_report row that is literally stamped
+        # MessageStatus.COMPLETED. The sync outbox mint
+        # (child_reports.py:5957) creates the row PENDING / SYNC_MINT; it
+        # is NOT terminal by design — a delivery pass settles it:
+        #   * repository.py:1774 claim_for_injection -> INJECTED
+        #     (driven by graph.py:754 ReportInjectionSlot.drain);
+        #   * repository.py:2013 claim_for_task_delivery -> TASK_DELIVERED
+        #     (driven by task_processor.py:447).
+        # Both are pure DB ops on this fixture's in-memory SQLite engine,
+        # so the unit fixture CAN reach the terminal state cheaply — no
+        # network, sleeps, or wall-clock dependence in the assertions.
+        #
+        # Discriminator: in the SUPPRESS path (pre-fix base) ZERO rows are
+        # minted, so the exact-count assertion below fails; in the regular
+        # path (tip) exactly TWO rows are minted and settle to INJECTED.
+        # Exact count (not >=1) also catches a stray extra mint.
+        from daemon.repositories.report_injection.models import (
+            ReportInjection,
+        )
+        with Session(engine) as session:
+            rows = session.exec(
+                sm_select(ReportInjection).where(
+                    ReportInjection.child_instance_id == _RW_CHILD,
+                )
+            ).all()
+        assert len(rows) == 2, (
+            "exactly one report_injections row per lifecycle must be "
+            f"persisted (got {len(rows)})"
+        )
+        assert all(r.state == "PENDING" for r in rows), (
+            "sync-mint rows start PENDING at the outbox mint"
+        )
+        assert all(r.deferred_reason == "SYNC_MINT" for r in rows), (
+            "sync-mint provenance must be stamped on every row"
+        )
+
+        # Drive the real delivery pass: the parent's live-node drain
+        # atomically claims all PENDING rows for the recipient and settles
+        # each to the terminal INJECTED state (repository.py:1774).
+        drained = ReportInjectionRepository(engine).claim_for_injection(
+            _RW_PARENT
+        )
+        assert len(drained) == 2, (
+            "both minted obligations must be claimable by the delivery "
+            f"pass (drained {len(drained)})"
+        )
+        with Session(engine) as session:
+            settled = session.exec(
+                sm_select(ReportInjection).where(
+                    ReportInjection.child_instance_id == _RW_CHILD,
+                )
+            ).all()
+        assert all(r.state == "INJECTED" for r in settled), (
+            "each report_injections row must REACH a terminal delivery "
+            "state (INJECTED) — the commission's 'reaches completed'"
+        )
+        assert all(r.delivered_at is not None for r in settled), (
+            "the terminal transition must stamp delivered_at"
+        )

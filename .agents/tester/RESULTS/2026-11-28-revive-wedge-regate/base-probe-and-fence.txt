@@ -1,0 +1,103 @@
+=== BASE LEG — PROBE & FENCE EVIDENCE (STEP 1 + STEP 3) ===
+Node under test: tests/unit/services/test_child_reports.py::TestReviveWedgeDirection1Canonical::test_revive_then_new_anchor_terminalizes_and_persists_report_injection
+
+--- STEP 1 — PRE-FLIGHT (verbatim) ---
+$ cd /home/nea/ensemble-src-wt-revive-gate-base && git rev-parse HEAD
+5cc5912f706fda7cc2793973aaf8521aceec19d1
+
+$ cd /home/nea/ensemble-src-wt-revive-gate-base && git rev-parse --abbrev-ref HEAD
+HEAD
+
+$ cd /home/nea/ensemble-src-wt-revive-gate-base && git status --porcelain
+(<empty above = clean>)
+
+$ sha256sum /home/nea/ensemble-src-wt-revive-wedge/tests/unit/services/test_child_reports.py
+8cdf6af619e01ef26bf8f8e122b44dde1230d8864a7c5416c5fd6d4976db7632  /home/nea/ensemble-src-wt-revive-wedge/tests/unit/services/test_child_reports.py
+EXPECTED: 8cdf6af619e01ef26bf8f8e122b44dde1230d8864a7c5416c5fd6d4976db7632  -> MATCH
+
+--- STEP 2 — OVERLAID FILE sha256 (after cp) ---
+$ sha256sum /home/nea/ensemble-src-wt-revive-gate-base/tests/unit/services/test_child_reports.py
+8cdf6af619e01ef26bf8f8e122b44dde1230d8864a7c5416c5fd6d4976db7632  /home/nea/ensemble-src-wt-revive-gate-base/tests/unit/services/test_child_reports.py
+-> EQUAL to the STEP 1 source sha256 (byte-identical overlay)
+
+--- STEP 3 — IMPORT RESOLUTION PROOF (verbatim) ---
+$ cd /home/nea/ensemble-src-wt-revive-gate-base && PYTHONPATH=/home/nea/ensemble-src-wt-revive-gate-base /home/nea/ensemble-src-wt-revive-wedge/.venv/bin/python -c "import daemon, daemon.services.child_reports as cr; print('daemon_file=', daemon.__file__); print('cr_file=', cr.__file__)"
+daemon_file= /home/nea/ensemble-src-wt-revive-gate-base/daemon/__init__.py
+cr_file= /home/nea/ensemble-src-wt-revive-gate-base/daemon/services/child_reports.py
+
+BOTH paths are under /home/nea/ensemble-src-wt-revive-gate-base -> base tree confirmed (no -P, no PYTHONSAFEPATH).
+
+--- PROBE USED ---
+/tmp/probe_resolve.py (pre-existing, from setup worker) — loaded via -p probe_resolve with PYTHONPATH=/tmp:<base tree>
+
+--- IN-SESSION PROBE LINES (from the STEP 4 pytest run) ---
+[PROBE] sessionstart sys.path[0:5] = ['/home/nea/ensemble-src-wt-revive-gate-base', '/tmp', '/home/nea/ensemble-src-wt-revive-gate-base', '/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python314.zip', '/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14']
+[PROBE] daemon.__file__ = /home/nea/ensemble-src-wt-revive-gate-base/daemon/__init__.py
+[PROBE] daemon.__path__ = ['/home/nea/ensemble-src-wt-revive-gate-base/daemon']
+[PROBE] child_reports.__file__ = /home/nea/ensemble-src-wt-revive-gate-base/daemon/services/child_reports.py
+[PROBE] sys.path[0:5] = ['/home/nea/ensemble-src-wt-revive-gate-base', '/tmp', '/home/nea/ensemble-src-wt-revive-gate-base', '/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python314.zip', '/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14']
+
+--- STEP 6 — RESTORE PROOF ---
+$ cd /home/nea/ensemble-src-wt-revive-gate-base && git checkout -- tests/unit/services/test_child_reports.py
+$ cd /home/nea/ensemble-src-wt-revive-gate-base && git status --porcelain
+(<empty above = restored clean>)
+
+$ sha256sum tests/unit/services/test_child_reports.py   (post-restore: base version, NOT the overlay)
+c4a934cd71b241b8c986832f0f21f22bbd823abc64c38402ed95bb0ce1c09db3  tests/unit/services/test_child_reports.py
+
+--- BASE MECHANISM (why the pin must be red at base) ---
+daemon/services/child_reports.py @ base 5cc5912f7 — WIDE single-arm prefix guard:
+                        # commissioner or to the parent — discharges it).
+                        existing_report = session.exec(
+                            select(MessageQueue)
+                            .where(
+                                MessageQueue.source.startswith(
+                                    f"internal_report:{instance_id}:",
+                                    autoescape=True,
+                                )
+                            )
+                            .where(MessageQueue.status.in_([
+                                MessageStatus.READY.value,
+                                MessageStatus.PROCESSING.value,
+                                MessageStatus.COMPLETED.value,
+                            ]))
+                        ).first()
+                        if existing_report is not None:
+                            should_send = False
+                            skip_reason = "idempotency_skip"
+                        else:
+                            should_send = True
+                            skip_reason = "all_checks_passed"
+            
+            if not should_send:
+                logger.info(f"Instance {instance_id[:8]}... completion report skipped: reason={skip_reason}")
+                return _ChildCompletionDbResult(
+                    outcome="idempotency_skip",
+                    instance_id=instance_id,
+                    agent_id=instance.agent_id,
+                    parent_id=instance.parent_id,
+                )
+
+
+-> status set [READY, PROCESSING, COMPLETED] (wide arm), unconditional early return BEFORE the CAS
+   at 4699-4705 => the revived child's 2nd completion logs
+   'completion report skipped: reason=idempotency_skip' and the instance row stays 'running'.
+
+--- ADDENDUM: OVERLAY FIDELITY — git hash-object (rule 1 of red-receipt-two-tree-proof) ---
+$ cd /home/nea/ensemble-src-wt-revive-wedge && git hash-object tests/unit/services/test_child_reports.py   (overlay SOURCE)
+7ce534a728825b47321845c3ffabc0f4b3edc3fa
+$ cd /home/nea/ensemble-src-wt-revive-gate-base && git rev-parse HEAD:tests/unit/services/test_child_reports.py   (BASE tree's own committed blob)
+a27c4d4d77901c05b658b4dfcc408fed68d81a9c
+
+-> The overlay blob hash DIFFERS from the base tree's committed blob hash => the base tree
+   really carried the TIP test file during the leg (overlay was not a no-op), and the base
+   tree's OWN production code (child_reports.py) stayed at the pre-fix wide-guard version.
+
+--- ADDENDUM: FAILED ids provenance (rule 3) ---
+The 15 FAILED ids were taken ONLY from the pytest 'short test summary info' section
+(captured with -rf in base-full-file.out RUN B). No whole-output '^(FAILED|ERROR)' grep was used
+=> no phantom reds from daemon loguru stdout rows.
+
+--- ADDENDUM: CLASSIFICATION SCOPE ---
+This leg is the BASE leg only. PROVEN_RED = (node in BASE failed set) AND (absent from HEAD
+failed set). The first conjunct is proven here; the second (HEAD leg) is a separate commission.
