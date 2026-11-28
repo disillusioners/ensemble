@@ -38,6 +38,8 @@ fake tmp HOME (M3): no test can reach a real ~/agents-ensemble* path.
 """
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 import json
 import os
 import re
@@ -47,16 +49,23 @@ import errno
 import pathlib
 import pwd
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
+import daemon.tools.upgrade_db_preflight as udp
 import daemon.tools.upgrade_tools as ut
 from daemon.tools import upgrade_journal as uj
 from daemon.tools.job_queue import create_job_tools
 from daemon.tools.upgrade_tools import create_upgrade_tools
+from tests.unit.tools.test_upgrade_db_preflight import (
+    _ARTIFACT_NEWEST,
+    build_registry_engine,
+    insert_registry_row,
+)
 
 # Repo root: tests/unit/tools/test_upgrade_tools.py -> parents[3].
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -507,6 +516,48 @@ def _base_manager() -> MagicMock:
 def _refusal_reason(result: str) -> str | None:
     m = re.search(r"REFUSED — reason=([a-z0-9-]+)", result)
     return m.group(1) if m else None
+
+
+# ── promote-db-preflight-validation (T6 #7): the DEFAULT-PASS accommodation ──
+#
+# The new arm-path check (upgrade_tools Step 0b) is LIVE-only and reads the
+# dump-lane registry. Every `live_harness` test arms through `_base_manager()`
+# — a MagicMock whose engine yields no registry row — so WITHOUT this
+# accommodation each live arm refuses `db-preflight-*` before the nonce burn
+# and the pre-existing `UPGRADE ARMED` asserts fail.
+#
+# The accommodation is a DEFAULT-PASS stub on the module-attribute seam the
+# tool resolves at call time (`udp.evaluate_db_preflight`) — the seam exists
+# for exactly this purpose (decisions.md §TEST-HARNESS ACCOMMODATION). ONLY
+# the verdict is stubbed: the post-verdict writes (`db_preflight_validated`
+# row + the D3 record through the REAL `record_db_preflight`) still run
+# against the /tmp fixture install, so the arm path is exercised unchanged
+# apart from the registry read. No test-awareness branch enters production
+# code (decisions.md §REJECTED ALTERNATIVE).
+#
+# `_REAL_EVALUATE_DB_PREFLIGHT` is captured at IMPORT time: a capture inside a
+# test body would capture the STUB and silently no-op.
+_REAL_EVALUATE_DB_PREFLIGHT = udp.evaluate_db_preflight
+
+
+async def _default_pass_verdict(*_args: Any, **_kwargs: Any) -> udp.DbPreflightVerdict:
+    """A PASSING ``validated`` verdict built from the module's own result type.
+
+    Fresh ``finished_at`` (now, UTC) so the age is inside every bound; a
+    non-empty artifact name and ``bytes > 0``; ``integrity_ok=True``.
+
+    ASYNC on purpose: the arm path ``await``s the seam, so a sync stub would
+    raise "object can't be awaited" inside the check (a fail-closed
+    ``db-preflight-registry-unavailable`` — never a pass).
+    """
+    row = udp.ArtifactRow(
+        lane=udp.DB_PREFLIGHT_LANE,
+        artifact="pg_dumpall-fixture-default-pass.pgdump.zst",
+        bytes=1024,
+        finished_at=datetime.now(timezone.utc),
+        integrity_ok=True,
+    )
+    return udp.DbPreflightVerdict.validated(row)
 
 
 def _no_pwd_entry(_uid) -> None:
@@ -2663,9 +2714,18 @@ def live_harness(install: Path, monkeypatch: pytest.MonkeyPatch):
     """FAKE live marker + /tmp fixture install, mock manager carrying the
     REAL window dict + marker recorder. Module-level (hoisted from
     TestLiveThreeFactorGate in the P2.2 fix pass) so the fix-pass classes
-    share the exact same harness shape."""
+    share the exact same harness shape.
+
+    promote-db-preflight-validation (T6 #7): also installs the DEFAULT-PASS
+    verdict stub on the module-attribute seam (`udp.evaluate_db_preflight`),
+    so the pre-existing live arm-path tests keep reaching `UPGRADE ARMED`
+    through the new live-only backup-artifact check. `TestArmPreflightDbPreflight`
+    overrides this default in every node. ONLY the verdict is stubbed — the
+    post-verdict journal row and the D3 record still run for real.
+    """
     monkeypatch.setenv("ENSEMBLE_SELF_ENV", "live")  # FAKE
     monkeypatch.setattr(ut, "_resolve_install_dir", lambda self_env: install)
+    monkeypatch.setattr(udp, "evaluate_db_preflight", _default_pass_verdict)
     manager = _base_manager()  # no-network port, idle task repo, no queue repo
     windows: dict[str, dict] = {}
     manager._user_origin_windows = windows
@@ -3152,6 +3212,960 @@ class TestArmPreflightBeforeBurn:
         data = uj.journal_read(live["install"])
         assert data["pending_actions"][run_id]["consumed_at"] is not None
         assert data["pending_op"]["nonce_consumed"] is True
+
+
+# ── promote-db-preflight-validation T6 #2 — the arm-path class ──────────────
+# (phase1-plan.md §TEST MATRIX pins (c)/(d)/(e)/(M2) arm-path halves + T6 #8.)
+#
+# EVERY node here OVERRIDES the `live_harness` default-pass stub — except the
+# (α) ordering node, which by design wraps the STUB (it needs the arm to reach
+# the burn; the plan records that single exception). The REAL verdict function
+# is reached only through `_REAL_EVALUATE_DB_PREFLIGHT`, captured at import
+# time — a capture inside a test body would capture the stub and silently
+# no-op.
+#
+# PATCH TARGETS (patching the wrong one SILENTLY NO-OPS — plan cycle-2 F11):
+#   * `journal_lock_acquire` is an ALIASED IMPORT in upgrade_tools
+#     (`lock_acquire as journal_lock_acquire`) ⇒ patch `ut.journal_lock_acquire`,
+#     never `uj.lock_acquire`;
+#   * `consume_pending_action` is called as a MODULE ATTRIBUTE
+#     (`uj.consume_pending_action(...)`) ⇒ patch `uj.consume_pending_action`;
+#   * the verdict seam is a MODULE ATTRIBUTE (`udp.evaluate_db_preflight(...)`)
+#     ⇒ patch `udp.evaluate_db_preflight`.
+
+
+def _shell_untouched_status(
+    repo: Path, *, base_ref: str = "origin/latest"
+) -> tuple[str, str]:
+    """``(status, detail)`` with status in ``{"clean", "dirty", "skip"}`` for
+    ``scripts/upgrade/promote.sh`` + ``scripts/upgrade/lib.sh``.
+
+    BASE RULE (plan cycle-2 F16): a non-git export and a DETACHED HEAD both
+    SKIP — on a detached checkout ``merge-base HEAD <ref>`` collapses to HEAD
+    when HEAD is an ancestor (a vacuous pass that only compares uncommitted
+    edits) and yields an older base on a diverged checkout (a false red).
+    Otherwise the base is ``git merge-base HEAD <ref>`` and the COMMITTED range
+    and the WORKTREE are diffed SEPARATELY, each reported with its own message.
+    The base is never a hardcoded constant.
+    """
+
+    shell_paths = [
+        "scripts/upgrade/promote.sh",
+        "scripts/upgrade/lib.sh",
+    ]
+
+    def _run(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", "-C", str(repo), *args],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+    if _run("rev-parse", "--git-dir").returncode != 0:
+        return "skip", "non-git export"
+    head = _run("rev-parse", "--abbrev-ref", "HEAD")
+    if head.returncode != 0:
+        return "skip", "non-git export"
+    if head.stdout.decode().strip() == "HEAD":
+        return "skip", "detached HEAD — merge-base is undefined as a lane base"
+    mb = _run("merge-base", "HEAD", base_ref)
+    if mb.returncode != 0 or not mb.stdout.decode().strip():
+        return "skip", f"no merge-base with {base_ref}"
+    base = mb.stdout.decode().strip()
+    if _run("diff", "--quiet", base, "HEAD", "--", *shell_paths).returncode != 0:
+        return "dirty", f"committed range {base[:9]}..HEAD touches the shell"
+    if _run("diff", "--quiet", "HEAD", "--", *shell_paths).returncode != 0:
+        return "dirty", "uncommitted edits touch the shell"
+    return "clean", f"base={base[:9]}"
+
+
+class TestArmPreflightDbPreflight:
+    """The backup-artifact validation check in the arm path (Step 0b).
+
+    The check sits AFTER the lock acquire and BEFORE the nonce burn; every
+    refusal releases the lock, journals its row (except the torn path) and
+    leaves the nonce unspent; the LOCK-RELEASE BELT makes every unexpected
+    exit lock-free (`a check that exists to refuse loudly must NEVER be able
+    to wedge the pipeline`).
+
+    SEAM DISPOSITION PER NODE (the `live_harness` default-pass stub is the
+    baseline the class must displace where the REAL verdict is under test):
+
+    * REAL verdict via `_real_seam(...)` — every node that asserts a refusal,
+      a real pass, or a pure constant: pre-lock, torn-journal, both dry-run
+      nodes, (ζ), (η), both arm-refusal nodes, the PendingOp-capture node, the
+      M2 live node, the non-live mode-gate node (on the demo `harness`, never
+      stubbed), and the executor-boundary / shell-untouched / planted-edit
+      pins. Each asserts
+      `udp.evaluate_db_preflight is not _default_pass_verdict`.
+    * DEFAULT STUB kept, deliberately — (α) ONLY, because the ordering claim
+      needs the arm to reach the burn AND asserts the arm resolves the SAME
+      seam attribute the tool uses, so wrapping the stub is what proves the
+      patch target is live.
+    * PURITY-ONLY NODES — the executor-boundary, shell-untouched and
+      planted-edit pins are assertions on constants / a git diff; they never
+      invoke the tool, so neither stub nor real verdict is reachable from them.
+      They still perform the `_real_seam(...)` override (and assert it), so the
+      class-wide "the default stub is displaced in every node" invariant holds
+      literally, not just in spirit.
+    * `test_existing_live_arm_path_suite_stays_green_under_default_pass` (T6
+      #8) asserts the stub IS resolved in leg 1 — that IS its non-vacuity
+      proof.
+    """
+
+    # ── seam helpers ───────────────────────────────────────────────────────
+
+    @staticmethod
+    def _seam_is_default_stub() -> None:
+        """The fixture's default-pass accommodation is installed."""
+        assert udp.evaluate_db_preflight is _default_pass_verdict
+
+    @staticmethod
+    def _real_seam(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Point the seam at the REAL verdict function (import-time capture)."""
+        monkeypatch.setattr(udp, "evaluate_db_preflight", _REAL_EVALUATE_DB_PREFLIGHT)
+        assert udp.evaluate_db_preflight is not _default_pass_verdict
+        assert udp.evaluate_db_preflight is _REAL_EVALUATE_DB_PREFLIGHT
+
+    @staticmethod
+    def _wire_engine(live, engine) -> None:  # noqa: ANN001
+        """Give the tool's manager the real registry engine."""
+        live["manager"].engine = engine
+
+    @staticmethod
+    def _wrap_sync(fn, tag: str, log: list):  # noqa: ANN001, ANN202
+        def _recorder(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+            result = fn(*args, **kwargs)
+            log.append(tag)
+            return result
+
+        return _recorder
+
+    @staticmethod
+    def _wrap_async(fn, tag: str, log: list):  # noqa: ANN001, ANN202
+        async def _recorder(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+            result = await fn(*args, **kwargs)
+            log.append(tag)
+            return result
+
+        return _recorder
+
+    @staticmethod
+    def _arm_ordering(monkeypatch: pytest.MonkeyPatch, log: list) -> None:
+        """Install the three WRAPPING CALL-THROUGH recorders (plan F11)."""
+        monkeypatch.setattr(
+            ut, "journal_lock_acquire", TestArmPreflightDbPreflight._wrap_sync(
+                ut.journal_lock_acquire, "lock", log
+            )
+        )
+        monkeypatch.setattr(
+            uj, "consume_pending_action", TestArmPreflightDbPreflight._wrap_sync(
+                uj.consume_pending_action, "burn", log
+            )
+        )
+        monkeypatch.setattr(
+            udp, "evaluate_db_preflight", TestArmPreflightDbPreflight._wrap_async(
+                udp.evaluate_db_preflight, "verdict", log
+            )
+        )
+
+    @staticmethod
+    def _history_events(install: Path) -> list[dict]:
+        return [
+            entry
+            for entry in uj.journal_read(install).get("history", [])
+            if isinstance(entry, dict) and str(entry.get("event", "")).startswith("db_preflight")
+        ]
+
+    def _refused_rows(self, install: Path) -> list[dict]:
+        return [
+            entry
+            for entry in self._history_events(install)
+            if entry.get("event") == "db_preflight_refused"
+        ]
+
+    # ── (α) the ORDERING pin ───────────────────────────────────────────────
+
+    async def test_db_preflight_runs_after_lock_acquire_before_nonce_burn(
+        self, live_harness, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(e)(3): ``["lock", "verdict", "burn"]`` — EXACTLY, in that order.
+
+        Wrapping CALL-THROUGH recorders (each calls the real function, then
+        appends its tag) so a recorder that never fired cannot pass. The
+        sole node of this class that wraps the DEFAULT-PASS stub: it needs the
+        arm to reach the burn (the plan records this single exception).
+
+        Also asserts the HANDOFF invariant: the lock dir is STILL HELD after
+        ``UPGRADE ARMED`` (the tool hands it to the executor at drain) — a bare
+        ``finally: release`` in the belt is RED here.
+        """
+        live = live_harness
+        self._seam_is_default_stub()
+        log: list[str] = []
+        self._arm_ordering(monkeypatch, log)
+
+        run_id, out = await TestArmPreflightBeforeBurn._armed_call(live)
+
+        assert log == ["lock", "verdict", "burn"], log
+        assert "UPGRADE ARMED" in out, out
+        assert (live["install"] / "releases" / "rollback.lock.d").is_dir(), (
+            "the success path KEEPS the lock for the executor handoff — a bare "
+            "`finally: release` belt would have removed it"
+        )
+
+    # ── (β) the pre-lock invariant (M4) ───────────────────────────────────
+
+    async def test_pre_lock_refusal_writes_no_db_preflight_row(
+        self, live_harness, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A refusal that fires BEFORE the lock acquire writes NO
+        ``db_preflight_*`` row and never reaches the check.
+
+        Source: the 3-factor gate (`user_confirmed=False` on live) — pre-lock by
+        construction.
+        """
+        live = live_harness
+        self._real_seam(monkeypatch)
+        log: list[str] = []
+        self._arm_ordering(monkeypatch, log)
+
+        _, _nonce, grouped = await TestLiveThreeFactorGate._mint_nonce(live)
+        TestLiveThreeFactorGate._stamp_window(live, content=grouped)
+        out = await live["tools"]["system_upgrade"].ainvoke(
+            {"target_env": "live", "version": "1.2.3", "dry_run": False,
+             "nonce": grouped}  # user_confirmed defaults False
+        )
+
+        assert _refusal_reason(out) == "user-confirmation-missing", out
+        assert log == [], log
+        assert self._history_events(live["install"]) == []
+        assert uj.read_pending_op(live["install"]) is None
+        assert not (live["install"] / "releases" / "rollback.lock.d").exists()
+
+    # ── (γ) an arm-entry torn journal never reaches the check ──────────────
+
+    async def test_arm_entry_torn_journal_refuses_journal_unavailable_pre_lock(
+        self, live_harness, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An arm-entry torn journal is refused by the PRE-EXISTING
+        ``journal-unavailable`` (pre-lock, nonce unspent) — the new check is
+        never reached, so its ``journal-torn`` token stays RACE-WINDOW-ONLY.
+        """
+        live = live_harness
+        self._real_seam(monkeypatch)
+        log: list[str] = []
+        self._arm_ordering(monkeypatch, log)
+
+        _, _nonce, grouped = await TestLiveThreeFactorGate._mint_nonce(live)
+        TestLiveThreeFactorGate._stamp_window(live, content=grouped)
+
+        torn = '{"current":'
+        uj.journal_path(live["install"]).write_text(torn, encoding="utf-8")
+
+        out = await live["tools"]["system_upgrade"].ainvoke(
+            {"target_env": "live", "version": "1.2.3", "dry_run": False,
+             "user_confirmed": True, "nonce": grouped}
+        )
+
+        assert _refusal_reason(out) == "journal-unavailable", out
+        assert log == [], log
+        assert uj.journal_path(live["install"]).read_text(encoding="utf-8") == torn
+        assert not (live["install"] / "releases" / "rollback.lock.d").exists()
+
+    # ── (δ)/(F14) the dry-run legs ─────────────────────────────────────────
+
+    async def test_live_dry_run_full_dump_refusal_leaves_journal_bytes_unchanged(
+        self, live_harness, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(d)/(cycle-2 F3): a LIVE dry-run ``full-dump`` refusal is pre-lock,
+        so it writes NO ``db_preflight_refused`` row and NO nonce — the journal
+        BYTES are unchanged.
+        """
+        live = live_harness
+        self._real_seam(monkeypatch)
+        before = _journal_bytes(live["install"])
+
+        out = await live["tools"]["system_upgrade"].ainvoke(
+            {"target_env": "live", "version": "1.2.3", "dry_run": True,
+             "db_preflight": "full-dump"}
+        )
+
+        assert _refusal_reason(out) == "db-preflight-full-dump-unavailable", out
+        assert _journal_bytes(live["install"]) == before
+        assert uj.journal_read(live["install"]).get("pending_actions") == {}
+        assert self._history_events(live["install"]) == []
+
+    async def test_dry_run_plan_string_no_longer_claims_pg_dump_preflight(
+        self, live_harness, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(F14): the dry-run PLAN line no longer claims a dump leg.
+
+        Non-vacuous: the PLAN line itself must be present.
+        """
+        live = live_harness
+        self._real_seam(monkeypatch)
+
+        out = await live["tools"]["system_upgrade"].ainvoke(
+            {"target_env": "live", "version": "1.2.3", "dry_run": True}
+        )
+
+        assert "PLAN:" in out, out
+        assert "pg_dump preflight" not in out, out
+        assert "backup-artifact validation" in out, out
+
+    async def test_dry_run_refuses_full_dump_before_nonce_mint(
+        self, live_harness, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(d)/(M5): the SAME token fires at DRY-RUN time, BEFORE any nonce is
+        minted — the human is never shown a green preflight for a request the
+        arm will refuse."""
+        live = live_harness
+        self._real_seam(monkeypatch)
+
+        out = await live["tools"]["system_upgrade"].ainvoke(
+            {"target_env": "live", "version": "1.2.3", "dry_run": True,
+             "db_preflight": "full-dump"}
+        )
+        assert _refusal_reason(out) == "db-preflight-full-dump-unavailable", out
+        assert "CONFIRMATION REQUIRED" not in out, out
+        assert uj.journal_read(live["install"]).get("pending_actions") == {}
+
+        unknown = await live["tools"]["system_upgrade"].ainvoke(
+            {"target_env": "live", "version": "1.2.3", "dry_run": True,
+             "db_preflight": "snapshot"}
+        )
+        assert _refusal_reason(unknown) == "db-preflight-mode-unknown", unknown
+        assert uj.journal_read(live["install"]).get("pending_actions") == {}
+
+    # ── (d) the executor boundary + PendingOp capture ──────────────────────
+
+    def test_db_preflight_opt_in_not_in_executor_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(d)(i)(ii) — the v1-transport REGRESSION GUARD: the WITHDRAWN
+        ``ENSEMBLE_PROMOTE_DB_PREFLIGHT`` transport is absent from the allowlist
+        and matches no prefix. It cannot fail for this plan; it exists so a
+        resurrection trips it."""
+        self._real_seam(monkeypatch)  # the class invariant (pure assertion)
+        assert "ENSEMBLE_PROMOTE_DB_PREFLIGHT" not in uj.EXECUTOR_ENV_ALLOWLIST
+        assert not any(
+            "ENSEMBLE_PROMOTE_DB_PREFLIGHT".startswith(p)
+            for p in uj.EXECUTOR_ENV_PREFIXES
+        )
+
+    def test_db_preflight_max_age_knob_not_in_executor_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(d)(iii) — the knob that DOES exist must never cross the executor
+        boundary either (T0c shape)."""
+        self._real_seam(monkeypatch)  # the class invariant (pure assertion)
+        knob = "ENSEMBLE_PROMOTE_DB_PREFLIGHT_MAX_AGE_S"
+        assert knob not in uj.EXECUTOR_ENV_ALLOWLIST
+        assert not any(knob.startswith(p) for p in uj.EXECUTOR_ENV_PREFIXES)
+
+    def test_db_preflight_opt_in_not_in_verified_arm_extras(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(d)(i-b) — the executor-boundary half that CAN fail: on a VERIFIED op
+        the extras are identical with and without ``db_preflight``, for argv AND
+        env, and the baseline is non-empty (``([], {}) == ([], {})`` would pass
+        for an UNVERIFIED op — the non-vacuity guard)."""
+        self._real_seam(monkeypatch)  # the class invariant (pure assertion)
+        verified = uj.PendingOp(
+            run_id="r-verified-1",
+            kind="promote",
+            env="live",
+            target="1.2.3",
+            nonce="abc",
+            nonce_consumed=True,
+            confirmed_by_human=True,
+            confirmed_source="api:m-1",
+        )
+        assert uj.is_verified_arm(verified) is True, "fixture is not a verified op"
+
+        base_argv, base_env = uj._verified_arm_extras(
+            dataclasses.replace(verified, db_preflight=None)
+        )
+        with_mode_argv, with_mode_env = uj._verified_arm_extras(
+            dataclasses.replace(verified, db_preflight="full-dump")
+        )
+
+        # Non-vacuity: the VERIFIED baseline is NOT the unverified ([], {}).
+        assert base_argv == ["--f2-verified-closed"], base_argv
+        assert set(base_env) >= {"ENSEMBLE_UPGRADE_LIVE", "F2_VERIFIED_NOTE"}, base_env
+        # The opt-in changes nothing at the executor boundary.
+        assert with_mode_argv == base_argv
+        assert with_mode_env == base_env
+
+    async def test_db_preflight_opt_in_captured_in_pending_op(
+        self, live_harness, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """(d)(ii): the value is BOUND INTO the PendingOp and survives a
+        write→read round trip (a hand-inserted dict key would be written and
+        then silently dropped by ``from_json``).
+
+        Runs through the REAL verdict against a REAL validating registry, so
+        this node also proves the opt-in path is the real one (override of the
+        default-pass stub asserted).
+        """
+        live = live_harness
+        self._real_seam(monkeypatch)
+        engine = build_registry_engine(tmp_path, tag="optin")
+        insert_registry_row(engine)
+        self._wire_engine(live, engine)
+
+        run_id, _nonce, grouped = await TestLiveThreeFactorGate._mint_nonce(live)
+        TestLiveThreeFactorGate._stamp_window(
+            live, source="api", msg_id="m-optin", content=grouped
+        )
+        out = await live["tools"]["system_upgrade"].ainvoke(
+            {"target_env": "live", "version": "1.2.3", "dry_run": False,
+             "user_confirmed": True, "nonce": grouped,
+             "db_preflight": "validation-only"}
+        )
+        assert "UPGRADE ARMED" in out, out
+        data = uj.journal_read(live["install"])
+        assert data["pending_op"]["db_preflight"] == "validation-only"
+
+        # The round trip through the dataclass serializer.
+        op = uj.read_pending_op(live["install"])
+        assert op is not None
+        assert op.db_preflight == "validation-only"
+        assert op.run_id == run_id
+
+    # ── (ζ)/(η) the LOCK-RELEASE BELT ──────────────────────────────────────
+
+    async def test_arm_db_preflight_unexpected_exception_refuses_registry_unavailable_releases_lock(
+        self, live_harness, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(ζ) — ladder arm (4): an UNEXPECTED exception from the check FAILS
+        CLOSED as ``db-preflight-registry-unavailable`` (never the tool's
+        generic ``system_upgrade failed:`` escape), leaves the nonce unspent, no
+        ``pending_op``, no marker, and the belt releases the lock.
+        """
+        live = live_harness
+
+        async def _boom(*_args, **_kwargs):
+            raise RuntimeError("injected")
+
+        monkeypatch.setattr(udp, "evaluate_db_preflight", _boom)
+        assert udp.evaluate_db_preflight is not _default_pass_verdict
+
+        run_id, out = await TestArmPreflightBeforeBurn._armed_call(live)
+
+        assert _refusal_reason(out) == "db-preflight-registry-unavailable", out
+        assert "system_upgrade failed:" not in out, out
+        TestArmPreflightBeforeBurn._assert_nonce_intact(live, run_id)
+        refused = self._refused_rows(live["install"])
+        assert refused, self._history_events(live["install"])
+        assert "token=db-preflight-registry-unavailable" in refused[0]["detail"]
+        assert "unexpected RuntimeError" in refused[0]["detail"]
+
+    async def test_arm_db_preflight_cancelled_error_releases_lock_nonce_unspent(
+        self, live_harness, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(η) — ladder arm (5): an ``asyncio.CancelledError`` from the check is
+        NEVER swallowed (the house rider). It PROPAGATES, the belt releases the
+        lock as it unwinds, and the token is readable from the best-effort
+        ``db_preflight_refused`` row (there is no tool string to parse).
+        """
+        live = live_harness
+
+        async def _cancel(*_args, **_kwargs):
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr(udp, "evaluate_db_preflight", _cancel)
+        assert udp.evaluate_db_preflight is not _default_pass_verdict
+
+        run_id, _nonce, grouped = await TestLiveThreeFactorGate._mint_nonce(live)
+        TestLiveThreeFactorGate._stamp_window(
+            live, source="api", msg_id="m-cancel", content=grouped
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await live["tools"]["system_upgrade"].ainvoke(
+                {"target_env": "live", "version": "1.2.3", "dry_run": False,
+                 "user_confirmed": True, "nonce": grouped}
+            )
+
+        TestArmPreflightBeforeBurn._assert_nonce_intact(live, run_id)
+        assert not (live["install"] / "releases" / "rollback.lock.d").exists()
+        refused = self._refused_rows(live["install"])
+        assert refused, self._history_events(live["install"])
+        assert "token=db-preflight-registry-unavailable" in refused[0]["detail"]
+        assert "interrupted" in refused[0]["detail"]
+
+    # ── (c) the arm-path refusal nodes (REAL verdict, REAL registry) ───────
+
+    async def test_arm_refuses_no_backup_releases_lock_and_rows(
+        self, live_harness, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """(c): zero registry rows ⇒ ``db-preflight-no-backup`` through the REAL
+        verdict against a REAL empty registry — lock released, nonce unspent, no
+        ``pending_op``, and the journal-always row names the token."""
+        live = live_harness
+        self._real_seam(monkeypatch)
+        self._wire_engine(live, build_registry_engine(tmp_path, tag="empty"))
+
+        run_id, out = await TestArmPreflightBeforeBurn._armed_call(live)
+
+        assert _refusal_reason(out) == "db-preflight-no-backup", out
+        TestArmPreflightBeforeBurn._assert_nonce_intact(live, run_id)
+        refused = self._refused_rows(live["install"])
+        assert refused, self._history_events(live["install"])
+        assert "token=db-preflight-no-backup" in refused[0]["detail"]
+        assert uj.journal_read(live["install"])["db_preflight"] is None
+
+    async def test_arm_refuses_registry_unavailable_releases_lock_and_rows(
+        self, live_harness, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """(c): the relation ABSENT ⇒ ``db-preflight-registry-unavailable``
+        through the REAL verdict — same lock/nonce/row invariants."""
+        live = live_harness
+        self._real_seam(monkeypatch)
+        self._wire_engine(
+            live, build_registry_engine(tmp_path, table=False, view=False, tag="absent")
+        )
+
+        run_id, out = await TestArmPreflightBeforeBurn._armed_call(live)
+
+        assert _refusal_reason(out) == "db-preflight-registry-unavailable", out
+        TestArmPreflightBeforeBurn._assert_nonce_intact(live, run_id)
+        refused = self._refused_rows(live["install"])
+        assert refused, self._history_events(live["install"])
+        assert "token=db-preflight-registry-unavailable" in refused[0]["detail"]
+        # The CAUSE is named but driver-specific: PostgreSQL reports 42P01
+        # ("relation absent"); SQLite reports a bare "no such table", which the
+        # classifier maps to the connection-failure arm. Both are the SAME
+        # token; the free text is what differs (never asserted as the PG
+        # wording here — that assertion belongs to the hermetic module's shape
+        # check, which does not depend on the driver's SQLSTATE).
+        assert " reason=db-preflight-registry-unavailable " in refused[0]["detail"]
+
+    # ── (F1) arm-path MODE gate (real coverage hole) ────────────────────────
+
+    async def test_arm_refuses_full_dump_under_lock_releases_lock(
+        self, live_harness, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """F1 — REAL COVERAGE HOLE: the ARM-PATH mode gate has a node.
+
+        An ARMED call with ``db_preflight='full-dump'`` is refused by the mode
+        gate, which is the FIRST action inside ``evaluate_db_preflight`` (before
+        the env gate and before any registry read), so NO registry row is needed
+        and the mock engine is never touched. The mode gate fires in EVERY
+        environment, so it refuses here regardless of env.
+
+        Asserts: refusal reason, nonce intact (consumed_at None, pending_op
+        None, rollback.lock.d ABSENT, markers empty), a ``db_preflight_refused``
+        history row carrying the token, and no D3 record.
+        """
+        live = live_harness
+        self._real_seam(monkeypatch)
+
+        run_id, _nonce, grouped = await TestLiveThreeFactorGate._mint_nonce(live)
+        TestLiveThreeFactorGate._stamp_window(
+            live, source="api", msg_id="m-full-dump-arm", content=grouped
+        )
+        out = await live["tools"]["system_upgrade"].ainvoke(
+            {"target_env": "live", "version": "1.2.3", "dry_run": False,
+             "user_confirmed": True, "nonce": grouped,
+             "db_preflight": "full-dump"}
+        )
+
+        assert _refusal_reason(out) == "db-preflight-full-dump-unavailable", out
+        TestArmPreflightBeforeBurn._assert_nonce_intact(live, run_id)
+        refused = self._refused_rows(live["install"])
+        assert refused, self._history_events(live["install"])
+        assert "token=db-preflight-full-dump-unavailable" in refused[0]["detail"]
+        assert uj.journal_read(live["install"])["db_preflight"] is None
+
+    # ── (F5) matrix (b)(3) arm-path clause (integrity flip) ───────────────
+
+    async def test_arm_refuses_broken_newest_releases_lock_and_rows(
+        self, live_harness, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """F5 — matrix (b)(3) requires the integrity-flip refusal to append
+        ``db_preflight_refused`` on the ARM path. A real registry row with
+        ``integrity_ok`` false, driven through the REAL verdict on the ARM
+        path, refuses ``db-preflight-artifact-broken``; the artifact is NAMED
+        in the refusal text; nonce intact, lock released, ``db_preflight_refused``
+        row present, and the ``db_preflight`` record is NOT mutated to
+        ``skipped`` (absent/None — a refusal writes no D3 record).
+        """
+        live = live_harness
+        self._real_seam(monkeypatch)
+        engine = build_registry_engine(tmp_path, tag="broken")
+        insert_registry_row(engine, integrity_ok=False)
+        self._wire_engine(live, engine)
+
+        run_id, out = await TestArmPreflightBeforeBurn._armed_call(live)
+
+        assert _refusal_reason(out) == "db-preflight-artifact-broken", out
+        TestArmPreflightBeforeBurn._assert_nonce_intact(live, run_id)
+        refused = self._refused_rows(live["install"])
+        assert refused, self._history_events(live["install"])
+        assert "token=db-preflight-artifact-broken" in refused[0]["detail"]
+        assert _ARTIFACT_NEWEST in refused[0]["detail"]
+        assert uj.journal_read(live["install"])["db_preflight"] is None
+
+    # ── (M2) the environment matrix ────────────────────────────────────────
+
+    async def test_db_preflight_skipped_when_not_live(
+        self, harness, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(M2): on a NON-live env the registry validation is SKIPPED entirely
+        (no DB read, no refusal, no ``db_preflight_*`` row, no record write) and
+        the armed output says so EXPLICITLY — never a silent pass.
+
+        The manager's engine stays the MagicMock: any DB read would refuse, so a
+        green arm IS the proof that no read happened.
+        """
+        tools, markers, install = harness
+        assert udp.evaluate_db_preflight is not _default_pass_verdict
+
+        out = await _arm_demo_promote(tools)
+
+        assert "UPGRADE ARMED" in out, out
+        # L6 pin: the env-skip verdict is SKIPPED-BY-ENV (built from
+        # udp.VERDICT_SKIPPED_BY_ENV), NOT the bare SKIPPED that the
+        # identity-unchanged skip prints — the two must be distinguishable.
+        assert (
+            "db-preflight: "
+            f"{udp.VERDICT_SKIPPED_BY_ENV.upper()} (self_env=demo)" in out
+        ), out
+        assert "db-preflight: SKIPPED (" not in out, out
+        assert self._history_events(install) == []
+        assert uj.journal_read(install)["db_preflight"] is None
+        assert markers and markers[-1]["kind"] == "promote"
+
+    async def test_mode_gate_fires_in_a_non_live_environment(
+        self, harness
+    ) -> None:
+        """(M2)/(d) — the MODE gate PRECEDES the environment gate (T1 #8a;
+        N-5): a ``full-dump`` / unrecognised mode requested on a NON-live
+        environment is REFUSED by the mode gate — the non-live skip never
+        swallows a mode refusal into a green arm.
+
+        The demo ``harness`` is never stubbed, so the arm runs the REAL
+        verdict, whose FIRST action is the mode gate: the mock engine is
+        never touched and the registry is never read. Asserts per mode: the
+        refusal reason (never ``UPGRADE ARMED``, never a SKIPPED line), no
+        execution scheduled, the lock released, a ``db_preflight_refused``
+        history row carrying the token (the arm-path site writes it under the
+        held lock in EVERY environment), and no D3 record.
+
+        MUTATION PROOF (measured in-lane): moving the environment gate ahead
+        of the mode gate inside ``evaluate_db_preflight`` turns the
+        ``full-dump`` call into a green ``UPGRADE ARMED`` with a ``SKIPPED
+        (self_env=demo)`` line — this node goes RED at its first assertion
+        — and before it existed no other node in either test module caught
+        that reorder (the mutant survived all 45).
+        """
+        tools, markers, install = harness
+        assert udp.evaluate_db_preflight is not _default_pass_verdict
+
+        expected = (
+            ("full-dump", udp.TOK_FULL_DUMP_UNAVAILABLE),
+            ("snapshot", udp.TOK_MODE_UNKNOWN),
+        )
+        for mode, token in expected:
+            out = await tools["system_upgrade"].ainvoke(
+                {"target_env": "demo", "version": "1.2.3", "dry_run": False,
+                 "db_preflight": mode}
+            )
+            assert "UPGRADE ARMED" not in out, out
+            assert "db-preflight: SKIPPED" not in out, out
+            assert _refusal_reason(out) == token, out
+
+        assert markers == [], "a mode refusal must not schedule an execution"
+        assert not (install / "releases" / "rollback.lock.d").exists()
+        refused = self._history_events(install)
+        assert [entry["event"] for entry in refused] == [
+            "db_preflight_refused",
+            "db_preflight_refused",
+        ], refused
+        assert f"token={udp.TOK_FULL_DUMP_UNAVAILABLE}" in refused[0]["detail"]
+        assert f"token={udp.TOK_MODE_UNKNOWN}" in refused[1]["detail"]
+        assert uj.journal_read(install)["db_preflight"] is None
+
+    # ── (M2, lock-release order) the refusal append rides UNDER the lock ──
+
+    async def test_arm_refusal_journals_under_lock_belt_is_sole_release(
+        self, harness, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """M2 (lock-release order): every journal append a REFUSED arm makes
+        — the explicit ``db_preflight_refused`` row AND the ``refusal`` row
+        written by ``_refusal`` → ``_journal_refusal_event`` — is observed
+        WHILE THE LOCK IS STILL HELD; the ``finally`` belt is the SINGLE
+        release point (no arm releases early).
+
+        Why this is the safe order: ``journal_history_append`` is an
+        unlocked read-modify-write of ``state.json`` that never acquires the
+        lock itself (caller discipline serializes it), so the held lock is
+        the ONLY thing standing between the append and a concurrent
+        holder's RMW. The ``pipeline-busy`` carve-out in
+        ``_journal_refusal_event`` keys on the REASON TOKEN, never on the
+        lock, so holding the lock cannot suppress the row.
+
+        NON-LIVE on purpose (the demo ``harness``): on live
+        ``_journal_refusal_event`` returns at the live carve-out BEFORE any
+        append, so a live harness could never observe the ``refusal`` row
+        and this ordering would be untestable (vacuous) there. The
+        ``full-dump`` mode gate drives the REAL verdict to REFUSED on demo.
+
+        PATCH-TARGET: ``journal_lock_release`` is an ALIASED import bound in
+        the ``ut`` namespace — patching ``uj.lock_release`` is a silent
+        no-op. Both append sites resolve ``uj.journal_history_append`` as a
+        module attribute at call time, so patching ``uj`` captures both.
+
+        Non-vacuous (red on the pre-fix order): with an explicit
+        ``journal_lock_release`` before ``return _refusal(...)``, the log is
+        ``[append:db_preflight_refused, release, append:refusal, release]``
+        — two releases, and a release PRECEDES the refusal append — so the
+        single-release and last-entry assertions both fail.
+        """
+        tools, _markers, install = harness
+        assert udp.evaluate_db_preflight is not _default_pass_verdict
+        log: list[str] = []
+        monkeypatch.setattr(
+            ut, "journal_lock_release",
+            self._wrap_sync(ut.journal_lock_release, "release", log),
+        )
+        real_append = uj.journal_history_append
+
+        def _recording_append(install_dir, event, detail):  # noqa: ANN001, ANN202
+            result = real_append(install_dir, event, detail)
+            log.append(f"append:{event}")
+            return result
+
+        monkeypatch.setattr(uj, "journal_history_append", _recording_append)
+
+        out = await tools["system_upgrade"].ainvoke(
+            {"target_env": "demo", "version": "1.2.3", "dry_run": False,
+             "db_preflight": "full-dump"}
+        )
+
+        assert _refusal_reason(out) == udp.TOK_FULL_DUMP_UNAVAILABLE, out
+        # Both rows DID append (non-live) — the ordering claim below is about
+        # real events, not an early-returned carve-out.
+        assert "append:db_preflight_refused" in log, log
+        assert "append:refusal" in log, log
+        # The belt is the SINGLE release and it is LAST: no append — the
+        # explicit row or the ``refusal`` row — ran after the lock was gone.
+        assert log.count("release") == 1, log
+        assert log[-1] == "release", log
+        # …and the lock really is gone afterwards (no wedge).
+        assert not (install / "releases" / "rollback.lock.d").exists()
+
+    async def test_db_preflight_runs_when_live(
+        self, live_harness, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """(M2): on LIVE the validation RUNS — a real registry row validates, the
+        ``db_preflight_validated`` row is written and the D3 record lands."""
+        live = live_harness
+        self._real_seam(monkeypatch)
+        engine = build_registry_engine(tmp_path, tag="valid")
+        insert_registry_row(engine)
+        self._wire_engine(live, engine)
+
+        run_id, out = await TestArmPreflightBeforeBurn._armed_call(live)
+
+        assert "UPGRADE ARMED" in out, out
+        assert "db-preflight: VALIDATED" in out, out
+        assert (live["install"] / "releases" / "rollback.lock.d").is_dir()
+        events = self._history_events(live["install"])
+        assert [e["event"] for e in events].count("db_preflight_validated") == 1, events
+        record = uj.journal_read(live["install"])["db_preflight"]
+        assert record["verdict"] == "validated"
+        assert record["artifact"].endswith(".pgdump.zst")
+
+    # ── (e) the shell-untouched pin + its mutation proof ───────────────────
+
+    def test_promote_shell_untouched_by_this_lane(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(e)(1): ``scripts/upgrade/promote.sh`` and ``lib.sh`` are untouched by
+        this lane — committed range AND worktree, against ``merge-base HEAD
+        origin/latest`` (skipped on a non-git export or a detached HEAD, with the
+        reason)."""
+        self._real_seam(monkeypatch)  # the class invariant (pure assertion)
+        status, detail = _shell_untouched_status(REPO_ROOT)
+        if status == "skip":
+            pytest.skip(detail)
+        assert status == "clean", detail
+
+    def test_shell_untouched_pin_detects_a_planted_edit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(e)(1) MUTATION PROOF: the same helper reports ``dirty`` for a
+        COMMITTED edit, ``dirty`` for an UNCOMMITTED edit, ``clean`` for an
+        untouched tree and ``skip`` on a detached HEAD — so the pin above cannot
+        pass vacuously."""
+        self._real_seam(monkeypatch)  # the class invariant (pure assertion)
+        repo = tmp_path / "shell-pin-repo"
+        (repo / "scripts" / "upgrade").mkdir(parents=True)
+
+        def _git(*args: str) -> str:
+            r = subprocess.run(
+                ["git", "-C", str(repo), *args],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+            )
+            assert r.returncode == 0, (args, r.stderr.decode()[:300])
+            return r.stdout.decode().strip()
+
+        _git("init", "-q")
+        _git("config", "user.email", "t@t")
+        _git("config", "user.name", "t")
+        for rel in ("promote.sh", "lib.sh"):
+            (repo / "scripts" / "upgrade" / rel).write_text(
+                "#!/usr/bin/env bash\n# base\n", encoding="utf-8"
+            )
+        _git("add", "-A")
+        _git("commit", "-q", "-m", "base")
+        _git("branch", "main")
+        _git("checkout", "-q", "-b", "feature/x")
+
+        # Untouched feature branch ⇒ clean.
+        assert _shell_untouched_status(repo, base_ref="main")[0] == "clean"
+
+        # An UNCOMMITTED edit ⇒ dirty (the worktree leg).
+        lib = repo / "scripts" / "upgrade" / "lib.sh"
+        lib.write_text("#!/usr/bin/env bash\n# planted (uncommitted)\n", encoding="utf-8")
+        status, detail = _shell_untouched_status(repo, base_ref="main")
+        assert status == "dirty", detail
+        assert "uncommitted" in detail, detail
+
+        # The SAME edit COMMITTED ⇒ dirty on the committed range, clean worktree.
+        _git("add", "-A")
+        _git("commit", "-q", "-m", "planted edit")
+        status, detail = _shell_untouched_status(repo, base_ref="main")
+        assert status == "dirty", detail
+        assert "committed range" in detail, detail
+
+        # A detached checkout ⇒ skip (a merge-base there is not a lane base).
+        _git("checkout", "-q", "--detach", "HEAD")
+        status, detail = _shell_untouched_status(repo, base_ref="main")
+        assert status == "skip", detail
+        assert "detached" in detail, detail
+
+    # ── T6 #8 — the Success-Criterion-#13 proof node ───────────────────────
+
+    async def test_existing_live_arm_path_suite_stays_green_under_default_pass(
+        self, live_harness, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """T6 #8 — THREE legs in ONE node.
+
+        (1) NON-VACUITY: the seam attribute the tool resolves at call time IS
+            the default-pass accommodation.
+        (2) GREEN: the canonical PRE-EXISTING armed call still reaches
+            ``UPGRADE ARMED``, burns the nonce, writes ``pending_op`` — and KEEPS
+            the lock (that is why leg 3 needs the inter-leg unwind).
+        (3) RED: with the REAL verdict function on the same mock manager the arm
+            REFUSES ``db-preflight-*`` and the nonce stays unspent.
+
+        The inter-leg unwind mirrors ``test_replay_after_consume_refused``
+        (commit row → ``clear_pending_op`` → ``lock_release``); without it leg 3
+        would hit the PRE-LOCK ``pipeline-busy`` refusal and prove nothing. The
+        unwound state is asserted immediately so a no-op unwind fails LOUDLY
+        here instead of misreading as ``pipeline-busy``.
+        """
+        live = live_harness
+        install = live["install"]
+
+        # ── leg 1: non-vacuity ──
+        assert udp.evaluate_db_preflight is _default_pass_verdict
+
+        # ── leg 2: GREEN on the pre-existing armed call ──
+        run_id, out = await TestArmPreflightBeforeBurn._armed_call(live)
+        assert "UPGRADE ARMED" in out, out
+        data = uj.journal_read(install)
+        assert data["pending_actions"][run_id]["consumed_at"] is not None
+        assert data["pending_op"]["nonce_consumed"] is True
+        assert (install / "releases" / "rollback.lock.d").is_dir(), (
+            "the armed success path keeps the lock for the executor handoff"
+        )
+        markers_after_leg2 = len(live["markers"])
+
+        # ── the inter-leg unwind (the house precedent) ──
+        uj.journal_history_append(install, "commit", f"run {run_id} committed")
+        uj.clear_pending_op(install)
+        uj.lock_release(install)
+        assert not (install / "releases" / "rollback.lock.d").exists(), (
+            "the unwind must be REAL — a no-op here would surface as a "
+            "pipeline-busy misread in leg 3"
+        )
+        assert uj.read_pending_op(install) is None
+
+        # ── leg 3: RED with the REAL verdict against the mock engine ──
+        run_id2, _nonce2, grouped2 = await TestLiveThreeFactorGate._mint_nonce(live)
+        TestLiveThreeFactorGate._stamp_window(
+            live, source="api", msg_id="m-preflight-red", content=grouped2
+        )
+        monkeypatch.setattr(udp, "evaluate_db_preflight", _REAL_EVALUATE_DB_PREFLIGHT)
+        assert udp.evaluate_db_preflight is _REAL_EVALUATE_DB_PREFLIGHT
+
+        red_out = await live["tools"]["system_upgrade"].ainvoke(
+            {"target_env": "live", "version": "1.2.3", "dry_run": False,
+             "user_confirmed": True, "nonce": grouped2}
+        )
+
+        reason = _refusal_reason(red_out)
+        assert reason is not None and reason.startswith("db-preflight-"), red_out
+        after = uj.journal_read(install)
+        assert after["pending_actions"][run_id2]["consumed_at"] is None, (
+            "the real verdict must not burn the nonce"
+        )
+        assert after["pending_op"] is None
+        assert not (install / "releases" / "rollback.lock.d").exists()
+        assert len(live["markers"]) == markers_after_leg2, (
+            "a refused arm must not schedule an execution"
+        )
+
+
+def test_full_doc_args_block_names_db_preflight() -> None:
+    """T5 #2 acceptance (note B1): ``tool_help`` renders the ``_full_doc_``
+    ``Args:`` block, so the new parameter MUST be documented THERE — not merely
+    in the kebab-token list.
+
+    The ``Args:`` block is LOCATED (``Args:`` .. ``LIVE 3-factor gate``) and
+    the underscore form is asserted inside that slice: the kebab token list
+    never carries ``db_preflight:``, so the slice is what proves placement.
+    """
+    full_doc = None
+    manager = _base_manager()
+    for tool in create_upgrade_tools(manager, INSTANCE_ID, agent_id="ari"):
+        if getattr(tool, "name", None) == "system_upgrade":
+            full_doc = getattr(tool, "_full_doc_", None)
+    if not isinstance(full_doc, str) or "Args:" not in full_doc:
+        # The Tool wrapper does not re-export ``_full_doc_`` in every build —
+        # fall back to the source text so the pin never passes vacuously by
+        # silently finding nothing.
+        source = (REPO_ROOT / "daemon" / "tools" / "upgrade_tools.py").read_text(
+            encoding="utf-8"
+        )
+        marker = 'system_upgrade._full_doc_ = """\\'
+        start = source.index(marker)
+        end = source.index('"""', start + len(marker))
+        full_doc = source[start + len(marker): end]
+
+    args_start = full_doc.index("Args:")
+    args_end = full_doc.index("LIVE 3-factor gate")
+    assert args_end > args_start, "the Args: block must precede the LIVE gate block"
+    args_block = full_doc[args_start:args_end]
+
+    assert "db_preflight:" in args_block, args_block[-800:]
+    assert "full-dump" in args_block, args_block[-800:]
+    # Modes are documented as REFUSALS, never as capabilities.
+    assert "db-preflight-full-dump-unavailable" in args_block, args_block[-800:]
+    assert "db-preflight-mode-unknown" in args_block, args_block[-800:]
+    # The executor boundary is stated, so an operator cannot believe the value
+    # rides the shell lane.
+    assert "never crosses the executor boundary" in args_block, args_block[-800:]
+    # RACE-WINDOW-ONLY is stated for the torn token (plan T5 #2 / cycle-2 F2).
+    assert "RACE-WINDOW-ONLY" in full_doc
+    # No kubectl literal may enter a daemon string (F12-i).
+    assert "kubectl" not in full_doc
 
 
 # ── v0.29.16 promote-halt class (2026-11-11) — Check 1b, the stop-script
@@ -4046,6 +5060,19 @@ class TestRefusalTaxonomy:
         "no-staged-install",
         "journal-unavailable",
         "layout-divergence",
+        # promote-db-preflight-validation (2026-11-26): the EIGHT-token
+        # backup-artifact validation family — all eight are DOCUMENTED in
+        # system_upgrade._full_doc_ (as reason=<token>) and emitted by the
+        # arm preflight; the two mode tokens are refused at dry-run time too
+        # (before any nonce is minted).
+        "db-preflight-registry-unavailable",
+        "db-preflight-no-backup",
+        "db-preflight-artifact-broken",
+        "db-preflight-artifact-empty",
+        "db-preflight-artifact-stale",
+        "db-preflight-journal-torn",
+        "db-preflight-full-dump-unavailable",
+        "db-preflight-mode-unknown",
     }
     RESTART_TOKENS = {
         "unknown-mode",

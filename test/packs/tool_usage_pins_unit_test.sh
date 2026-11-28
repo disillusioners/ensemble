@@ -4,20 +4,24 @@
 #
 # Lane: feature/pack-coverage-registration (base `40301a5e3`) (re-verified at this base) — the
 #       PACKS.md + pack-scripts coverage registration wave, FAMILY A2
-#       "TOOL-USAGE" (8 files, one pack script + one PACKS.md block).
+#       "TOOL-USAGE" (10 files, one pack script + one PACKS.md block).
 #
 # WHAT IT PINS
 #   tests/unit/repositories/test_tool_usage_repository.py          (15 nodes)
 #   tests/unit/repositories/test_tool_usage_seed_lifecycle.py      (79 nodes)
 #   tests/unit/repositories/test_tool_usage_seed_optout.py          (6 nodes)
 #   tests/unit/routers/test_tool_usage_router.py                   (16 nodes)
-#   tests/unit/services/test_tool_usage_digest_determinism.py      (37 nodes)
-#   tests/unit/services/test_tool_usage_digest_root.py               (5 nodes)
+#   tests/unit/services/test_tool_usage_digest_determinism.py      (41 nodes)
+#   tests/unit/services/test_tool_usage_digest_root.py               (9 nodes)
 #   tests/unit/services/test_tool_usage_observation.py             (21 nodes)
-#   tests/unit/tools/test_tool_usage_digest_registration.py       (21 nodes)
-#   Total: 200 nodes (mechanical `--collect-only` census at this freeze:
-#   200 collected, RC=0, 0 collection errors; per-file 15+79+6+16+37+5+21+21
-#   = 200, the slice count equals the sum of the per-file counts).
+#   tests/unit/tools/test_tool_usage_digest_registration.py       (24 nodes)
+#   tests/unit/services/test_tool_usage_digest_allow_semantics.py  (14 nodes)
+#   tests/unit/services/test_tool_usage_digest_artifact_schema.py  (10 nodes)
+#   Total: 235 nodes (mechanical `--collect-only` census re-stamped after the
+#   per-section weight heading/disclosure + artifact-empty trigger + schema-1
+#   reason pin fix:
+#   235 collected, RC=0, 0 collection errors; per-file 15+79+6+16+41+9+21+24+14+10
+#   = 235, the slice count equals the sum of the per-file counts).
 #
 #   The family is the tool-usage-metrics-p1 lane's (ENSEMBLE-37) unit
 #   surface. From the files' own docstrings:
@@ -52,11 +56,11 @@
 #       lines in `agent_id` ASC order, the score basis pinned to
 #       `calls_7d`), and the frozen D-7 windows ("last-24h" = the
 #       complete previous UTC day; "cumulative-week" = [D-7, D-1]);
-#     - the FROZEN-AWARE `digest_root()` RESOLUTION (council C5):
-#       `sys.frozen` => anchored at `sys.executable`'s parent, the
-#       non-frozen default via `__file__` parents[2], and the
-#       `ENSEMBLE_TOOL_USAGE_DIGEST_ROOT` env override taking precedence
-#       over both;
+#     - the DIGEST ROOT RESOLUTION (council C5, corrected): the digest
+#       root resolves to the INSTALL ROOT that owns `releases/`, via the
+#       house resolver `resolve_live_install_root()` (the frozen branch is
+#       the READ anchor only); `ENSEMBLE_TOOL_USAGE_DIGEST_ROOT` keeps
+#       precedence over both;
 #     - the OBSERVATION TAP + OFF-LOOP FLUSHER (Phase 1): the NAMES-ONLY
 #       sink signature (no argument payload), the 256-char tap choke
 #       (overflow counter + throttled WARNING), the flusher's
@@ -102,10 +106,10 @@
 #     `env -u` on it: stripping the ambient guard makes the boot sweep
 #     SIGTERM/SIGKILL live processes).
 #   - SLICING PROOF: the pack re-derives its own node count with
-#     `--collect-only` and FAILS if it drifts from the declared 200 — a
+#     `--collect-only` and FAILS if it drifts from the declared 235 — a
 #     pack that silently runs a different node set is inadmissible. The
 #     SAME collect leg yields the per-file census for free (the node-id
-#     prefix), so each of the 8 files is counted individually and every
+#     prefix), so each of the 10 files is counted individually and every
 #     per-file count is checked against its declared value; the slice
 #     count must equal the sum of the per-file counts.
 #   - VACUOUS-VERDICT GUARD: zero passed tests or no summary line = FAIL
@@ -136,7 +140,7 @@
 set -u
 
 PACK_NAME="tool_usage_pins_unit_test"
-EXPECTED_NODES=200
+EXPECTED_NODES=235
 
 # ── the declared family slice + its frozen per-file census ────────────────
 UNIT_FILES=(
@@ -148,16 +152,20 @@ UNIT_FILES=(
   tests/unit/services/test_tool_usage_digest_root.py
   tests/unit/services/test_tool_usage_observation.py
   tests/unit/tools/test_tool_usage_digest_registration.py
+  tests/unit/services/test_tool_usage_digest_allow_semantics.py
+  tests/unit/services/test_tool_usage_digest_artifact_schema.py
 )
 UNIT_EXPECTED=(
   15
   79
   6
   16
-  37
-  5
+  41
+  9
   21
-  21
+  24
+  14
+  10
 )
 
 echo "=== Test Pack: ${PACK_NAME} ==="
@@ -322,12 +330,12 @@ if [ "$FILES_REPLACED" -eq 0 ]; then
     echo "RESULT: FAIL (slicing proof)"
     exit 1
   fi
-  echo "CENSUS: OK (8 files, per-file sum=$CENSUS_SUM == slice count=$EXPECTED_NODES)"
+  echo "CENSUS: OK (10 files, per-file sum=$CENSUS_SUM == slice count=$EXPECTED_NODES)"
 fi
 rm -f "$COLLECT_OUT"
 
 echo
-echo "--- lane A2: tool-usage repository / seeder lifecycle / opt-out ladder / read door / digest determinism / digest root / observation tap / digest registration ---"
+echo "--- lane A2: tool-usage repository / seeder lifecycle / opt-out ladder / read door / digest determinism / digest root / observation tap / digest registration / digest allow-semantics / digest artifact-schema ---"
 OUT="$(mktemp)"
 timeout 280 env \
   "${SCRUB[@]}" \
