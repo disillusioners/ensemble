@@ -3,13 +3,16 @@
 import asyncio
 import json
 import logging
+import threading
 import uuid
-from datetime import datetime, timezone
+from contextlib import contextmanager
+from contextvars import ContextVar
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from daemon.services.timestamps import now_utc, now_utc_naive
 
-from sqlalchemy import exists, func, select, text, update as sa_update
+from sqlalchemy import and_, exists, func, or_, select, text, update as sa_update
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session
 from sqlmodel import select as sqlmodel_select
@@ -17,6 +20,10 @@ from sqlmodel import select as sqlmodel_select
 from ..graph import ThinkingChatOpenAI, clean_llm_config
 from ..persistence import get_instance_messages
 from .event_registry import record as _event_registry_record
+# Component C (revive-wedge): the completion guard's recency bound is the
+# REPO'S OWN constant (imported, never re-declared) so the two backstops
+# cannot drift. See the ``P_C_RECENCY_BOUND_SECONDS`` block below.
+from .eligible_pending_sweep import DEFAULT_MIN_PENDING_AGE_SECONDS
 from ..repositories.instance.models import Instance, InstanceStatus
 from ..repositories.message_queue.models import MessageQueue, MessageStatus, MessageType
 from ..repositories.report_injection.repository import (
@@ -74,6 +81,430 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+# ── Revive-wedge terminalization — mint-guard predicate + R-K2 observability ──
+# Lane ``fix/revive-wedge-terminalization`` (2026-11-25). Plan of record:
+# ``.agents/shared/planning/revive-wedge-terminalization/`` (plan.md §2/§3/§7,
+# design.md §2/§3/§7). The predicate fragments below are the §7 CANONICAL
+# strings — keep them character-for-character (BODY WINS ON CONFLICT).
+#
+# POLICY (plan.md §2): at most one OUTSTANDING (undelivered) report
+# obligation per child; a DELIVERED prior report does not block a new
+# turn's report. This is NOT "one report per child, ever".
+#
+#   suppress_mint = (ARM_A or ARM_B)                      (P-SUPPRESS)
+#
+#   ARM A — same-ANCHOR (same-token) duplicate, status set S-A:
+#     MessageQueue.source == f"internal_report:{instance_id}:{completed_message_id}" and MessageQueue.status.in_([MessageStatus.READY.value, MessageStatus.PROCESSING.value, MessageStatus.COMPLETED.value])
+#   ARM B — OUTSTANDING obligation, status set S-B:
+#     MessageQueue.source.startswith(f"internal_report:{instance_id}:", autoescape=True) and MessageQueue.status.in_([MessageStatus.READY.value, MessageStatus.PROCESSING.value])
+#
+# ``completed`` is NOT in ARM B — that relocation is the cure: the
+# blanket per-child lifetime prefix (58fc594eb) let a DELIVERED report
+# from a child's previous episode block the new turn's mint, and the
+# early return that followed skipped the terminal CAS, so a revived
+# child stayed ``running`` forever (the fleet-wide revive-wedge).
+# ``retrying`` is deliberately EXCLUDED from ARM B (leader ruling 6 —
+# a stuck ``retrying`` row must never become a new forever-block
+# class; residual R-K4, observable via ``_emit_retrying_obligation_info``).
+#
+# The ledger writes the arm connectives as ``and`` / ``or``; SQLAlchemy
+# needs ``and_`` / ``or_`` — hence the two-arm form below. ONE query,
+# ONE scan, ONE definition with TWO call sites: the live guard in
+# ``_process_child_completion_db_sync`` and its dead-code twin
+# ``_should_send_completion_report`` (P-TWIN lockstep — pinned by
+# ``tests/unit/test_ready_message_completion_report.py``).
+
+
+def _mint_guard_suppress_predicate(instance_id: str, completed_message_id: str):
+    """P-SUPPRESS — the two-arm mint-guard evidence predicate (ONE SELECT).
+
+    Returns the SQLAlchemy ``or_`` expression the guard's single
+    ``select(MessageQueue).where(...)`` consumes; ``existing_report is
+    not None`` ⇔ ``suppress_mint``. Shared by the live guard and its
+    dead-code twin so the two predicates are IDENTICAL by construction.
+    """
+    return or_(
+        and_(
+            # ARM A — same-ANCHOR duplicate (S-A)
+            MessageQueue.source == f"internal_report:{instance_id}:{completed_message_id}",
+            MessageQueue.status.in_([
+                MessageStatus.READY.value,
+                MessageStatus.PROCESSING.value,
+                MessageStatus.COMPLETED.value,
+            ]),
+        ),
+        and_(
+            # ARM B — OUTSTANDING obligation, ANY anchor (S-B)
+            MessageQueue.source.startswith(f"internal_report:{instance_id}:", autoescape=True),
+            MessageQueue.status.in_([
+                MessageStatus.READY.value,
+                MessageStatus.PROCESSING.value,
+            ]),
+        ),
+    )
+
+
+def _report_anchor_from_source(instance_id: str, source: str | None) -> str:
+    """P-ANCHOR-PARSE — the anchor of a report row, by PREFIX-STRIP.
+
+    ``anchor = row.source[len(f"internal_report:{instance_id}:"):]``
+    — NEVER ``.split(":")`` (that truncates a colon-bearing anchor at
+    its first inner colon). The degenerate source yields ``""``.
+    OBSERVABILITY-ONLY: it feeds the ``outstanding_anchor`` /
+    ``matched_anchor`` / ``retrying_anchor`` log fields and NEVER a
+    control decision (``suppress_mint``, the classification, the CAS).
+    """
+    prefix = f"internal_report:{instance_id}:"
+    return (source or "")[len(prefix):]
+
+
+# P-ARM-B-SUPPRESS-LOG / P-ARM-A-SUPPRESS-LOG / P-RETRYING-INFO-LOG —
+# the format strings are the UNCHANGED canonical strings (plan.md §7).
+_ARM_B_SUPPRESS_LOG_FMT = (
+    "child_reports|arm-b-suppress: class=arm-b-suppress child=%s "
+    "incoming_anchor=%s outstanding_anchor=%s outstanding_message_id=%s "
+    "loss=%s total=%d"
+)
+_ARM_A_SUPPRESS_LOG_FMT = (
+    "child_reports|arm-a-suppress: class=arm-a-suppress child=%s "
+    "incoming_anchor=%s matched_anchor=%s matched_message_id=%s "
+    "matched_status=%s"
+)
+_RETRYING_INFO_LOG_FMT = (
+    "child_reports|retrying-obligation: class=retrying-obligation "
+    "child=%s incoming_anchor=%s retrying_anchor=%s "
+    "retrying_message_id=%s retrying_count=%d"
+)
+
+# P-ARM-B-SUPPRESS-COUNTER — the running count of R-K2 content-loss
+# events (an ARM-B suppression whose ``loss == 1``). Surfaced as
+# ``total=%d`` in every ARM-B suppress record; resets on daemon
+# restart. Every increment AND every ``total=`` read runs under
+# ``_ARM_B_SUPPRESS_LOCK`` — the chain runs on ``asyncio.to_thread``
+# workers, where a bare ``+= 1`` can lose an update.
+_ARM_B_SUPPRESS_LOCK = threading.Lock()
+_ARM_B_SUPPRESS_LOSS_TOTAL = 0
+
+
+def _bump_arm_b_suppress_loss_total() -> int:
+    """``_ARM_B_SUPPRESS_LOSS_TOTAL += 1`` and return it — under the lock."""
+    global _ARM_B_SUPPRESS_LOSS_TOTAL
+    with _ARM_B_SUPPRESS_LOCK:
+        _ARM_B_SUPPRESS_LOSS_TOTAL += 1
+        return _ARM_B_SUPPRESS_LOSS_TOTAL
+
+
+def _emit_mint_suppression_record(
+    instance_id: str,
+    incoming_anchor: str,
+    *,
+    classification: str,
+    blocking_source: str | None,
+    blocking_message_id: str | None,
+    blocking_status: str | None,
+) -> None:
+    """Emit the ONE suppression record for an ACTUAL mint suppression.
+
+    Called ONLY from the suppress branch of
+    ``_process_child_completion_db_sync`` — after the fall-through CAS
+    committed (plan.md §2 emission rules (i)-(v)). An ARM-B
+    classification (the blocking row is OUTSTANDING) logs
+    ``P-ARM-B-SUPPRESS-LOG`` with ``loss=0`` (same anchor — the same
+    obligation, nothing lost) or ``loss=1`` (different anchor — the
+    newer turn's report was dropped, residual R-K2); the loss counter
+    moves ONLY on ``loss=1``. An ARM-A-only classification (the
+    blocking row is a DELIVERED same-anchor report) logs
+    ``P-ARM-A-SUPPRESS-LOG`` and never touches the counter.
+    """
+    matched_anchor = _report_anchor_from_source(instance_id, blocking_source)
+    if classification == "ARM_B":
+        loss = 0 if matched_anchor == incoming_anchor else 1
+        if loss == 1:
+            total = _bump_arm_b_suppress_loss_total()
+        else:
+            with _ARM_B_SUPPRESS_LOCK:
+                total = _ARM_B_SUPPRESS_LOSS_TOTAL
+        logger.warning(
+            _ARM_B_SUPPRESS_LOG_FMT,
+            instance_id, incoming_anchor, matched_anchor,
+            blocking_message_id, loss, total,
+        )
+        return
+    logger.warning(
+        _ARM_A_SUPPRESS_LOG_FMT,
+        instance_id, incoming_anchor, matched_anchor,
+        blocking_message_id, blocking_status,
+    )
+
+
+def _emit_tool_lane_suppression_record(
+    instance_id: str,
+    completed_message_id: str | None,
+    *,
+    classification: str | None,
+    blocking_source: str | None,
+    blocking_message_id: str | None,
+    blocking_status: str | None,
+) -> None:
+    """C5/A1 — the tool-invocation lane's suppressed-mint observability.
+
+    The tool-invocation lane returns BEFORE the shared suppress branch
+    (which carries the record emit + the locked counter bump), so a
+    suppression on that lane used to be SILENT — violating the leader
+    ruling "ARM-B suppressions are loudly logged AND counted". This
+    mirrors the SAME emit (same fields, same ``_ARM_B_SUPPRESS_LOCK``
+    discipline) at BOTH exits of that lane; the lane's outcome value,
+    log lines and control flow are UNCHANGED. Called only when
+    ``suppress_mint`` is True, so exactly ONE record is emitted per
+    actual suppression on that lane.
+    """
+    try:
+        _emit_mint_suppression_record(
+            instance_id,
+            completed_message_id,
+            classification=classification or "ARM_A",
+            blocking_source=blocking_source,
+            blocking_message_id=blocking_message_id,
+            blocking_status=blocking_status,
+        )
+    except Exception as emit_exc:  # noqa: BLE001 — observability is best-effort
+        logger.debug(
+            "child_reports|suppress-record: tool-lane emit failed for "
+            "child %s... (non-fatal, outcome unchanged): %r",
+            instance_id[:8], emit_exc,
+        )
+
+
+def _emit_retrying_obligation_info(
+    session, instance_id: str, completed_message_id: str,
+) -> None:
+    """P-RETRYING-INFO-LOG — make the ``retrying`` exclusion observable.
+
+    A SEPARATE, best-effort, mint-path-only probe: when a mint
+    PROCEEDS while an older report for the same child sits in
+    ``retrying`` (``retrying`` ∉ S-B — leader ruling 6), log ONE INFO
+    record (the oldest ``retrying`` row + the count). It NEVER
+    influences ``suppress_mint``, it never runs on a suppression or a
+    defer, and any failure is swallowed — observability must never
+    block a mint. It costs ONE additional prefix scan per MINT (never
+    per suppressed call).
+
+    The probe reuses the CALLER's session AFTER its commit — deliberately
+    NOT a second ``Session(engine)``: on SQLite (StaticPool / shared
+    connection) opening and closing a second session can roll back the
+    caller's just-committed transaction, deleting the mint itself. The
+    caller has already committed; a failed read here cannot affect the
+    mint's durability.
+    """
+    try:
+        child_prefix = f"internal_report:{instance_id}:"
+        retrying_rows = session.exec(
+            sqlmodel_select(MessageQueue)
+            .where(
+                MessageQueue.source.startswith(
+                    child_prefix, autoescape=True,
+                )
+            )
+            .where(MessageQueue.status == MessageStatus.RETRYING.value)
+            .order_by(
+                MessageQueue.enqueued_at.asc(),
+                MessageQueue.message_id.asc(),
+            )
+        ).all()
+        if not retrying_rows:
+            return
+        oldest = retrying_rows[0]
+        logger.info(
+            _RETRYING_INFO_LOG_FMT,
+            instance_id,
+            completed_message_id,
+            _report_anchor_from_source(instance_id, oldest.source),
+            oldest.message_id,
+            len(retrying_rows),
+        )
+    except Exception as probe_exc:  # noqa: BLE001 — observability never blocks a mint
+        logger.debug(
+            "child_reports|retrying-obligation: probe failed for child "
+            "%s... (non-fatal, mint proceeds): %r",
+            instance_id[:8], probe_exc,
+        )
+
+
+# ── Revive-wedge terminalization — Component C: the parent-completion seam ──
+# Lane ``fix/revive-wedge-terminalization`` (2026-11-26). Plan of record:
+# ``.agents/shared/planning/revive-wedge-terminalization/`` (plan.md §15,
+# plan.md §7 ``### Component C`` table, decisions.md §9 D20-D28,
+# gate-matrix.md §11). BODY WINS ON CONFLICT.
+#
+# THE SEAM (D20): the completion guard's PENDING-TASK COUNT —
+# ``_count_actionable_pending_tasks`` — reached from the ROOT guard and the
+# NON-ROOT guard (ONE definition, TWO call sites). A parent must complete
+# AT THE MOMENT its last child finishes; today the count refuses that
+# completion when the parent's own queue holds
+#
+#   (i)  the WaitingChildren watchdog's OWN wake notice — a notice that
+#        exists ONLY to tell the parent to complete. Counting it defers
+#        the very completion it asks for (the self-defeating wedge: the
+#        guard's deferral line has NO re-arm, so the parent strands), and
+#   (ii) a PENDING task that is already DEAD by the repo's own recency
+#        rule (``is_deferred = false AND created_at < now() - 60s``) —
+#        a dead task cannot defer a completion for hours.
+#
+#   pending_work = COUNT(PENDING tasks for the instance)
+#                  − (P-C-NOTICES-EXCLUDED)
+#                  − (P-C-RECENCY)
+#                  − (the pre-existing INJECTED-report exclusion — UNCHANGED)
+#
+# P-C-NOTICES-EXCLUDED — the TWO-LAYER watchdog discriminator, mirroring
+# the HOUSE PRECEDENT (``daemon/services/waiting_children_watchdog.py`` —
+# the watchdog excludes its OWN notices from the queued-completion-report
+# scan by BOTH the metadata keys AND the source pair):
+#   source IN ('system:watchdog', 'system:watchdog:wedge')
+#       (the watchdog's ``WATCHDOG_SOURCE`` / ``WEDGE_SOURCE``)
+#   OR message_metadata carries one of
+#       ('watchdog_notice', 'watchdog_escalation', 'watchdog_release',
+#        'wedge_notice')
+# It is NOT a blanket ``system:`` exclusion — ``system:resume_wake`` /
+# ``system:wedge-resolve`` / ``system:memoir-proposal`` /
+# ``system:injection_drain`` STILL count (invariant I-C5).
+#
+# P-C-RECENCY — DEAD iff ``is_deferred = false AND created_at < now() - 60s``
+# — the MIRROR of the repo's own orphan conjunct
+# (``daemon/services/job_feedback_observer.py``) and of the drift detector
+# (``daemon/repositories/task/repository.py``).
+#
+# P-C-RECENCY-BOUND — the bound is the repo's OWN constant
+# (``DEFAULT_MIN_PENDING_AGE_SECONDS``), IMPORTED (never re-declared) so
+# the two backstops cannot drift.
+#
+# PORTABILITY: the plan's canonical string uses the PostgreSQL jsonb ``?``
+# key-existence operator, which does not exist on SQLite (the repo is
+# PG-primary with SQLite compatibility, and the unit pins run on SQLite).
+# The metadata layer is therefore expressed with the SQLAlchemy JSON
+# indexed access, which compiles to a DIALECT-PORTABLE key lookup:
+# ``json_extract(metadata, '$."<key>"') IS NOT NULL`` on SQLite and
+# ``metadata ->> '<key>' IS NOT NULL`` on PostgreSQL (both backends agree:
+# a key whose value is JSON ``null`` reads as ABSENT on both).
+#
+# FENCE (D27): no wake-creation change, no config, no env knob, no
+# migration, no index, no lifecycle action — ONE helper predicate plus
+# its pins. The pre-existing INJECTED-report exclusion and the guard's
+# deferral log line are UNCHANGED.
+
+#: P-C-WATCHDOG-SOURCES — the WC-watchdog's own provenance markers, as
+#: stamped onto ``message_queue.source``. BOUND to the watchdog's own
+#: constants (review S-2; values byte-identical to the former literals
+#: ``"system:watchdog"`` / ``"system:watchdog:wedge"``). Resolved LAZILY
+#: (``_watchdog_notice_sources`` / the module ``__getattr__`` below): a
+#: module-level import of ``waiting_children_watchdog`` closes an
+#: order-dependent import cycle (see the helper's docstring).
+
+
+def _watchdog_notice_sources() -> tuple[str, ...]:
+    """The watchdog's OWN source constants — imported at CALL time.
+
+    ``waiting_children_watchdog.WATCHDOG_SOURCE`` / ``WEDGE_SOURCE`` are
+    the single source of truth (imported, never re-declared). The import
+    is deferred because a module-level import here closes an
+    order-dependent cycle: ``daemon.repositories.*`` (partially
+    initialized) → ``daemon/services/__init__`` → this module →
+    ``waiting_children_watchdog`` → ``daemon.repositories.instance.repository``
+    (still mid-execution) — the ``tests/support/conftest.py`` entry order
+    hits it (ImportError on ``SQLModelInstanceRepository``).
+    """
+    from .waiting_children_watchdog import WEDGE_SOURCE, WATCHDOG_SOURCE
+
+    return (WATCHDOG_SOURCE, WEDGE_SOURCE)
+
+
+def __getattr__(name: str):
+    """PEP 562: ``WATCHDOG_NOTICE_SOURCES`` as a lazily bound module
+    attribute (house precedent: ``daemon/graph.py``)."""
+    if name == "WATCHDOG_NOTICE_SOURCES":
+        return _watchdog_notice_sources()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+#: P-C-WATCHDOG-METADATA-KEYS — the markers the WC watchdog stamps into
+#: ``message_queue.metadata`` (``watchdog_notice`` = hang,
+#: ``watchdog_escalation`` / ``watchdog_release`` = the escalate/release
+#: notices, ``wedge_notice`` = the wedge notice).
+WATCHDOG_NOTICE_METADATA_KEYS: tuple[str, ...] = (
+    "watchdog_notice",
+    "watchdog_escalation",
+    "watchdog_release",
+    "wedge_notice",
+)
+
+#: P-C-RECENCY-BOUND — the recency bound of the completion guard's
+#: pending-task count. BOUND TO THE REPO'S OWN CONSTANT (imported above,
+#: never re-declared): ``DEFAULT_MIN_PENDING_AGE_SECONDS`` is the same age
+#: boundary the eligible-PENDING sweep uses to re-notify the worker pool
+#: and the same one the job-finalization gate's orphan rule uses.
+P_C_RECENCY_BOUND_SECONDS: int = DEFAULT_MIN_PENDING_AGE_SECONDS
+
+
+#: ``P-C-RECENCY-ROOT-ONLY`` — the call-site value of the recency switch.
+#: The helper's ``apply_recency`` parameter is resolved from this ContextVar
+#: when the call site does not pass it explicitly. Two pre-existing L2N
+#: spies (``tests/unit/services/test_child_reports.py``) pin the 2-argument
+#: helper call signature, so the call sites set the True/False value via
+#: ``_recency_call_site`` instead of a third argument. A ContextVar (not a
+#: service attribute) is required because the chain runs on
+#: ``asyncio.to_thread`` workers — a shared attribute would race.
+#: The default is FAIL-CLOSED (``False``): a call site that omits the
+#: context inherits NO recency (the pre-change, defer-more behaviour).
+_COMPONENT_C_APPLY_RECENCY: ContextVar[bool] = ContextVar(
+    "component_c_apply_recency", default=False
+)
+
+
+@contextmanager
+def _recency_call_site(apply_recency: bool):
+    """Set the recency switch for ONE helper call at a guard call site."""
+    token = _COMPONENT_C_APPLY_RECENCY.set(apply_recency)
+    try:
+        yield
+    finally:
+        _COMPONENT_C_APPLY_RECENCY.reset(token)
+
+
+def _watchdog_notice_exists_expression():
+    """``P-C-NOTICES-EXCLUDED`` — ONE portable ORM expression (no DB access).
+
+    Shared by the pending-task seam and the dual-dialect compile pin
+    (``PC-10``): SQLAlchemy dialect compilers are pure, so the SAME
+    expression renders ``->>`` on PostgreSQL and ``JSON_EXTRACT`` on
+    SQLite. NO dialect branch, NO raw ``?`` operator, NO ``text()``
+    containing ``?`` (SQLite reads ``?`` as a bind placeholder).
+    """
+    return or_(
+        MessageQueue.source.in_(_watchdog_notice_sources()),
+        *(
+            MessageQueue.message_metadata[key].as_string().is_not(None)
+            for key in WATCHDOG_NOTICE_METADATA_KEYS
+        ),
+    )
+
+
+def _is_watchdog_notice_row(row: MessageQueue) -> bool:
+    """``P-C-OWN-QUEUE-NOTICES-EXCLUDED`` — the same two-layer discriminator.
+
+    Applied at the ROOT ladder's own-queue call site ONLY (the NON-ROOT
+    ladder has no own-queue leg). The shared predicate
+    ``finalizer_counts_as_pending`` is NOT modified globally: this is a
+    Python-side filter against the pinned discriminator set (the house
+    precedent in ``waiting_children_watchdog.py``). A metadata key whose
+    JSON value is ``null`` reads as ABSENT here, matching the ORM form's
+    ``IS NOT NULL`` on both backends. The four non-watchdog system wakes
+    (``system:resume_wake`` / ``system:wedge-resolve`` /
+    ``system:memoir-proposal`` / ``system:injection_drain``) still count.
+    """
+    if row.source in _watchdog_notice_sources():
+        return True
+    metadata = row.message_metadata or {}
+    return any(metadata.get(key) is not None for key in WATCHDOG_NOTICE_METADATA_KEYS)
 
 
 # ── Terminal-row strand (9f0ed4f5 family, 2026-10-31) ──────────────
@@ -202,7 +633,13 @@ class _ChildCompletionDbResult(NamedTuple):
         ``"root_completed"`` — root completed cleanly, commit + SSE
             ``completed`` + CompletionRegistry + lifecycle event + title gen.
         ``"idempotency_skip"`` — already reported (terminal
-            COMPLETED/ERROR state). B4 cycle-2 (W5 obligation re-mint):
+            COMPLETED/ERROR state). ALSO the MINT-SUPPRESSED path
+            (revive-wedge terminalization, 2026-11-25): the two-arm
+            mint guard suppressed a duplicate report, yet the guarded
+            CAS still stamped the row COMPLETED before this outcome
+            returned — terminalization never depends on a mint (the
+            dedicated suppress branch in ``_process_child_completion_
+            db_sync``). B4 cycle-2 (W5 obligation re-mint):
             when the obligation IS met (no PENDING watcher for the
             (parent, child) pair, or the instance is NOT yet in
             COMPLETED status) this branch is a no-op. When the
@@ -1288,14 +1725,20 @@ Provide a concise summary:"""
         
         DEPRECATION NOTE (pause-report-recovery Phase 1, 2026-08-19):
         This helper is superseded by the inlined check at
-        ``_process_child_completion_db_sync`` around line ~2106 (the live
-        reachable production guard). The inlined check is the
-        authoritative parent-completion guard after Phase 2's B2
-        reachability audit; this helper is dead code in production
-        (only tests exercise it). It is kept verbatim (no deletion, no
-        edits to the logic) so the existing test surface remains
-        green. Do NOT extend this helper — add the production change to
-        the inlined check instead.
+        ``_process_child_completion_db_sync`` (the live reachable
+        production guard). The inlined check is the authoritative
+        parent-completion guard after Phase 2's B2 reachability audit;
+        this helper is dead code in production (only tests exercise
+        it). It is NOT kept verbatim any more: 58fc594eb (the per-child
+        prefix widening) and the revive-wedge terminalization fix
+        (2026-11-25, lane ``fix/revive-wedge-terminalization``) both
+        edited it in LOCKSTEP with the live guard — both evaluate the
+        SAME two-arm predicate builder ``_mint_guard_suppress_predicate``
+        (one definition, two call sites; pinned by
+        ``tests/unit/test_ready_message_completion_report.py``), so the
+        twin stays a faithful copy source and cannot drift. Do NOT
+        extend this helper — add the production change to the shared
+        predicate (and so to the inlined check) instead.
         
         Args:
             session: Database session.
@@ -1357,25 +1800,29 @@ Provide a concise summary:"""
             logger.info(f"Instance {instance_id[:8]}... has no parent_id, skipping completion report")
             return False, "no_parent_id"
             
-        # Idempotency: one obligation per CHILD (the per-child PREFIX
-        # invariant), NOT one per anchor.
+        # Idempotency — the mint guard, kept in LOCKSTEP with the live
+        # guard (P-TWIN). NIT-MEDIUM (fix/post-outage-recovery SCOPE (c)
+        # rider) made the guard PER-CHILD (the anchor-exact form let a b4
+        # candidate whose PRIOR report was still pending under a
+        # DIFFERENT anchor mint a SECOND report row AND a SECOND delivery
+        # obligation — the probe: 2 obligations for 1 child). The
+        # revive-wedge terminalization fix (2026-11-25, lane
+        # ``fix/revive-wedge-terminalization``) then split it into the
+        # TWO-ARM disjunction ``suppress_mint = (ARM_A or ARM_B)``:
         #
-        # NIT-MEDIUM (fix/post-outage-recovery SCOPE (c) rider): the
-        # guard used to be ANCHOR-EXACT
-        # (``source == internal_report:{child}:{message_id}``) while the
-        # INVARIANT the rest of the subsystem enforces is PER-CHILD
-        # PREFIX (``source LIKE 'internal_report:' || child || ':%'`` —
-        # see ``daemon/repositories/report_injection/repository.py``
-        # ``find_completed_children_without_delivery``). A b4
-        # stale-running candidate whose PRIOR report is still pending
-        # under a DIFFERENT anchor therefore slipped past the mint
-        # guard: a SECOND report row was minted AND a SECOND delivery
-        # obligation was created for the same child (the probe: 2
-        # obligations for 1 child, the parent receives 2 reports).
+        # * ARM A — the SAME-ANCHOR report (READY / PROCESSING /
+        #   COMPLETED) is never minted twice.
+        # * ARM B — an OUTSTANDING obligation for this child (READY /
+        #   PROCESSING, ANY anchor) blocks a second mint — the b4
+        #   duplicate. ``completed`` is NOT in ARM B: a DELIVERED prior
+        #   report no longer blocks a new turn (the cure). ``retrying``
+        #   is deliberately excluded (leader ruling 6 — residual R-K4).
         #
-        # The fix is at the MINT SITE (not a hold in the sweep): the
-        # guard now matches the child's report PREFIX, so ANY pending
-        # report for the child suppresses a second mint.
+        # This twin evaluates the ONE shared predicate builder
+        # ``_mint_guard_suppress_predicate`` — the same definition the
+        # inlined (live) guard in ``_process_child_completion_db_sync``
+        # consumes — so the two guards cannot drift (pinned by
+        # ``tests/unit/test_ready_message_completion_report.py``).
         #
         # TWO properties preserved deliberately:
         #
@@ -1398,23 +1845,18 @@ Provide a concise summary:"""
         # commissioner-addressed report as UNDELIVERED and mint a second
         # obligation for the structural parent (the D1 defect).
         existing_report = session.exec(
-            select(MessageQueue)
-            .where(
-                MessageQueue.source.startswith(
-                    f"internal_report:{instance_id}:", autoescape=True
+            sqlmodel_select(MessageQueue).where(
+                _mint_guard_suppress_predicate(
+                    instance_id, completed_message_id,
                 )
             )
-            .where(MessageQueue.status.in_([
-                MessageStatus.READY.value,
-                MessageStatus.PROCESSING.value,
-                MessageStatus.COMPLETED.value,
-            ]))
         ).first()
         
         if existing_report is not None:
             logger.debug(
                 f"Completion report already queued for child {instance_id[:8]}... "
-                f"(per-child prefix), skipping duplicate"
+                f"(two-arm mint guard: same-anchor duplicate or outstanding "
+                f"obligation), skipping duplicate"
             )
             return False, "idempotency_skip"
         
@@ -3593,7 +4035,13 @@ Provide a concise summary:"""
             & no_tasks
         )
 
-    def _count_actionable_pending_tasks(self, session: Session, instance_id: str) -> int:
+    def _count_actionable_pending_tasks(
+        self,
+        session: Session,
+        instance_id: str,
+        *,
+        apply_recency: bool | None = None,
+    ) -> int:
         """Count PENDING tasks for an instance that will actually run a turn.
         Used by both completion guards (root + non-root) to decide whether
         to defer completion. A PENDING ``process_report`` task whose report
@@ -3612,9 +4060,35 @@ Provide a concise summary:"""
         (``process_message``) there is no matching ``report_injections``
         row, so the EXISTS is false and the task is counted.
 
+        COMPONENT C (revive-wedge, 2026-11-26) — TWO conjuncts on top of
+        the predicate above. The pre-existing INJECTED-report exclusion is
+        UNCHANGED (invariant I-C1); the two new conjuncts are FILTERS on
+        the SAME single COUNT query (no new I/O, no new index):
+
+        (i)  ``P-C-NOTICES-EXCLUDED`` — a PENDING task whose message is a
+             WaitingChildren-watchdog notice is NOT pending work. The
+             notice exists ONLY to tell the parent to complete; counting
+             it defers the very completion it asks for (the self-
+             defeating wedge). TWO layers, mirroring the house precedent
+             in ``daemon/services/waiting_children_watchdog.py``: the
+             watchdog source pair AND the watchdog metadata keys.
+        (ii) ``P-C-RECENCY`` — a PENDING task that is already DEAD by the
+             repo's own orphan rule (``is_deferred = false AND created_at
+             < now() - P_C_RECENCY_BOUND_SECONDS``) is NOT pending work.
+             A dead task cannot defer a completion for hours.
+
         Args:
             session: An open (WriteGuard)Session.
             instance_id: The instance whose pending tasks to count.
+            apply_recency: ``P-C-RECENCY-ROOT-ONLY`` — the DEAD-by-age
+                conjunct is applied at the ROOT guard call site ONLY
+                (``True``). The NON-ROOT ladder passes ``False``: it has
+                no own-queue backstop, so a recency exclusion there
+                would let a child report to its parent prematurely
+                (incident ``777eff96``). The NOTICES-EXCLUDED conjunct
+                is applied at BOTH call sites (it is unconditional).
+                The accepted residual is a stale task on the non-root
+                path still deferring — a delay, never a premature report.
 
         Returns:
             Count of PENDING tasks that will run a real graph turn.
@@ -3625,12 +4099,46 @@ Provide a concise summary:"""
             .where(ReportInjection.state == ReportInjectionState.INJECTED.value)
             .exists()
         )
+        # P-C-NOTICES-EXCLUDED — the watchdog's OWN notice. The correlated
+        # EXISTS joins ``task.message_id`` → ``message_queue.message_id``
+        # (the watchdog's enqueue path writes BOTH rows with the SAME
+        # message id). The ONE portable expression is shared with the
+        # dual-dialect compile pin (PC-10): PostgreSQL ``->>``, SQLite
+        # ``JSON_EXTRACT`` — no dialect branch, no raw ``?`` operator.
+        watchdog_notice_exists = (
+            select(MessageQueue.message_id)
+            .where(MessageQueue.message_id == Task.message_id)
+            .where(_watchdog_notice_exists_expression())
+            .exists()
+        )
+        # P-C-RECENCY — the DEAD-by-age conjunct, mirroring the repo's own
+        # orphan rule. The cutoff is computed in the COLUMN's frame
+        # (naive UTC — ``Task.created_at`` stores naive-UTC digits; an
+        # aware threshold makes PostgreSQL cast the column through the
+        # session TimeZone, the frame bug the drift detector documents).
+        dead_by_recency = and_(
+            Task.is_deferred.is_(False),
+            Task.created_at
+            < (now_utc_naive() - timedelta(seconds=P_C_RECENCY_BOUND_SECONDS)),
+        )
+        # P-C-COUNT — the NOTICES-EXCLUDED conjunct is UNCONDITIONAL (both
+        # call sites); the RECENCY conjunct is call-site-gated by
+        # ``apply_recency`` (P-C-RECENCY-ROOT-ONLY). The pre-existing
+        # INJECTED-report exclusion is UNCHANGED.
+        count_predicates = [
+            Task.instance_id == instance_id,
+            Task.status == TaskStatus.PENDING.value,
+            ~injected_report_exists,
+            ~watchdog_notice_exists,
+        ]
+        if apply_recency is None:
+            apply_recency = _COMPONENT_C_APPLY_RECENCY.get()
+        if apply_recency:
+            count_predicates.append(~dead_by_recency)
         return session.exec(
             select(func.count())
             .select_from(Task)
-            .where(Task.instance_id == instance_id)
-            .where(Task.status == TaskStatus.PENDING.value)
-            .where(~injected_report_exists)
+            .where(*count_predicates)
         ).scalar_one()
 
     def _process_child_completion_db_sync(
@@ -3972,7 +4480,16 @@ Provide a concise summary:"""
                 # would be premature and the idempotency guard would later
                 # drop the real final completion. Defer until the queued
                 # turn drains. See the non-root guard for the full rationale.
-                pending_tasks = self._count_actionable_pending_tasks(session, instance_id)
+                # P-C-RECENCY-ROOT-ONLY: the ROOT call site is the ONLY
+                # one that applies the DEAD-by-age conjunct (it has the
+                # own-queue backstop); the NON-ROOT call site passes
+                # False. The value travels via a ContextVar so the two
+                # pre-existing 2-argument spies in test_child_reports.py
+                # keep working.
+                with _recency_call_site(True):
+                    pending_tasks = self._count_actionable_pending_tasks(
+                        session, instance_id
+                    )
                 if pending_tasks > 0:
                     logger.info(
                         f"Instance {instance_id[:8]}... completed message "
@@ -4295,10 +4812,24 @@ Provide a concise summary:"""
                 # any future task-less row producer. Refinement 2 (unknown
                 # task-less READY rows count conservatively with a WARNING)
                 # is untouched and remains the live hardening.
+                # P-C-OWN-QUEUE-NOTICES-EXCLUDED (leader ruling D32): the
+                # watchdog's own notice is excluded from the ROOT's
+                # own-queue count by the SAME two-layer discriminator as
+                # the pending-task seam. The shared predicate
+                # ``finalizer_counts_as_pending`` is NOT modified
+                # globally. Non-watchdog system wakes still count.
+                # ORDERING (review S-1): the exclusion is applied FIRST so an
+                # excluded row never reaches the finalizer — the finalizer
+                # costs one SELECT per row and raises the task-less-READY
+                # WARNING (Refinement 2) for any row it is asked about. The
+                # two predicates are a CONJUNCTION, so the counted set is
+                # IDENTICAL to the pre-reorder form; only the wasted SELECT
+                # and the spurious warning on excluded rows go away.
                 pending_count = sum(
                     1
                     for _row in _candidate_rows
-                    if finalizer_counts_as_pending(_row, self._manager.engine)
+                    if not _is_watchdog_notice_row(_row)
+                    and finalizer_counts_as_pending(_row, self._manager.engine)
                 )
                 del _candidate_rows  # scope hygiene
 
@@ -4576,6 +5107,18 @@ Provide a concise summary:"""
             # ``child_instance_id = instance_id``,
             # ``child_message_id = completed_message_id``,
             # ``reason = DEFERRED_REASON_PENDING_MESSAGES``.
+            #
+            # Revive-wedge decoupling (design.md §3.1 step 1): the
+            # mint-guard skip is flagged SEPARATELY from the other
+            # ``should_send = False`` skips — only it falls through to
+            # the terminal CAS (see the suppress branch below). The
+            # observability locals are captured at the guard and read
+            # ONLY in that suppress branch.
+            suppress_mint = False
+            _suppress_class: str | None = None
+            _suppress_block_source: str | None = None
+            _suppress_block_message_id: str | None = None
+            _suppress_block_status: str | None = None
             if completed_message_id is None:
                 pending_count = session.exec(
                     select(func.count())
@@ -4652,50 +5195,105 @@ Provide a concise summary:"""
                         skip_reason = "no_parent_id"
                     else:
                         # NIT-MEDIUM (fix/post-outage-recovery SCOPE (c)
-                        # rider) — the MINT-SITE guard is PER-CHILD
-                        # PREFIX, not anchor-exact. The invariant the
-                        # whole subsystem enforces is "one obligation
-                        # per child" (``source LIKE 'internal_report:'
-                        # || child || ':%'`` — the delivery-side D1
-                        # correction in
-                        # ``daemon/repositories/report_injection/
-                        # repository.py``). The anchor-exact form let a
+                        # rider) — the MINT-SITE guard is PER-CHILD,
+                        # not anchor-exact: the anchor-exact form let a
                         # b4 stale-running candidate whose prior report
                         # was still PENDING under a different anchor
-                        # mint a SECOND report + a SECOND obligation.
+                        # mint a SECOND report + a SECOND obligation
+                        # (the delivery-side D1 counterpart of the
+                        # "one obligation per child" invariant in
+                        # ``daemon/repositories/report_injection/
+                        # repository.py``).
                         #
-                        # Same three deliberate properties as the
-                        # sibling guard in ``_should_send_completion_
-                        # report``: the COLON terminator keeps the exact
-                        # boundary (a sibling whose id EXTENDS this
-                        # child's id does not match), ``autoescape=True``
+                        # REVIVE-WEDGE TERMINALIZATION (2026-11-25, lane
+                        # ``fix/revive-wedge-terminalization``; plan.md
+                        # §2, design.md §2): the blanket per-child
+                        # lifetime prefix (COMPLETED included — the
+                        # 58fc594eb widening) WEDGED a revived child —
+                        # its DELIVERED report from the previous episode
+                        # blocked the new turn's mint, and the early
+                        # return that followed skipped the terminal
+                        # CAS, so the child stayed ``running`` forever.
+                        # The guard is now a TWO-ARM disjunction — ONE
+                        # SELECT, built by the shared
+                        # ``_mint_guard_suppress_predicate`` (the
+                        # dead-code twin evaluates the SAME predicate):
+                        #
+                        #   suppress_mint = (ARM_A or ARM_B)   (P-SUPPRESS)
+                        #
+                        #   ARM A — same-ANCHOR duplicate (READY /
+                        #   PROCESSING / COMPLETED): the report for
+                        #   THIS anchor is never minted twice.
+                        #   ARM B — OUTSTANDING obligation (READY /
+                        #   PROCESSING, ANY anchor): the b4 duplicate
+                        #   stays blocked — at most one UNDELIVERED
+                        #   obligation per child. ``completed`` is NOT
+                        #   in ARM B (that is the cure — a DELIVERED
+                        #   prior report no longer blocks a new turn);
+                        #   ``retrying`` is deliberately EXCLUDED
+                        #   (leader ruling 6 — residual R-K4, observed
+                        #   by the ``retrying-obligation`` INFO record).
+                        #
+                        # Same three deliberate properties as before:
+                        # the COLON terminator keeps the exact boundary
+                        # (a sibling whose id EXTENDS this child's id
+                        # does not match), ``autoescape=True``
                         # neutralises ``%`` / ``_`` inside the id, and
                         # the RECIPIENT predicate is dropped because the
                         # obligation belongs to the CHILD (a report
                         # already minted for it — addressed to the
                         # commissioner or to the parent — discharges it).
+                        # ``sqlmodel_select`` — ``exec(...).first()`` must
+                        # yield the ORM row (its ``status`` classifies the
+                        # suppression); the bare SQLAlchemy ``select`` yields
+                        # a one-column ``Row`` wrapper instead.
                         existing_report = session.exec(
-                            select(MessageQueue)
-                            .where(
-                                MessageQueue.source.startswith(
-                                    f"internal_report:{instance_id}:",
-                                    autoescape=True,
+                            sqlmodel_select(MessageQueue).where(
+                                _mint_guard_suppress_predicate(
+                                    instance_id, completed_message_id,
                                 )
                             )
-                            .where(MessageQueue.status.in_([
-                                MessageStatus.READY.value,
-                                MessageStatus.PROCESSING.value,
-                                MessageStatus.COMPLETED.value,
-                            ]))
                         ).first()
                         if existing_report is not None:
                             should_send = False
                             skip_reason = "idempotency_skip"
+                            # DECOUPLING (design.md §3.1 step 1): the
+                            # MINT is suppressed, terminalization is
+                            # NOT — this call falls through to the
+                            # guarded CAS below (the cure). NOTHING is
+                            # logged and the R-K2 counter is NOT touched
+                            # here: the guard only CAPTURES the
+                            # observability locals. The ONE emission
+                            # point is the suppress branch after the CAS
+                            # (plan.md §2 rules (i)-(v)) — a defer guard
+                            # may still return before it, and a defer
+                            # suppresses nothing.
+                            suppress_mint = True
+                            # Discriminator on the returned row — no
+                            # second query: an ARM-B hit iff the blocking
+                            # row is OUTSTANDING (S-B); else ARM A.
+                            if existing_report.status in (
+                                MessageStatus.READY.value,
+                                MessageStatus.PROCESSING.value,
+                            ):
+                                _suppress_class = "ARM_B"
+                            else:
+                                _suppress_class = "ARM_A"
+                            _suppress_block_source = existing_report.source
+                            _suppress_block_message_id = (
+                                existing_report.message_id
+                            )
+                            _suppress_block_status = existing_report.status
                         else:
                             should_send = True
                             skip_reason = "all_checks_passed"
             
-            if not should_send:
+            # P-EARLY-RETURN — every OTHER ``should_send = False`` path
+            # (``no_completed_message_id`` / ``pending_messages_exist``
+            # / ``instance_not_found`` / ``no_parent_id``) still returns
+            # here exactly as before; ONLY the mint-guard case
+            # (``suppress_mint``) falls through to the terminal CAS.
+            if not should_send and not suppress_mint:
                 logger.info(f"Instance {instance_id[:8]}... completion report skipped: reason={skip_reason}")
                 return _ChildCompletionDbResult(
                     outcome="idempotency_skip",
@@ -4757,6 +5355,11 @@ Provide a concise summary:"""
                         f"{{paused,completed,error}}); skipping "
                         f"completion side effects (TOCTOU defense)"
                     )
+                    # W-2 (leader ruling 2026-11-26): NO suppress record and NO
+                    # counter bump on this LOST-RACE exit. The ledger's emission
+                    # point is "after the CAS has succeeded"; the regular lane's
+                    # lost-race exit is silent by design. The R-K2 under-count
+                    # here is the disclosed advisory (observability-only).
                     return _ChildCompletionDbResult(
                         outcome="idempotency_skip",
                         instance_id=instance_id,
@@ -4765,6 +5368,14 @@ Provide a concise summary:"""
                     )
 
                 # Post-commit side effects are dispatched by the async caller.
+                if suppress_mint:
+                    _emit_tool_lane_suppression_record(
+                        instance_id, completed_message_id,
+                        classification=_suppress_class,
+                        blocking_source=_suppress_block_source,
+                        blocking_message_id=_suppress_block_message_id,
+                        blocking_status=_suppress_block_status,
+                    )
                 return _ChildCompletionDbResult(
                     outcome="tool_invocation_completed",
                     instance_id=instance_id,
@@ -4855,7 +5466,15 @@ Provide a concise summary:"""
             # EXCLUDED by ``_count_actionable_pending_tasks`` — counting
             # it would defer completion forever because the skipped task
             # never produces a turn to re-evaluate completion.
-            pending_tasks = self._count_actionable_pending_tasks(session, instance_id)
+            # P-C-RECENCY-ROOT-ONLY: the NON-ROOT call site NEVER applies
+            # the DEAD-by-age conjunct — this ladder has no own-queue
+            # backstop, so recency here could report the child to its
+            # parent prematurely (incident 777eff96). NOTICES-EXCLUDED
+            # still applies (it is unconditional in the shared helper).
+            with _recency_call_site(False):
+                pending_tasks = self._count_actionable_pending_tasks(
+                    session, instance_id
+                )
             if active_children > 0 or pending_tasks > 0:
                 # The just-completed instance (e.g., Wanderer / a tester)
                 # still has non-terminal children OR queued turns of its
@@ -4928,6 +5547,52 @@ Provide a concise summary:"""
                     f"completion_report + parent cascade "
                     f"(TOCTOU defense)"
                 )
+                return _ChildCompletionDbResult(
+                    outcome="idempotency_skip",
+                    instance_id=instance_id,
+                    agent_id=instance.agent_id,
+                    parent_id=instance.parent_id,
+                )
+
+            # ─── Revive-wedge decoupling (design.md §3.1 step 4) ──────────
+            # TERMINALIZATION NEVER DEPENDS ON A MINT. The mint guard
+            # suppressed the report (ARM A / ARM B) and the guarded CAS
+            # above has stamped the row COMPLETED — that IS the cure.
+            # A DEDICATED return: it does NOT fall through to the final
+            # return below, which reads mint-produced locals that do not
+            # exist on this path. The outcome string is UNCHANGED —
+            # ``idempotency_skip`` is what the B4 cycle-2 gate keys on;
+            # what changed is that the row is COMPLETED by the time that
+            # gate re-reads it, so the corrective bus emit can fire.
+            if suppress_mint:
+                session.commit()
+                # Terminal observability — the same two records the mint
+                # path emits after ITS commit (ids only, content-free).
+                _event_registry_record("event_bus:instance_completed",
+                                       instance_id=instance_id)
+                _event_registry_record("event_bus:child_completed",
+                                       instance_id=instance.parent_id,
+                                       child_instance_id=instance_id)
+                # THE emission point (plan.md §2 rules (i)-(v)): exactly
+                # ONE suppression record per ACTUAL suppression, and the
+                # R-K2 loss counter (+1 on an ARM-B ``loss=1`` only).
+                # Nothing was emitted at the guard and nothing is
+                # emitted on the defer path above.
+                try:
+                    _emit_mint_suppression_record(
+                        instance_id,
+                        completed_message_id,
+                        classification=_suppress_class or "ARM_A",
+                        blocking_source=_suppress_block_source,
+                        blocking_message_id=_suppress_block_message_id,
+                        blocking_status=_suppress_block_status,
+                    )
+                except Exception as emit_exc:  # noqa: BLE001 — observability is best-effort
+                    logger.debug(
+                        "child_reports|suppress-record: emit failed for "
+                        "child %s... (non-fatal, outcome unchanged): %r",
+                        instance_id[:8], emit_exc,
+                    )
                 return _ChildCompletionDbResult(
                     outcome="idempotency_skip",
                     instance_id=instance_id,
@@ -5760,6 +6425,19 @@ Provide a concise summary:"""
                     parent_agent_id = parent_for_event.agent_id
             
             session.commit()
+            # P-RETRYING-INFO-LOG (plan.md §2; leader ruling 6): the
+            # ``retrying`` exclusion from ARM B, made observable. A
+            # SEPARATE, best-effort, mint-path-only probe — it never
+            # influences ``suppress_mint`` and runs only AFTER the mint
+            # committed (never on a suppression, never on a defer, never
+            # for a mint that failed). Any failure is swallowed:
+            # observability must never block a mint. One additional
+            # prefix scan per MINT, on the caller's ALREADY-COMMITTED
+            # session — never a second Session on a shared SQLite
+            # connection (its close can roll back the mint).
+            _emit_retrying_obligation_info(
+                session, instance_id, completed_message_id,
+            )
             # Phase 5 event registry — class-2 bridge (T5.4): observe the
             # two durable completion rows AFTER the transaction commits
             # (the row is the truth; the staged-rows helper twin

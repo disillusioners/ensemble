@@ -1,0 +1,33 @@
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_ TestReviveWedgeObservability.test_an_arm_a_only_suppression_emits_exactly_one_arm_a_record _
+tests/unit/services/test_child_reports.py:3006: in test_an_arm_a_only_suppression_emits_exactly_one_arm_a_record
+    assert len(arm_a) == 1, (
+E   AssertionError: exactly ONE arm-a-suppress record on an ARM-A-only suppression; got ['Instance rw-child... parent_id=rw-leader, status=running', 'Instance rw-child... completed, sending report to parent rw-leade...', 'Bus-active: skipping inline cascade for parent rw-leade... — no inline status write; parent terminal transition completes when the PROCESS_REPORT task delivery completes (bus is state-machine only — it does not own completion and does not wake the parent)']
+E   assert 0 == 1
+E    +  where 0 = len([])
+------------------------------ Captured log call -------------------------------
+INFO     daemon.services.child_reports:child_reports.py:4191 Instance rw-child... parent_id=rw-leader, status=running
+INFO     daemon.services.child_reports:child_reports.py:5500 Instance rw-child... completed, sending report to parent rw-leade...
+INFO     daemon.services.child_reports:child_reports.py:6272 Bus-active: skipping inline cascade for parent rw-leade... — no inline status write; parent terminal transition completes when the PROCESS_REPORT task delivery completes (bus is state-machine only — it does not own completion and does not wake the parent)
+_ TestReviveWedgeNarrow.test_same_anchor_re_supplied_with_prior_delivered_report_does_not_mint _
+tests/unit/services/test_stale_running_sweep_rider_pins.py:822: in test_same_anchor_re_supplied_with_prior_delivered_report_does_not_mint
+    assert len(sources) == 1, (
+E   AssertionError: NEW-5: ARM A must suppress the second mint; expected ONE row, got ['internal_report:rider-child:', 'internal_report:rider-child:']
+E   assert 2 == 1
+E    +  where 2 = len(['internal_report:rider-child:', 'internal_report:rider-child:'])
+------------------------------ Captured log call -------------------------------
+WARNING  daemon.registry:registry.py:1589 Tool config validation: Agent 'maintenancer': deny entry 'git_commit' is neither a known category nor a known tool
+WARNING  daemon.services.child_reports:child_reports.py:7576 Failed to broadcast child completion event: 'MagicMock' object can't be awaited
+WARNING  daemon.services.child_reports:child_reports.py:1272 _fire_terminal_child_and_deliver: bus fire failed for child rider-ch... (non-fatal): TypeError: 'MagicMock' object can't be awaited
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-revive-wedge/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/services/test_child_reports.py::TestReviveWedgeObservability::test_an_arm_a_only_suppression_emits_exactly_one_arm_a_record
+FAILED tests/unit/services/test_stale_running_sweep_rider_pins.py::TestReviveWedgeNarrow::test_same_anchor_re_supplied_with_prior_delivered_report_does_not_mint
+2 failed, 1 warning in 2.87s
+RC=1

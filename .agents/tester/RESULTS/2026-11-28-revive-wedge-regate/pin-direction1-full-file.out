@@ -1,0 +1,13 @@
+..................................................................       [100%]
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-revive-wedge/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+tests/unit/services/test_child_reports.py::TestReportIntegrityGuardStageIIIEnforcement::test_enforcement_evaluation_preserves_ordering
+tests/unit/services/test_child_reports.py::TestReportIntegrityGuardStageIIIEnforcement::test_flag_off_root_path_b_violation_report_is_inert
+  /home/nea/ensemble-src-wt-revive-wedge/.venv/lib/python3.14/site-packages/sqlmodel/orm/session.py:75: SAWarning: The engine provided as bind produced a connection that is already in a transaction. This is usually caused by a core event, such as 'engine_connect', that has left a transaction open. The effective join transaction mode used by this session is 'create_savepoint'. To silence this warning, do not leave transactions open
+    results = super().execute(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+66 passed, 3 warnings in 15.33s

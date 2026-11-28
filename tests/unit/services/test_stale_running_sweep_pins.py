@@ -310,6 +310,7 @@ def _insert_message(
     completed_at: datetime | None = None,
     message_id: str = "msg-srs-1",
     content: str = "scheduled mission",
+    source: str = "api",
 ) -> None:
     completed_iso = (
         completed_at.isoformat() if completed_at is not None else None
@@ -326,7 +327,7 @@ def _insert_message(
                      status, priority, retry_count, max_retries,
                      enqueued_at, completed_at, metadata)
                 VALUES
-                    (:message_id, :instance_id, :content, 'agent', 'api',
+                    (:message_id, :instance_id, :content, 'agent', :source,
                      :status, 1, 0, 3, :enqueued_at, :completed_at, :metadata)
                 """
             ),
@@ -334,6 +335,7 @@ def _insert_message(
                 "message_id": message_id,
                 "instance_id": instance_id,
                 "content": content,
+                "source": source,
                 "status": status,
                 "enqueued_at": enqueued_iso,
                 "completed_at": completed_iso,
@@ -422,6 +424,40 @@ def _seed_shape_b(
             message_id="msg-shape-b",
         )
     return instance_id
+
+
+def _seed_delivered_prior_report(
+    engine,
+    *,
+    recipient_id: str,
+    child_id: str,
+    anchor: str = "anchor-A",
+    age: timedelta = timedelta(hours=4),
+) -> None:
+    """THE REVIVE-WEDGE PRECONDITION — the child's report from the
+    PREVIOUS episode was already DELIVERED: the per-child
+    ``internal_report:{child}:{anchor}`` marker row, status ``completed``
+    (the same shape the sibling rider pins seed, with the DELIVERED
+    status instead of the outstanding one).
+
+    At BASE the mint-site guard is the blanket per-child LIFETIME prefix
+    (``COMPLETED`` included): the DELIVERED prior report blocks the new
+    turn's mint and the early return that follows SKIPS the terminal CAS
+    — the victim stays ``running`` forever and the sweep's drive has NO
+    effect (RED). At MERGE the two-arm guard does not block on a
+    DELIVERED prior report (``completed`` is not in ARM B) and the
+    terminalization is decoupled from the mint, so the drive terminalizes
+    the victim (GREEN).
+    """
+    _insert_message(
+        engine,
+        instance_id=recipient_id,
+        status="completed",
+        message_id=f"msg-prior-report-{anchor}",
+        content="prior report from the previous episode, already delivered",
+        source=f"internal_report:{child_id}:{anchor}",
+        completed_at=datetime.now(timezone.utc) - age,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -787,3 +823,90 @@ class TestStructural:
         """The lane's terminal vocabulary is the house constant."""
         assert TERMINAL_INSTANCE_STATUSES >= {"completed", "error",
                                               "terminated", "failed"}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Revive-wedge drive outcome — NEW drive-outcome pin (L5)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestReviveWedgeDriveOutcome:
+    @pytest.mark.asyncio
+    async def test_revive_wedge_victim_lands_in_healed(
+        self, srs_harness, caplog,
+    ):
+        """L5: the sweep's drive on a revive-wedge victim terminalizes the
+        child and lands in ``healed`` (P-DRIVE-OUTCOME), NEVER
+        ``drive-no-effect``. The P-DRIVE-LOG line fires with its
+        unchanged format, and the terminal reason is persisted onto the
+        row (NIT-6).
+
+        RED at base (the drive leaves the victim RUNNING, class=
+        drive-no-effect); GREEN at merge (the victim terminalizes).
+        """
+        import logging
+
+        caplog.set_level(logging.WARNING)
+        engine = srs_harness.engine
+        # THE REVIVE-WEDGE PRECONDITION — the fixture that discriminates
+        # base from merge. The victim is a CHILD whose report from the
+        # PREVIOUS episode was already DELIVERED (the per-child
+        # ``internal_report:{child}:%`` marker the base guard keys on).
+        # At BASE that DELIVERED prior report blocks the new turn's mint
+        # and the early return SKIPS the terminal CAS, so the drive has
+        # NO effect and the victim stays ``running`` (RED). At MERGE the
+        # drive terminalizes the victim (GREEN).
+        _insert_instance(
+            engine, "the-parent",
+            status=InstanceStatus.IDLE.value,
+            parent_id=None,
+            agent_id="leader",
+            last_activity_at=now_utc_naive(),
+        )
+        _seed_shape_b(engine, instance_id=CHILD, parent_id="the-parent")
+        _seed_delivered_prior_report(
+            engine, recipient_id="the-parent", child_id=CHILD,
+        )
+        sweep = _make_sweep(srs_harness)
+        assert sweep.census_stale_running() == 1
+        with _patch_drive_seams():
+            result = await sweep.sweep_once()
+        assert result.healed == 1, result
+        assert result.drive_no_effect == 0, result
+        assert result.errors == 0, result
+        row = _get_instance_row(engine, CHILD)
+        assert row.status == InstanceStatus.COMPLETED.value
+        # NIT-6 — the typed reason is persisted onto the row.
+        assert (row.instance_metadata or {}).get(
+            "terminal_transition_reason"
+        ) == "finalize_gap_steady_state", row.instance_metadata
+        # P-DRIVE-LOG — the unchanged shape-b WARNING fires.
+        shape_b_lines = [
+            r.getMessage() for r in caplog.records
+            if "stale_running_sweep|shape-b" in r.getMessage()
+        ]
+        assert len(shape_b_lines) == 1, shape_b_lines
+        assert shape_b_lines[0].startswith(
+            f"stale_running_sweep|shape-b: instance={CHILD} "
+        ), shape_b_lines[0]
+        assert "transitioned=completed" in shape_b_lines[0]
+        assert "reason=finalize_gap_steady_state" in shape_b_lines[0]
+        assert sweep.census_stale_running() == 0
+
+    @pytest.mark.asyncio
+    async def test_class_young_still_skipped_for_non_victim(
+        self, srs_harness,
+    ):
+        """A non-victim whose completion evidence is younger than the age
+        bound is still skipped as ``class=young`` (P-SKIP-LOG) — the
+        drive-outcome change does not collapse the age gate."""
+        engine = srs_harness.engine
+        _seed_shape_b(
+            engine, instance_id="trap-young-2",
+            evidence_age=__import__("datetime").timedelta(seconds=30),
+        )
+        sweep = _make_sweep(srs_harness)
+        result = await sweep.sweep_once()
+        assert result.skipped_young >= 1, result
+        assert result.healed == 0, result
+        assert _get_instance_row(engine, "trap-young-2").status == "running"

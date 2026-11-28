@@ -1,0 +1,45 @@
+=== STEP 0 — PRE-FLIGHT ===
+sha256sum daemon/services/child_reports.py:
+717c9fc4cf00dbb0801346b30316f71763d7aad08a187288b26ea61b508a22a5  daemon/services/child_reports.py
+git status --porcelain --untracked-files=no:
+ M tests/unit/services/test_child_reports.py
+backup sha256sum /tmp/rw_gate_backup_child_reports.py:
+717c9fc4cf00dbb0801346b30316f71763d7aad08a187288b26ea61b508a22a5  /tmp/rw_gate_backup_child_reports.py
+
+=== STEP 1 — BASELINE ===
+8 passed, 1 warning in 5.19s  RC=0
+
+=== STEP 2 — M1 (re-widen ARM B to include COMPLETED) ===
+mutated predicate: ARM B status.in_ now {READY, PROCESSING, COMPLETED} (3 statuses); ARM A untouched.
+mutated sha256sum daemon/services/child_reports.py:
+6e4113dd035117c477a9fc6b473555aa5c5edbe015d722d6da89ebb7fc8e0309  daemon/services/child_reports.py
+D1 (Direction-1): 1 failed, RC=1 — expected regular_child_completed, got 'idempotency_skip' (RED)
+D2a+D2b (Direction-2): 5 passed, RC=0 (GREEN)
+AA1+AA2 (ARM A): 2 passed, RC=0 (GREEN)
+RESTORE M1:
+sha256sum daemon/services/child_reports.py:
+717c9fc4cf00dbb0801346b30316f71763d7aad08a187288b26ea61b508a22a5  daemon/services/child_reports.py
+git status --porcelain --untracked-files=no:
+ M tests/unit/services/test_child_reports.py
+post-restore control D1: 1 passed, RC=0 (GREEN)
+
+=== STEP 3 — M2 (disable whole guard: live consumer site line 5257 `if existing_report is not None:` -> `if False:`) ===
+mutated sha256sum daemon/services/child_reports.py:
+5c05d59b47e6e2b71a28df5b8068f4505ddf2f96cf5e32a9c54009fb07aed2cf  daemon/services/child_reports.py
+D2a+D2b (Direction-2): 5 failed, RC=1 (RED)
+AA1+AA2 (ARM A): 2 failed, RC=1 (RED)
+D1 (informative): 1 passed, RC=0
+RESTORE M2:
+sha256sum daemon/services/child_reports.py:
+717c9fc4cf00dbb0801346b30316f71763d7aad08a187288b26ea61b508a22a5  daemon/services/child_reports.py
+git status --porcelain --untracked-files=no:
+ M tests/unit/services/test_child_reports.py
+post-restore control D2a+D2b: 5 passed, RC=0 (GREEN)
+
+=== STEP 4 — FINAL FENCE PROOF ===
+sha256sum daemon/services/child_reports.py:
+717c9fc4cf00dbb0801346b30316f71763d7aad08a187288b26ea61b508a22a5  daemon/services/child_reports.py
+git status --porcelain --untracked-files=no:
+ M tests/unit/services/test_child_reports.py
+git diff --stat -- daemon/:
+(empty)

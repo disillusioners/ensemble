@@ -1,0 +1,26 @@
+
+=== BASE minted report_injections rows: 1 ===
+first.outcome='regular_child_completed' second.outcome='idempotency_skip'
+F
+=================================== FAILURES ===================================
+_____________________________ test_d_vacuity_base ______________________________
+tests/unit/services/test_rw_d_base_d.py:31: in test_d_vacuity_base
+    assert len(rows) == 2, (
+E   AssertionError: exactly one report_injections row per lifecycle must be persisted (got 1)
+E   assert 1 == 2
+E    +  where 1 = len([ReportInjection(report_message_id='ada4e5f0-105e-4b6b-ac4e-2c8adafaede4', parent_instance_id='rw-leader', child_insta...ted_at='2026-11-28T10:09:26.530078+00:00', state='PENDING', recovery_attempted_at=None, commissioner_instance_id=None)])
+------------------------------ Captured log call -------------------------------
+INFO     daemon.services.child_reports:child_reports.py:3683 Instance rw-child... parent_id=rw-leader, status=running
+INFO     daemon.services.child_reports:child_reports.py:4881 Instance rw-child... completed, sending report to parent rw-leade...
+INFO     daemon.services.child_reports:child_reports.py:5607 Bus-active: skipping inline cascade for parent rw-leade... — no inline status write; parent terminal transition completes when the PROCESS_REPORT task delivery completes (bus is state-machine only — it does not own completion and does not wake the parent)
+INFO     daemon.services.child_reports:child_reports.py:3683 Instance rw-child... parent_id=rw-leader, status=running
+INFO     daemon.services.child_reports:child_reports.py:4699 Instance rw-child... completion report skipped: reason=idempotency_skip
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /tmp/rw_vacuum/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/services/test_rw_d_base_d.py::test_d_vacuity_base - Asserti...
+1 failed, 1 warning in 0.99s

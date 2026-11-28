@@ -1,0 +1,58 @@
+FFFFF                                                                    [100%]
+=================================== FAILURES ===================================
+_ TestReviveWedgeDecoupling.test_a_mint_suppressed_call_still_terminalizes_the_child[completed-anchor-A-anchor-A-i] _
+tests/unit/services/test_child_reports.py:2733: in test_a_mint_suppressed_call_still_terminalizes_the_child
+    assert _rw_report_sources(engine) == [
+E   AssertionError: row i: no second report row may be minted
+E   assert ['internal_re...ild:anchor-A'] == ['internal_re...ild:anchor-A']
+E     
+E     Left contains one more item: 'internal_report:rw-child:anchor-A'
+E     Use -v to get more diff
+_ TestReviveWedgeDecoupling.test_a_mint_suppressed_call_still_terminalizes_the_child[processing-anchor-A-anchor-A-ii] _
+tests/unit/services/test_child_reports.py:2733: in test_a_mint_suppressed_call_still_terminalizes_the_child
+    assert _rw_report_sources(engine) == [
+E   AssertionError: row ii: no second report row may be minted
+E   assert ['internal_re...ild:anchor-A'] == ['internal_re...ild:anchor-A']
+E     
+E     Left contains one more item: 'internal_report:rw-child:anchor-A'
+E     Use -v to get more diff
+_ TestReviveWedgeDecoupling.test_a_mint_suppressed_call_still_terminalizes_the_child[ready-anchor-A-anchor-B-iv-ready] _
+tests/unit/services/test_child_reports.py:2733: in test_a_mint_suppressed_call_still_terminalizes_the_child
+    assert _rw_report_sources(engine) == [
+E   AssertionError: row iv-ready: no second report row may be minted
+E   assert ['internal_re...ild:anchor-B'] == ['internal_re...ild:anchor-A']
+E     
+E     Left contains one more item: 'internal_report:rw-child:anchor-B'
+E     Use -v to get more diff
+_ TestReviveWedgeDecoupling.test_a_mint_suppressed_call_still_terminalizes_the_child[processing-anchor-A-anchor-B-iv-processing] _
+tests/unit/services/test_child_reports.py:2733: in test_a_mint_suppressed_call_still_terminalizes_the_child
+    assert _rw_report_sources(engine) == [
+E   AssertionError: row iv-processing: no second report row may be minted
+E   assert ['internal_re...ild:anchor-B'] == ['internal_re...ild:anchor-A']
+E     
+E     Left contains one more item: 'internal_report:rw-child:anchor-B'
+E     Use -v to get more diff
+_ TestNit1MintSitePrefixGuard.test_prior_pending_report_under_a_different_anchor_blocks_a_second _
+tests/unit/services/test_stale_running_sweep_rider_pins.py:455: in test_prior_pending_report_under_a_different_anchor_blocks_a_second
+    assert len(sources) == 1, (
+E   AssertionError: expected exactly ONE report for the child, got ['internal_report:rider-child:anchor-A', 'internal_report:rider-child:']
+E   assert 2 == 1
+E    +  where 2 = len(['internal_report:rider-child:anchor-A', 'internal_report:rider-child:'])
+------------------------------ Captured log call -------------------------------
+WARNING  daemon.registry:registry.py:1589 Tool config validation: Agent 'maintenancer': deny entry 'git_commit' is neither a known category nor a known tool
+WARNING  daemon.services.child_reports:child_reports.py:7576 Failed to broadcast child completion event: 'MagicMock' object can't be awaited
+WARNING  daemon.services.child_reports:child_reports.py:1272 _fire_terminal_child_and_deliver: bus fire failed for child rider-ch... (non-fatal): TypeError: 'MagicMock' object can't be awaited
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-revive-wedge/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/services/test_child_reports.py::TestReviveWedgeDecoupling::test_a_mint_suppressed_call_still_terminalizes_the_child[completed-anchor-A-anchor-A-i]
+FAILED tests/unit/services/test_child_reports.py::TestReviveWedgeDecoupling::test_a_mint_suppressed_call_still_terminalizes_the_child[processing-anchor-A-anchor-A-ii]
+FAILED tests/unit/services/test_child_reports.py::TestReviveWedgeDecoupling::test_a_mint_suppressed_call_still_terminalizes_the_child[ready-anchor-A-anchor-B-iv-ready]
+FAILED tests/unit/services/test_child_reports.py::TestReviveWedgeDecoupling::test_a_mint_suppressed_call_still_terminalizes_the_child[processing-anchor-A-anchor-B-iv-processing]
+FAILED tests/unit/services/test_stale_running_sweep_rider_pins.py::TestNit1MintSitePrefixGuard::test_prior_pending_report_under_a_different_anchor_blocks_a_second
+5 failed, 1 warning in 4.31s
+RC=1

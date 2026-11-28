@@ -1,0 +1,59 @@
+...............                                                          [100%]
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-revive-wedge/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+==================================== PASSES ====================================
+____ TestObserverResultSummary.test_completed_event_carries_result_summary _____
+------------------------------ Captured log call -------------------------------
+WARNING  daemon.services.job_feedback_observer:job_feedback_observer.py:2306 PP1 zero-watcher terminal fire (observer outbox): work_id=29cbb8f8 status=completed terminal_status=completed — notify_watchers returned 0, the terminal report is NOT being delivered. The producer-side log carries the JOB_COMPLETED event id once it is published (the publish runs as a sibling step after this WARN site). The durable event row carries the result_summary / error payload and can be re-fired from the events table for recovery. NOTE: re-delivery is NOT auto-compensated (duplicate-delivery risk) — follow-up commission owns re-arm.
+WARNING  daemon.services.job_feedback_observer:job_feedback_observer.py:2455 Observer: failed to publish JOB_COMPLETED event for job 29cbb8f8... (instance root-ins...): 'MagicMock' object can't be awaited
+_ TestObserverResultSummary.test_failed_event_carries_error_and_best_effort_result _
+------------------------------ Captured log call -------------------------------
+WARNING  daemon.services.job_feedback_observer:job_feedback_observer.py:2455 Observer: failed to publish JOB_COMPLETED event for job ae8883de... (instance root-ins...): 'MagicMock' object can't be awaited
+_ TestObserverResultSummary.test_deadlock_guard_terminal_without_result_still_terminates _
+------------------------------ Captured log call -------------------------------
+WARNING  daemon.services.job_feedback_observer:job_feedback_observer.py:2306 PP1 zero-watcher terminal fire (observer outbox): work_id=0e7632ea status=failed terminal_status=error — notify_watchers returned 0, the terminal report is NOT being delivered. The producer-side log carries the JOB_COMPLETED event id once it is published (the publish runs as a sibling step after this WARN site). The durable event row carries the result_summary / error payload and can be re-fired from the events table for recovery. NOTE: re-delivery is NOT auto-compensated (duplicate-delivery risk) — follow-up commission owns re-arm.
+WARNING  daemon.services.job_feedback_observer:job_feedback_observer.py:2455 Observer: failed to publish JOB_COMPLETED event for job 0e7632ea... (instance root-ins...): 'MagicMock' object can't be awaited
+____ TestObserverResultSummary.test_watchers_receive_non_empty_result_body _____
+------------------------------ Captured log call -------------------------------
+WARNING  daemon.services.job_feedback_observer:job_feedback_observer.py:2455 Observer: failed to publish JOB_COMPLETED event for job 10f9945f... (instance root-ins...): 'MagicMock' object can't be awaited
+_ TestRootCompletionGate.test_root_with_pending_child_report_is_held_not_completed _
+------------------------------ Captured log call -------------------------------
+WARNING  daemon.registry:registry.py:1589 Tool config validation: Agent 'maintenancer': deny entry 'git_commit' is neither a known category nor a known tool
+WARNING  daemon.repositories.message_queue.predicates:predicates.py:379 message_queue finalizer: task-less READY row counts as pending conservatively (unknown task-less source — delivery can never happen; different bug class, needs visibility): message_id=report-msg-1 source='internal_report:child-instance-1:child-msg-1' instance_id=root-instance-1
+_ TestRootCompletionGate.test_predicate_reevaluated_on_next_message_completed_signal _
+------------------------------ Captured log call -------------------------------
+WARNING  daemon.repositories.message_queue.predicates:predicates.py:379 message_queue finalizer: task-less READY row counts as pending conservatively (unknown task-less source — delivery can never happen; different bug class, needs visibility): message_id=report-msg-1 source='internal_report:child-instance-1:child-msg-1' instance_id=root-instance-1
+WARNING  daemon.services.child_reports:child_reports.py:2745 Freshness check failed for instance root-ins... ('MagicMock' object can't be awaited); treating as fresh (fail-open)
+WARNING  daemon.services.child_reports:child_reports.py:7163 ChildReportsService: lifecycle-COMPLETED hook (b) no_job carrier failed for root-ins... (non-fatal, swept by WatchReconcileSweepService next tick): 'MagicMock' object can't be awaited
+WARNING  daemon.services.child_reports:child_reports.py:1272 _fire_terminal_child_and_deliver: bus fire failed for child root-ins... (non-fatal): TypeError: 'MagicMock' object can't be awaited
+_ TestRootCompletionGate.test_root_without_child_completed_events_completes_fast _
+------------------------------ Captured log call -------------------------------
+WARNING  daemon.services.child_reports:child_reports.py:7163 ChildReportsService: lifecycle-COMPLETED hook (b) no_job carrier failed for root-ins... (non-fatal, swept by WatchReconcileSweepService next tick): 'MagicMock' object can't be awaited
+WARNING  daemon.services.child_reports:child_reports.py:1272 _fire_terminal_child_and_deliver: bus fire failed for child root-ins... (non-fatal): TypeError: 'MagicMock' object can't be awaited
+__ TestRootCompletionGate.test_freshness_leg_fails_open_on_checkpointer_error __
+------------------------------ Captured log call -------------------------------
+WARNING  daemon.services.child_reports:child_reports.py:2745 Freshness check failed for instance root-ins... ('MagicMock' object can't be awaited); treating as fresh (fail-open)
+_______ TestRootCompletionGate.test_root_held_when_waiting_for_positive ________
+------------------------------ Captured log call -------------------------------
+WARNING  daemon.services.child_reports:child_reports.py:6742 root_completion: emission-time gate blocked for root-ins... (reason=waiting_for=2); downgrading to WAITING_CHILDREN and suppressing publish
+=========================== short test summary info ============================
+PASSED tests/job_queue/test_job_result_summary_and_gate.py::TestObserverResultSummary::test_completed_event_carries_result_summary
+PASSED tests/job_queue/test_job_result_summary_and_gate.py::TestObserverResultSummary::test_failed_event_carries_error_and_best_effort_result
+PASSED tests/job_queue/test_job_result_summary_and_gate.py::TestObserverResultSummary::test_deadlock_guard_terminal_without_result_still_terminates
+PASSED tests/job_queue/test_job_result_summary_and_gate.py::TestObserverResultSummary::test_watchers_receive_non_empty_result_body
+PASSED tests/job_queue/test_job_result_summary_and_gate.py::TestRootCompletionGate::test_root_with_pending_child_report_is_held_not_completed
+PASSED tests/job_queue/test_job_result_summary_and_gate.py::TestRootCompletionGate::test_predicate_reevaluated_on_next_message_completed_signal
+PASSED tests/job_queue/test_job_result_summary_and_gate.py::TestRootCompletionGate::test_root_without_child_completed_events_completes_fast
+PASSED tests/job_queue/test_job_result_summary_and_gate.py::TestRootCompletionGate::test_freshness_leg_fails_open_on_checkpointer_error
+PASSED tests/job_queue/test_job_result_summary_and_gate.py::TestRootCompletionGate::test_root_held_when_waiting_for_positive
+PASSED tests/job_queue/test_job_result_summary_and_gate.py::TestCascadeCompletionGate::test_cascade_holds_parent_when_assistant_message_stale
+PASSED tests/job_queue/test_job_result_summary_and_gate.py::TestCascadeCompletionGate::test_cascade_completes_parent_when_fresh
+PASSED tests/job_queue/test_job_result_summary_and_gate.py::TestCascadeCompletionGate::test_cascade_publish_regate_suppresses_and_downgrades
+PASSED tests/job_queue/test_job_result_summary_and_gate.py::TestCompletionContentHelper::test_returns_last_non_empty_assistant_content_and_ts
+PASSED tests/job_queue/test_job_result_summary_and_gate.py::TestCompletionContentHelper::test_none_checkpointer_yields_none_pair
+PASSED tests/job_queue/test_job_result_summary_and_gate.py::TestRootCompletionGateBusPendingHold::test_real_gate_held_by_bus_pending_released_on_clear
+15 passed, 1 warning in 4.62s
