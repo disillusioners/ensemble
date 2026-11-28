@@ -2531,11 +2531,25 @@ def _make_read_scope_aware(
     from langchain_core.tools import StructuredTool
 
     from .filesystem import (
+        READ_SCOPE_REFUSAL_EVENT,
+        READ_SCOPE_REFUSAL_TOKEN,
+        SCOPE_REFUSAL_LOG_LEVEL,
         declared_read_scope,
         reset_caller_agent_id,
+        reset_current_read_tool_name,
         reset_trusted_workdir,
         set_caller_agent_id,
+        set_current_read_tool_name,
         set_trusted_workdir,
+    )
+
+    # The tool NAME is known here (the factory owns the tool object) but NOT
+    # at the filesystem resolver. Bind it for the call so every scoped
+    # refusal / candidate-drop journal line can name the tool.
+    tool_name = (
+        getattr(tool, "name", None)
+        or getattr(tool, "__name__", None)
+        or "unknown"
     )
 
     def _scope_refusal(agent_id: str | None, supplied_workdir) -> str | None:
@@ -2559,6 +2573,18 @@ def _make_read_scope_aware(
         if supplied_workdir is None or not str(supplied_workdir).strip():
             return None
         anchor = get_trusted_workdir()
+        # F9: ONE WARNING line per refused call, with agent id, tool name and
+        # the reason. No file CONTENT is logged (and the workdir value is
+        # deliberately omitted — the reason token is enough to count).
+        logger.log(
+            SCOPE_REFUSAL_LOG_LEVEL,
+            "read scope refused: %s agent=%s tool=%s reason=agent-supplied-workdir anchor=%s",
+            READ_SCOPE_REFUSAL_TOKEN,
+            agent_id or "unknown",
+            tool_name,
+            anchor,
+            extra={"event": READ_SCOPE_REFUSAL_EVENT},
+        )
         return (
             f"ERROR: read scope {scope!r} fixes the read anchor at the "
             f"daemon-resolved workdir ({anchor}); the 'workdir' argument is "
@@ -2580,9 +2606,11 @@ def _make_read_scope_aware(
                     return refusal
                 token = set_caller_agent_id(agent_id)
                 workdir_token = set_trusted_workdir(get_trusted_workdir())
+                name_token = set_current_read_tool_name(tool_name)
                 try:
                     return await original_func(*args, **kwargs)
                 finally:
+                    reset_current_read_tool_name(name_token)
                     reset_trusted_workdir(workdir_token)
                     reset_caller_agent_id(token)
         else:
@@ -2594,9 +2622,11 @@ def _make_read_scope_aware(
                     return refusal
                 token = set_caller_agent_id(agent_id)
                 workdir_token = set_trusted_workdir(get_trusted_workdir())
+                name_token = set_current_read_tool_name(tool_name)
                 try:
                     return original_func(*args, **kwargs)
                 finally:
+                    reset_current_read_tool_name(name_token)
                     reset_trusted_workdir(workdir_token)
                     reset_caller_agent_id(token)
 
@@ -2613,9 +2643,11 @@ def _make_read_scope_aware(
                 return refusal
             token = set_caller_agent_id(agent_id)
             workdir_token = set_trusted_workdir(get_trusted_workdir())
+            name_token = set_current_read_tool_name(tool_name)
             try:
                 return await func(*args, **kwargs)
             finally:
+                reset_current_read_tool_name(name_token)
                 reset_trusted_workdir(workdir_token)
                 reset_caller_agent_id(token)
     else:
@@ -2627,9 +2659,11 @@ def _make_read_scope_aware(
                 return refusal
             token = set_caller_agent_id(agent_id)
             workdir_token = set_trusted_workdir(get_trusted_workdir())
+            name_token = set_current_read_tool_name(tool_name)
             try:
                 return func(*args, **kwargs)
             finally:
+                reset_current_read_tool_name(name_token)
                 reset_trusted_workdir(workdir_token)
                 reset_caller_agent_id(token)
 

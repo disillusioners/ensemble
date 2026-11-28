@@ -43,6 +43,7 @@ skips that leg cleanly; the SQLite leg always runs.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -52,6 +53,11 @@ from sqlmodel import SQLModel, Session
 
 from daemon.repositories.tool_usage.models import ToolUsageDaily
 from daemon.services import tool_usage_digest as tud
+from daemon.tools._tool_registry import (
+    CATEGORY_MODULES,
+    DYNAMIC_TOOL_NAMES,
+    KNOWN_TOOL_NAMES,
+)
 from tests.helpers.tool_usage_t7_pg_fence import pg_throwaway_schema_engine
 
 #: The run date (D). 08:00 ICT == 01:00 UTC of the same UTC date.
@@ -241,9 +247,34 @@ def hermetic_artifacts(monkeypatch):
     of whatever the committed JSON artifacts currently carry (the
     sanctioned ``{}`` weight artifact means the fallback is the live state
     anyway — 9(a)).
+
+    ``allowlist_source`` is neutralized TOO, with a minimal VALID schema-2
+    envelope in state ``"ok"`` — never a degraded state. A degraded state
+    would turn EVERY verdict into ``"unknown"``, which is a verdict change
+    and would make these legs vacuous. An empty ``agents`` map makes NO
+    per-agent claim (§3.6.3 step 3), while the full 278-name vocabulary
+    keeps the reader's decision path live: a known name is DECIDED (``"no"``
+    against an empty flat map), an unknown name is genuinely undecidable.
     """
     monkeypatch.setattr(tud, "tool_weights", lambda: {})
     monkeypatch.setattr(tud, "allowlists", lambda: {})
+    monkeypatch.setattr(
+        tud,
+        "allowlist_source",
+        lambda: tud.AllowSource(
+            state="ok",
+            schema_version=2,
+            agents={},
+            categories={},
+            runtime_only_categories=[],
+            privileged_categories=[],
+            dynamic_prefixes=[],
+            innate_skill_categories={},
+            known_tool_names=set(KNOWN_TOOL_NAMES) | set(DYNAMIC_TOOL_NAMES),
+            unresolved={"allow": [], "deny": []},
+            provenance={},
+        ),
+    )
     return None
 
 
@@ -615,3 +646,161 @@ class TestRollupBodyHasNoNondeterministicSource:
         source = inspect.getsource(tud.render_markdown)
         assert "generated_at" in source
         assert "datetime.now" in source
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# R-EXPANSION — the reader consumes registry keys, never display names
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_the_weight_heading_and_disclosure_are_computed_from_the_rollup(
+    tmp_path, monkeypatch
+):
+    """§6.1 (B1) — both verbatim heading variants plus the permanent
+    disclosure blockquote, quoted from a REAL render. The old hard-coded
+    'sorted by schema weight × calls, descending' claim must be gone."""
+    engine = _sqlite_engine(tmp_path, "weight-heading.db")
+    monkeypatch.setattr(tud, "allowlists", lambda: {})
+    _seed(engine, [_row(DAY_D1, PROJECT_MAIN, "w_absent", "a", 3)])
+    fallback_data = tud.rollup(engine, RUN_DATE)
+    fallback_md = tud.render_markdown(fallback_data, "FIXED")
+    fallback_lines = fallback_md.splitlines()
+
+    assert fallback_data["weight_heading"] == tud.FALLBACK_WEIGHT_HEADING
+    assert fallback_data["weight_heading"] == (
+        "### Tools (sorted by calls 7d, descending — no per-tool schema weights are available; "
+        "every tool uses the 230-token average fallback, so the weight does not discriminate)"
+    )
+    idx = fallback_lines.index(tud.FALLBACK_WEIGHT_HEADING)
+    assert fallback_lines[idx + 1:idx + 4] == [
+        "> **Weight disclosure:** the per-tool schema-weight artifact (`tool-weights.json`) is currently empty.",
+        "> All tools in this section use the 230-token average fallback (deterministic; `phase3-plan.md` §3.3).",
+        "> While the fallback is in effect the Weight column is constant (230) and the ranking is frequency-only.",
+    ]
+    assert _table_row(fallback_md, "w_absent")[:5] == [
+        "w_absent", "230", "3", "3", "690"
+    ]
+    assert len(_table_row(fallback_md, "w_absent")) == 6
+
+    # One measured weight flips the heading AND the disclosure's counts;
+    # the table shape and the score basis stay byte-identical.
+    monkeypatch.setattr(tud, "tool_weights", lambda: {"w_heavy": 50})
+    _seed(engine, [_row(DAY_D1, PROJECT_MAIN, "w_heavy", "a", 2)])
+    measured_data = tud.rollup(engine, RUN_DATE)
+    measured_md = tud.render_markdown(measured_data, "FIXED")
+    measured_lines = measured_md.splitlines()
+
+    assert measured_data["weight_heading"] == tud.WEIGHT_HEADING
+    assert measured_data["weight_heading"] == (
+        "### Tools (sorted by schema weight × calls 7d, descending)"
+    )
+    idx = measured_lines.index(tud.WEIGHT_HEADING)
+    assert "measured weights for 1 of 2 rendered rows in this project section; 1 row uses the 230-token average fallback" in measured_lines[idx + 1]
+    assert len(_table_row(measured_md, "w_heavy")) == 6
+    assert "sorted by schema weight × calls, descending" not in fallback_md
+    assert "sorted by schema weight × calls, descending" not in measured_md
+
+
+def test_the_weight_heading_and_disclosure_are_computed_per_project_section(
+    tmp_path, monkeypatch
+):
+    """N-1 — the heading and the disclosure are PER SECTION.
+
+    A digest that mixes a measured project with an all-fallback project must
+    not lend the measured project's heading (nor its counts) to the fallback
+    project: the heading and the counts describe THAT section's rows.
+    """
+    engine = _sqlite_engine(tmp_path, "weight-per-section.db")
+    monkeypatch.setattr(tud, "allowlists", lambda: {})
+    # A NON-EMPTY artifact (one measured weight, for one rendered tool).
+    monkeypatch.setattr(tud, "tool_weights", lambda: {"w_heavy": 50})
+    _seed(
+        engine,
+        [
+            _row(DAY_D1, PROJECT_AA, "w_heavy", "a", 4),
+            _row(DAY_D1, PROJECT_AA, "w_absent", "a", 2),
+            _row(DAY_D1, PROJECT_ZZ, "w_absent", "a", 3),
+        ],
+    )
+
+    data = tud.rollup(engine, RUN_DATE)
+    md = tud.render_markdown(data, "FIXED")
+    lines = md.splitlines()
+
+    aa_idx = lines.index(f"## Project: {PROJECT_AA}")
+    zz_idx = lines.index(f"## Project: {PROJECT_ZZ}")
+
+    # The MEASURED section carries the measured heading and ITS OWN counts.
+    assert lines[aa_idx + 2] == tud.WEIGHT_HEADING
+    assert (
+        "measured weights for 1 of 2 rendered rows in this project section; "
+        "1 row uses the 230-token average fallback"
+    ) in lines[aa_idx + 3]
+
+    # The ALL-FALLBACK section carries the fallback heading — NOT the
+    # measured one — and its own (zero measured) counts.
+    assert lines[zz_idx + 2] == tud.FALLBACK_WEIGHT_HEADING
+    assert (
+        "measured weights for 0 of 1 rendered rows in this project section; "
+        "1 row uses the 230-token average fallback"
+    ) in lines[zz_idx + 3]
+
+    # The measured heading appears ONCE — under the measured section only.
+    assert lines.count(tud.WEIGHT_HEADING) == 1
+    assert lines.count(tud.FALLBACK_WEIGHT_HEADING) == 1
+
+
+def test_a_non_empty_weight_artifact_is_never_described_as_empty(
+    tmp_path, monkeypatch
+):
+    """N-2 — the "currently empty" wording is triggered by the ARTIFACT.
+
+    A non-empty artifact whose keys match NO rendered tool must never be
+    described as "currently empty": the claim and its trigger must agree.
+    The heading still follows the section's own rows (all on the fallback).
+    """
+    engine = _sqlite_engine(tmp_path, "weight-artifact-nonempty.db")
+    monkeypatch.setattr(tud, "allowlists", lambda: {})
+    # A NON-EMPTY artifact: it carries a weight, but for NO rendered tool.
+    monkeypatch.setattr(tud, "tool_weights", lambda: {"w_not_rendered": 50})
+    _seed(engine, [_row(DAY_D1, PROJECT_MAIN, "w_absent", "a", 3)])
+
+    data = tud.rollup(engine, RUN_DATE)
+    md = tud.render_markdown(data, "FIXED")
+
+    assert "currently empty" not in md
+    assert (
+        "measured weights for 0 of 1 rendered rows in this project section; "
+        "1 row uses the 230-token average fallback"
+    ) in md
+    # The heading follows the SECTION's rows: every rendered row is on the
+    # fallback, so the weight does not discriminate.
+    assert tud.FALLBACK_WEIGHT_HEADING in md
+    assert tud.WEIGHT_HEADING not in md
+
+
+def test_the_digest_never_consumes_the_display_name_category_function():
+    """Node 38 (§3.9.2): a SOURCE pin plus a DATA pin.
+
+    The digest must never call the display-name category helper or import
+    the display-name constant: the artifact's category keys are REGISTRY
+    keys, and a display name ("File Operations", "Shell", ...) is not a
+    category the runtime can grant.
+    """
+    source = Path(tud.__file__).read_text(encoding="utf-8")
+    assert "get_tool_categories" not in source
+    assert "CATEGORY_NAME" not in source
+
+    artifact = (
+        Path(tud.__file__).resolve().parents[2]
+        / ".agents"
+        / "shared"
+        / "planning"
+        / "tool-usage-metrics-p1"
+        / "allowlists.json"
+    )
+    categories = json.loads(artifact.read_text(encoding="utf-8"))["categories"]
+    assert categories, "vacuity guard: the artifact must carry a category map"
+    assert set(categories) <= set(CATEGORY_MODULES)
+    for display_name in ("File Operations", "Nest Report", "Shell", "MCP"):
+        assert display_name not in categories

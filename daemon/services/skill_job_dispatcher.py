@@ -83,6 +83,23 @@ _SWITCH_ON_TOKENS = frozenset({"1", "true", "yes", "on"})
 _SWITCH_OFF_TOKENS = frozenset({"0", "false", "no", "off"})
 
 
+# Sentinel for a MISSING attribute on a skill row. ``getattr(skill,
+# "is_active", True)`` silently ARMED the F3 servability gate on a model
+# rename (the attribute vanishes → the default says "servable" → the guard
+# is disarmed with NO signal). A missing attribute is UNKNOWN, not
+# servable — see ``_check_fix_target_servable``.
+_MISSING = object()
+
+
+def _short_skill_id(skill_id: Any) -> Any:
+    """Log-facing short id — the ONE spelling of the ``[:8]`` idiom.
+
+    Non-string inputs pass through unchanged (the original expression
+    did exactly that), so log/record output stays byte-identical.
+    """
+    return skill_id[:8] if isinstance(skill_id, str) else skill_id
+
+
 def _resolve_switch(env_name: str, configured_default: bool = False) -> bool:
     """Resolve a kill-switch env var against the SHARED token sets.
 
@@ -343,6 +360,37 @@ class SkillFixBurstCapRefused(SkillLaneRefused):
         super().__init__(type(self).reason, message)
 
 
+class SkillNonServableTargetRefused(SkillLaneRefused):
+    """Raised when a FIX admission names a NON-SERVABLE target (F3).
+
+    The evolution lane refuses a FIX (or any Tier-3 mutation admission)
+    against a skill row whose ``is_active`` is ``False`` — a
+    deactivated skill is out of the serving surface, so evolving it
+    would resurrect a variant the operator (or a resolution) retired.
+    Like the burst cap, this refusal MUST NOT be silent and MUST NOT
+    masquerade as the generic "lane disabled" refusal: the lane is ON —
+    the TARGET refused.
+
+    The ``skill_fix`` tool renders the exception message in its
+    envelope and the REST route reads the stable token off the CLASS
+    (``e.reason``) — one token per concept (M11), the route never
+    hard-codes a literal, so the two can never drift.
+    """
+
+    #: The stable token the REST route returns in the refusal envelope
+    #: and an operator greps the daemon journal for.
+    reason = "non_servable_target"
+
+    def __init__(self, message: str) -> None:
+        """Build the refusal.
+
+        Args:
+            message: The agent-facing refusal text. It MUST keep the
+                ``refused: non-servable target`` prefix.
+        """
+        super().__init__(type(self).reason, message)
+
+
 class SkillJobDispatcher:
     """Dispatches skill-related jobs via the job queue.
 
@@ -382,6 +430,7 @@ class SkillJobDispatcher:
         fix_burst_cap: int = DEFAULT_FIX_BURST_CAP,
         fix_burst_window_seconds: int = DEFAULT_FIX_BURST_WINDOW_SECONDS,
         anomaly_reporter: Any = None,
+        skill_repo: Any = None,
     ) -> None:
         """Store the job service and queue repository.
 
@@ -415,6 +464,14 @@ class SkillJobDispatcher:
                 (the ``AnomalyService.accept_report`` shape). When
                 omitted, the reporter is resolved late-bound from the
                 job service — the cap still announces itself.
+            skill_repo: Optional ``SkillRepository`` — the F3 FIX
+                servability gate reads the target skill row through it.
+                When omitted (a test double, a direct construction),
+                the gate DEGRADES fail-open: the admission proceeds,
+                the degraded posture is logged at WARNING + written to
+                the sink, and the execution-time guard in
+                ``SkillEvolutionService._evolve_fix`` remains the
+                backstop.
         """
         self._job_service = job_service
         self._queue_repo = queue_repo
@@ -452,6 +509,10 @@ class SkillJobDispatcher:
                 self._fix_burst_window_seconds,
             )
         self._anomaly_reporter = anomaly_reporter
+        # F3 — the FIX servability gate reads the target skill row
+        # through this repo. None ⇒ the gate degrades fail-open (the
+        # execution-time guard in _evolve_fix stays the backstop).
+        self._skill_repo = skill_repo
         # (normalized_project_id, skill_id) -> monotonic timestamp of
         # the last ACCEPTED FIX admission. RAM-only by design: it is
         # a rate limiter, not durable state; a daemon restart resets
@@ -709,7 +770,7 @@ class SkillJobDispatcher:
                 "(the job service does not expose a repository with "
                 "count_fix_admissions_since) — the durable FIX burst cap "
                 "is DEGRADED (RAM cooldown only) for skill %s",
-                skill_id[:8] if isinstance(skill_id, str) else skill_id,
+                _short_skill_id(skill_id),
             )
             # M18 — the DEGRADED posture is ALWAYS RECORDED. The posture
             # itself stays fail-open for AVAILABILITY (a rate limiter must
@@ -736,7 +797,7 @@ class SkillJobDispatcher:
                 "SkillJobDispatcher: the job repository does not implement "
                 "count_fix_admissions_since — the durable FIX burst cap is "
                 "DEGRADED (RAM cooldown only) for skill %s",
-                skill_id[:8] if isinstance(skill_id, str) else skill_id,
+                _short_skill_id(skill_id),
             )
             observability.append_run_record(
                 observability.build_run_record(
@@ -779,7 +840,7 @@ class SkillJobDispatcher:
         if recent < self._fix_burst_cap:
             return None
 
-        short_id = skill_id[:8] if isinstance(skill_id, str) else skill_id
+        short_id = _short_skill_id(skill_id)
         message = (
             f"refused: burst cap — {recent} FIX admissions for skill "
             f"{short_id} within {self._fix_burst_window_seconds}s "
@@ -816,6 +877,168 @@ class SkillJobDispatcher:
             reporter=self._anomaly_reporter,
         )
         return SkillFixBurstCapRefused(message)
+
+    async def _check_fix_target_servable(
+        self,
+        skill_id: str,
+        *,
+        run_id: str | None = None,
+    ) -> SkillNonServableTargetRefused | None:
+        """F3 — refuse a FIX admission against a NON-SERVABLE target.
+
+        The FIX front door (the ``skill_fix`` tool, the admin
+        ``POST /api/skills/{id}/fix`` endpoint, the trigger engine's
+        ``evolve_fix`` follow-through) funnels EVERY admission through
+        :meth:`enqueue_evolution` forwarding the raw ``skill_id`` —
+        no layer loaded the skill row, so a DEACTIVATED skill
+        (``is_active=False`` — retired by an A/B resolution or an
+        operator deactivation) was admissible and the keeper would
+        evolve a variant outside the serving surface. This gate
+        introduces the row read at the ONE chokepoint all those
+        producers share.
+
+        The refusal is HUMAN-VISIBLE, not a silent drop and not a
+        "dropped job": a WARNING log line carrying the house
+        ``refused: non-servable target`` prefix (the SAME shape the
+        burst cap logs, so a ``refused:``-prefix count catches BOTH),
+        an admission-refusal counter under its OWN token
+        (``non_servable_target``), a sink record, and an anomaly row
+        through the daemon-side ``accept_report`` path — the same
+        mechanism the burst cap uses.
+
+        FAIL-OPEN on an infrastructure gap (no skill repo wired, the
+        row read raised): the admission proceeds, the degraded posture
+        is logged at WARNING + written to the sink, and the
+        execution-time guard in ``SkillEvolutionService._evolve_fix``
+        stays the backstop (it refuses the mutation with a skip
+        envelope at execution).
+
+        Returns:
+            The refusal exception to raise, or ``None`` when the
+            admission may proceed (target servable, or the gate is
+            degraded).
+        """
+        repo = self._skill_repo
+        reader = getattr(repo, "get", None)
+        if repo is None or not callable(reader):
+            logger.warning(
+                "SkillJobDispatcher: no skill repository is wired — the "
+                "F3 FIX servability gate is DEGRADED (fail-open) for "
+                "skill %s; the execution-time guard remains the "
+                "backstop",
+                _short_skill_id(skill_id),
+            )
+            observability.append_run_record(
+                observability.build_run_record(
+                    stage="admission",
+                    run_id=run_id,
+                    outcome="servability_gate_degraded",
+                    extra={
+                        "skill_id": skill_id,
+                        "degraded_reason": "no_skill_repo",
+                    },
+                )
+            )
+            return None
+        try:
+            skill = await asyncio.to_thread(reader, skill_id)
+        except Exception as read_err:  # noqa: BLE001 — fail-open
+            logger.warning(
+                "SkillJobDispatcher: FIX servability read failed for skill "
+                "%s (%s: %s) — FAIL-OPEN (the admission proceeds; the "
+                "execution-time guard still applies)",
+                _short_skill_id(skill_id),
+                type(read_err).__name__, read_err,
+            )
+            observability.append_run_record(
+                observability.build_run_record(
+                    stage="admission",
+                    run_id=run_id,
+                    outcome="servability_check_error",
+                    extra={
+                        "skill_id": skill_id,
+                        "error": f"{type(read_err).__name__}: {read_err}",
+                    },
+                )
+            )
+            return None
+        if skill is None:
+            # Unknown target: NOT this gate's refusal — the downstream
+            # flow already handles a missing skill id (the keeper job
+            # fails loudly on read; the service raises ValueError).
+            return None
+        # FIX 8 (2026-11-27): a MISSING ``is_active`` attribute is
+        # UNKNOWN — it is NOT servable. The old
+        # ``getattr(skill, "is_active", True)`` default silently ARMED
+        # this gate on a model rename (the attribute vanishes → the
+        # default says "servable" → the guard is disarmed with NO
+        # signal). UNKNOWN takes the EXISTING degraded posture — fail
+        # open AND RECORDED (a WARNING naming the skill + a
+        # ``servability_gate_degraded`` admission run record), the same
+        # shape the no-repo leg uses. ONLY an attribute that is PRESENT
+        # and falsy means "deactivated/refuse" — the attribute's own
+        # truthiness is unchanged from the pre-fix gate.
+        is_active_value = getattr(skill, "is_active", _MISSING)
+        if is_active_value is _MISSING:
+            logger.warning(
+                "SkillJobDispatcher: the F3 FIX servability gate is "
+                "DEGRADED (fail-open) for skill %s — the skill row has NO "
+                "'is_active' attribute (servability UNKNOWN); the "
+                "execution-time guard remains the backstop",
+                _short_skill_id(skill_id),
+            )
+            observability.append_run_record(
+                observability.build_run_record(
+                    stage="admission",
+                    run_id=run_id,
+                    outcome="servability_gate_degraded",
+                    extra={
+                        "skill_id": skill_id,
+                        "degraded_reason": "missing_is_active_attribute",
+                    },
+                )
+            )
+            return None
+        if is_active_value:
+            return None
+
+        short_id = _short_skill_id(skill_id)
+        status = getattr(skill, "status", None)
+        message = (
+            f"refused: non-servable target — skill {short_id} is NOT "
+            f"servable (is_active=False, status={status!r}). The "
+            "evolution lane does not admit FIX jobs against a "
+            "deactivated skill. NO skill-keeper job was created."
+        )
+        logger.warning(
+            "SkillJobDispatcher.enqueue_evolution: %s", message,
+        )
+        observability.record_admission_refusal("non_servable_target")
+        observability.append_run_record(
+            observability.build_run_record(
+                stage="admission",
+                run_id=run_id,
+                outcome="refused",
+                refusal_reason="non_servable_target",
+                extra={
+                    "skill_id": skill_id,
+                    "skill_is_active": False,
+                    "skill_status": status,
+                },
+            )
+        )
+        await observability.emit_lane_anomaly(
+            category=observability.CATEGORY_LANE_DEVIATION,
+            description=message,
+            severity="minor",
+            suspected_cause=(
+                "FIX admission against a deactivated skill (retired by "
+                "an A/B resolution or an operator deactivation)"
+            ),
+            job_service=self._job_service,
+            reporter=self._anomaly_reporter,
+        )
+        return SkillNonServableTargetRefused(message)
 
     async def enqueue_analysis(
         self,
@@ -979,6 +1202,24 @@ class SkillJobDispatcher:
         is_fix = evolution_type == EVOLUTION_TYPE_FIX
         cooldown_key = (normalized_project_id, skill_id)
 
+        # ── 1b. FIX target servability (F3 — 2026-11-26) ────────────
+        # The FIX front door forwarded the raw ``skill_id`` with NO
+        # row read at ANY layer, so a DEACTIVATED skill was admissible.
+        # This gate introduces the read at the ONE chokepoint every
+        # producer shares (tool / REST / trigger engine). RAISES (it
+        # does not return ``None``): the generic ``None`` path renders
+        # as "the lane is disabled" in the ``skill_fix`` envelope,
+        # which would be a lie — the lane is ON, the TARGET refused.
+        # Scoped to FIX admissions: DERIVED is spawned by the keeper
+        # FROM an already-loaded (active) skill row, and CAPTURED has
+        # its own enqueue path.
+        if is_fix:
+            servability_refusal = await self._check_fix_target_servable(
+                skill_id, run_id=run_id,
+            )
+            if servability_refusal is not None:
+                raise servability_refusal
+
         if is_fix and self._fix_cooldown_seconds > 0:
             now = time.monotonic()
             last = self._fix_admission_cooldown.get(cooldown_key)
@@ -991,7 +1232,7 @@ class SkillJobDispatcher:
                         "%.0fs since last admission, window=%ds. "
                         "Refusing duplicate FIX admission.",
                         normalized_project_id[:8] if normalized_project_id else "<none>",
-                        skill_id[:8] if isinstance(skill_id, str) else skill_id,
+                        _short_skill_id(skill_id),
                         elapsed,
                         self._fix_cooldown_seconds,
                     )

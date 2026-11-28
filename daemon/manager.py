@@ -4997,7 +4997,9 @@ class InstanceManager:
             # [decision] D2/C2 (2026-11-17, user ruling E-6 + Q1):
             # the skill_ab_inactivity_sweep companion — the ONE
             # sanctioned resolution mechanism's periodic leg. Finds
-            # zero-traffic A/B pairs (comparisons == 0 AND age >=
+            # zero-traffic A/B pairs (BOTH arms at zero traffic —
+            # total_selections == 0 AND total_applied == 0 on both
+            # variants — AND comparisons == 0, AND age >=
             # ab_stall_timeout_days) that can NEVER self-resolve
             # (check_ab_test_resolution returns needs_more_data
             # before the extension bump), resolves the E-6-unambiguous
@@ -8251,8 +8253,10 @@ class InstanceManager:
         resolution tree returns ``needs_more_data`` before the
         extension bump. This sweep closes that deadlock:
 
-        * STALLED predicate (enforced in code, never judgment):
-          ``comparisons == 0`` AND pair age >=
+        * STALLED predicate (enforced in code, never judgment): BOTH
+          ARMS at zero traffic (``total_selections == 0`` AND
+          ``total_applied == 0`` on both variants) AND
+          ``comparisons == 0``, AND pair age >=
           ``ab_stall_timeout_days``.
         * E-6 winner rule: the NEWER LINEAGE GENERATION wins, decided
           by generation number and NEVER by timestamps. A generation
@@ -8852,6 +8856,11 @@ class InstanceManager:
                     if _raw_burst_window is not None
                     else DEFAULT_FIX_BURST_WINDOW_SECONDS
                 ),
+                # F3 (2026-11-26): the FIX servability gate reads the
+                # target skill row (refusing an admission against a
+                # deactivated skill) — wire the manager's repo so the
+                # gate is LIVE instead of degraded-fail-open.
+                skill_repo=getattr(self, "_skill_repo", None),
             )
             # Round-2 S4: log the RESOLVED evolution-lane state, not the
             # bare config default. The per-call admission gate resolves

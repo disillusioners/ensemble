@@ -155,6 +155,91 @@ def _make_pair(skill_repo, ab_test_repo, *, group="ab-atomic", comparisons=0,
 
 
 # ─────────────────────────────────────────────────────────────────────
+# F2 — winner activeness + write-once counting helpers
+# ─────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def _skill_write_spy(engine, request):
+    """Count per-row writes to the ``skills`` table across a window.
+
+    Two independent counters:
+
+    * ``dirty`` — ORM dirty objects (of type :class:`Skill`) observed
+      at each ``before_flush`` — proves each ROW OBJECT is mutated
+      exactly once per resolve.
+    * ``updates`` — compiled ``UPDATE skills ...`` statements captured
+      via ``before_cursor_execute`` — proves the row writes actually
+      reach the database exactly once (the pair-row UPDATE targets
+      ``skillabtest`` and is filtered out by the table-name prefix).
+
+    The spy exposes ``on_flush`` / ``on_exec`` (the listener functions)
+    and a ``cleanup()`` method for deterministic teardown, plus
+    ``dirty`` / ``updates`` views of the same counters.
+
+    The listeners are REMOVED in teardown (both of them) so they do
+    not leak into the rest of the pytest session or into any later
+    test that touches a SQLModel session.
+    """
+    import daemon.repositories.skill.repository as repo_mod
+
+    # Plain counters dict — the listeners close over THIS, not over
+    # the spy object, so the spy stays collectable.
+    counters = {"dirty": {}, "updates": {}}
+
+    def _on_flush(session, flush_context, instances):
+        for obj in session.dirty:
+            if isinstance(obj, Skill):
+                counters["dirty"][obj.id] = (
+                    counters["dirty"].get(obj.id, 0) + 1
+                )
+
+    def _on_exec(conn, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().upper().startswith("UPDATE SKILLS"):
+            # SQLModel binds the WHERE primary key LAST in the
+            # parameter tuple for its single-row UPDATE shape.
+            row_id = None
+            if isinstance(parameters, (tuple, list)) and parameters:
+                row_id = parameters[-1]
+            elif isinstance(parameters, dict):
+                row_id = parameters.get("id")
+            if row_id is not None:
+                counters["updates"][row_id] = (
+                    counters["updates"].get(row_id, 0) + 1
+                )
+
+    def _cleanup():
+        try:
+            event.remove(repo_mod.Session, "before_flush", _on_flush)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            event.remove(engine, "before_cursor_execute", _on_exec)
+        except Exception:  # noqa: BLE001
+            pass
+
+    class _Spy:
+        __slots__ = (
+            "dirty", "updates", "on_flush", "on_exec", "cleanup",
+            "__weakref__",
+        )
+
+    spy = _Spy()
+    spy.dirty = counters["dirty"]
+    spy.updates = counters["updates"]
+    spy.on_flush = _on_flush
+    spy.on_exec = _on_exec
+    spy.cleanup = _cleanup
+
+    event.listens_for(repo_mod.Session, "before_flush")(_on_flush)
+    event.listens_for(engine, "before_cursor_execute")(_on_exec)
+
+    request.addfinalizer(_cleanup)
+
+    return spy
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Repository level — the CAS + single-transaction contract
 # ─────────────────────────────────────────────────────────────────────
 
@@ -184,7 +269,56 @@ class TestResolveAtomicCAS:
 
         winner_row = skill_repo.get(new.id)
         assert winner_row.status == "active"
+        # F2: the winner write also restores servability — the loser
+        # side sets ``is_active=False`` so the winner side MUST set
+        # ``is_active=True`` (same transaction, same commit).
+        assert winner_row.is_active is True
         assert winner_row.ab_test_group is None
+
+    def test_winner_reactivated_when_previously_deactivated(
+        self, skill_repo, ab_test_repo
+    ):
+        """B2 pin: resolve_atomic must set winner.is_active=True even when
+        the winner entered the pair deactivated (is_active=False)."""
+        old, new, _row = _make_pair(skill_repo, ab_test_repo)
+        # Pre-deactivate the winner (challenger entered via deactivate-heavy flow).
+        skill_repo.update(new.id, is_active=False)
+        assert skill_repo.get(new.id).is_active is False
+
+        won = ab_test_repo.resolve_atomic("ab-atomic", new.id, old.id)
+        assert won is True
+
+        winner_row = skill_repo.get(new.id)
+        loser_row = skill_repo.get(old.id)
+        assert winner_row.is_active is True
+        assert winner_row.status == "active"
+        assert loser_row.is_active is False
+
+    def test_winner_and_loser_are_each_written_exactly_once(
+        self, skill_repo, ab_test_repo, engine, _skill_write_spy
+    ):
+        """F2: a resolution writes the WINNER and the LOSER exactly
+        once each — one transaction, one flush, no double-write of
+        either row (and the pair-row UPDATE is not a skills write)."""
+        old, new, _row = _make_pair(skill_repo, ab_test_repo)
+
+        spy = _skill_write_spy
+
+        won = ab_test_repo.resolve_atomic("ab-atomic", new.id, old.id)
+        assert won is True
+
+        # Terminal activeness: winner servable, loser not.
+        winner_row = skill_repo.get(new.id)
+        loser_row = skill_repo.get(old.id)
+        assert winner_row.is_active is True
+        assert winner_row.status == "active"
+        assert loser_row.is_active is False
+        assert loser_row.status == "inactive"
+
+        # Exactly-once per row: one dirty mutation and one UPDATE
+        # statement per skill row — nothing more.
+        assert spy.dirty == {old.id: 1, new.id: 1}
+        assert spy.updates == {old.id: 1, new.id: 1}
 
     def test_duplicate_resolve_is_a_noop(self, skill_repo, ab_test_repo):
         """The second resolver LOSES the CAS — exactly-once."""
@@ -306,15 +440,18 @@ class TestSanctionedResolverUsesAtomicCAS:
         assert pair.resolved_at is not None
         assert pair.winner_skill_id == new.id
         assert skill_repo.get(old.id).status == "inactive"
+        assert skill_repo.get(old.id).is_active is False
         assert skill_repo.get(old.id).ab_test_group == "ab-atomic"
         assert skill_repo.get(new.id).status == "active"
+        # F2: the sanctioned path crowns a SERVABLE winner.
+        assert skill_repo.get(new.id).is_active is True
         assert skill_repo.get(new.id).ab_test_group is None
 
     async def test_concurrent_duplicate_resolve_resolves_exactly_once(
         self, skill_repo, ab_test_repo
     ):
         """Two concurrent sanctioned resolvers ⇒ exactly one wins."""
-        old, new, _row = _make_pair(skill_repo, ab_test_repo)
+        _old, new, _row = _make_pair(skill_repo, ab_test_repo)
         svc = _make_service(skill_repo, ab_test_repo)
 
         outcomes = await asyncio.gather(
@@ -349,7 +486,7 @@ class TestSanctionedResolverUsesAtomicCAS:
         true race, where the guard's read is stale (see the concurrent
         test above and the repository-level duplicate test).
         """
-        old, new, _row = _make_pair(skill_repo, ab_test_repo)
+        _old, new, _row = _make_pair(skill_repo, ab_test_repo)
         svc = _make_service(skill_repo, ab_test_repo)
 
         first = await svc.resolve_ab_test_sanctioned(
@@ -396,3 +533,29 @@ class TestSanctionedResolverUsesAtomicCAS:
         assert pair.resolved_at is None
         assert skill_repo.get(old.id).is_active is True
         assert skill_repo.get(new.id).ab_test_group == "ab-atomic"
+
+
+# ── FIX 8 regression pin — the session-global listener must NOT leak ──────
+
+
+class TestSpyTeardownRegressionPin:
+    def test_teardown_removes_session_global_before_flush_listener(
+        self, engine, _skill_write_spy
+    ):
+        import daemon.repositories.skill.repository as repo_mod
+        from sqlalchemy import event
+
+        spy = _skill_write_spy
+        # Registered while alive.
+        assert event.contains(
+            repo_mod.Session, "before_flush", spy.on_flush
+        ) is True
+        # Deterministic teardown (idempotent with the fixture's
+        # addfinalizer).
+        spy.cleanup()
+        assert event.contains(
+            repo_mod.Session, "before_flush", spy.on_flush
+        ) is False
+        assert event.contains(
+            engine, "before_cursor_execute", spy.on_exec
+        ) is False

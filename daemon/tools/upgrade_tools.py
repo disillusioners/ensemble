@@ -101,6 +101,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from ._schema_registry import tool
 from ._tool_registry import register_tool_category
 from . import upgrade_journal as uj
+from . import upgrade_db_preflight as udp
 from .upgrade_journal import (
     JournalTorn,
     PENDING_WAKE_GRACE_S,
@@ -1997,6 +1998,29 @@ def _journal_refusal_event(reason: str, message: str) -> None:
         )
 
 
+def _db_preflight_refused_row_best_effort(install_dir: Path, detail: str) -> None:
+    """Best-effort ``db_preflight_refused`` history row for the fail-closed
+    arms of the backup-artifact check's exception ladder (promote-db-
+    preflight-validation, T3 #1c (4)/(5)).
+
+    The refusal is ALREADY decided on those paths, so the row is NOT
+    load-bearing: NEVER raises — a torn journal (``JournalTorn``), an
+    unwritable journal (``OSError``) or any other ``Exception`` produces ONE
+    warning line and nothing else. NEVER BaseException (the house
+    "CancelledError project gotcha" rider): a cancellation must not be
+    swallowed here.
+    """
+    try:
+        uj.journal_history_append(install_dir, udp.EVENT_REFUSED, detail)
+    except Exception as exc:  # NEVER BaseException (CancelledError gotcha)
+        logger.warning(
+            "upgrade_tools: db_preflight_refused best-effort row FAILED (%s: "
+            "%s) — the refusal proceeds unchanged",
+            type(exc).__name__,
+            exc,
+        )
+
+
 def _refusal(label: str, reason: str, message: str) -> str:
     """Structured refusal string — D-FA2.2: ``Error:`` prefix, distinct
     machine-readable ``reason=<token>`` per taxonomy entry.
@@ -3614,6 +3638,7 @@ never decides go/rollback).
         user_confirmed: bool = False,
         dry_run: bool = True,
         nonce: str | None = None,
+        db_preflight: str | None = None,
     ) -> str:
         """Run the P2.1 promote pipeline for THIS daemon's environment (armed → poll via upgrade_status). Use tool_help("system_upgrade") for details."""
         try:
@@ -3756,10 +3781,29 @@ never decides go/rollback).
                     f"{lock_line}",
                     f"cooldown={cooldown}",
                     busy,
-                    "PLAN: pg_dump preflight → stop (SINGLE-TERM) → flip "
-                    f"current→{version} → start → gate (/livez ≤60s, /readyz "
-                    "≤120s, 300s soak) → commit | auto-rollback",
+                    "PLAN: preflight (scripts provenance + backup-artifact "
+                    f"validation) → stop (SINGLE-TERM) → flip current→{version} → "
+                    "start → gate (/livez ≤60s, /readyz ≤120s, 300s soak) → "
+                    "commit | auto-rollback",
                 ]
+                # ── D6 MODE GATE — dry-run time, BEFORE any nonce is minted ──
+                # (M5) "full-dump" / an unrecognised mode is refused HERE with
+                # the SAME token the arm refuses — mode_gate_refusal is the ONE
+                # implementation both sites call, so the token can never drift
+                # between them and the human is never shown a green preflight
+                # for a request the arm will refuse. This branch holds NO
+                # lock ⇒ NO db_preflight_* journal-always row is written here
+                # (an unlocked append would race a live holder's
+                # read-modify-write — a lost UPDATE).
+                db_preflight_mode_refusal = udp.mode_gate_refusal(db_preflight)
+                if db_preflight_mode_refusal is not None:
+                    return _refusal(
+                        label,
+                        db_preflight_mode_refusal.token,
+                        f"dry-run preflight: {db_preflight_mode_refusal.detail} — "
+                        "the ARM refuses identically (same token, before the "
+                        "nonce burn); NO nonce minted",
+                    )
                 if self_env == "live":
                     run_id = mint_run_id()
                     action = PendingAction(
@@ -3778,6 +3822,15 @@ never decides go/rollback).
                         f"user_confirmed=true, nonce=\"{nonce_grouped(action.nonce)}\"). "
                         "Nonce single-use, expires in 60min."
                     )
+                    if db_preflight is not None:
+                        lines.append(
+                            "NOTE: db_preflight="
+                            f"{db_preflight!r} — the ARM validates the newest "
+                            "daily backup artifact (the dump lane's own "
+                            "registry row: metadata validation under the held "
+                            "lock, live only) before the nonce burns; the "
+                            "nonce you echo attests that validation."
+                        )
                     lines.append(
                         "NOTE: this preflight persisted ONLY the nonce "
                         f"pending-action (run_id={run_id}) — no pipeline mutation."
@@ -4373,6 +4426,240 @@ never decides go/rollback).
                         f"arm preflight: {prov_detail} — nonce NOT burned "
                         "(the arm simply did not happen; nothing consumed)",
                     )
+            # ── Step 0b — promote-time BACKUP-ARTIFACT VALIDATION ───────────
+            # (promote-db-preflight-validation, T3.) The ceremony no longer
+            # dumps the live database per promote (the Emperor's ruling): it
+            # validates the NEWEST daily backup artifact's registry row (lane
+            # `pgdumpall`) over the sanctioned pooled PostgreSQL channel —
+            # under the held lock, AFTER every busy/cooldown/lock/provenance
+            # refusal and BEFORE the nonce burn, so a refusal never spends the
+            # nonce and never writes a pending_op.
+            #
+            # LIVE ONLY (M2): the registry lives in the live database; the
+            # dev/demo/sandbox environments have no such relation, so there the
+            # validation is a documented no-op that the ARMED output states
+            # EXPLICITLY (never a silent pass). The MODE gate (the
+            # db_preflight parameter) applies in EVERY environment.
+            #
+            # The verdict logic lives in upgrade_db_preflight — the injectable
+            # seam, called as a MODULE-ATTRIBUTE lookup at call time (so a
+            # test patches THAT attribute). This block carries no
+            # test-awareness branch and never inspects the engine: it
+            # journals, records, discloses and refuses. Nothing else.
+            #
+            # LOCK-RELEASE BELT (cycle-4 BLOCKING-1): the flag-gated `finally`
+            # below is the SINGLE release point for EVERY non-success exit of
+            # this block — every refusal, every exception class (Exception /
+            # OSError / TypeError / CancelledError / KeyboardInterrupt /
+            # SystemExit alike, including the FIRST await inside the held
+            # lock — the registry read) and any return made before the flag
+            # flips. Success KEEPS the lock: the tool hands it to the
+            # executor at drain (the promote executor acquires the lock
+            # itself at preflight; releasing here would leave two lock
+            # holders). A BARE `finally: release` would break that handoff.
+            # M2 (lock-release order): NO arm releases early. `_refusal`
+            # journals through `_journal_refusal_event` →
+            # `journal_history_append`, an UNLOCKED read-modify-write of
+            # state.json (it never acquires the lock; caller discipline is
+            # the serializer). Releasing before `_refusal` put that RMW
+            # OUTSIDE the lock (the clobber hazard); holding the lock until
+            # the belt makes every refusal append a LOCKED write. The
+            # `pipeline-busy` carve-out there keys on the reason token, never
+            # on the lock, so the row is not suppressed by holding it.
+            db_preflight_handoff_ok = False
+            # L6: the env-skip verdict is built from the module CONSTANT
+            # (``SKIPPED-BY-ENV``), never a hand-typed ``SKIPPED`` — the
+            # identity-unchanged skip below prints ``SKIPPED`` and the two
+            # verdicts must stay shape-distinguishable in ceremony output.
+            db_preflight_line = (
+                f"db-preflight: {udp.VERDICT_SKIPPED_BY_ENV.upper()} "
+                f"(self_env={self_env}) — the backup-artifact registry lives in "
+                "the live database only; no validation ran"
+            )
+            db_preflight_verdict = None
+            try:
+                # LEGEND: bare (N) = the T3 write steps; (1c)(N) = the
+                # exception-ladder arms. Both label spaces appear in this block.
+                # ONLY. The probe IS the `ensure_extensions` call below: it is
+                # the FIRST write of this block, it re-reads the journal, and a
+                # torn/absent/unparseable journal makes it raise `JournalTorn`
+                # BEFORE any further write of this block (no history row, no
+                # D3 record, no evidence append). A journal torn at arm ENTRY
+                # never reaches here at all — it is refused PRE-lock as
+                # `journal-unavailable` by the `_journal_read` above — so this
+                # only closes the read→slot window (a concurrent tear or a
+                # hand-edit in between).
+                # UNIQUE EFFECT of this probe: the `db_preflight` seed. The verdict
+                # function's own `journal_read` raises `JournalTorn` before any write,
+                # so the refusal outcome is identical either way.
+                uj.ensure_extensions(install_dir)
+                db_preflight_verdict = await udp.evaluate_db_preflight(
+                    manager,
+                    install_dir,
+                    mode=db_preflight,
+                    self_env=self_env,
+                )
+                if db_preflight_verdict.verdict == udp.VERDICT_REFUSED:
+                    db_preflight_token = (
+                        db_preflight_verdict.token or udp.TOK_REGISTRY_UNAVAILABLE
+                    )
+                    if db_preflight_token != udp.TOK_JOURNAL_TORN:
+                        # (2) The journal-ALWAYS refusal row — written WITH
+                        # THE LOCK STILL HELD, BEFORE the release. On live,
+                        # `_refusal` skips journaling (the carve-out), so this
+                        # row is the ONLY audit trail of the refusal. The
+                        # journal-torn refusal is the ONE refusal that writes
+                        # NO row (the journal is the unavailable substrate).
+                        uj.journal_history_append(
+                            install_dir,
+                            udp.EVENT_REFUSED,
+                            db_preflight_verdict.detail,
+                        )
+                    return _refusal(
+                        label,
+                        db_preflight_token,
+                        f"arm preflight: {db_preflight_verdict.detail} — nonce "
+                        "NOT burned (the arm simply did not happen; nothing "
+                        "consumed)",
+                    )
+                if db_preflight_verdict.verdict != udp.VERDICT_SKIPPED_BY_ENV:
+                    # (3)/(4) The journal-ALWAYS pass row + (5) the D3 record.
+                    # Both are LOAD-BEARING: the row is the audit trail, the
+                    # record is the skip memory — a failed write fails CLOSED
+                    # below (arm 3), never a silent half-validated arm.
+                    db_preflight_event = (
+                        udp.EVENT_VALIDATED
+                        if db_preflight_verdict.verdict == udp.VERDICT_VALIDATED
+                        else udp.EVENT_SKIPPED
+                    )
+                    uj.journal_history_append(
+                        install_dir, db_preflight_event, db_preflight_verdict.detail
+                    )
+                    db_preflight_record = db_preflight_verdict.record
+                    if not isinstance(db_preflight_record, dict):
+                        raise TypeError(
+                            f"{db_preflight_verdict.verdict} db-preflight verdict "
+                            "carried no D3 record"
+                        )
+                    uj.record_db_preflight(install_dir, db_preflight_record)
+                    db_preflight_line = (
+                        f"db-preflight: {db_preflight_verdict.verdict.upper()} "
+                        f"artifact={db_preflight_verdict.artifact} "
+                        f"finished_at={db_preflight_verdict.finished_at_iso} "
+                        f"age={db_preflight_verdict.age_s}s "
+                        f"bound={db_preflight_verdict.bound_s}s — the effective "
+                        "data-loss age of the restore point this promote relies "
+                        "on (metadata validation: the lane's own integrity "
+                        "verdict + bytes + freshness; the bytes are never "
+                        "re-read)"
+                    )
+                # The last write of a validated/skipped outcome succeeded —
+                # control now proceeds toward Step 0c and the nonce burn with
+                # the lock KEPT for the executor handoff.
+                db_preflight_handoff_ok = True
+            except uj.JournalTorn:
+                # (1c)(1) NO row — the journal is the unavailable substrate on
+                # this path (the pre-write probe or one of this check's own
+                # writes raised it). The lock stays held through `_refusal`
+                # (M2 — the belt is the single release; the refusal append
+                # is a locked write, and on this path the torn journal makes
+                # it a logged no-op inside `_journal_refusal_event`).
+                return _refusal(
+                    label,
+                    udp.TOK_JOURNAL_TORN,
+                    "arm preflight: the journal tore inside the backup-artifact "
+                    "check (RACE-WINDOW-ONLY — a journal torn at arm entry is "
+                    "refused earlier, pre-lock, as journal-unavailable) — "
+                    "nonce NOT burned (the arm simply did not happen; nothing "
+                    "consumed)",
+                )
+            except OSError as exc:
+                # (1c)(3) The check's OWN journal/record write failed — BOTH
+                # sibling arms are mirrored (the arm-scripts-provenance shape
+                # at the sibling write): a path whose verdict ALREADY refused
+                # keeps its SPECIFIC token (that row is best-effort); a
+                # validated/skipped path FAILS CLOSED, because there the row
+                # IS the audit trail and the record IS the skip memory — the
+                # arm never proceeds on an outcome it could not record.
+                if (
+                    db_preflight_verdict is not None
+                    and db_preflight_verdict.verdict == udp.VERDICT_REFUSED
+                ):
+                    logger.warning(
+                        "upgrade_tools: db_preflight_refused row LOST "
+                        "(%s: %s) — the specific refusal proceeds (the row is "
+                        "best-effort): %s",
+                        type(exc).__name__,
+                        exc,
+                        db_preflight_verdict.detail,
+                    )
+                    return _refusal(
+                        label,
+                        db_preflight_verdict.token or udp.TOK_REGISTRY_UNAVAILABLE,
+                        f"arm preflight: {db_preflight_verdict.detail} — nonce "
+                        "NOT burned (the arm simply did not happen; nothing "
+                        "consumed)",
+                    )
+                logger.warning(
+                    "upgrade_tools: backup-artifact check WRITE FAILED (%s: %s) "
+                    "— failing CLOSED (the validated/skipped row and the D3 "
+                    "record are load-bearing)",
+                    type(exc).__name__,
+                    exc,
+                )
+                db_preflight_write_failed_detail = udp.artifact_less(
+                    udp.TOK_REGISTRY_UNAVAILABLE,
+                    f"check write failed ({type(exc).__name__})",
+                )
+                return _refusal(
+                    label,
+                    udp.TOK_REGISTRY_UNAVAILABLE,
+                    f"arm preflight: {db_preflight_write_failed_detail} — nonce NOT "
+                    "burned (the arm simply did not happen; nothing consumed)",
+                )
+            except Exception as exc:  # noqa: BLE001 — fail-closed, never raises
+                # (1c)(4) ANY other unexpected failure (a defect in the new
+                # module, a row shape the NULL guards did not anticipate, an
+                # engine failure the verdict function did not map) — FAIL
+                # CLOSED: the best-effort row first (its own failure is
+                # logged, never raised), the nonce unspent, no pending_op, and
+                # the lock released by the belt.
+                db_preflight_unexpected_detail = udp.artifact_less(
+                    udp.TOK_REGISTRY_UNAVAILABLE,
+                    f"unexpected {type(exc).__name__} before handoff",
+                )
+                logger.warning(
+                    "upgrade_tools: backup-artifact check raised %s — failing "
+                    "CLOSED (db-preflight-registry-unavailable): %s",
+                    type(exc).__name__,
+                    exc,
+                )
+                _db_preflight_refused_row_best_effort(
+                    install_dir, db_preflight_unexpected_detail
+                )
+                return _refusal(
+                    label,
+                    udp.TOK_REGISTRY_UNAVAILABLE,
+                    f"arm preflight: {db_preflight_unexpected_detail} — nonce NOT "
+                    "burned (the arm simply did not happen; nothing consumed)",
+                )
+            except BaseException as exc:  # noqa: BLE001 — NEVER swallowed
+                # (1c)(5) asyncio.CancelledError / KeyboardInterrupt /
+                # SystemExit: NEVER converted into a tool string (the house
+                # "never BaseException" rider) — the best-effort row first,
+                # then the cancellation PROPAGATES; the belt releases the lock
+                # as it unwinds.
+                db_preflight_interrupted_detail = udp.artifact_less(
+                    udp.TOK_REGISTRY_UNAVAILABLE,
+                    f"interrupted ({type(exc).__name__}) before handoff",
+                )
+                _db_preflight_refused_row_best_effort(
+                    install_dir, db_preflight_interrupted_detail
+                )
+                raise
+            finally:
+                if not db_preflight_handoff_ok:
+                    journal_lock_release(install_dir)
             # ── Step 0c — arm-time journalctl capture (AC-OBS-1 / C-7) ────
             # The daemon app log rotates at 10 MB (~15-20 min) and the
             # AGENT lanes cannot reach journalctl or /var/log at all ⇒ the
@@ -4474,6 +4761,7 @@ never decides go/rollback).
                     nonce_consumed=confirmed_action is not None,
                     confirmed_by_human=confirmed_source is not None,
                     confirmed_source=confirmed_source,
+                    db_preflight=db_preflight,
                 )
                 uj.write_pending_op(install_dir, op)
                 # Post-Restart Arm-Notify (ADR-039 + ADR-044): ride the SAME
@@ -4509,6 +4797,7 @@ never decides go/rollback).
                     f"post-restart: the arm is recorded (run_id=\"{run_id}\"); on daemon restart an auto-wake will be delivered to this instance to report the outcome — no user action required; kill-switch: ENSEMBLE_POST_RESTART_ARM_NOTIFY=0 in <install_dir>/.env",
                     f"journal: releases/state.json txn opened (started_at={op.armed_at}, owner=exec-pending)",
                     f"scripts provenance: verdict={prov_verdict} ({prov_detail})",
+                    db_preflight_line,
                     (
                         f"live-confirmation: nonce consumed (confirmed_source={confirmed_source})"
                         if confirmed_action is not None
@@ -4553,6 +4842,13 @@ Args:
         it issues the confirmation nonce. dry_run=false → arm.
     nonce: LIVE only — the nonce issued by a prior dry_run, which the
         user must have echoed back in their reply.
+    db_preflight: OPTIONAL promote-time backup-artifact validation mode —
+        absent = validation-only (the newest daily backup artifact's
+        registry row is validated under the held lock; live only).
+        "full-dump" is REFUSED (db-preflight-full-dump-unavailable — no
+        VM-side dump leg exists); any other value is REFUSED
+        (db-preflight-mode-unknown). The value is bound into the pending op
+        and never crosses the executor boundary.
 
 LIVE 3-factor gate (§4.3, enforced server-side BEFORE any live action):
 (1) user_confirmed=true param; (2) this turn triggered by a user-origin
@@ -4588,7 +4884,25 @@ fail-closed BEFORE the nonce burn),
 preflight-argv-unconstructable, preflight-argv-malformed (the executor
 argv/env could not be constructed — fail-closed BEFORE the nonce burn),
 no-staged-install, journal-unavailable (install dir
-resolves but the journal is torn/absent), layout-divergence.
+resolves but the journal is torn/absent), layout-divergence,
+reason=db-preflight-registry-unavailable (the dump-lane registry could not
+be read: relation absent / unreadable / query failed / connection refused /
+pool exhausted / client- or server-side timeout / a future-dated row beyond
+the clock-skew tolerance — the artifact-less detail names the cause),
+reason=db-preflight-no-backup (zero rows for lane pgdumpall),
+reason=db-preflight-artifact-broken (the NEWEST overall row is not
+integrity_ok=true — names the artifact),
+reason=db-preflight-artifact-empty (bytes <= 0),
+reason=db-preflight-artifact-stale (finished_at older than the freshness
+bound — names artifact + age + bound),
+reason=db-preflight-journal-torn (RACE-WINDOW-ONLY — a journal torn at arm entry
+is refused earlier as journal-unavailable, pre-lock; this token fires only
+if the journal tears between the arm-time read and the backup-artifact
+check, or if the check's own history write raises JournalTorn),
+reason=db-preflight-full-dump-unavailable (the full-dump opt-in — no VM-side
+dump leg exists; refused at dry-run time too, before any nonce is minted),
+reason=db-preflight-mode-unknown (an unrecognised db_preflight mode — likewise
+refused at dry-run time, before any nonce is minted).
 
 Never auto-retry a refusal — relay it verbatim (the LLM never decides
 go/rollback).

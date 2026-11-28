@@ -2278,7 +2278,38 @@ class TestForcedWinnerResolvedAtGuard:
             "needs_more_data": False,
         }
 
+        # Spy on the atomic path vs the legacy three-transaction fan-out.
+        _orig_resolve_atomic = evolution_service._ab_test_repo.resolve_atomic
+        _calls = {"resolve_atomic": 0, "deactivate": 0, "resolve": 0, "update": 0}
+
+        def _spy_resolve_atomic(*a, **kw):
+            _calls["resolve_atomic"] += 1
+            return _orig_resolve_atomic(*a, **kw)
+
+        def _spy_deactivate(*a, **kw):
+            _calls["deactivate"] += 1
+            return None
+
+        def _spy_resolve(*a, **kw):
+            _calls["resolve"] += 1
+            return None
+
+        def _spy_update(*a, **kw):
+            _calls["update"] += 1
+            return None
+
+        evolution_service._ab_test_repo.resolve_atomic = _spy_resolve_atomic
+        evolution_service._skill_repo.deactivate = _spy_deactivate
+        evolution_service._ab_test_repo.resolve = _spy_resolve
+        evolution_service._skill_repo.update = _spy_update
+
         result = await evolution_service.check_ab_test_resolution(group)
+
+        # Behavioural pin: the atomic CAS path is the ONLY terminal mutation.
+        assert _calls["resolve_atomic"] == 1
+        assert _calls["deactivate"] == 0
+        assert _calls["resolve"] == 0
+        assert _calls["update"] == 0
 
         assert result["resolved"] is True
         assert result["winner_id"] == new.id   # higher completion rate
@@ -2390,7 +2421,37 @@ class TestForcedWinnerResolvedAtGuard:
             "needs_more_data": True,
         }
 
+        _orig_resolve_atomic2 = evolution_service._ab_test_repo.resolve_atomic
+        _calls2 = {"resolve_atomic": 0, "deactivate": 0, "resolve": 0, "update": 0}
+
+        def _spy_resolve_atomic2(*a, **kw):
+            _calls2["resolve_atomic"] += 1
+            return _orig_resolve_atomic2(*a, **kw)
+
+        def _spy_deactivate2(*a, **kw):
+            _calls2["deactivate"] += 1
+            return None
+
+        def _spy_resolve2(*a, **kw):
+            _calls2["resolve"] += 1
+            return None
+
+        def _spy_update2(*a, **kw):
+            _calls2["update"] += 1
+            return None
+
+        evolution_service._ab_test_repo.resolve_atomic = _spy_resolve_atomic2
+        evolution_service._skill_repo.deactivate = _spy_deactivate2
+        evolution_service._ab_test_repo.resolve = _spy_resolve2
+        evolution_service._skill_repo.update = _spy_update2
+
         result2 = await evolution_service.check_ab_test_resolution(group2)
+
+        # Behavioural pin: the atomic CAS path is the ONLY terminal mutation.
+        assert _calls2["resolve_atomic"] == 1
+        assert _calls2["deactivate"] == 0
+        assert _calls2["resolve"] == 0
+        assert _calls2["update"] == 0
 
         assert result2["resolved"] is True
         assert result2["reason"] == "force_resolved_max_extensions"
@@ -4176,7 +4237,7 @@ class TestSanctionedResolution:
 
     def _make_stalled_pair(
         self, skill_repo, ab_test_repo, project_id, *, age_days=10.0,
-        comparisons=0, old_gen=1, new_gen=2,
+        comparisons=0, arm_traffic=0, old_gen=1, new_gen=2,
     ):
         import uuid as _uuid
 
@@ -4209,6 +4270,24 @@ class TestSanctionedResolution:
             obj.comparisons = comparisons
             session.add(obj)
             session.commit()
+        # F5 (2026-11-26): the stall predicate's traffic signal is the
+        # ARMS' serving counters (``total_selections`` /
+        # ``total_applied``), NOT ``SkillABTest.comparisons``
+        # (injection-only; stays 0 on a feedback-bearing pair).
+        # ``arm_traffic`` models the production relationship
+        # explicitly — the old fixtures expressed "traffic" through
+        # ``comparisons`` alone, which the new criterion deliberately
+        # no longer treats as traffic. Passing both keeps the
+        # pre-F5 tests' INTENT (a traffic-bearing pair is never
+        # stalled/resolved) intact under the new signal.
+        if arm_traffic:
+            for row in (old, new):
+                skill_repo.increment_counter(
+                    row.id, "total_selections", arm_traffic
+                )
+                skill_repo.increment_counter(
+                    row.id, "total_applied", arm_traffic
+                )
         return group, old, new
 
     @pytest.mark.asyncio
@@ -4229,6 +4308,73 @@ class TestSanctionedResolution:
         assert result["loser_id"] == old.id
 
         # Terminal state EXACTLY per spec (d):
+        loser = skill_repo.get(old.id)
+        assert loser.status == "inactive"
+        assert loser.is_active is False
+        assert loser.ab_test_group == group  # RETAINED
+        winner = skill_repo.get(new.id)
+        assert winner.status == "active"
+        assert winner.ab_test_group is None  # cleared
+        pair = ab_test_repo.get_by_group(group)
+        assert pair.winner_skill_id == new.id
+        assert pair.resolved_at
+
+    @pytest.mark.asyncio
+    async def test_sanctioned_resolve_calls_resolve_atomic_exactly_once(
+        self, evolution_service, skill_repo, ab_test_repo, project_id
+    ):
+        """The SANCTIONED path must call ``resolve_atomic`` EXACTLY ONCE.
+
+        ``resolve_atomic`` is a CAS on ``resolved_at IS NULL``: a
+        SECOND call on the same group simply loses the CAS and returns
+        ``False`` with ZERO mutations. A doubled call is therefore
+        INVISIBLE to every end-state assertion — the terminal state
+        after two calls is byte-identical to the state after one.
+        Only a CALL-COUNT pin can see it.
+
+        The other two ``resolve_atomic`` call sites (:2004 the helper
+        ``_atomic_resolve_triple`` and :2424 the force-resolve path)
+        already carry ``== 1`` spies; the SANCTIONED path did not.
+
+        Mutation bar: duplicate the ``resolve_atomic`` call at the
+        sanctioned call site ⇒ the counter reads 2 ⇒ RED.
+        """
+        group, old, new = self._make_stalled_pair(
+            skill_repo, ab_test_repo, project_id
+        )
+
+        # Spy on the sanctioned path's atomic CAS: a CALL-THROUGH
+        # wrapper (NOT a replacing mock) so the real CAS still runs.
+        _repo = evolution_service._ab_test_repo
+        _orig_resolve_atomic = _repo.resolve_atomic
+        _calls = {"resolve_atomic": 0}
+
+        def _spy_resolve_atomic(*a, **kw):
+            _calls["resolve_atomic"] += 1
+            return _orig_resolve_atomic(*a, **kw)
+
+        _repo.resolve_atomic = _spy_resolve_atomic
+        try:
+            result = await evolution_service.resolve_ab_test_sanctioned(
+                group, basis="stalled",
+                reason="sweep: zero traffic for 10d",
+            )
+        finally:
+            # The spy was an INSTANCE attribute shadowing the
+            # repository's class-level method — deleting it restores
+            # the original binding exactly. No spy leaks past this
+            # node (teardown leak = the TestSpyTeardownRegressionPin
+            # concern).
+            del _repo.resolve_atomic
+
+        # Behavioural pin: EXACTLY ONE atomic CAS on the sanctioned
+        # path — not "at least one".
+        assert _calls["resolve_atomic"] == 1
+
+        # End state EXACTLY per spec (d) — mirrors the sibling nodes.
+        assert result["resolved"] is True
+        assert result["winner_id"] == new.id  # generation 2 > 1
+        assert result["loser_id"] == old.id
         loser = skill_repo.get(old.id)
         assert loser.status == "inactive"
         assert loser.is_active is False
@@ -4449,9 +4595,17 @@ class TestSanctionedResolution:
     async def test_stalled_basis_refuses_traffic_bearing_pair(
         self, evolution_service, skill_repo, ab_test_repo, project_id
     ):
-        """comparisons > 0 ⇒ NEVER (normal pairs are untouchable)."""
+        """Arm traffic > 0 ⇒ NEVER (normal pairs are untouchable).
+
+        F5 (2026-11-26): the traffic signal is the ARMS' serving
+        counters (``total_selections``/``total_applied``), not
+        ``comparisons``. This pin models the LIVE 98c3e028 shape —
+        ``comparisons == 0`` YET both arms carry sel=2/app=2 — and
+        asserts the sanctioned resolver REFUSES it (Site B).
+        """
         group, old, new = self._make_stalled_pair(
-            skill_repo, ab_test_repo, project_id, comparisons=3
+            skill_repo, ab_test_repo, project_id,
+            comparisons=0, arm_traffic=2,
         )
         with pytest.raises(ValueError, match="traffic-bearing"):
             await evolution_service.resolve_ab_test_sanctioned(
@@ -4510,8 +4664,10 @@ class TestSanctionedResolution:
         stalled_group, _o, _n = self._make_stalled_pair(
             skill_repo, ab_test_repo, project_id
         )
+        # F5: traffic is modelled on the ARM ROWS (the serving
+        # counters), not on ``comparisons`` — the criterion moved.
         traffic_group, _o2, _n2 = self._make_stalled_pair(
-            skill_repo, ab_test_repo, project_id, comparisons=2
+            skill_repo, ab_test_repo, project_id, arm_traffic=2
         )
         fresh_group, _o3, _n3 = self._make_stalled_pair(
             skill_repo, ab_test_repo, project_id, age_days=0.5
@@ -4695,6 +4851,292 @@ class TestCorrectiveFix:
         assert result["skipped"] is True
         assert "A/B testing" in result["reason"]
         mock_llm.assert_not_called()
+
+
+class TestF3GuardBypass:
+    """B1: corrective=True must NOT bypass the F3 servability guard for a
+    deactivated (is_active=False, status='inactive') skill."""
+
+    @pytest.mark.asyncio
+    async def test_deactivated_skill_corrective_is_refused(
+        self, evolution_service, skill_repo, project_id
+    ):
+        """A deactivated skill (is_active=False, status='inactive') with
+        corrective=True is refused with refusal_reason=non_servable_target:
+        no new generation, no new ab_test_group, row count unchanged,
+        refusal counter incremented."""
+        from daemon.services import skill_capture_observability as observability
+
+        skill = _make_skill(skill_repo, project_id, "retired-bypass")
+        skill_repo.deactivate(skill.id)
+        # Project-scoped ROW TOTAL: ``SkillRepository.list()`` returns
+        # ``(items, total)`` — the SECOND element is the real row count
+        # over the filtered set (it ignores limit/offset), whereas
+        # ``len(items)`` is capped by ``limit=100`` and ``len(tuple)``
+        # is ALWAYS 2 (which made the old assertion vacuous).
+        # ``active_only=False`` keeps the DEACTIVATED row in scope —
+        # this test is ABOUT a deactivated skill.
+        _, before_total = skill_repo.list(
+            project_id=project_id, active_only=False
+        )
+
+        observability.reset_counters()
+        with patch.object(
+            evolution_service,
+            "_call_llm",
+            AsyncMock(return_value='{"description": null, "edits": [{"op": "replace", "anchor": "content for retired-bypass", "replacement": "new content"}]}'),
+        ):
+            result = await evolution_service.evolve_skill(
+                skill.id, "FIX", "repair it", corrective=True
+            )
+
+        assert result["skipped"] is True
+        assert result.get("refusal_reason") == "non_servable_target"
+        # No new generation minted, no new ab_test_group.
+        assert result.get("new_skill_id") is None
+        _, after_total = skill_repo.list(
+            project_id=project_id, active_only=False
+        )
+        assert after_total == before_total
+        # Refusal counter incremented.
+        assert (
+            observability.counters().execution_refusals.get(
+                "non_servable_target", 0
+            )
+            == 1
+        )
+        # The deactivated skill is untouched.
+        after = skill_repo.get(skill.id)
+        assert after.is_active is False
+        assert after.status == "inactive"
+
+    @pytest.mark.asyncio
+    async def test_ab_testing_inactive_skill_corrective_not_refused(
+        self, evolution_service, skill_repo, ab_test_repo, project_id
+    ):
+        """Positive control: is_active=False + status='ab_testing' +
+        corrective=True is NOT refused by the F3 guard (legitimate
+        corrective case still works)."""
+        import uuid as _uuid
+
+        parent = _make_skill(skill_repo, project_id, "omega-pc", generation=1)
+        child = skill_repo.create(
+            name="omega-pc",
+            description="desc for omega-pc child",
+            content="content for omega-pc child",
+            project_id=project_id,
+            lineage_origin="evolved",
+            generation=2,
+        )
+        group = str(_uuid.uuid4())
+        for row in (parent, child):
+            skill_repo.update(
+                row.id, ab_test_group=group, status="ab_testing"
+            )
+        # Deactivate the child (is_active=False) but keep ab_testing status.
+        skill_repo.update(child.id, is_active=False)
+        ab_test_repo.create_ab_test(group, parent.id, child.id)
+
+        edit_script = json.dumps(
+            {
+                "description": "Omega-pc, corrected",
+                "edits": [
+                    {
+                        "op": "replace",
+                        "anchor": "content for omega-pc child",
+                        "replacement": "content for omega-pc child, fixed",
+                    }
+                ],
+            }
+        )
+        with patch.object(
+            evolution_service, "_call_llm",
+            AsyncMock(return_value=edit_script),
+        ):
+            result = await evolution_service.evolve_skill(
+                child.id, "FIX", "repair the defective generation",
+                corrective=True,
+            )
+
+        # Not refused by the F3 guard.
+        assert result.get("refusal_reason") != "non_servable_target"
+        # The corrective path ran (skipped False on success).
+        assert result["skipped"] is False
+
+    @pytest.mark.asyncio
+    async def test_ab_testing_skill_corrective_default_false_is_refused_by_f3(
+        self, evolution_service, skill_repo, project_id, tmp_path
+    ):
+        """F3 (2026-11-27): the ``corrective`` half of the F3 predicate is
+        LOAD-BEARING — this test is its pin.
+
+        A source skill that is ``is_active=False`` + ``status='ab_testing'``
+        is NOT servable. With ``corrective=False`` (the DECLARED DEFAULT of
+        :meth:`SkillEvolutionService.evolve_skill`) the F3 guard MUST fire
+        the typed refusal ``non_servable_target`` — it must NOT silently
+        re-route to the ``ab_guard`` refusal that sits further down the
+        same method.
+
+        Mutation A — dropping the ``corrective and`` conjunct at BOTH
+        predicate sites (``skill_evolution_service.py:983`` and ``:1011``)
+        — makes the shape SILENTLY RE-ROUTE to ``ab_guard``: the returned
+        envelope carries NO ``refusal_reason`` key and the observability
+        token becomes ``ab_guard``. The pre-existing pins
+        (``test_deactivated_skill_corrective_is_refused`` and
+        ``test_ab_testing_inactive_skill_corrective_not_refused``) cover
+        only the ``status`` half, so Mutation A is DELETABLE WITH ZERO
+        REDS without this test. THIS TEST IS THE MISSING PIN.
+        """
+        from daemon.services import skill_capture_observability as observability
+        from daemon.repositories.skill.models import Skill, SkillABTest
+        from daemon.services.skill_evolution_service import (
+            SkillEvolutionService,
+        )
+        from sqlmodel import Session, select
+
+        # (0) The DECLARED DEFAULT for ``corrective`` — pinned so a silent
+        # default flip surfaces as a named failure, not as a mystery delta.
+        corrective_default = inspect.signature(
+            SkillEvolutionService.evolve_skill
+        ).parameters["corrective"].default
+        assert corrective_default is False, (
+            "evolve_skill's `corrective` default changed: "
+            f"{corrective_default!r}"
+        )
+
+        skill = _make_skill(
+            skill_repo, project_id, "ab-testing-non-corrective"
+        )
+        # The discriminating shape: NOT servable (is_active=False) AND
+        # status='ab_testing' — the ONLY combination where the
+        # ``corrective`` conjunct of the F3 predicate changes the outcome.
+        skill_repo.update(skill.id, is_active=False, status="ab_testing")
+
+        before = skill_repo.get(skill.id)
+        assert before.is_active is False
+        assert before.status == "ab_testing"
+        before_fields = {
+            "id": before.id,
+            "name": before.name,
+            "description": before.description,
+            "content": before.content,
+            "category": before.category,
+            "is_active": before.is_active,
+            "status": before.status,
+            "lineage_origin": before.lineage_origin,
+            "generation": before.generation,
+            "ab_test_group": before.ab_test_group,
+            "updated_at": before.updated_at,
+        }
+
+        with Session(skill_repo.engine) as session:
+            before_skill_rows = len(list(session.exec(select(Skill))))
+            before_ab_rows = len(list(session.exec(select(SkillABTest))))
+            before_max_generation = max(
+                (s.generation for s in session.exec(select(Skill))),
+                default=0,
+            )
+
+        observability.reset_counters()
+        before_refusals = dict(observability.counters().execution_refusals)
+
+        with patch.object(
+            evolution_service,
+            "_call_llm",
+            AsyncMock(
+                return_value=json.dumps(
+                    {
+                        "description": None,
+                        "edits": [
+                            {
+                                "op": "replace",
+                                "anchor": "content for ab-testing-non-corrective",
+                                "replacement": "new content",
+                            }
+                        ],
+                    }
+                )
+            ),
+        ):
+            result = await evolution_service.evolve_skill(
+                skill.id, "FIX", "repair it", corrective=False
+            )
+
+        after_refusals = dict(observability.counters().execution_refusals)
+
+        # (1) The typed F3 refusal — NOT a generic skip.
+        assert result.get("skipped") is True
+        assert result.get("refusal_reason") == "non_servable_target"
+
+        # (2) The execution-refusal counter moved by EXACTLY ONE.
+        assert (
+            after_refusals.get("non_servable_target", 0)
+            - before_refusals.get("non_servable_target", 0)
+        ) == 1
+
+        # (3) NO new generation was minted.
+        assert result.get("new_skill_id") is None
+        assert result.get("ab_test_group") is None
+        with Session(skill_repo.engine) as session:
+            after_rows = list(session.exec(select(Skill)))
+        after_max_generation = max(
+            (s.generation for s in after_rows), default=0
+        )
+        assert after_max_generation == before_max_generation
+
+        # (4) NO new ``ab_test_group`` row.
+        with Session(skill_repo.engine) as session:
+            after_ab_rows = len(list(session.exec(select(SkillABTest))))
+        assert after_ab_rows == before_ab_rows
+
+        # (5) The skill row count is unchanged.
+        assert len(after_rows) == before_skill_rows
+
+        # (6) The source row is untouched (status and every other field).
+        after = skill_repo.get(skill.id)
+        after_fields = {
+            "id": after.id,
+            "name": after.name,
+            "description": after.description,
+            "content": after.content,
+            "category": after.category,
+            "is_active": after.is_active,
+            "status": after.status,
+            "lineage_origin": after.lineage_origin,
+            "generation": after.generation,
+            "ab_test_group": after.ab_test_group,
+            "updated_at": after.updated_at,
+        }
+        assert after_fields == before_fields
+        assert after.is_active is False
+        assert after.status == "ab_testing"
+
+        # (7) The observability token is ``non_servable_target`` and NOT
+        # ``ab_guard`` — a SILENT RE-ROUTE must be caught here, in the
+        # counter AND in the sink record.
+        assert (
+            after_refusals.get("ab_guard", 0)
+            == before_refusals.get("ab_guard", 0)
+        ), "the refusal silently re-routed to ab_guard"
+        assert "ab_guard" not in after_refusals
+
+        sink_records = []
+        for path in sorted(tmp_path.rglob("skill-capture-*.jsonl")):
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line:
+                    sink_records.append(json.loads(line))
+        execution_refusals = [
+            r
+            for r in sink_records
+            if r.get("stage") == "execution" and r.get("outcome") == "refused"
+        ]
+        assert execution_refusals, (
+            "no execution-refusal record reached the observability sink"
+        )
+        tokens = [r.get("refusal_reason") for r in execution_refusals]
+        assert tokens.count("non_servable_target") == 1, tokens
+        assert not any("ab_guard" in str(token) for token in tokens), tokens
 
 
 class TestDuplicatedAnchorRejection:

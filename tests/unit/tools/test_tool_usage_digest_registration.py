@@ -35,6 +35,9 @@ a per-test tmp SQLite file.
 from __future__ import annotations
 
 import ast
+import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -42,6 +45,7 @@ from sqlalchemy import create_engine
 from sqlmodel import SQLModel, Session
 
 from daemon.repositories.tool_usage.models import ToolUsageDaily
+from daemon.tools import _tool_registry as registry_mod
 from daemon.tools._tool_registry import (
     CATEGORY_MODULES,
     DYNAMIC_TOOL_NAMES,
@@ -336,3 +340,211 @@ class TestCallSurface:
         tool = create_tool_usage_tools(_StubManager(engine), agent_id="ari")[0]
         result = await tool.ainvoke({"run_date": "not-a-date"})
         assert result.startswith("Digest written:")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# artifact delivery pins (D4 / F6) — §3.9.5 node 56, §3.9.8 node 57
+# ══════════════════════════════════════════════════════════════════════════
+
+
+#: The hash-verified tree roots (§5.4). The digest output must sit under
+#: NONE of them — a file dropped there must not move any tree hash.
+HASH_VERIFIED_ROOTS = frozenset(
+    {"agents", "frontend", "plugins", "guidelines", "scripts", "daemon_slice"}
+)
+
+
+def test_the_written_digest_lands_outside_every_hash_verified_tree(
+    engine, tmp_path, monkeypatch
+):
+    """Node 56 (§3.9.5): D4 pinning assertion (i) at unit level.
+
+    The DEFAULT frozen resolution is what matters: the env override wins
+    BEFORE any resolver call, so an override-path test proves nothing about
+    where a real frozen install writes. The digest dir is DERIVED from that
+    resolution (and asserted), never injected.
+    """
+    from daemon.services import tool_usage_digest as tud
+
+    install = tmp_path / "install"
+    binary = install / "releases" / "v0.0.0" / "ensemble-prod"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(binary))
+    monkeypatch.delenv(tud.DIGEST_ROOT_ENV, raising=False)
+    monkeypatch.delenv(tud.ARTIFACT_DIR_ENV, raising=False)
+
+    expected_dir = (
+        install
+        / ".agents"
+        / "shared"
+        / "planning"
+        / "tool-usage-metrics-p1"
+        / "digests"
+    )
+    digest_dir = tud.digest_root()  # derived from the default resolution
+    assert digest_dir == expected_dir
+    assert "releases" not in digest_dir.parts
+
+    with Session(engine) as session:
+        session.add(
+            ToolUsageDaily(
+                day="2026-11-20",
+                project_id="proj-1",
+                tool_name="bash",
+                agent_id="ari",
+                call_count=2,
+                updated_at="2026-11-20T00:00:00+00:00",
+            )
+        )
+        session.commit()
+
+    _md, path = tud.write_digest(engine, "2026-11-21")
+    assert path.is_file()
+    assert path.parent == digest_dir
+    assert HASH_VERIFIED_ROOTS.isdisjoint(p.name for p in path.parents)
+
+    payload_dir = tud._artifact_dir()
+    assert payload_dir == install / "releases" / "v0.0.0" / "tool-usage-artifacts"
+    assert digest_dir != payload_dir
+    assert payload_dir not in digest_dir.parents
+
+
+def _git_output(repo_root: Path, *args: str) -> str | None:
+    """Git stdout, or None when history is unavailable (shallow/no git)."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo_root), *args],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None
+    return proc.stdout.strip()
+
+
+def _verify_artifact(repo_root: Path, target: Path) -> subprocess.CompletedProcess[str]:
+    """Run the schema-2 producer's separated --verify, never its writer."""
+    return subprocess.run(
+        [
+            sys.executable,  # the lane worktree's own .venv python under pytest
+            str(repo_root / "scripts" / "gen_tool_usage_allowlists.py"),
+            "--agents-dir",
+            str(repo_root / "agents"),
+            "--verify",
+            "--out",
+            str(target),
+        ],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+
+
+def test_committed_bundle_equals_generator_output(tmp_path):
+    """Node 57 (§3.9.8): the F6 freshness gate + APPROVER-B1 vacuity guard.
+
+    --verify compares the SEMANTIC PAYLOAD (byte-equal), the unresolved
+    ledger (as a set), and the provenance CONTENT hashes; tree_commit is
+    informational and excluded. It NEVER rewrites the committed artifact.
+    The same node proves the gate can go RED on a payload-only mutation.
+    """
+    repo_root = REPO_ROOT
+    artifact = (
+        repo_root
+        / ".agents"
+        / "shared"
+        / "planning"
+        / "tool-usage-metrics-p1"
+        / "allowlists.json"
+    )
+    assert artifact.is_file()
+
+    if _git_output(repo_root, "rev-parse", "--is-inside-work-tree") is None:
+        pytest.skip("git history unavailable: not inside a git work tree")
+    if _git_output(repo_root, "rev-parse", "--is-shallow-repository") == "true":
+        pytest.skip("shallow clone: provenance inputs have no git history")
+    for input_path in ("agents", "daemon/tools"):
+        if _git_output(repo_root, "log", "-1", "--format=%H", "--", input_path) is None:
+            pytest.skip(f"git history unavailable for {input_path}")
+
+    original = artifact.read_text(encoding="utf-8")
+    clean = _verify_artifact(repo_root, artifact)
+    assert clean.returncode == 0, (
+        f"--verify drift: rc={clean.returncode} stdout={clean.stdout!r} stderr={clean.stderr!r}"
+    )
+    assert artifact.read_text(encoding="utf-8") == original, (
+        "--verify must compare, never author the committed artifact"
+    )
+
+    # VACUITY GUARD: mutate an allow entry in the PAYLOAD (never provenance).
+    data = json.loads(original)
+    victims = sorted(
+        agent_id
+        for agent_id, info in data["agents"].items()
+        if isinstance(info, dict) and info.get("allow")
+    )
+    assert victims, "vacuity guard: no agent with an allow entry to mutate"
+    victim = victims[0]
+    data["agents"][victim]["allow"] = sorted(
+        ["__verify_vacuity_probe__", *data["agents"][victim]["allow"][1:]]
+    )
+    mutated = tmp_path / "mutated-allowlists.json"
+    mutated.write_text(
+        json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    assert mutated.read_text(encoding="utf-8") != original
+
+    drifted = _verify_artifact(repo_root, mutated)
+    assert drifted.returncode != 0, (
+        "--verify compared nothing: a payload-only mutation must go RED "
+        f"(rc={drifted.returncode} stdout={drifted.stdout!r} stderr={drifted.stderr!r})"
+    )
+    assert artifact.read_text(encoding="utf-8") == original
+
+
+def test_an_attribute_called_decorator_ahead_of_a_tool_does_not_abandon_the_module_scan(
+    tmp_path, monkeypatch
+):
+    """W1 — `dec` is an `ast.Call` in the attribute-decorator branch; reading
+    `dec.attr` raises AttributeError, which the file-level `except` swallows,
+    abandoning the WHOLE module's scan. A future attribute-called decorator
+    ahead of a factory-built `@tool` would then silently drop that tool from
+    `categories` and cause FALSE NOs in the digest."""
+    fake = tmp_path / "fake_attr_decorator_module.py"
+    fake.write_text(
+        "from decorators import registry\n"
+        "\n"
+        "@registry.namespaced()\n"
+        "@tool\n"
+        "def early_tool():\n"
+        "    ...\n"
+        "\n"
+        "@tool\n"
+        "def later_tool():\n"
+        "    ...\n",
+        encoding="utf-8",
+    )
+    # The scanner resolves `daemon.tools.<parts[2:]>` under
+    # `Path(_tool_registry.__file__).parent`; point that anchor at tmp_path.
+    monkeypatch.setattr(
+        registry_mod, "__file__", str(tmp_path / "_tool_registry.py")
+    )
+    monkeypatch.setattr(
+        registry_mod,
+        "CATEGORY_MODULES",
+        {"w1-synthetic": "daemon.tools.fake_attr_decorator_module"},
+    )
+
+    result = registry_mod.scan_category_module_sources_by_category()
+
+    assert "early_tool" in result.get("w1-synthetic", {}), (
+        f"the attribute-called decorator must not abandon the module scan: {result!r}"
+    )
+    assert "later_tool" in result.get("w1-synthetic", {})

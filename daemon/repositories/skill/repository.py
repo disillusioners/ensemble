@@ -40,8 +40,9 @@ Design highlights
   stored as plain JSON arrays of floats (NOT BYTEA, NOT pickle,
   NOT numpy) — the project standard for JSON-shaped columns.
 
-Size rationale (2470 lines): six repositories share one table module
-and the raw-SQL hot paths (atomic counters, BM25 full-text search,
+Size rationale (2536 lines after this cleanup, 2533 before it): six
+repositories share one table module, and the raw-SQL hot paths (atomic
+counters, BM25 full-text search,
 bulk embedding lookup) live alongside the CRUD, so the file sits in
 the 1000-3000 band honestly. Splitting per repository would scatter
 the shared engine/JSONB conventions and the whitelisted-column
@@ -554,6 +555,53 @@ class SkillRepository:
         with Session(self.engine) as session:
             stmt = select(Skill).where(Skill.ab_test_group == ab_test_group)
             return list(session.exec(stmt))
+
+    def get_arm_traffic(self, skill_id: str) -> dict[str, int | str] | None:
+        """Read ONE A/B arm's serving-TRAFFIC counters (F5).
+
+        READ-ONLY. Returns the skill row's live traffic counters —
+        ``total_selections`` and ``total_applied`` — the two columns
+        the serving/feedback paths bump through
+        :meth:`increment_counter` / :meth:`reset_counter`. This is a
+        DEDICATED COUNTER READ SURFACE for the stall predicate (there
+        was no aggregate/SUM reader over these columns anywhere in
+        ``daemon/``).
+
+        SINGLE SOURCE OF TRUTH: the method reads the ``skills`` ROW
+        directly on every call — no cache, no denormalized copy, no
+        second write path — so it can never drift from the columns the
+        writers bump. (``SkillRepository.get_ab_variants`` also carries
+        these columns, but it is a GROUP reader; the stall predicate
+        needs a declared, per-arm counter read.)
+
+        Args:
+            skill_id: The arm's skill id.
+
+        Returns:
+            ``{"skill_id", "total_selections", "total_applied"}`` when
+            the row exists, or ``None`` when it does not — a MISSING
+            row is "traffic UNKNOWN", deliberately distinct from
+            "zero traffic" (a non-existent default of 0 would let the
+            stall rule resolve a pair it cannot actually verify).
+            ``NULL`` counters on a present row are coerced to 0: the
+            schema declares both columns ``INTEGER NOT NULL DEFAULT 0``
+            (migration ``20260710_000001_create_skill_tables.sql``), so
+            a NULL is a schema-level impossibility, not a traffic
+            signal.
+        """
+        with Session(self.engine) as session:
+            row = session.get(Skill, skill_id)
+            if row is None:
+                return None
+            return {
+                "skill_id": skill_id,
+                "total_selections": int(
+                    getattr(row, "total_selections", None) or 0
+                ),
+                "total_applied": int(
+                    getattr(row, "total_applied", None) or 0
+                ),
+            }
 
     def get_active_variant(
         self,
@@ -2356,7 +2404,9 @@ class SkillABTestRepository:
         2. the loser skill (``is_active=False``, ``status='inactive'``,
            ``ab_test_group`` RETAINED),
         3. the winner skill (``ab_test_group`` cleared,
-           ``status='active'``) —
+           ``status='active'``, ``is_active=True`` — F2: the winner is
+           explicitly RE-SERVABLE; the loser write deactivates so the
+           winner write must re-activate) —
 
         are applied inside ONE session / ONE transaction. The pair
         row is claimed with a compare-and-set UPDATE whose predicate
@@ -2437,6 +2487,15 @@ class SkillABTestRepository:
             else:
                 winner.ab_test_group = None
                 winner.status = "active"
+                # F2 (2026-11-26): the winner write MUST also restore
+                # servability. The loser write below sets
+                # ``is_active=False``; the winner side historically
+                # wrote ONLY ``ab_test_group``/``status`` — leaving the
+                # crowned variant ``is_active`` as-is (``False`` for a
+                # challenger that entered the pair via the deactivate-
+                # heavy promotion flow) and the resolution terminal
+                # state asymmetric. Same transaction, same commit.
+                winner.is_active = True
                 winner.updated_at = now
 
             session.commit()

@@ -35,8 +35,10 @@ Design highlights
   in active A/B testing (``status='ab_testing'``) — creating nested
   A/B tests would corrupt the per-group resolution bookkeeping.
 
-Size rationale (3815 lines, PRE-EXISTING at 3749 lines before this
-range): the service exceeds the 3000-line band, but the seams are
+Size rationale (4237 lines after this cleanup, 4248 before it;
+PRE-EXISTING at 3749 lines before this range; F2/F3/F5/F6/F10 grew it
+past the earlier 3815-line figure): the service exceeds the 3000-line
+band, but the seams are
 separable for a future refactor — Tier-2/Tier-3 analysis vs the
 CAPTURED flow vs A/B resolution. Flagged for refactor; no code
 movement this pass.
@@ -320,6 +322,47 @@ def _sanitize_note_text(note: str) -> str:
 # direction marker (the escape hatch), and even that path now sees
 # the FULL parent body (the 3000-char truncation is gone).
 
+#: F10 (2026-11-26): hard cap for ``SkillLineage.change_summary``.
+#:
+#: MEASURED COLUMN SPEC: ``daemon/repositories/skill/models.py:289``
+#: declares ``change_summary: str = Field(default="")`` — an AutoString
+#: with NO ``max_length`` — and the DB column is ``TEXT NOT NULL
+#: DEFAULT ''`` (migration ``20260710_000001_create_skill_tables.sql:38``),
+#: i.e. UNBOUNDED. The cap therefore MUST live in code (contrast:
+#: ``Skill.status`` carries ``max_length=32`` and
+#: ``Skill.ab_test_group`` ``max_length=64`` — bounded columns enforce
+#: their own).
+#:
+#: 200 is deliberately NARROWER than the sibling bounded string
+#: surfaces in this module (``_MAX_NOTE_CHARS`` = 300 for feedback
+#: notes; ``_MAX_PAYLOAD_DESCRIPTION_CHARS`` = 512 for skill
+#: descriptions): the change summary is a ONE-LINE human-facing label
+#: rendered beside every lineage edge in the lineage views — not a
+#: retrieval surface — and the FULL direction survives in the
+#: evolution job's metadata (the dispatcher stores it verbatim).
+_MAX_CHANGE_SUMMARY_CHARS = 200
+
+
+def _change_summary(prefix: str, direction: str) -> str:
+    """F10 (2026-11-26): the FIRST LINE of ``direction``, hard-capped.
+
+    ``change_summary`` used to carry the ENTIRE direction — which the
+    FIX dispatcher composes as ``issue_description`` + an appended
+    ``Suggested fix:`` block (arbitrarily long, multi-paragraph user
+    input) — into an UNBOUNDED TEXT column. The summary now keeps only
+    the first line, prefixed, capped at ``_MAX_CHANGE_SUMMARY_CHARS``
+    with an explicit ellipsis when truncated. The full direction is
+    NOT lost: ``SkillJobDispatcher.enqueue_evolution`` stores it
+    verbatim in the job metadata.
+    """
+    text = str(direction or "").strip()
+    first_line = text.splitlines()[0].strip() if text else ""
+    summary = f"{prefix}: {first_line}" if first_line else str(prefix)
+    if len(summary) > _MAX_CHANGE_SUMMARY_CHARS:
+        summary = summary[: _MAX_CHANGE_SUMMARY_CHARS - 1].rstrip() + "\u2026"
+    return summary
+
+
 #: Ops the surgical applier understands. Every op carries an
 #: ``anchor`` — an EXACT verbatim substring of the parent body that
 #: must occur EXACTLY ONCE (an ambiguous anchor is rejected, never
@@ -381,6 +424,106 @@ def _significant_header_tokens(title: str) -> set[str]:
 def _wants_full_regen(direction: str) -> bool:
     """D5: does the direction EXPLICITLY request full-body regen?"""
     return bool(direction) and bool(_FULL_REGEN_MARKER_RE.search(direction))
+
+
+def _captured_envelope(
+    new_skill_id: str | None,
+    *,
+    skip_reason: str | None = None,
+    similarity_score: float | None = None,
+) -> dict[str, Any]:
+    """F6 (2026-11-26): the ONE CAPTURED-path result envelope.
+
+    CAPTURED never runs the surgical edit pipeline (no
+    ``_produce_evolved_body``), so its shape used to OMIT the
+    edit-contract keys entirely — while the documented shape promised
+    only ``new_skill_id``/``skipped``. F6 makes the envelope UNIFORM
+    across all three Tier-3 paths: the edit-contract keys are ALWAYS
+    present, explicitly neutral for CAPTURED (``mode="captured"``,
+    zero edit counts, ``partial_apply=False``), so a caller reads ONE
+    shape and can tell a COMPLETE evolution from a PARTIAL one (and
+    from a skip) without path-specific probing.
+
+    Args:
+        new_skill_id: The created / matched skill id, or ``None``.
+        skip_reason: Present ⇒ this envelope is a SKIP
+            (``skipped=True``).
+        similarity_score: Set by the Layer-2 embedding-dedup skip only.
+    """
+    skipped = skip_reason is not None
+    envelope: dict[str, Any] = {
+        "new_skill_id": new_skill_id,
+        "skipped": skipped,
+        "mode": "captured",
+        "edits_applied": 0,
+        "edits_rejected": 0,
+        "edit_rejections": [],
+        "partial_apply": False,
+    }
+    if skip_reason is not None:
+        envelope["skip_reason"] = skip_reason
+    if similarity_score is not None:
+        envelope["similarity_score"] = similarity_score
+    return envelope
+
+
+class EvolutionEditRejected(ValueError):
+    """F6 (2026-11-26): surgical evolution produced NO applicable edits.
+
+    The FAILED-evolution signal for the surgical path — every op in the
+    edit script was rejected (anchor absent / ambiguous) AND the payload
+    carried no description change, so no generation may be created.
+
+    Before F6 this was a bare ``ValueError`` whose ONLY carrier of the
+    per-op rejection reasons was the exception MESSAGE, which
+    ``_invoke_service`` (daemon/tools/skill_evolution_tools.py)
+    flattened into a free-text ``ERROR: ...`` string — the reasons
+    reached the calling agent as prose, not as STRUCTURED data. This
+    subclass carries them as attributes and renders a JSON-safe
+    :meth:`to_payload` the tool lane serialises verbatim.
+
+    It IS a ``ValueError`` (not a new base) so every existing
+    caller/guard that catches ``ValueError`` for a failed evolution
+    keeps its semantics.
+    """
+
+    def __init__(
+        self,
+        reasons: list[str] | None = None,
+        *,
+        edits_rejected: int = 0,
+        mode: str = "surgical",
+    ) -> None:
+        self.reasons: list[str] = list(reasons or [])
+        self.edits_rejected: int = int(edits_rejected)
+        self.mode: str = mode
+        super().__init__(
+            "surgical evolution produced no applicable edits and "
+            f"no description change (rejected ops: "
+            f"{self.reasons or 'none'}) — refusing to create a no-op "
+            "or unfulfilled generation"
+        )
+
+    def to_payload(self) -> dict[str, Any]:
+        """The STRUCTURED failure envelope (JSON-safe).
+
+        Mirrors the success-path envelope keys (``mode`` /
+        ``edits_applied`` / ``edits_rejected`` / ``edit_rejections`` /
+        ``partial_apply``) so a caller can tell a COMPLETE evolution
+        from a PARTIAL one from a REFUSED one by the returned shape
+        ALONE — no prose parsing.
+        """
+        return {
+            "ok": False,
+            "skipped": False,
+            "mode": self.mode,
+            "edits_applied": 0,
+            "edits_rejected": self.edits_rejected,
+            "edit_rejections": list(self.reasons),
+            "partial_apply": False,
+            "reason": "no_applicable_edits",
+            "error": str(self),
+        }
 
 
 def _sanitize_payload_description(raw: Any) -> str:
@@ -716,14 +859,41 @@ class SkillEvolutionService:
             direction: Short instruction fed to the evolution LLM.
 
         Returns:
-            Dict whose shape depends on the path:
+            Dict whose shape depends on the path — F6 (2026-11-26):
+            On every EVOLUTION path (FIX / DERIVED / CAPTURED) the
+            returned shape carries the EDIT CONTRACT keys ``mode``
+            (``"surgical"`` / ``"full_regen"`` / ``"captured"``),
+            ``edits_applied``, ``edits_rejected``, ``edit_rejections``
+            (list — always present) and ``partial_apply`` (bool) — so a
+            caller can tell a COMPLETE evolution from a PARTIAL one by
+            the returned shape ALONE. A GUARD-SKIP envelope
+            (``skipped=True``) is distinguishable BY ITS SKIP SHAPE
+            (``{"skipped": True, "reason": ..., "skill_id": ...}``)
+            and does NOT carry the edit-contract keys:
 
             * ``FIX``: ``{"new_skill_id", "old_skill_id",
-              "ab_test_group", "skipped"}``.
+              "ab_test_group", "skipped"}`` plus the edit-contract keys
+              (and ``production_meta``).
             * ``DERIVED``: ``{"new_skill_id", "parent_ids",
-              "skipped"}``.
+              "skipped"}`` plus the edit-contract keys (and
+              ``production_meta``).
+            * ``partial_apply`` is ALWAYS present on those paths:
+              ``False`` for a complete evolution, ``True`` when at
+              least one op was rejected (``edit_rejections`` carries
+              the per-op reasons; ``[]`` when none).
+            * CAPTURED (via :meth:`capture_skill` /
+              ``SkillEvolutionService._evolve_captured``):
+              ``{"new_skill_id", "skipped", "skip_reason"?, ...}`` with
+              the edit-contract keys NEUTRAL (``mode="captured"``, zero
+              counts, ``partial_apply=False``) — CAPTURED runs no edit pipeline.
 
         Raises:
+            EvolutionEditRejected: (a ``ValueError`` subclass) the
+                surgical edit script applied NOTHING and carried no
+                description change. Carries the per-op rejection
+                reasons STRUCTURED (``.reasons`` / ``.to_payload()``) —
+                the tool lane serialises the payload verbatim instead
+                of flattening a message into an ``ERROR:`` string.
             ValueError: When ``skill_id`` is not found, when
                 ``evolution_type`` is ``CAPTURED`` (rejected — use
                 :meth:`capture_skill` instead), or when
@@ -795,6 +965,82 @@ class SkillEvolutionService:
             ``ab_test_group``, ``skipped``. When the guard fires
             the dict carries ``skipped=True`` and a ``reason``.
         """
+        # F3 GUARD (2026-11-26) — a NON-SERVABLE source is refused
+        # BEFORE the A/B guard: a deactivated skill (``is_active=False``
+        # — retired by an A/B resolution or an operator deactivation)
+        # is outside the serving surface and must not be evolved back
+        # into existence through the plain FIX path. The admission-side
+        # twin lives in ``SkillJobDispatcher._check_fix_target_servable``
+        # (the dispatched routes); THIS is the inline/execution-time
+        # half — the ``skill_evolve`` tool path arrives here WITHOUT a
+        # dispatcher admission, and an admitted job re-reads the row
+        # state at execution (the row may have flipped between
+        # admission and execution). House shape: skip-envelope dict +
+        # execution-refusal counter + sink record (mirrors the
+        # ``ab_guard`` refusal below). The SANCTIONED CORRECTIVE path
+        # keeps its pass-through, exactly like the sibling guard.
+        _skill_has_is_active = hasattr(skill, "is_active")
+        if not _skill_has_is_active and not (corrective and getattr(skill, "status", None) == "ab_testing"):
+            # FIX 8 (H1 service half): a MISSING attribute is UNKNOWN,
+            # not "servable". Take the DEGRADED path (fail-open AND
+            # RECORDED: WARNING + run record) — never the silent
+            # servable path. The execution-time guard is not a
+            # backstop here; we proceed (fail-open) but record.
+            skill_id_val = getattr(skill, "id", None)
+            logger.warning(
+                "[SkillEvolution] F3 servability gate DEGRADED "
+                "(fail-open): skill %s has no 'is_active' attribute "
+                "(UNKNOWN) — proceeding; the row state is re-read at "
+                "execution",
+                skill_id_val,
+            )
+            observability.append_run_record(
+                observability.build_run_record(
+                    stage="execution",
+                    run_id=observability.new_run_id(),
+                    agent_id=None,
+                    prompt_source="_evolve_fix",
+                    outcome="servability_gate_degraded",
+                    extra={
+                        "skill_id": skill_id_val,
+                        "degraded_reason": "missing_is_active_attribute",
+                    },
+                )
+            )
+        # fall through (fail-open): do NOT refuse
+        elif not getattr(skill, "is_active", True) and not (corrective and getattr(skill, "status", None) == "ab_testing"):
+            skill_id_val = getattr(skill, "id", None)
+            logger.warning(
+                f"[SkillEvolution] Refusing FIX on skill "
+                f"id={skill_id_val}: target is NOT SERVABLE "
+                f"(is_active=False, reason=non_servable_target)"
+            )
+            observability.record_execution_refusal("non_servable_target")
+            observability.append_run_record(
+                observability.build_run_record(
+                    stage="execution",
+                    run_id=observability.new_run_id(),
+                    agent_id=None,
+                    prompt_source="_evolve_fix",
+                    outcome="refused",
+                    refusal_reason="non_servable_target",
+                    extra={
+                        "skill_id": skill_id_val,
+                        "skill_status": getattr(skill, "status", None),
+                    },
+                )
+            )
+            return {
+                "skipped": True,
+                "reason": (
+                    "skill is not servable (is_active=False) — the "
+                    "plain FIX path refuses a deactivated source "
+                    "(reason=non_servable_target)"
+                ),
+                "refusal_reason": "non_servable_target",
+                "skill_id": skill_id_val,
+            }
+
         # GUARD FIRST — never mutate a skill that's already in
         # an active A/B test (would create nested A/B tests) — EXCEPT
         # through the SANCTIONED CORRECTIVE path (D2a, 2026-11-17):
@@ -896,7 +1142,7 @@ class SkillEvolutionService:
             self._lineage_repo.create,
             new_skill.id,
             skill.id,
-            change_summary=f"FIX: {direction}",
+            change_summary=_change_summary("FIX", direction),
             content_diff=self._compute_diff(skill.content, new_content),
         )
 
@@ -1038,7 +1284,7 @@ class SkillEvolutionService:
             self._lineage_repo.create,
             corrected.id,
             skill.id,
-            change_summary=f"CORRECTIVE FIX: {direction}",
+            change_summary=_change_summary("CORRECTIVE FIX", direction),
             content_diff=self._compute_diff(skill.content, new_content),
         )
 
@@ -1135,7 +1381,7 @@ class SkillEvolutionService:
             self._lineage_repo.create,
             new_skill.id,
             skill.id,
-            change_summary=f"DERIVED: {direction}",
+            change_summary=_change_summary("DERIVED", direction),
             content_diff=self._compute_diff(skill.content, new_content),
         )
 
@@ -1318,11 +1564,9 @@ class SkillEvolutionService:
                 "[SkillEvolution] CAPTURED P0 gate: blank task_message "
                 "— nothing to distill; skipping capture."
             )
-            return {
-                "new_skill_id": None,
-                "skipped": True,
-                "skip_reason": "blank_task_message",
-            }
+            return _captured_envelope(
+                None, skip_reason="blank_task_message"
+            )
         try:
             iterations_int = int(iterations or 0)
         except (TypeError, ValueError):
@@ -1333,21 +1577,17 @@ class SkillEvolutionService:
                 f"({iterations!r}) — no loop procedure to distill; "
                 "skipping capture."
             )
-            return {
-                "new_skill_id": None,
-                "skipped": True,
-                "skip_reason": "trivial_iterations",
-            }
+            return _captured_envelope(
+                None, skip_reason="trivial_iterations"
+            )
         if not agent_id or not str(agent_id).strip():
             logger.warning(
                 "[SkillEvolution] CAPTURED P0 gate: blank agent_id — "
                 "capture not attributable; skipping."
             )
-            return {
-                "new_skill_id": None,
-                "skipped": True,
-                "skip_reason": "blank_agent_id",
-            }
+            return _captured_envelope(
+                None, skip_reason="blank_agent_id"
+            )
         if project_id is None or not str(project_id).strip():
             # Project scope is the DEFAULT (skill-scope decision:
             # "default project scope, global via explicit API/UI
@@ -1360,11 +1600,9 @@ class SkillEvolutionService:
                 "— captures are project-scoped by default (global "
                 "requires an explicit share action); skipping."
             )
-            return {
-                "new_skill_id": None,
-                "skipped": True,
-                "skip_reason": "missing_project_scope",
-            }
+            return _captured_envelope(
+                None, skip_reason="missing_project_scope"
+            )
 
         # ------------------------------------------------------------
         # Layer 1 prep: fetch other active project skills (excluding
@@ -1421,11 +1659,9 @@ class SkillEvolutionService:
                 f"skipping creation — matched existing "
                 f"skill_id={skip_id!r}"
             )
-            return {
-                "new_skill_id": skip_id,
-                "skipped": True,
-                "skip_reason": "llm_skip_duplicate",
-            }
+            return _captured_envelope(
+                skip_id, skip_reason="llm_skip_duplicate"
+            )
 
         # Loose fallback: the LLM emitted ``SKIP_DUPLICATE`` without
         # a usable id (e.g. ``SKIP_DUPLICATE:`` with no token, or a
@@ -1445,11 +1681,9 @@ class SkillEvolutionService:
                 "SKIP_DUPLICATE without a valid skill_id; "
                 "skipping capture (no target picked)."
             )
-            return {
-                "new_skill_id": None,
-                "skipped": True,
-                "skip_reason": "llm_skip_duplicate_no_id",
-            }
+            return _captured_envelope(
+                None, skip_reason="llm_skip_duplicate_no_id"
+            )
 
         name, description, content = self._parse_capture_response(raw)
 
@@ -1469,11 +1703,7 @@ class SkillEvolutionService:
                 f"({quality_skip}) — rejecting candidate "
                 f"name={name!r}; no row inserted."
             )
-            return {
-                "new_skill_id": None,
-                "skipped": True,
-                "skip_reason": quality_skip,
-            }
+            return _captured_envelope(None, skip_reason=quality_skip)
 
         # ------------------------------------------------------------
         # Layer 2 gate: embedding-similarity backstop.
@@ -1496,12 +1726,11 @@ class SkillEvolutionService:
                 f">= {_CAPTURED_DEDUP_THRESHOLD} matched "
                 f"skill_id={matched_id!r}"
             )
-            return {
-                "new_skill_id": matched_id,
-                "skipped": True,
-                "skip_reason": "embedding_similarity",
-                "similarity_score": similarity,
-            }
+            return _captured_envelope(
+                matched_id,
+                skip_reason="embedding_similarity",
+                similarity_score=similarity,
+            )
 
         new_skill = await asyncio.to_thread(
             self._skill_repo.create,
@@ -1524,10 +1753,7 @@ class SkillEvolutionService:
                 f"Skill remains BM25-searchable."
             )
 
-        return {
-            "new_skill_id": new_skill.id,
-            "skipped": False,
-        }
+        return _captured_envelope(new_skill.id)
 
     async def _embedding_dedup_check(
         self,
@@ -1749,6 +1975,97 @@ class SkillEvolutionService:
     # Public API: A/B test resolution
     # --------------------------------------------------------
 
+    async def _atomic_resolve_triple(
+        self,
+        ab_test_group: str,
+        winner_id: str,
+        loser_id: str,
+    ) -> bool:
+        """F2 (2026-11-26): the ONE commit path for a resolution.
+
+        ``check_ab_test_resolution``'s three terminal branches (forced
+        winner / threshold met / force-resolved at max extensions)
+        used to run the ``{deactivate(loser), resolve(pair),
+        update(winner)}`` triple as three independent
+        ``asyncio.gather`` transactions — a mid-flight failure left the
+        pair HALF resolved, exactly the defect the sanctioned resolver
+        already fixed by routing through
+        :meth:`SkillABTestRepository.resolve_atomic`. All three now
+        share the same CAS-guarded single-transaction path (one
+        Session, one commit; loser ``is_active=False`` + winner
+        ``is_active=True`` + group cleared, atomically).
+
+        Returns:
+            ``True`` when this caller won the CAS (mutations
+            committed); ``False`` when the pair was resolved
+            concurrently — ZERO mutations applied (logged at WARNING).
+        """
+        cas_won = await asyncio.to_thread(
+            self._ab_test_repo.resolve_atomic,
+            ab_test_group,
+            winner_id,
+            loser_id,
+        )
+        if not cas_won:
+            logger.warning(
+                "[SkillEvolution] A/B test %s: atomic resolve CAS LOST "
+                "(pair already resolved concurrently) — no mutation "
+                "performed",
+                ab_test_group,
+            )
+        return cas_won
+
+    # FIX 5 (H1) — collapsed CAS commit-tail helpers (behaviour-neutral).
+    # Single source of truth for the cas_lost / resolved envelopes so
+    # the four CAS sites cannot drift apart. Key sets are reproduced
+    # EXACTLY from the pre-edit literals (extension_count only where
+    # the original carried it; basis/parked only where the original
+    # carried them).
+    def _cas_lost_result(
+        self,
+        extension_count: Optional[int] = None,
+        *,
+        basis: Optional[str] = None,
+        parked: Optional[bool] = None,
+    ) -> dict:
+        result: dict = {
+            "resolved": False,
+            "winner_id": None,
+            "loser_id": None,
+            "reason": "cas_lost",
+        }
+        if extension_count is not None:
+            result["extension_count"] = extension_count
+        if basis is not None:
+            result["basis"] = basis
+        if parked is not None:
+            result["parked"] = parked
+        return result
+
+    def _resolved_result(
+        self,
+        winner_id: Any,
+        loser_id: Any,
+        reason: str,
+        extension_count: Optional[int] = None,
+        *,
+        basis: Optional[str] = None,
+        parked: Optional[bool] = None,
+    ) -> dict:
+        result: dict = {
+            "resolved": True,
+            "winner_id": winner_id,
+            "loser_id": loser_id,
+            "reason": reason,
+        }
+        if extension_count is not None:
+            result["extension_count"] = extension_count
+        if basis is not None:
+            result["basis"] = basis
+        if parked is not None:
+            result["parked"] = parked
+        return result
+
     async def check_ab_test_resolution(
         self,
         ab_test_group: str,
@@ -1761,7 +2078,8 @@ class SkillEvolutionService:
         0. **Forced winner** (``winner_id`` argument is set) →
            validate the ID against the two persisted variants,
            then run the same side effects as Path 2 / Path 3
-           (deactivate loser / resolve ab_test / promote winner).
+           (deactivate loser / resolve ab_test / promote winner —
+           F2: via the ONE atomic CAS path, ``_atomic_resolve_triple``).
            ``reason='forced_winner'``. Skips the threshold /
            extension evaluation — the caller has explicit
            authority to pick — but NOT the sample-size floor:
@@ -1950,28 +2268,15 @@ class SkillEvolutionService:
                 f"[SkillEvolution] A/B test {ab_test_group}: forced "
                 f"winner={winner_id} (loser={loser_id})"
             )
-            await asyncio.gather(
-                asyncio.to_thread(
-                    self._skill_repo.deactivate, loser_id,
-                ),
-                asyncio.to_thread(
-                    self._ab_test_repo.resolve,
-                    ab_test_group, winner_id,
-                ),
-                asyncio.to_thread(
-                    self._skill_repo.update,
-                    winner_id,
-                    ab_test_group=None,
-                    status="active",
-                ),
+            cas_won = await self._atomic_resolve_triple(
+                ab_test_group, winner_id, loser_id,
             )
-            return {
-                "resolved": True,
-                "winner_id": winner_id,
-                "loser_id": loser_id,
-                "reason": "forced_winner",
-                "extension_count": extension_count,
-            }
+            if not cas_won:
+                return self._cas_lost_result(extension_count=extension_count)
+            return self._resolved_result(
+                winner_id, loser_id, "forced_winner",
+                extension_count=extension_count,
+            )
 
         if comparisons < sample_size:
             return {
@@ -2017,23 +2322,15 @@ class SkillEvolutionService:
                     f"ab_test_group {ab_test_group!r} is already resolved"
                 )
             winner_id, loser_id = _pick_winner()
-            await asyncio.gather(
-                asyncio.to_thread(self._skill_repo.deactivate, loser_id),
-                asyncio.to_thread(self._ab_test_repo.resolve, ab_test_group, winner_id),
-                asyncio.to_thread(
-                    self._skill_repo.update,
-                    winner_id,
-                    ab_test_group=None,
-                    status="active",
-                ),
+            cas_won = await self._atomic_resolve_triple(
+                ab_test_group, winner_id, loser_id,
             )
-            return {
-                "resolved": True,
-                "winner_id": winner_id,
-                "loser_id": loser_id,
-                "reason": "threshold_met",
-                "extension_count": extension_count,
-            }
+            if not cas_won:
+                return self._cas_lost_result(extension_count=extension_count)
+            return self._resolved_result(
+                winner_id, loser_id, "threshold_met",
+                extension_count=extension_count,
+            )
 
         # Path 3: out of extensions → force-resolve.
         if extension_count >= max_ext:
@@ -2056,23 +2353,15 @@ class SkillEvolutionService:
                 f"({max_ext}) reached, force-resolving by raw completion_rate "
                 f"(difference={difference:.3f} < threshold={min_diff})"
             )
-            await asyncio.gather(
-                asyncio.to_thread(self._skill_repo.deactivate, loser_id),
-                asyncio.to_thread(self._ab_test_repo.resolve, ab_test_group, winner_id),
-                asyncio.to_thread(
-                    self._skill_repo.update,
-                    winner_id,
-                    ab_test_group=None,
-                    status="active",
-                ),
+            cas_won = await self._atomic_resolve_triple(
+                ab_test_group, winner_id, loser_id,
             )
-            return {
-                "resolved": True,
-                "winner_id": winner_id,
-                "loser_id": loser_id,
-                "reason": "force_resolved_max_extensions",
-                "extension_count": extension_count,
-            }
+            if not cas_won:
+                return self._cas_lost_result(extension_count=extension_count)
+            return self._resolved_result(
+                winner_id, loser_id, "force_resolved_max_extensions",
+                extension_count=extension_count,
+            )
 
         # Path 4: extend.
         # Mirror guard (2026-11-17, leader ruling — Path 4): the SAME
@@ -2157,17 +2446,28 @@ class SkillEvolutionService:
     ) -> list[dict]:
         """List unresolved A/B pairs in the stalled shape.
 
-        STALLED = ``comparisons == 0`` (zero genuine injections — the
-        counter only bumps on real variant routing) AND pair age >= the
-        stall timeout. Traffic-bearing pairs (``comparisons > 0``) are
-        NEVER listed — the mechanism must not pick winners on normal
-        pairs.
+        STALLED (F5, 2026-11-26) = **BOTH ARMS have zero traffic**
+        (``total_selections == 0`` AND ``total_applied == 0`` on BOTH
+        variants — the ``skills`` row counters the serving/feedback
+        paths bump) AND pair age >= the stall timeout.
+
+        WHY ``comparisons`` is a second signal (and why it is NOT
+        sufficient on its own): see :meth:`_pair_has_traffic`, the ONE
+        shared traffic predicate both enforcement sites call.
+
+        Absent arm row (row deleted / desynced): no counters exist, so
+        the pair is NOT traffic-bearing by this predicate — it is
+        listed, and the E-6 winner rule downstream PARKS it with
+        ``stalled_variant_row_missing`` (never crowns, never resolves).
+        This is DELIBERATE: the anomaly stays SURFACED instead of
+        silently skipped.
 
         Returns:
             List of ``{"ab_test_group", "age_days", "skill_id_old",
-            "skill_id_new", "e6_winner_id", "park_reason"}`` entries —
-            ``e6_winner_id`` is ``None`` with a ``park_reason`` when
-            the E-6 rule cannot decide (generation tie / missing row).
+            "skill_id_new", "comparisons", "e6_winner_id",
+            "park_reason"}`` entries — ``e6_winner_id`` is ``None``
+            with a ``park_reason`` when the E-6 rule cannot decide
+            (generation tie / missing row).
         """
         if stall_timeout_days is None:
             stall_timeout_days = float(
@@ -2177,8 +2477,11 @@ class SkillEvolutionService:
         stalled: list[dict] = []
         for test in tests or []:
             comparisons = int(getattr(test, "comparisons", 0) or 0)
-            if comparisons != 0:
-                continue  # traffic-bearing — normal pair, not ours
+            if await self._pair_has_traffic(test):
+                # Traffic-bearing on at least one arm — normal pair,
+                # never ours (F5: the stall rule must not pick winners
+                # on pairs that were actually served / applied).
+                continue
             age_days = self._ab_pair_age_days(test)
             if age_days < stall_timeout_days:
                 continue
@@ -2202,6 +2505,59 @@ class SkillEvolutionService:
             )
         return stalled
 
+    async def _pair_has_traffic(self, ab_test: Any) -> bool:
+        """F5 (M-1 follow-up) — the ONE shared traffic predicate.
+
+        A pair counts as stalled ONLY when BOTH arms have
+        ``total_selections == 0`` AND ``total_applied == 0`` (the
+        serving/feedback counters the arms' ``skills`` rows carry) —
+        that is a NECESSARY condition, not a sufficient one. The
+        pair's OWN ``comparisons`` counter is an ADDITIONAL, further
+        necessary traffic signal: a pair with ``comparisons != 0`` is
+        traffic-bearing (injection-side serving moved) and is therefore
+        NOT stalled.
+
+        Counter source: :meth:`SkillRepository.get_arm_traffic` (the
+        dedicated read-only counter surface). A MISSING arm row yields
+        no counters ⇒ not traffic-bearing on the arm side (the E-6
+        rule parks such a pair downstream, so it can never resolve
+        unverified).
+
+        ``comparisons`` alone is NOT sufficient evidence of serving —
+        a pair can carry feedback traffic with ``comparisons == 0``
+        (the live 98c3e028 shape) — so both-arms-zero remains the
+        PRIMARY signal and ``comparisons == 0`` is a further NECESSARY
+        condition, not a sufficient one. Adding ``comparisons`` makes
+        the predicate strictly MORE conservative: a pair with real
+        traffic still has non-zero arm counters and is still excluded.
+
+        The DB read runs off the event loop via ``asyncio.to_thread``
+        (house convention) — ``get_arm_traffic`` itself stays
+        synchronous and read-only.
+        """
+        # The pair's own comparisons counter is a (second) traffic
+        # signal: injection-side serving moved ⇒ not stalled.
+        if int(getattr(ab_test, "comparisons", 0) or 0) != 0:
+            return True
+        for attr in ("skill_id_old", "skill_id_new"):
+            arm_id = str(getattr(ab_test, attr, "") or "")
+            if not arm_id:
+                continue
+            counters = await asyncio.to_thread(
+                self._skill_repo.get_arm_traffic, arm_id
+            )
+            if counters is None:
+                # Missing arm row — no traffic RECORD. Deliberate:
+                # stalled-eligible at the predicate; _e6_winner parks
+                # it (stalled_variant_row_missing) before any mutation.
+                continue
+            if (
+                int(counters.get("total_selections", 0) or 0) > 0
+                or int(counters.get("total_applied", 0) or 0) > 0
+            ):
+                return True
+        return False
+
     async def resolve_ab_test_sanctioned(
         self,
         ab_test_group: str,
@@ -2217,10 +2573,15 @@ class SkillEvolutionService:
         Covers both stalled shapes with two explicit bases:
 
         * ``basis="stalled"`` — the ZERO-TRAFFIC stall. Enforced in
-          code: ``comparisons == 0`` AND age >=
-          ``ab_stall_timeout_days``. Winner by E-6 (newer GENERATION
-          NUMBER wins; never timestamps). Generation tie ⇒ PARK +
-          SURFACE (anomaly row, no mutation). A defective-divert
+          code (F5, M-1 follow-up, 2026-11-27): BOTH ARMS at zero
+          traffic — ``total_selections == 0`` AND ``total_applied == 0``
+          on both ``skills`` rows (the serving/feedback counters) —
+          AND the pair's OWN ``comparisons == 0`` — AND age >=
+          ``ab_stall_timeout_days``. ``comparisons`` is a further
+          NECESSARY condition, not a sufficient one (a feedback-bearing
+          pair can carry comparisons == 0). Winner by E-6 (newer
+          GENERATION NUMBER wins; never timestamps). Generation tie ⇒
+          PARK + SURFACE (anomaly row, no mutation). A defective-divert
           (``defective_arm_id``) may be supplied EXPLICITLY by the
           operator — then the non-defective member wins regardless of
           generation (E-6: never crown a verified-defective newer
@@ -2240,7 +2601,9 @@ class SkillEvolutionService:
         ``resolved_at``.
 
         NEVER fires on normal (traffic-bearing) pairs: the stalled
-        basis is gated by the stall predicate, and the defective basis
+        basis is gated by the BOTH-ARMS-ZERO traffic predicate
+        (F5 — either arm's ``total_selections``/``total_applied``
+        above zero refuses), and the defective basis
         requires an explicit operator assertion. ``reason`` is
         REQUIRED (auditable provenance).
 
@@ -2281,7 +2644,6 @@ class SkillEvolutionService:
             raise ValueError(
                 f"ab_test_group {ab_test_group!r} is already resolved"
             )
-        comparisons = int(getattr(ab_test, "comparisons", 0) or 0)
         variants = {
             str(getattr(ab_test, "skill_id_old", "") or ""),
             str(getattr(ab_test, "skill_id_new", "") or ""),
@@ -2318,11 +2680,22 @@ class SkillEvolutionService:
             stall_timeout_days = float(
                 getattr(self._config, "ab_stall_timeout_days", 7.0) or 7.0
             )
-            if comparisons != 0:
+            # F5 (M-1 follow-up, 2026-11-27): both-arms-zero arm counters
+            # PLUS the pair's OWN ``comparisons == 0`` are enforced by
+            # the ONE shared predicate :meth:`_pair_has_traffic` (its
+            # docstring carries the full rationale, including the live
+            # 98c3e028 feedback-with-zero-comparisons shape). A pair
+            # with traffic on EITHER arm is refused here — the SAME
+            # predicate ``find_stalled_ab_tests`` uses (both enforcement
+            # sites move together; changing only one would let a
+            # traffic-bearing pair through the other).
+            if await self._pair_has_traffic(ab_test):
                 raise ValueError(
                     f"stalled basis refused: ab_test_group "
-                    f"{ab_test_group!r} has comparisons={comparisons} "
-                    "(traffic-bearing — normal resolution paths only)"
+                    f"{ab_test_group!r} is traffic-bearing "
+                    "(reason=traffic_bearing) — the pair's arms carry "
+                    "traffic (total_selections/total_applied) or its "
+                    "comparisons counter is non-zero"
                 )
             age_days = self._ab_pair_age_days(ab_test)
             if age_days < stall_timeout_days:
@@ -2414,8 +2787,17 @@ class SkillEvolutionService:
         #
         # * CAS predicate: ``resolved_at IS NULL`` ALWAYS, plus
         #   ``comparisons = 0`` on the ``stalled`` basis (the
-        #   zero-traffic guard — a pair whose counter moved since it
-        #   was read loses the CAS and is never resolved on traffic).
+        #   zero-SERVING guard — a pair whose injection counter moved
+        #   since it was read loses the CAS). NOTE (F5, M-1 follow-up,
+        #   2026-11-27): the ADMISSION predicate now ALSO requires
+        #   ``comparisons == 0`` (the traffic predicate requires it),
+        #   so every traffic-admitted pair necessarily satisfies the
+        #   CAS's ``comparisons = 0`` term. The CAS term is therefore
+        #   NOT a second traffic gate — it is an independent
+        #   exactly-once / race-window guard for the interval between
+        #   the pair read and the CAS. A pair whose ``comparisons``
+        #   counter moved in that window loses the CAS even though it
+        #   passed admission.
         #   The ``defective_arm`` basis is an OPERATOR-named retirement
         #   of a possibly traffic-bearing pair, so it keeps the
         #   ``resolved_at IS NULL`` predicate alone; forcing
@@ -2469,14 +2851,9 @@ class SkillEvolutionService:
                 "cas_lost",
                 {"winner_id": resolved_winner, "loser_id": resolved_loser},
             )
-            return {
-                "resolved": False,
-                "winner_id": None,
-                "loser_id": None,
-                "reason": "cas_lost",
-                "basis": basis,
-                "parked": False,
-            }
+            return self._cas_lost_result(
+                basis=basis, parked=False,
+            )
 
         _announce(
             outcome_reason,
@@ -2492,14 +2869,10 @@ class SkillEvolutionService:
             reason,
             actor,
         )
-        return {
-            "resolved": True,
-            "winner_id": resolved_winner,
-            "loser_id": resolved_loser,
-            "reason": outcome_reason,
-            "basis": basis,
-            "parked": False,
-        }
+        return self._resolved_result(
+            resolved_winner, resolved_loser, outcome_reason,
+            basis=basis, parked=False,
+        )
 
     # --------------------------------------------------------
     # Public API: read-only metrics for a skill
@@ -3423,10 +3796,21 @@ class SkillEvolutionService:
             self._gate_evolved_content(
                 parent_content, new_content, direction
             )
+            # F6 (2026-11-26): the meta carries the FULL edit-contract
+            # keys on EVERY mode — a full regen applies no surgical
+            # edits, so the counts are explicit zeros rather than
+            # ABSENT keys (the documented shape must never promise a
+            # key a path does not return).
             return (
                 new_content,
                 _resolve_fix_description(skill.description, None),
-                {"mode": "full_regen"},
+                {
+                    "mode": "full_regen",
+                    "edits_applied": 0,
+                    "edits_rejected": 0,
+                    "edit_rejections": [],
+                    "partial_apply": False,
+                },
             )
 
         payload = await self._generate_evolved_payload(
@@ -3440,20 +3824,52 @@ class SkillEvolutionService:
             _sanitize_payload_description(payload.get("description"))
         )
         if applied == 0 and not has_description:
-            raise ValueError(
-                "surgical evolution produced no applicable edits and "
-                f"no description change (rejected ops: "
-                f"{reasons or 'none'}) — refusing to create a no-op "
-                "or unfulfilled generation"
+            # F6: the failure is STRUCTURED — the per-op rejection
+            # reasons ride the exception as attributes (and a JSON-safe
+            # payload), never as prose inside an ERROR string; and the
+            # refused execution is LOGGED + PERSISTED through the house
+            # observability mechanism (mirrors the `_evolve_fix`
+            # ab_guard shape: an execution-refusal counter + a sink
+            # run record).
+            logger.warning(
+                "[SkillEvolution] surgical evolution REFUSED "
+                "(reason=no_applicable_edits) skill=%s edits_rejected=%d",
+                getattr(skill, "id", None),
+                rejected,
+            )
+            observability.record_execution_refusal("no_applicable_edits")
+            observability.append_run_record(
+                observability.build_run_record(
+                    stage="execution",
+                    run_id=observability.new_run_id(),
+                    agent_id=None,
+                    prompt_source="_produce_evolved_body",
+                    outcome="refused",
+                    refusal_reason="no_applicable_edits",
+                    extra={
+                        "skill_id": getattr(skill, "id", None),
+                        "edits_rejected": rejected,
+                        "edit_rejections": list(reasons),
+                    },
+                )
+            )
+            raise EvolutionEditRejected(
+                reasons, edits_rejected=rejected, mode="surgical"
             )
         self._gate_evolved_content(parent_content, new_content, direction)
         meta = {
             "mode": "surgical",
             "edits_applied": applied,
             "edits_rejected": rejected,
+            # F6: the key is ALWAYS present ([] when nothing was
+            # rejected) — a caller reads the shape, never a
+            # present/absent probe.
+            "edit_rejections": list(reasons),
+            # F6: a PARTIAL apply is a successful-but-incomplete
+            # evolution; the flag makes that distinguishable from a
+            # COMPLETE one by the returned shape ALONE.
+            "partial_apply": rejected > 0,
         }
-        if reasons:
-            meta["edit_rejections"] = reasons
         return (
             new_content,
             _resolve_fix_description(

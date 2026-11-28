@@ -454,6 +454,179 @@ if [ ! -d "$INSTALL_DIR" ]; then
 fi
 mkdir -p "$INSTALL_DIR/releases"
 
+# ── the stage's python interpreter (ONE resolution, TWO consumers) ──────────
+# The interpreter every DERIVED payload artifact is produced with: the D-2
+# config-compat CONTRACT (minted below, after the payload assembly) and the
+# tool-usage-artifacts/ payload generator (the sibling payload site below).
+#
+# The RESOLUTION lives HERE (before the payload assembly) because the
+# tool-usage-artifacts/ payload is DERIVED at stage time and needs the SAME
+# interpreter (A4: NEVER a hardcoded `python3` — the venv interpreter is the
+# one the rest of the stage machinery uses, and a hardcoded python3 would run
+# the generator under a DIFFERENT interpreter than the rest of the stage, and
+# could fail outright on a host whose python3 lacks the generator's
+# dependencies).
+_stage_cc_py=""
+if [ -x "$REPO_ROOT/.venv/bin/python" ]; then
+    _stage_cc_py="$REPO_ROOT/.venv/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+    _stage_cc_py="python3"
+fi
+
+# ── tool-usage-artifacts/ payload (the tool-usage digest's READ side) ──────
+#
+# The digest's read side ships as a PAYLOAD beside the other release trees:
+#   releases/<ver>/tool-usage-artifacts/allowlists.json    (schema-2 allow-lists)
+#   releases/<ver>/tool-usage-artifacts/tool-weights.json   (weight artifact)
+#
+# The allow-lists are DERIVED at stage time from the tree being staged
+# (F1 — never copied: a stale committed file can never reach a release);
+# the weight artifact is copied VERBATIM (it is data, not derived). The
+# payload dir carries ONLY those two files — no digests/, no scratch, no
+# writable output (the digest's WRITE side lives under the install root's
+# .agents/, a different subtree from the release payload).
+#
+# The four functions below are the WHOLE seam. They are delimited by
+# explicit BEGIN/END markers so the hermetic stage-level suite
+# (tests/test_tool_usage_artifacts_payload.sh) can exercise the SHIPPED
+# LOGIC IN ISOLATION — the same bytes stage.sh runs, never a fork ("one
+# walker, one source of truth", architecture-recommendation-digest-fix.md
+# §8.5). The suite MUST NOT run the whole stage.sh (it assembles a release
+# layout); it extracts this block and calls the same functions.
+#
+# >>> TOOL-USAGE-ARTIFACTS-BLOCK-BEGIN
+# _stage_tool_usage_artifacts_generate <repo_root> <stage_tmp> <python>
+#   Build the payload tree. DERIVES allowlists.json from <repo_root>/agents
+#   (the tree being staged) and copies tool-weights.json verbatim.
+#   Returns 0 on success, 78 for a REFUSAL (a payload that cannot be
+#   derived must never ship half-built), 1 for an I/O failure.
+_stage_tool_usage_artifacts_generate() {
+    local repo_root="$1" stage_tmp="$2" py="$3"
+    local payload_dir="$stage_tmp/tool-usage-artifacts"
+    local src_dir="$repo_root/.agents/shared/planning/tool-usage-metrics-p1"
+    local generator="$repo_root/scripts/gen_tool_usage_allowlists.py"
+    local weights="$src_dir/tool-weights.json"
+    local committed="$src_dir/allowlists.json"
+    if [ ! -f "$generator" ]; then
+        if [ -f "$committed" ]; then
+            _warn "tool-usage-artifacts: the generator is missing ($generator) but the committed dev-mode artifact is present ($committed) — refusing to stage (the shipped allow-lists are DERIVED; a tree that ships the committed artifact must ship a derived payload, and this tree cannot produce one)"
+            return 78
+        fi
+        # This tree carries NO tool-usage lane at all (no producer, no
+        # committed artifact): there is nothing to derive and nothing to
+        # ship. The payload dir is staged EMPTY so the manifest map, the tree
+        # aggregate and the re-hash leg keep ONE uniform shape across every
+        # tree. NOT silent — the stage says so.
+        _warn "tool-usage-artifacts: no generator ($generator) and no committed dev-mode artifact — this tree carries NO tool-usage lane, so NO payload is staged (the digest's read side is a feature of the trees that HAVE the lane)"
+        mkdir -p "$payload_dir" || { _warn "tool-usage-artifacts: cannot create $payload_dir"; return 1; }
+        return 0
+    fi
+    if [ -z "$py" ]; then
+        _warn "tool-usage-artifacts: no python interpreter available — refusing to stage (the allow-lists are GENERATED at stage time, never copied; a payload without them is a half-built payload and the digest's allow-list dimension would silently degrade)"
+        return 78
+    fi
+    if [ ! -f "$weights" ]; then
+        _warn "tool-usage-artifacts: weight artifact missing ($weights) — refusing to stage"
+        return 78
+    fi
+    mkdir -p "$payload_dir" || { _warn "tool-usage-artifacts: cannot create $payload_dir"; return 1; }
+    cp "$weights" "$payload_dir/tool-weights.json" || { _warn "tool-usage-artifacts: cannot copy the weight artifact into $payload_dir"; return 1; }
+    if ! "$py" "$generator" --agents-dir "$repo_root/agents" --out "$payload_dir/allowlists.json"; then
+        _warn "tool-usage-artifacts: allow-list GENERATION FAILED — refusing to stage (the shipped artifact is derived from the tree being staged; shipping a stale copy is not an option)"
+        return 78
+    fi
+    _log "tool-usage-artifacts: payload staged at $payload_dir (allowlists.json derived from $repo_root/agents; tool-weights.json copied verbatim)"
+    return 0
+}
+
+# _stage_tool_usage_artifacts_drift_report <repo_root> <python>
+#   F3 — the stage-time regeneration is compared against the COMMITTED
+#   dev-mode artifact. A mismatch is REPORTED (warn + journaled event),
+#   NEVER a stage refusal: the committed file is the dev-mode READ source
+#   (its enforcement is the CI freshness test, F6), while the shipped
+#   payload is regenerated from the tree being staged and is therefore
+#   correct by construction. Refusing here would re-arm the "one unrelated
+#   lane's meta.json edit blocks the next release" failure class.
+#   The comparison is the generator's OWN --verify (the SEPARATED
+#   semantic-payload/provenance comparison) — NEVER a whole-file byte
+#   compare: a committed artifact can never equal the regeneration of the
+#   tree that carries it, so a byte compare would be RED from the first
+#   commit onward.
+_stage_tool_usage_artifacts_drift_report() {
+    local repo_root="$1" py="$2"
+    local generator="$repo_root/scripts/gen_tool_usage_allowlists.py"
+    local committed="$repo_root/.agents/shared/planning/tool-usage-metrics-p1/allowlists.json"
+    local out rc summary
+    if [ -z "$py" ] || [ ! -f "$generator" ]; then
+        _log "tool-usage-artifacts drift report: skipped (no interpreter or no generator) — non-fatal"
+        return 0
+    fi
+    if [ ! -f "$committed" ]; then
+        _warn "tool-usage-artifacts drift report: committed dev-mode artifact absent ($committed) — informational only, staging continues (the committed artifact is the dev-mode read source; its enforcement is the CI freshness test)"
+        return 0
+    fi
+    out="$("$py" "$generator" --agents-dir "$repo_root/agents" --out "$committed" --verify 2>&1)"
+    rc=$?
+    summary="$(printf '%s\n' "$out" | head -1)"
+    if [ "$rc" -ne 0 ]; then
+        _warn "tool-usage-artifacts DRIFT between the committed dev-mode artifact and the stage-time regeneration (informational — the shipped payload is regenerated from the tree being staged, so it is correct by construction; staging continues): $summary"
+        if command -v journal_history_append >/dev/null 2>&1; then
+            journal_init >/dev/null 2>&1 || true
+            journal_history_append warn "tool-usage-artifacts drift at stage: committed dev-mode artifact differs from the stage-time regeneration: $summary" \
+                || _warn "tool-usage-artifacts drift report: journal append failed (non-fatal)"
+        fi
+    else
+        _log "tool-usage-artifacts: committed dev-mode artifact matches the stage-time regeneration ($summary)"
+    fi
+    return 0
+}
+
+# _stage_tool_usage_artifacts_rehash <stage_tmp> <expected_tree_sha256>
+#   The stage-local fail-closed re-hash leg — the guidelines/ precedent:
+#   lib.sh's integrity_verify loop covers agents+frontend ONLY, so WITHOUT
+#   this leg the tool-usage-artifacts/ tree would be verified NOWHERE. The
+#   aggregate hash is the tree's identity; a mismatch means the copy
+#   glitched (rsync truncation, ENOSPC mid-write) and must abort BEFORE
+#   the rename-aside swap. Returns 0 on match, 1 on mismatch.
+_stage_tool_usage_artifacts_rehash() {
+    local stage_tmp="$1" want="$2"
+    local got_lines got_tree
+    got_lines="$(_tree_manifest "$stage_tmp/tool-usage-artifacts" "")"
+    got_tree="$(_tree_hash_of_lines "$got_lines")"
+    if [ "$got_tree" != "$want" ]; then
+        _warn "post-stage tool-usage-artifacts/ tree hash MISMATCH (want ${want:0:12}… got ${got_tree:0:12}…) — refusing to swap in a payload whose tool-usage-artifacts/ tree cannot be re-hashed to the manifest stamp (likely a copy glitch; the integrity check is local because lib.sh's integrity_verify doesn't cover tool-usage-artifacts/ — the same open escalation item as plugins/ and guidelines/)"
+        return 1
+    fi
+    return 0
+}
+# _stage_tool_usage_artifacts_map <stage_tmp> <walk_lines>
+#   The per-file map — the SAME flat {path:sha256,…} shape as the
+#   agents/frontend/plugins/guidelines maps, with TREE-RELATIVE keys
+#   ("allowlists.json", "tool-weights.json"), so it composes with lib.sh's
+#   _manifest_map_lines verifier exactly like the other trees. It consumes the
+#   ALREADY-computed walk lines (one walk per tree feeds BOTH the aggregate
+#   hash and the per-file map — the second-walk shape is the 2026-10-28
+#   stage-SIGTERM family). The fragment file lives INSIDE the stage tmp dir so
+#   every existing `rm -rf "$STAGE_TMP"` failure path cleans it.
+_stage_tool_usage_artifacts_map() {
+    local stage_tmp="$1" lines="$2"
+    local frag sha rel map
+    frag="$stage_tmp/.map_frag.tool_usage_artifacts"
+    : > "$frag" || return 1
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        sha="${line%%  *}"; rel="${line#*  }"
+        printf '"%s":"%s"\n' "$(_json_escape "$rel")" "$sha" >> "$frag"
+    done <<EOF
+$lines
+EOF
+    map="$(_stage_join_map "$frag")" || { rm -f "$frag"; return 1; }
+    rm -f "$frag"
+    printf '%s' "$map"
+    return 0
+}
+# <<< TOOL-USAGE-ARTIFACTS-BLOCK-END
+
 # ── Assemble into a temp dir, verify, then swap in (idempotent re-stage) ────
 REL="$INSTALL_DIR/releases/$VERSION"
 STAGE_TMP="$INSTALL_DIR/releases/.staging.$VERSION.$$"
@@ -485,6 +658,29 @@ cp -R "$REPO_ROOT/plugins" "$STAGE_TMP/plugins" || { rm -rf "$STAGE_TMP"; exit 1
 # verbatim copy pattern above. .md-only content is safe under the
 # _no_env_in_release whole-tree walk (no build artifacts in the tree).
 cp -R "$REPO_ROOT/docs/guidelines" "$STAGE_TMP/guidelines" || { rm -rf "$STAGE_TMP"; exit 1; }
+# tool-usage-artifacts/ tree — the tool-usage digest's READ side. Unlike the
+# trees above it is NOT a verbatim copy: the allow-lists are DERIVED at stage
+# time from the tree being staged (F1 — a stale committed file can never reach
+# a release) and the weight artifact is copied verbatim. The aggregate lands
+# in the manifest as `tool_usage_artifacts_tree_sha256` and the per-file map
+# as `tool_usage_artifacts_manifest`, with a stage-local re-hash leg below —
+# lib.sh's integrity_verify loop does NOT cover this tree (same open
+# escalation as plugins/ and guidelines/; see that leg's comment). Mirrors the
+# guidelines/ sibling pattern above; the payload carries ONLY the two JSON
+# files (no digests/, no scratch, no writable output).
+_stage_tool_usage_artifacts_generate "$REPO_ROOT" "$STAGE_TMP" "$_stage_cc_py"
+_tua_gen_rc=$?
+if [ "$_tua_gen_rc" -ne 0 ]; then
+    rm -rf "$STAGE_TMP"
+    exit "$_tua_gen_rc"
+fi
+# F3 — the stage-time regeneration vs the COMMITTED dev-mode artifact:
+# REPORTED (warn + journaled event), NEVER a stage refusal. The committed
+# file is the dev-mode read source and its enforcement is the CI freshness
+# test; the shipped payload is regenerated from the tree being staged, so it
+# is correct by construction. Refusing here would re-arm the "one unrelated
+# lane's meta.json edit blocks the next release" failure class.
+_stage_tool_usage_artifacts_drift_report "$REPO_ROOT" "$_stage_cc_py"
 # G3 (review round 2): EXCLUDE the FE provenance sidecar from the release
 # payload (it is web-servable: the front-end container serves every file
 # under browser/). The sidecar is BUILD-TIME state, not a runtime
@@ -534,12 +730,10 @@ executor_family_install "$REPO_ROOT" "$STAGE_TMP" || {
 # host without an importable pydantic/pydantic_settings mints nothing
 # and this stage WARNS — the promote gate then REFUSES fail-closed on
 # the absent contract (never warns-and-passes; D-2 mandate).
-_stage_cc_py=""
-if [ -x "$REPO_ROOT/.venv/bin/python" ]; then
-    _stage_cc_py="$REPO_ROOT/.venv/bin/python"
-elif command -v python3 >/dev/null 2>&1; then
-    _stage_cc_py="python3"
-fi
+#
+# The INTERPRETER is resolved ABOVE (with the payload assembly) — one
+# resolution, two consumers: this contract and the tool-usage-artifacts/
+# payload generator (A4: never a hardcoded `python3` at a call site).
 if [ -z "$_stage_cc_py" ]; then
     _warn "config-compat contract NOT minted: no python interpreter found — the promote gate will REFUSE this payload at entry (fail-closed; D-2)"
 else
@@ -618,6 +812,13 @@ DAEMON_SLICE_TREE="$(executor_family_tree_hash "$DAEMON_SLICE_LINES")"
 # rationale as the executor family note above.
 GUIDELINES_LINES="$(_stage_tree_walk guidelines "$STAGE_TMP/guidelines")" || { rm -rf "$STAGE_TMP"; exit 1; }
 GUIDELINES_TREE="$(_tree_hash_of_lines "$GUIDELINES_LINES")"
+# tool-usage-artifacts/ tree — same one-walk-feeds-both shape as the other
+# trees (the walk feeds BOTH the aggregate hash and the per-file map below).
+# The tree is small and fixed-shape (exactly two JSON files), so the
+# plugins-tree unbounded-walk budget concern does not apply — same
+# rationale as the executor family note above.
+TOOL_USAGE_ARTIFACTS_LINES="$(_stage_tree_walk tool-usage-artifacts "$STAGE_TMP/tool-usage-artifacts")" || { rm -rf "$STAGE_TMP"; exit 1; }
+TOOL_USAGE_ARTIFACTS_TREE="$(_tree_hash_of_lines "$TOOL_USAGE_ARTIFACTS_LINES")"
 
 # ── per-file maps (linear streaming — 2026-10-07 O(n²) fix) ─────────────────
 # The previous construct appended each entry to a growing bash string
@@ -698,6 +899,14 @@ $GUIDELINES_LINES
 EOF
 guidelines_map="$(_stage_join_map "$_guidelines_frag")" || { rm -rf "$STAGE_TMP"; exit 1; }
 rm -f "$_guidelines_frag"
+# tool-usage-artifacts/ per-file map — same shape as the agents/frontend/
+# plugins/guidelines blocks above (flat {path:sha256,…}; the keys are
+# TREE-relative, so the map composes with lib.sh's _manifest_map_lines
+# verifier exactly like the other trees). The construction itself lives in
+# the TOOL-USAGE-ARTIFACTS-BLOCK above (the same bytes the stage-level suite
+# exercises — one implementation, no fork); it consumes the SAME walk lines
+# as the aggregate above (one walk per tree feeds both).
+tool_usage_artifacts_map="$(_stage_tool_usage_artifacts_map "$STAGE_TMP" "$TOOL_USAGE_ARTIFACTS_LINES")" || { rm -rf "$STAGE_TMP"; exit 1; }
 # scripts/ per-file map — the shipped executor family, same shape as the
 # agents/frontend/plugins blocks above (flat {path:sha256,…}; the keys are
 # TREE-relative, i.e. "upgrade/promote.sh" + "stop-ensemble.sh", so the
@@ -892,11 +1101,13 @@ cat > "$STAGE_TMP/manifest.json" <<EOF
   "plugins_tree_sha256": "$PLUGINS_TREE",
   "scripts_tree_sha256": "$SCRIPTS_TREE",
   "guidelines_tree_sha256": "$GUIDELINES_TREE",
+  "tool_usage_artifacts_tree_sha256": "$TOOL_USAGE_ARTIFACTS_TREE",
   "daemon_slice_tree_sha256": "$DAEMON_SLICE_TREE",
   "agents_manifest": {$agents_map},
   "frontend_manifest": {$frontend_map},
   "plugins_manifest": {$plugins_map},
   "guidelines_manifest": {$guidelines_map},
+  "tool_usage_artifacts_manifest": {$tool_usage_artifacts_map},
   "scripts_manifest": {$scripts_map},
   "daemon_slice_manifest": {$daemon_slice_map}
 }
@@ -943,6 +1154,20 @@ got_guidelines_lines="$(_tree_manifest "$STAGE_TMP/guidelines" "")"
 got_guidelines_tree="$(_tree_hash_of_lines "$got_guidelines_lines")"
 if [ "$got_guidelines_tree" != "$GUIDELINES_TREE" ]; then
     _warn "post-stage guidelines/ tree hash MISMATCH (want ${GUIDELINES_TREE:0:12}… got ${got_guidelines_tree:0:12}…) — refusing to swap in a payload whose guidelines/ tree cannot be re-hashed to the manifest stamp (likely a copy glitch; the integrity check is local because lib.sh's integrity_verify doesn't cover guidelines/ — the same open escalation item as plugins/)"
+    rm -rf "$STAGE_TMP"
+    exit 1
+fi
+
+# Local fail-closed re-hash for the tool-usage-artifacts/ tree — same shape
+# as the plugins/ + guidelines/ legs above (the aggregate is the tree's
+# identity; a mismatch means the copy glitched — rsync truncation, ENOSPC
+# mid-write — and must abort BEFORE the rename-aside swap). lib.sh's
+# integrity_verify loop covers agents+frontend only, so WITHOUT this leg a
+# tool-usage-artifacts/ copy glitch would ship silently — the manifest stamp
+# would name a tree nobody verifies. The leg itself lives in the
+# TOOL-USAGE-ARTIFACTS-BLOCK above (the same bytes the stage-level suite
+# exercises — one implementation, no fork).
+if ! _stage_tool_usage_artifacts_rehash "$STAGE_TMP" "$TOOL_USAGE_ARTIFACTS_TREE"; then
     rm -rf "$STAGE_TMP"
     exit 1
 fi
